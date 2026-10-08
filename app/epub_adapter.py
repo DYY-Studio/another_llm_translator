@@ -196,7 +196,7 @@ class EPUBDocumentAdapter:
                     "\\|, \\⟦, and \\⟧."
                 )
             )
-        elif ruby_mode == "aozora" and stage in {"translation", "proofreading", "polishing"}:
+        elif ruby_mode == "aozora":
             requirements.append(
                 "Ruby base（｜与《之间）是正文，必须翻译，不得因标记照抄。可删标记/"
                 "reading，仅输出已译 base；保留须为｜已译base《目标语言适用reading》，"

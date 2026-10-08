@@ -65,6 +65,15 @@ def draft_run_context(
     translation_config, _, _, _ = _project_context(
         project, stage="translation", frozen_run_options=frozen_run_options
     )
+    config["_draft_prompt_requirements"] = {
+        "term": {
+            file_id: dict(values)
+            for file_id, values in config[
+                "_document_adapter_prompt_requirements"
+            ].items()
+        },
+        "segment": translation_config["_document_adapter_prompt_requirements"],
+    }
     requirements = config["_document_adapter_prompt_requirements"]
     for file_id, values in translation_config[
         "_document_adapter_prompt_requirements"
@@ -80,6 +89,9 @@ def draft_run_context(
         )
         config["_fragment_prompt_requirements"] = summary_config[
             "_document_adapter_prompt_requirements"
+        ]
+        config["_draft_prompt_requirements"]["summary"] = config[
+            "_fragment_prompt_requirements"
         ]
         for file_id, values in summary_config[
             "_document_adapter_prompt_requirements"
@@ -410,6 +422,26 @@ class DraftTerminologyScan:
 
     def prompt(self, items: list[dict[str, Any]], requirements: tuple[str, ...]) -> str:
         return self.prompt_factories[self.mode(items)](requirements)
+
+    def requirements(
+        self,
+        items: list[dict[str, Any]],
+        mode: TerminologyResponseMode | None = None,
+    ) -> tuple[str, ...]:
+        kinds = response_record_types(mode or self.mode(items))
+        return tuple(
+            dict.fromkeys(
+                requirement
+                for kind, by_file in self.config["_draft_prompt_requirements"].items()
+                if kind in kinds
+                for item in items
+                if (
+                    requirement := by_file.get(str(item["file_id"]), {}).get(
+                        self.language
+                    )
+                )
+            )
+        )
 
     def progress(self) -> dict[str, dict[str, int]]:
         progress = {

@@ -665,13 +665,14 @@ def test_project_prompt_preview_includes_selected_adapter_requirements(
     tmp_path: Path,
 ) -> None:
     from tests.test_documents import make_epub
+    from app.execution import Scope
     from app.project import load_source_files, update_file_run_options
     from app.stage_runtime import (
         _project_context,
         _prompt_factory,
         _document_prompt_requirement_helpers,
     )
-    from app.stage_terminology_draft import draft_run_context
+    from app.stage_terminology_draft import DraftTerminologyScan, draft_run_context
 
     app_root = make_app_root(tmp_path)
     txt = tmp_path / "plain.txt"
@@ -739,6 +740,35 @@ def test_project_prompt_preview_includes_selected_adapter_requirements(
         ] == _prompt_factory(
             project, "terminology", response_mode="terms+translation+fragment-summary"
         )(draft_requirements)
+        for language in ("zh-CN", "en"):
+            preview = client.get(
+                "/api/v1/projects/preview/prompts/terminology",
+                params={"file_id": epub_id, "language": language},
+            ).json()
+            draft_config, metadata, _, draft_segments = draft_run_context(
+                project, include_summaries=True
+            )
+            selected = [item for item in draft_segments if item["file_id"] == epub_id]
+            scan = DraftTerminologyScan(
+                project,
+                metadata,
+                draft_config,
+                Scope(),
+                None,
+                language,
+                selected,
+                set(),
+            )
+            for mode in preview["assembled_modes"]:
+                if mode not in {item.value for item in TerminologyResponseMode}:
+                    continue
+                runtime = _prompt_factory(
+                    project,
+                    "terminology",
+                    language,
+                    response_mode=None if mode == "terms-only" else mode,
+                )(scan.requirements(selected, TerminologyResponseMode(mode)))
+                assert runtime == preview["assembled_modes"][mode]
         update_file_run_options(project, epub_id, {"ruby_mode": "base_only"})
         plain = client.get(endpoint, params={"file_id": epub_id}).json()
         assert "Ruby" not in plain["assembled"]

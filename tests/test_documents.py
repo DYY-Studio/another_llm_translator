@@ -978,6 +978,19 @@ def test_epub_model_prompt_requirements_follow_format_state() -> None:
         run_options={"ruby_mode": "aozora", "inline_format_mode": "plain", "inline_format_policy": "tiered"},
     )
     assert aozora is not None and "｜已译base《" in aozora
+    assert (
+        adapter.model_prompt_requirements(
+            stage="terminology",
+            language="zh-CN",
+            opaque_state={},
+            run_options={
+                "ruby_mode": "aozora",
+                "inline_format_mode": "plain",
+                "inline_format_policy": "tiered",
+            },
+        )
+        == aozora
+    )
     assert adapter.model_prompt_requirements(
         stage="translation",
         language="zh-CN",

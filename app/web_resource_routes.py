@@ -279,8 +279,6 @@ def register_resource_routes(
                 (document_requirements or {}).get(name, "") for name in stages
             )
             requirements = tuple(value for value in values if value)
-            if "terminology" in stages and "translation" in stages:
-                return ("\n".join(requirements),) if requirements else ()
             return requirements
 
         resolved = language

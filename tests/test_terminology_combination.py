@@ -148,6 +148,80 @@ async def test_triple_scan_preserves_independent_results_and_force(
         )
 
 
+@pytest.mark.asyncio
+async def test_supplement_adapter_requirements_follow_active_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = await create_project(tmp_path, "A")
+    write_summary_participation(
+        project, [{"file_id": "F0001", "part_id": "document", "selected": True}]
+    )
+    rules = {
+        "terminology": "术语文档规则。",
+        "translation": "翻译文档规则。",
+        "fragment_summary": "概括文档规则。",
+    }
+    monkeypatch.setattr(
+        "app.stage_runtime.document_prompt_requirements",
+        lambda adapter, state, options, stage: {
+            "zh-CN": rules[stage],
+            "en": rules[stage],
+        },
+    )
+    missing = "summary"
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        payload = json.loads(body["messages"][1]["content"])
+        mode = payload["response_mode"]
+        kinds = response_record_types(mode)
+        seen.append((mode, body["messages"][0]["content"]))
+        records = []
+        if "summary" in kinds:
+            records.append(
+                {"type": "summary", "text": "甲", "refs": payload["source_refs"]}
+                if missing != "summary"
+                else {"type": "summary", "text": 1}
+            )
+        if "term" in kinds:
+            records.append(
+                {"type": "no_terms"}
+                if missing != "term"
+                else {"type": "term", "source": "A", "category": 1}
+            )
+        if "segment" in kinds and missing != "segment":
+            records.append({"type": "segment", "id": "1", "translation": "甲"})
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for missing in ("summary", "term", "segment"):
+            await run_terminology(
+                project,
+                Scope(force=True),
+                http_client=client,
+                include_summaries=True,
+                include_draft_translation=True,
+            )
+    assert {mode for mode, _ in seen} == {
+        "terms+translation+fragment-summary",
+        "summary-only",
+        "terms-only",
+        "translation-only",
+    }
+    for mode, prompt in seen:
+        kinds = response_record_types(mode)
+        for stage, kind in (
+            ("terminology", "term"),
+            ("translation", "segment"),
+            ("fragment_summary", "summary"),
+        ):
+            assert (rules[stage] in prompt) == (kind in kinds)
+
+
 def test_combined_prompt_middles_are_used_in_preview_and_execution(
     tmp_path: Path,
 ) -> None:

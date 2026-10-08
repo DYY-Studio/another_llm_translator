@@ -2705,10 +2705,14 @@ async def test_draft_translation_proofreading_uses_published_decisions(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_summaries", [False, True])
 async def test_draft_scan_repairs_epub_markers_without_repeating_scan(
     tmp_path: Path,
+    include_summaries: bool,
 ) -> None:
     from tests.test_documents import make_epub
+    from app.sqlite_storage import write_summary_participation, read_content_summaries
+    from app.llm_response import response_record_types
 
     source = tmp_path / "markers.epub"
     make_epub(
@@ -2727,6 +2731,18 @@ async def test_draft_scan_repairs_epub_markers_without_repeating_scan(
     )
     assert project is not None
     os.environ["LLM_API_KEY"] = "test"
+    if include_summaries:
+        segment = read_segments(project)[0]
+        write_summary_participation(
+            project,
+            [
+                {
+                    "file_id": segment["file_id"],
+                    "part_id": segment["part_id"],
+                    "selected": True,
+                }
+            ],
+        )
     modes: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2748,6 +2764,18 @@ async def test_draft_scan_repairs_epub_markers_without_repeating_scan(
                         "message": {
                             "content": llm_jsonl(
                                 (
+                                    [
+                                        {
+                                            "type": "summary",
+                                            "text": "人物移动。",
+                                            "refs": payload["source_refs"],
+                                        }
+                                    ]
+                                    if "summary"
+                                    in response_record_types(payload["response_mode"])
+                                    else []
+                                )
+                                + (
                                     [{"type": "no_terms"}]
                                     if payload["response_mode"] != "translation-only"
                                     else []
@@ -2762,11 +2790,25 @@ async def test_draft_scan_repairs_epub_markers_without_repeating_scan(
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         result = await run_terminology(
-            project, Scope(), http_client=client, include_draft_translation=True
+            project,
+            Scope(),
+            http_client=client,
+            include_draft_translation=True,
+            include_summaries=include_summaries,
         )
-    assert modes == ["terms+translation", "translation-only"]
+    assert modes == [
+        "terms+translation+fragment-summary"
+        if include_summaries
+        else "terms+translation",
+        "translation-only",
+    ]
     assert result["failed"] == 0
     assert load_stage_history(project, "translation")[0]["text"] == "甲 乙 丙"
+    if include_summaries:
+        assert (
+            len(read_content_summaries(project, kind="fragment", status="completed"))
+            == 1
+        )
 
 
 @pytest.mark.asyncio

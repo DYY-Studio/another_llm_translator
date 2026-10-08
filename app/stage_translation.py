@@ -403,11 +403,10 @@ async def run_translation(
             (),
         )
         prompt_for_items = lambda items: draft_scan.prompt(
-            items, requirements_for_items(items)
+            items, draft_scan.requirements(items)
         )
-        adapter_partition_key = prompt_partition_key
         prompt_partition_key = lambda item: (
-            adapter_partition_key(item),
+            draft_scan.requirements([item]),
             bool(item.get("_draft_terms")),
             bool(item.get("_draft_translation")),
             bool(item.get("_draft_summary")),
@@ -882,7 +881,12 @@ async def run_translation(
                 payload_builder=(
                     lambda items: payload_builder(
                         [
-                            {**item, "_draft_terms": False, "_draft_translation": True}
+                            {
+                                **item,
+                                "_draft_terms": False,
+                                "_draft_translation": True,
+                                "_draft_summary": False,
+                            }
                             for item in items
                         ]
                     )
@@ -892,7 +896,11 @@ async def run_translation(
                 prompt=(
                     draft_scan.prompt_factories[
                         TerminologyResponseMode.TRANSLATION_ONLY
-                    ](requirements_for_items(group))
+                    ](
+                        draft_scan.requirements(
+                            group, TerminologyResponseMode.TRANSLATION_ONLY
+                        )
+                    )
                     if draft_scan
                     else prompt_for_items(group)
                 ),
