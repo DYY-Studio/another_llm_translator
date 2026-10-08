@@ -2898,6 +2898,21 @@ def segment_page_counts(
     """Return matching total and completed count from one aggregation."""
     if bool(file_id) != bool(part_id):
         raise ProjectError("file_id 与 part_id 必须同时提供")
+    if status is None and not search:
+        # Avoid materializing a LEFT JOIN for the unfiltered first page.
+        join, params = _stage_cte(stage)
+        boundary = " AND segments.file_id = ? AND segments.part_id = ?" if file_id else ""
+        bounds = [file_id, part_id] if file_id else []
+        connection = _with_db(project)
+        try:
+            row = connection.execute(
+                f"SELECT (SELECT COUNT(*) FROM segments WHERE segments.is_empty = 0{boundary}), "
+                f"(SELECT COUNT(*) FROM segments {join} WHERE segments.is_empty = 0 AND latest_stage.status = 'completed'{boundary})",
+                [*bounds, *params, *bounds],
+            ).fetchone()
+            return int(row[0]), int(row[1])
+        finally:
+            connection.close()
     join, params, filters = _stage_filters(status=status or "completed", search=None, stage=stage)
     if status is None:
         match = "1"
@@ -2921,3 +2936,4 @@ def segment_page_counts(
         return int(row[0]), int(row[1])
     finally:
         connection.close()
+
