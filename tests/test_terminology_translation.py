@@ -2768,7 +2768,10 @@ async def test_draft_scan_repairs_epub_markers_without_repeating_scan(
                                         {
                                             "type": "summary",
                                             "text": "人物移动。",
-                                            "refs": payload["source_refs"],
+                                            "refs": [
+                                                item["id"]
+                                                for item in payload["source_segments"]
+                                            ],
                                         }
                                     ]
                                     if "summary"

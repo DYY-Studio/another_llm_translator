@@ -512,17 +512,18 @@ async def run_translation(
 
         if draft_scan is not None:
             payload["response_mode"] = draft_scan.mode(items).value
-            payload["source_segments"] = (
-                [
-                    {"id": str(index), "text": segment_model_source(item)}
-                    for index, item in enumerate(items, 1)
-                ]
-                if items[0].get("_draft_summary")
-                else [segment_model_source(item) for item in items]
-            )
-            payload["source_refs"] = [str(item["segment_id"]) for item in items]
+            if items[0].get("_draft_terms") or items[0].get("_draft_summary"):
+                payload["source_segments"] = (
+                    [
+                        {"id": str(index), "text": segment_model_source(item)}
+                        for index, item in enumerate(items, 1)
+                    ]
+                    if items[0].get("_draft_translation")
+                    or items[0].get("_draft_summary")
+                    else [segment_model_source(item) for item in items]
+                )
             if not items[0].get("_draft_translation"):
-                payload["segments"] = [{"id": item["segment_id"]} for item in items]
+                del payload["segments"]
         return payload
 
     run_id, run_dir, continuation_index, fail_planning = _create_or_continue_run(

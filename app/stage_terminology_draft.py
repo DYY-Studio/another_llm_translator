@@ -688,9 +688,14 @@ class DraftTerminologyScan:
         while queue:
             pending, attempt, parent_request_id = queue.pop(0)
             mode = self.mode(pending)
-            payload, id_map = localize_request_ids(payload_builder(pending), pending)
-            if "summary" in response_record_types(mode):
-                payload["source_refs"] = list(id_map)
+            payload = payload_builder(pending)
+            if "segment" in response_record_types(mode):
+                payload, id_map = localize_request_ids(payload, pending)
+            else:
+                id_map = {
+                    str(index): str(item["segment_id"])
+                    for index, item in enumerate(pending, 1)
+                }
             if attempt:
                 payload["format_correction"] = _FORMAT_CORRECTION[self.language]
             generated_prompt = prompt_builder(pending)

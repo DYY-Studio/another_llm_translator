@@ -296,7 +296,7 @@ Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。�
 
 组合实验与标准术语扫描共用字段校验：`source`、`category` 为非空字符串，`description`、`preferred_translation` 为可选字符串，`aliases` 为字符串数组。宿主不额外检查候选及别名是否在源文中连续出现，也不额外拒绝重复候选或术语记录的未知字段。
 
-合并请求使用规范的 Prefix 和 Suffix 包围当前语言的对应 Prompt。粗翻为每个请求 Segment 返回一条完整 `segment` 译文记录；概括返回覆盖 `source_refs` 的 `summary` 记录，且出现在 `term` 或 `no_terms` 之前。三项合并时同时返回这些结果，末行只输出一条 `end`。仅补译与概括时返回 `segment` 和 `summary`，不声明术语结果。响应均遵循严格 JSONL。
+合并请求使用规范的 Prefix 和 Suffix 包围当前语言的对应 Prompt。需要返回片段引用时，输入在对应文本对象中携带请求内短 `id`，不另发 ID 数组。仅术语请求不携带片段 ID。粗翻为每个请求 Segment 返回一条完整 `segment` 译文记录；概括返回覆盖 `source_segments` 中 `id` 的 `summary` 记录，且出现在 `term` 或 `no_terms` 之前。三项合并时同时返回这些结果，末行只输出一条 `end`。仅补译与概括时返回 `segment` 和 `summary`，不声明术语结果。响应均遵循严格 JSONL。
 
 ## 2. Document Adapter（Beta）
 

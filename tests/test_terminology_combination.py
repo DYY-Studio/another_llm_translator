@@ -25,6 +25,12 @@ async def test_triple_scan_retries_missing_summary_and_preserves_draft(
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         seen.append(payload)
         kinds = response_record_types(payload["response_mode"])
+        assert "source_refs" not in payload
+        assert ("segments" in payload) == ("segment" in kinds)
+        if "segment" not in kinds:
+            assert all(
+                "id" in item and "text" in item for item in payload["source_segments"]
+            )
         records = []
         if "summary" in kinds and len(seen) > 1:
             records.append({"type": "summary", "text": "爱丽丝进来了。"})
@@ -94,7 +100,7 @@ async def test_triple_scan_preserves_independent_results_and_force(
                 {
                     "type": "summary",
                     "text": "人物进出。",
-                    "refs": payload["source_refs"],
+                    "refs": [item["id"] for item in payload["source_segments"]],
                 }
             )
         if "term" in kinds:
@@ -153,7 +159,7 @@ async def test_supplement_adapter_requirements_follow_active_tasks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    project = await create_project(tmp_path, "A")
+    project = await create_project(tmp_path, "A\nB")
     write_summary_participation(
         project, [{"file_id": "F0001", "part_id": "document", "selected": True}]
     )
@@ -169,7 +175,7 @@ async def test_supplement_adapter_requirements_follow_active_tasks(
             "en": rules[stage],
         },
     )
-    missing = "summary"
+    missing = {"summary"}
     seen = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -178,34 +184,57 @@ async def test_supplement_adapter_requirements_follow_active_tasks(
         mode = payload["response_mode"]
         kinds = response_record_types(mode)
         seen.append((mode, body["messages"][0]["content"]))
-        if "summary" in kinds:
-            assert payload["source_segments"] == [{"id": "1", "text": "A"}]
-            assert payload["source_refs"] == [
-                item["id"] for item in payload["source_segments"]
+        assert "source_refs" not in payload
+        assert ("segments" in payload) == ("segment" in kinds)
+        if "segment" in kinds:
+            assert payload["segments"] == [
+                {"id": "1", "source": "A"},
+                {"id": "2", "source": "B"},
             ]
+        if "summary" in kinds or ("segment" in kinds and "term" in kinds):
+            assert payload["source_segments"] == [
+                {"id": "1", "text": "A"},
+                {"id": "2", "text": "B"},
+            ]
+        elif "term" in kinds:
+            assert payload["source_segments"] == ["A", "B"]
         else:
-            assert payload["source_segments"] == ["A"]
+            assert "source_segments" not in payload
         records = []
         if "summary" in kinds:
             records.append(
-                {"type": "summary", "text": "甲", "refs": payload["source_refs"]}
-                if missing != "summary"
+                {
+                    "type": "summary",
+                    "text": "甲",
+                    "refs": [item["id"] for item in payload["source_segments"]],
+                }
+                if "summary" not in missing
                 else {"type": "summary", "text": 1}
             )
         if "term" in kinds:
             records.append(
                 {"type": "no_terms"}
-                if missing != "term"
+                if "term" not in missing
                 else {"type": "term", "source": "A", "category": 1}
             )
-        if "segment" in kinds and missing != "segment":
-            records.append({"type": "segment", "id": "1", "translation": "甲"})
+        if "segment" in kinds and "segment" not in missing:
+            records.extend(
+                {"type": "segment", "id": item["id"], "translation": "甲"}
+                for item in payload["segments"]
+            )
         return httpx.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        for missing in ("summary", "term", "segment"):
+        for missing in (
+            {"summary"},
+            {"term"},
+            {"segment"},
+            {"summary", "term"},
+            {"summary", "segment"},
+            {"term", "segment"},
+        ):
             await run_terminology(
                 project,
                 Scope(force=True),
@@ -213,11 +242,10 @@ async def test_supplement_adapter_requirements_follow_active_tasks(
                 include_summaries=True,
                 include_draft_translation=True,
             )
+    from app.llm_response import TerminologyResponseMode
+
     assert {mode for mode, _ in seen} == {
-        "terms+translation+fragment-summary",
-        "summary-only",
-        "terms-only",
-        "translation-only",
+        mode.value for mode in TerminologyResponseMode
     }
     for mode, prompt in seen:
         kinds = response_record_types(mode)
