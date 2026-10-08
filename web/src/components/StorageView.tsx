@@ -362,7 +362,12 @@ export function StorageView({ language }: { language: Language }) {
     } catch (reason) {
       setError(errorMessage(reason, language));
     } finally {
-      await loadSummary();
+      try {
+        await loadSummary();
+      } catch (reason) {
+        const refreshError = translate("storage.refreshFailed", language, { message: errorMessage(reason, language) });
+        setError((current) => current ? `${current}\n${refreshError}` : refreshError);
+      }
       setDetailRevision((current) => current + 1);
       setBusyAction(null);
     }
