@@ -187,8 +187,10 @@ def test_combined_prompt_middles_are_used_in_preview_and_execution(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_draft", [False, True])
 async def test_triple_resume_keeps_summary_selection_and_options(
     tmp_path: Path,
+    include_draft: bool,
 ) -> None:
     import asyncio
     from app.web_tasks import task_options
@@ -207,7 +209,7 @@ async def test_triple_resume_keeps_summary_selection_and_options(
                 Scope(),
                 http_client=client,
                 include_summaries=True,
-                include_draft_translation=True,
+                include_draft_translation=include_draft,
             )
     from app.sqlite_storage import read_summary_runs, read_json, write_json
 
@@ -219,10 +221,18 @@ async def test_triple_resume_keeps_summary_selection_and_options(
     write_json(project, manifest_path, manifest)
     write_summary_participation(project, [{**boundary, "selected": False}])
     options = task_options(
-        project, "terminology", include_summaries=True, include_draft_translation=True
+        project,
+        "terminology",
+        include_summaries=True,
+        include_draft_translation=include_draft,
     )
     assert options["summary_selected_boundaries"] == 1
-    assert options["draft_progress"]["content_summary"]["total"] == 1
+    progress = (
+        options["draft_progress"]["content_summary"]
+        if include_draft
+        else options["summary_progress"]
+    )
+    assert progress["total"] == 1
 
     def completed(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -235,11 +245,17 @@ async def test_triple_resume_keeps_summary_selection_and_options(
                                 [
                                     {"type": "summary", "text": "爱丽丝进来了。"},
                                     {"type": "no_terms"},
-                                    {
-                                        "type": "segment",
-                                        "id": "1",
-                                        "translation": "爱丽丝进来了。",
-                                    },
+                                    *(
+                                        [
+                                            {
+                                                "type": "segment",
+                                                "id": "1",
+                                                "translation": "爱丽丝进来了。",
+                                            }
+                                        ]
+                                        if include_draft
+                                        else []
+                                    ),
                                 ]
                             )
                         }
@@ -255,7 +271,98 @@ async def test_triple_resume_keeps_summary_selection_and_options(
             http_client=client,
             resume_run_id=run_id,
             include_summaries=True,
-            include_draft_translation=True,
+            include_draft_translation=include_draft,
         )
     assert result["failed"] == 0
-    assert result["draft_progress"]["content_summary"]["completed"] == 1
+    assert (
+        len(read_content_summaries(project, kind="fragment", status="completed")) == 1
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_terms", [False, True])
+@pytest.mark.parametrize("error_kind", ["context", "empty"])
+async def test_summary_supplement_records_unsplittable_failure(
+    tmp_path: Path,
+    missing_terms: bool,
+    error_kind: str,
+) -> None:
+    from app.sqlite_storage import read_json
+
+    project = await create_project(tmp_path, "A")
+    write_summary_participation(
+        project,
+        [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    failing = False
+    modes = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        mode = payload["response_mode"]
+        if failing:
+            modes.append(mode)
+            if error_kind == "context":
+                return httpx.Response(
+                    400, text="context_length_exceeded: maximum context tokens"
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"finish_reason": "length", "message": {"content": ""}}]
+                },
+            )
+        records = []
+        if "term" in response_record_types(mode):
+            records.append(
+                {"type": "term", "source": "A", "category": 1}
+                if missing_terms
+                else {"type": "no_terms"}
+            )
+        if "segment" in response_record_types(mode):
+            records.append({"type": "segment", "id": "1", "translation": "甲"})
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    progress = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            include_summaries=True,
+            include_draft_translation=True,
+        )
+        failing = True
+        result = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            reuse_mixed_fingerprints=True,
+            include_summaries=True,
+            include_draft_translation=True,
+            on_progress=lambda done, failed, total: progress.append(
+                (done, failed, total)
+            ),
+        )
+    assert modes == ["terms+fragment-summary" if missing_terms else "summary-only"]
+    assert result["failed"] == 1
+    assert result["draft_progress"]["content_summary"] == {
+        "completed": 0,
+        "failed": 1,
+        "total": 1,
+    }
+    assert progress[-1] == (0, 1, 1)
+    assert len(load_stage_history(project, "translation")) == 1
+    manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
+    assert manifest["status"] == "failed"
+    failures = [
+        row
+        for row in read_content_summaries(project, kind="fragment", status="failed")
+        if row["run_id"] == result["run_id"]
+    ]
+    assert len(failures) == 1
+    assert failures[0]["error_class"] == (
+        "context_error" if error_kind == "context" else "empty_response"
+    )

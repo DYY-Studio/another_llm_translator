@@ -361,9 +361,11 @@ def task_options(
             manifest = read_json(
                 project, project / "runs" / str(running["run_id"]) / "manifest.json"
             )
-            participation = [
-                {**item, "selected": True} for item in manifest["summary_selection"]
-            ]
+            participation = (
+                [{**item, "selected": True} for item in manifest["summary_selection"]]
+                if include_draft_translation
+                else manifest["summary_participation"]
+            )
         selected_boundaries = sum(
             1 for item in participation if bool(item["selected"])
         )
@@ -379,7 +381,7 @@ def task_options(
             else ("terminology",),
         )
     if stage == "terminology" and include_summaries and not include_draft_translation:
-        from .stage_terminology import _summary_participation, _summary_covered_segments
+        from .stage_terminology import _summary_covered_segments
         from .stage_runtime import (
             _project_context,
             _prompt_factory,
@@ -387,7 +389,10 @@ def task_options(
         )
         from .summary_provenance import digest
 
-        summary_ids = _summary_participation(project, nonempty)
+        summary_ids = {
+            (str(item["file_id"]), str(item["part_id"]))
+            for item in participation if item["selected"]
+        }
         summary_segments = [
             item
             for item in nonempty

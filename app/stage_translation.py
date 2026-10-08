@@ -1019,9 +1019,6 @@ async def run_translation(
                 message,
                 part_original,
             )
-            if not items[0].get("_draft_translation"):
-                report_progress()
-                return
         if draft_scan is not None and items[0].get("_draft_summary"):
             draft_scan.record_summary(
                 items,
@@ -1033,6 +1030,7 @@ async def run_translation(
                 error_class=category,
             )
         if draft_scan is not None and not items[0].get("_draft_translation"):
+            report_progress()
             return
         await save_failed(
             str(items[0]["segment_id"]),
