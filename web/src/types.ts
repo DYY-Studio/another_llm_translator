@@ -953,6 +953,9 @@ export interface ProjectConfig {
   validation: {
     translation: {
       validators: string[];
+      decision_enabled: boolean;
+      decision_preset: string;
+      decision_confidence_threshold: number;
       max_retry_attempts: number;
       exhausted_mode: "fail" | "warning";
     };
@@ -984,6 +987,26 @@ export interface AdapterCapabilities {
   max_output_tokens: boolean;
   streaming: "required" | "optional" | "unsupported";
   connection: { base_url: string; credential: LLMPreset["credential"]; proxy_source: "preset" | "connection" } | null;
+}
+
+export interface DecisionPreset {
+  preset_id: string;
+  protocol: "typesafe" | "openai-decisions";
+  url: string;
+  model: string;
+  proxy_url: string;
+  credential: { kind: "environment" | "keychain"; name: string };
+  request_timeout_seconds: number;
+  requests_per_minute: number;
+  max_parallel: number;
+}
+
+export interface DecisionPresetSummary {
+  preset_id: string;
+  protocol?: string;
+  model?: string;
+  valid: boolean;
+  error?: string;
 }
 
 export interface LLMPresetSummary {

@@ -3879,7 +3879,7 @@ async def test_web_task_manager_forwards_force_and_fingerprint_reuse(
     _, project = make_project(tmp_path)
     store = WebStore(project)
     segment_id = store.overview()["segments"][0]["segment_id"]
-    store.save_translation({"segment_id": segment_id, "text": "一"})
+    await asyncio.to_thread(store.save_translation, {"segment_id": segment_id, "text": "一"})
     prompt_path = project / "prompts" / "translation.zh-CN.middle.txt"
     prompt_path.write_text(
         prompt_path.read_text(encoding="utf-8") + "\nchanged",

@@ -12,7 +12,7 @@ from typing import Protocol
 from .errors import ExternalError, ProjectError
 
 if TYPE_CHECKING:
-    from .decision import DecisionClient
+    from .decision import DecisionService
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ class TranslationValidationContext:
     source: str
     translation: str
     terms: tuple[TranslationTermMatch, ...] = ()
-    decision: DecisionClient | None = None
+    decision: DecisionService | None = None
     decision_confidence_threshold: float = 0.8
     segment_id: str | None = None
 

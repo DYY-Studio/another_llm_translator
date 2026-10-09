@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -1227,7 +1228,7 @@ async def test_application_writers_omit_duplicate_text_and_keep_whitespace_overr
     repeated = run_apply(project, stage, Scope(), allow_outdated_base=False, confirmed_all=True)
     assert repeated["reused"] == 2
     assert len(read_jsonl(project, path)) == 2
-    store.save_translation(dict(segment_id="F0001-S000001", text="new base"))
+    await asyncio.to_thread(store.save_translation, dict(segment_id="F0001-S000001", text="new base"))
     with pytest.raises(IncompleteError, match="旧上游"):
         run_apply(project, stage, Scope(only_segment="F0001-S000001"), allow_outdated_base=False, confirmed_all=True)
     run_apply(project, stage, Scope(only_segment="F0001-S000001"), allow_outdated_base=True, confirmed_all=True)

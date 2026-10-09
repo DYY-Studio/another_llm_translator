@@ -13,7 +13,7 @@ from .documents import (
     decode_plaintext,
 )
 from .errors import IncompleteError, ProjectError, UsageError
-from .decision import DecisionAnswer, DecisionClient, DecisionQuestion
+from .decision import DecisionAnswer, DecisionQuestion, DecisionService
 from .translation_validation import (
     TranslationTermMatch,
     TranslationValidationContext,
@@ -35,7 +35,7 @@ class PluginDescriptor:
 
 __all__ = [
     "DecisionAnswer",
-    "DecisionClient",
+    "DecisionService",
     "DecisionQuestion",
     "DecodedPlaintext",
     "DocumentAdapter",

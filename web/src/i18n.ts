@@ -4,6 +4,17 @@ export type Language = "zh-CN" | "en";
 
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
+    "decision.review": "Decision 语义复核（实验）",
+    "decision.reviewHint": "复核推荐译名缺失项；确认术语用法后修复，无法判断时保留警告。",
+    "decision.select": "选择 Decision Preset",
+    "decision.threshold": "自动判断置信度门槛",
+    "decision.subtitle": "术语语义复核的模型连接。",
+    "decision.url": "请求 URL",
+    "decision.urlHint": "填写完整 URL，包含最终请求 Path。",
+    "decision.protocol": "协议",
+    "decision.empty": "新建或选择 Decision Preset。",
+    "decision.exists": "该 Preset ID 已存在。",
+
     "runDialog.summaryToggle": "同时生成概括（实验）",
     "runDialog.summaryHint": "概括范围沿用概括页面的参与选择。",
     "runDialog.summaryForce": "将重做 {count} 个参与内容边界的概括，并保留历史。",
@@ -1269,6 +1280,17 @@ const messages: Record<Language, Record<string, string>> = {
     "dialog.openHint": "只打开此目录，不扫描父目录，也不会移动项目。",
   },
   en: {
+    "decision.review": "Decision semantic review (experimental)",
+    "decision.reviewHint": "Review missing preferred translations; repair confirmed term usage and keep uncertain cases as warnings.",
+    "decision.select": "Select a Decision Preset",
+    "decision.threshold": "Automatic decision confidence threshold",
+    "decision.subtitle": "Model connections for terminology semantic review.",
+    "decision.url": "Request URL",
+    "decision.urlHint": "Enter the complete URL, including the final request path.",
+    "decision.protocol": "Protocol",
+    "decision.empty": "Create or select a Decision Preset.",
+    "decision.exists": "This Preset ID already exists.",
+
     "runDialog.summaryToggle": "Generate summaries while scanning (experimental)",
     "runDialog.summaryHint": "Uses the participation selection on the summaries page.",
     "runDialog.summaryForce": "Regenerate summaries for {count} participating boundaries and retain history.",

@@ -11,7 +11,7 @@ from app.errors import ConfigError, ExternalError
 
 def preset(protocol: str = "typesafe") -> dict:
     return dict(preset_id="local", protocol=protocol,
-                url="http://localhost:9876/custom/path", model="test-model",
+                url="http://localhost:9876/custom/path", model="test-model", proxy_url="",
                 credential={"kind": "environment", "name": "DECISION_TEST_KEY"},
                 request_timeout_seconds=10, requests_per_minute=0, max_parallel=2)
 
@@ -61,4 +61,65 @@ def test_invalid_answer_fails_without_fallback(monkeypatch):
             client = DecisionClient(validate_decision_preset(preset()), http_client=http)
             with pytest.raises(ExternalError):
                 await client.choose("source", [DecisionQuestion("term", "Question", {"a": "A", "b": "B"})])
+    asyncio.run(run())
+
+
+def test_retry_and_refusal_are_recorded(monkeypatch):
+    monkeypatch.setenv("DECISION_TEST_KEY", "secret")
+    responses = iter([httpx.Response(429), httpx.Response(200, json={
+        "model": "test-model", "answers": {"term": {"type": "refusal"}},
+    })])
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: next(responses))) as http:
+            client = DecisionClient(preset(), http_client=http,
+                                    retry={"http_max_attempts": 2, "base_delay_seconds": 0})
+            result = await client.choose("source", [DecisionQuestion("term", "Question", {"a": "A", "b": "B"})])
+            assert result["term"].refused
+            assert [record["http_status"] for record in client.records] == [429, 200]
+            assert client.pool.active == 0
+    asyncio.run(run())
+
+
+def test_cancellation_releases_request_lease(monkeypatch):
+    monkeypatch.setenv("DECISION_TEST_KEY", "secret")
+    async def run():
+        entered = asyncio.Event()
+        async def respond(request):
+            entered.set()
+            await asyncio.Event().wait()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            client = DecisionClient(preset(), http_client=http)
+            task = asyncio.create_task(client.choose("source", [DecisionQuestion("term", "Question", {"a": "A", "b": "B"})]))
+            await entered.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert client.pool.active == 0
+            assert client.records[0]["error"] == "cancelled"
+    asyncio.run(run())
+
+
+def test_http_proxy_carries_decision_request(monkeypatch):
+    monkeypatch.setenv("DECISION_TEST_KEY", "secret")
+    async def run():
+        requests = []
+        async def respond(reader, writer):
+            try:
+                headers = await reader.readuntil(b"\r\n\r\n")
+                requests.append(headers.decode())
+                length = next(int(line.split(b":", 1)[1]) for line in headers.split(b"\r\n") if line.lower().startswith(b"content-length:"))
+                await reader.readexactly(length)
+                body = b'{"model":"test-model","answers":{"term":{"type":"refusal"}}}'
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        async with await asyncio.start_server(respond, "127.0.0.1", 0) as server:
+            value = preset()
+            value.update(url="http://decision.invalid/v1/choose", proxy_url=f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}")
+            client = DecisionClient(validate_decision_preset(value))
+            answers = await client.choose("source", [DecisionQuestion("term", "Question", {"a": "A", "b": "B"})])
+            assert answers["term"].refused
+            assert requests[0].startswith("POST http://decision.invalid/v1/choose HTTP/1.1\r\n")
     asyncio.run(run())

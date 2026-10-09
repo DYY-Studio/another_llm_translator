@@ -9,7 +9,7 @@ import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import httpx
@@ -34,33 +34,53 @@ class DecisionAnswer:
     refused: bool = False
 
 
+class DecisionService(Protocol):
+    async def choose(self, state: Any, questions: list[DecisionQuestion], *,
+                     segment_id: str | None = None) -> dict[str, DecisionAnswer]: ...
+
+
 def decision_preset_path(root: Path, preset_id: str) -> Path:
-    if not re.fullmatch(r"[a-z][a-z0-9-]*", preset_id):
+    if not isinstance(preset_id, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", preset_id):
         raise ConfigError("Decision Preset ID 格式无效")
     return root / "decision_presets" / f"{preset_id}.json"
 
 
 def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
-    required = {"preset_id", "protocol", "url", "model", "credential",
+    required = {"preset_id", "protocol", "url", "model", "credential", "proxy_url",
                 "request_timeout_seconds", "requests_per_minute", "max_parallel"}
     if set(value) != required:
         raise ConfigError("Decision Preset 字段不完整或包含未知字段")
     decision_preset_path(Path(), value["preset_id"])
-    if value["protocol"] not in {"typesafe", "openai-decisions"}:
+    if not isinstance(value["protocol"], str) or value["protocol"] not in {"typesafe", "openai-decisions"}:
         raise ConfigError("不支持的 Decision 协议")
     url = value["url"]
     if not isinstance(url, str):
         raise ConfigError("Decision URL 必须是完整 HTTP URL")
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+        parsed.port
+    except ValueError as exc:
+        raise ConfigError("Decision URL 无效") from exc
     if (parsed.scheme not in {"http", "https"} or not parsed.hostname
             or parsed.username or parsed.password or parsed.query or parsed.fragment
             or not parsed.path or parsed.path == "/"):
         raise ConfigError("Decision URL 必须含最终 Path，不能含凭据、查询参数或 fragment")
     if not isinstance(value["model"], str) or not value["model"].strip():
         raise ConfigError("Decision 模型不能为空")
+    proxy_url = value["proxy_url"]
+    if not isinstance(proxy_url, str):
+        raise ConfigError("Decision proxy_url 必须是字符串")
+    if proxy_url:
+        try:
+            proxy = urlsplit(proxy_url)
+            proxy.port
+        except ValueError as exc:
+            raise ConfigError("Decision 代理 URL 无效") from exc
+        if proxy.scheme not in {"http", "https"} or not proxy.hostname or proxy.username or proxy.password:
+            raise ConfigError("Decision 代理必须是无凭据的 HTTP/HTTPS URL")
     credential = value["credential"]
     if (not isinstance(credential, dict) or set(credential) != {"kind", "name"}
-            or credential["kind"] not in {"environment", "keychain"}
+            or not isinstance(credential["kind"], str) or credential["kind"] not in {"environment", "keychain"}
             or not isinstance(credential["name"], str) or not credential["name"].strip()):
         raise ConfigError("Decision 凭据引用无效")
     for key, minimum in (("requests_per_minute", 0), ("max_parallel", 1)):
@@ -108,7 +128,7 @@ class DecisionClient:
                                         choices=[dict(value=k, description=v) for k, v in q.choices.items()]) for q in questions])
         if self.http_client is not None:
             return await self._request(self.http_client, body, questions, segment_id)
-        async with httpx.AsyncClient(trust_env=False) as http:
+        async with httpx.AsyncClient(proxy=self.preset["proxy_url"] or None) as http:
             return await self._request(http, body, questions, segment_id)
 
     async def _request(self, http: httpx.AsyncClient, body: dict[str, Any],
@@ -140,6 +160,9 @@ class DecisionClient:
                     raise FatalExternalError("Decision 响应无效") from exc
                 record.update(model=data["model"], answers={k: asdict(v) for k, v in answers.items()}, usage=data.get("usage"))
                 return answers
+            except asyncio.CancelledError:
+                record["error"] = "cancelled"
+                raise
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
                 record["error"] = type(exc).__name__
                 if attempt + 1 >= self.retry["http_max_attempts"]:
@@ -151,7 +174,7 @@ class DecisionClient:
                 record["elapsed_seconds"] = time.monotonic() - started
                 self.records.append(record)
                 await lease.release()
-            await asyncio.sleep(self.retry["base_delay_seconds"] * 2 ** attempt)
+            await asyncio.sleep(min(self.retry.get("max_delay_seconds", 60), self.retry["base_delay_seconds"] * 2 ** attempt))
         raise AssertionError("unreachable")
 
     def usage_summary(self) -> dict[str, Any] | None:
@@ -182,6 +205,8 @@ class DecisionClient:
         result = {}
         for q in questions:
             answer = raw[q.name]
+            if not isinstance(answer, dict):
+                raise ValueError("invalid answer")
             if answer["type"] == "refusal":
                 result[q.name] = DecisionAnswer(None, {}, 0, True)
                 continue
@@ -192,6 +217,8 @@ class DecisionClient:
                 if len({p["value"] for p in probabilities}) != len(probabilities):
                     raise ValueError("duplicate probabilities")
                 probabilities = {p["value"]: p["probability"] for p in probabilities}
+            if not isinstance(probabilities, dict):
+                raise ValueError("invalid probabilities")
             confidence = answer["confidence"]
             if set(probabilities) != set(q.choices):
                 raise ValueError("option mismatch")

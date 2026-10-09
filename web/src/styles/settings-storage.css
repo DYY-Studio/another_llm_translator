@@ -150,6 +150,8 @@
 .config-toggle { min-width: 0; display: grid; align-content: start; gap: 7px; font-size: 13px; font-weight: 650; }
 .config-toggle > span { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; }
 .config-toggle input { margin: 0; }
+.validator-settings-group { grid-column: 1 / -1; min-width: 0; display: grid; gap: 14px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; }
+.validator-settings-options { padding-left: 24px; }
 .context-config-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(130px, .7fr); gap: 14px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; }
 .context-risk-note { grid-column: 1 / -1; margin: 0; font-size: 12px; line-height: 1.55; }
 .warning-banner .quiet-button { margin-left: 12px; }

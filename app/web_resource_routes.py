@@ -43,6 +43,7 @@ from .errors import (
     UsageError,
 )
 from .execution import full_prompt
+from .decision import decision_preset_path, load_decision_preset, validate_decision_preset
 from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, endpoint_url, load_llm_preset, preset_path
 from .locking import project_write_lock
@@ -750,6 +751,52 @@ def register_resource_routes(
     ) -> dict[str, Any]:
         delete_prompt_library(stage, language, prompt_id)
         return {"deleted": True, "id": prompt_id}
+
+    @app.get("/api/v1/global/decision-presets")
+    async def list_decision_presets() -> dict[str, Any]:
+        paths: dict[str, Path] = {}
+        for root in (user_root(), app_root):
+            for path in sorted((root / "decision_presets").glob("*.json")):
+                paths.setdefault(path.stem, path)
+        values = []
+        for preset_id, path in sorted(paths.items()):
+            try:
+                value = load_decision_preset(path)
+                if value["preset_id"] != preset_id:
+                    raise ConfigError("Decision Preset ID 与文件名不一致")
+                values.append({"preset_id": preset_id, "protocol": value["protocol"], "model": value["model"], "valid": True})
+            except AppError as exc:
+                values.append({"preset_id": preset_id, "valid": False, "error": str(exc)})
+        return {"presets": values}
+
+    @app.get("/api/v1/global/decision-presets/{preset_id}")
+    async def get_decision_preset(preset_id: str) -> dict[str, Any]:
+        relative = str(decision_preset_path(Path(), preset_id))
+        return load_decision_preset(effective_path(relative, builtin_root=app_root))
+
+    @app.put("/api/v1/global/decision-presets/{preset_id}")
+    async def put_decision_preset(preset_id: str, payload: dict[str, Any]) -> dict[str, bool]:
+        relative = str(decision_preset_path(Path(), preset_id))
+        definition = validate_decision_preset(payload)
+        if definition["preset_id"] != preset_id:
+            raise ConfigError("Decision Preset ID 与请求不一致")
+        atomic_write_json(write_user(relative), definition)
+        return {"saved": True}
+
+    @app.delete("/api/v1/global/decision-presets/{preset_id}")
+    async def delete_decision_preset(preset_id: str) -> dict[str, bool]:
+        relative = str(decision_preset_path(Path(), preset_id))
+        configs = [effective_path("config/config.toml", builtin_root=app_root)]
+        configs.extend(item / "config.toml" for item in projects_root.iterdir() if database_path(item).is_file())
+        configs.extend(item / "config.toml" for item in app.state.external_projects)
+        for path in configs:
+            if load_config(path)["validation"]["translation"]["decision_preset"] == preset_id:
+                raise UsageError("不能删除配置正在引用的 Decision Preset")
+        path = user_root() / relative
+        if not path.is_file():
+            raise UsageError("Decision Preset 不存在或属于内置资源")
+        path.unlink()
+        return {"deleted": True}
 
     @app.get("/api/v1/global/presets")
     async def list_global_presets() -> dict[str, Any]:

@@ -191,6 +191,11 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 
 翻译校验协议、内置校验规则、finding 规范化和修复上下文。校验器不拥有 HTTP 重试或结果提交。
 
+### `app/decision.py`
+
+宿主 Decision Preset 校验与加载、两种 HTTP Choice 协议转换、限速、重试和用量记录。
+通过公共 DecisionService 供翻译校验插件调用，不拥有术语规则或结果提交。
+
 ## 8. 术语
 
 - `term_library.py`：术语规范化、候选合并、发布库、override 和组关系。

@@ -353,7 +353,7 @@ def normalize_model_output(
 
 `export_sources` 还会收到宿主项目配置中的 `target_language: str` 和 `target_language_tag: str`。前者是供模型和人阅读的自由文本名称，后者是可选的 BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用到自己的格式元数据，或在标签为空时明确拒绝导出。
 
-宿主不按 Adapter ID 推断语言行为。Document Adapter 插件协议版本为 `12`；旧协议插件会快速失败，不保留旧调用路径。
+宿主不按 Adapter ID 推断语言行为。Document Adapter 插件协议版本为 `13`；旧协议插件会快速失败，不保留旧调用路径。
 
 `render_model_source` 在每个阶段开始时以同一个 File 的 `opaque_state` 和冻结的 `run_options` 生成模型源文。`model_prompt_requirements` 接收完全相同的快照；宿主可据此把不同要求集合拆分到不同 Chunk。`normalize_model_output` 是可选方法；实现时接收相同快照，未实现时宿主原样使用模型文本。要求不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
 
@@ -442,7 +442,7 @@ File 版本与状态记录版本仍必须一致，未声明可读的版本立即
 提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
 目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
 
-Document Adapter 插件协议当前为版本 12。统一 TXT 导出由宿主改用内置 `txt`
+Document Adapter 插件协议当前为版本 13。统一 TXT 导出由宿主改用内置 `txt`
 Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
@@ -547,7 +547,7 @@ schema = 1
 [plugin]
 id = "my-documents"
 version = "1.0.0"
-protocol = 12
+protocol = 13
 entrypoint = "plugin:descriptor"
 ```
 
@@ -568,7 +568,7 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=12,
+        protocol_version=13,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```
@@ -577,16 +577,16 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `12`；每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收 `TranslationValidationContext` 的 `validate(context)`。
+翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `13`；每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收 `TranslationValidationContext` 的 `validate(context)`，可返回普通结果或可等待结果。
 
-上下文只包含当前 Segment 的源文、候选译文和宿主确定的逐 Segment 术语命中，不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
+上下文包含当前 Segment 的 ID、源文、候选译文、逐 Segment 术语命中，以及可选的宿主 `DecisionService` 和置信度门槛。术语命中包含分类和说明；上下文不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
 
 `TranslationValidationMatch.severity` 为 `error` 或 `advisory`。
 
-`error` 必须指向候选译文中的非空范围，使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为 warning。
+`error` 必须指向候选译文中的非空范围，使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为 warning。advisory 的 `repairable` 默认 `true`，设为 `false` 时只保存 warning，不进入修复请求；error 必须可修复。
 
 首个真实外部示例是可选的 `plugins/term_validation/` 目录插件，提供
-`preferred_term_usage`；它只检查实际命中的、带推荐译名的术语是否至少出现一次，不要求强制替换。
+`preferred_term_usage`；它先检查实际命中的推荐译名是否缺失，可显式启用 Decision 语义复核。
 
 ```python
 from app.plugin_api import (
@@ -664,3 +664,31 @@ Preset 仍只记录一个 credential 引用；其环境变量或钥匙串值按�
 上限约束。401/403 只隔离本次执行中的当前 Key，429 冷却并轮换，400/404 或协议、
 配置错误直接失败，不提供 Provider fallback。Run 收尾会按 Key 追加安全审计，绝不
 保存 Key 原文、摘要或跨执行健康状态。
+
+
+## 5. Decision Preset 与校验服务（实验）
+
+全局 `decision_presets/<preset_id>.json` 保存 `preset_id`、`protocol`、`url`、`model`、
+`credential`、`proxy_url`、`request_timeout_seconds`、`requests_per_minute`、`max_parallel`。
+`protocol` 为 `typesafe` 或 `openai-decisions`；`url` 是含最终 Path 的完整 HTTP(S) URL，
+宿主原样 POST，不推断或拼接路径。URL 不允许凭据、查询参数或 fragment。
+凭据使用现有 environment/keychain 引用，密钥由宿主在请求时读取。
+`proxy_url` 支持无凭据的 HTTP/HTTPS 代理；留空使用默认代理设置。
+
+TypeSafe 将共享证据写入 `state`，问题写入 `questions` 映射，读取 `answers` 映射。
+OpenAI Decisions 将共享证据编码为 JSON 字符串写入 `input`，问题写入带唯一 `name` 的
+`questions` 数组，按名称读取 `answers` 数组。首版只支持 Choice，统一为
+`DecisionQuestion(name, instructions, choices)` 和
+`DecisionAnswer(choice, probabilities, confidence, refused)`。
+插件通过 `await context.decision.choose(state, questions, segment_id=context.segment_id)` 调用，
+不得自行实例化客户端、管理凭据或发送 HTTP 请求。宿主负责限速、重试、取消、诊断和用量。
+回答缺失、重复、选项错误或非法概率直接失败；明确拒答返回 `refused=True`。
+
+`validation.translation` 的 `decision_enabled` 默认 false，`decision_preset` 默认空字符串，
+`decision_confidence_threshold` 默认 0.8。启用需要安装并选择 `preferred_term_usage` 和有效的
+Decision Preset。Run 保存 `decision_preset.json`；启用的连接配置和置信度门槛参与翻译指纹。
+
+术语插件将同一 Segment 的推荐译名缺失项合并请求，输出 required、ordinary 或 uncertain；
+处理语义见 [翻译阶段](MINIMAL.md#53-翻译)。Run 的 `decision_validation` 保存判断、
+Segment ID、证据摘要、耗时和用量；生成与校验用量合并汇总。人工保存译文只校验、不自动修复，
+判断记录随结果保存。
