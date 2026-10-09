@@ -193,7 +193,8 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 
 ### `app/decision.py`
 
-宿主 Decision Preset 校验与加载、两种 HTTP Choice 协议转换、限速、重试和用量记录。
+宿主 Decision Preset 校验与加载、两种 HTTP Choice 协议转换、限速、重试和用量记录，
+向实时诊断报告请求生命周期。
 通过公共 DecisionService 提供结构化决策调用，不拥有业务规则或结果提交。
 
 ## 8. 术语
@@ -218,7 +219,7 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 - `prompt_library.py`：用户级 Prompt 条目及项目载入边界。
 - `credentials.py`：环境变量和系统钥匙串访问，不向持久化层暴露密钥正文。
 - `server_config.py`：监听、局域网共享与认证设置。
-- `diagnostics.py`：本次运行的结构化诊断事件与摘要。
+- `diagnostics.py`：本次运行的结构化诊断事件与摘要，分别统计 LLM 与 Decision 请求并保留有界详情。
 - `logging_utils.py`：普通日志上下文和敏感字段边界。
 - `i18n.py`：CLI/后端可见文案与语言选择。
 - `errors.py`：可预期应用错误的公共基类。

@@ -61,6 +61,7 @@ def test_decision_diagnostics_tracks_retry_and_preflight_failure(tmp_path, monke
             assert items[0]["segment_id"] == "SEG"
             import json
             assert json.loads(diagnostics.request_detail(items[0]["request_id"])["request_body"])["state"] == "evidence"
+            assert "secret" not in json.dumps(diagnostics.request_detail(items[0]["request_id"]))
     asyncio.run(run())
 
 
@@ -166,8 +167,9 @@ def test_retry_and_refusal_are_recorded(monkeypatch):
     asyncio.run(run())
 
 
-def test_cancellation_releases_request_lease(monkeypatch):
+def test_cancellation_releases_request_lease(tmp_path, monkeypatch):
     monkeypatch.setenv("DECISION_TEST_KEY", "secret")
+    diagnostics = Diagnostics(tmp_path / "app.log")
     async def run():
         entered = asyncio.Event()
         async def respond(request):
@@ -182,7 +184,12 @@ def test_cancellation_releases_request_lease(monkeypatch):
                 await task
             assert client.pool.active == 0
             assert client.records[0]["error"] == "cancelled"
-    asyncio.run(run())
+            snapshot = diagnostics.snapshot()
+            assert snapshot["decision"]["metrics"]["active_requests"] == 0
+            assert snapshot["decision"]["metrics"]["http_errors"] == 0
+            assert snapshot["decision"]["activities"][0]["interrupted"] == 1
+    with diagnostics.activate("project", "translation"):
+        asyncio.run(run())
 
 
 def test_http_proxy_carries_decision_request(monkeypatch):

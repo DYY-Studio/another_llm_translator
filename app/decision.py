@@ -222,7 +222,7 @@ class DecisionClient:
                 if diagnostics is not None:
                     diagnostics.request_finished(request_id=request_id, attempt=attempt + 1,
                         key_index=lease.key_index + 1, latency_seconds=record["elapsed_seconds"],
-                        status=record.get("http_status"), error=outcome != "succeeded", retrying=retrying, outcome=outcome)
+                        status=record.get("http_status"), error=outcome not in {"succeeded", "cancelled"}, retrying=retrying, outcome=outcome)
                     if retrying:
                         diagnostics.retried(request_id)
                 await lease.release()

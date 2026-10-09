@@ -18,6 +18,9 @@
 .diagnostics-panel-heading h2 { margin: 0; }
 .diagnostics-panel-heading span { color: var(--muted); font-size: 11px; }
 .diagnostics-panel-heading button { min-height: 32px; padding-inline: 10px; white-space: nowrap; }
+.request-panel .diagnostics-panel-heading { flex-wrap: wrap; gap: 4px; }
+.request-panel .diagnostics-panel-heading > span { flex-basis: 100%; }
+.request-panel .diagnostics-subtabs { flex: none; }
 .diagnostics-filters { display: grid; grid-template-columns: 120px 150px 140px minmax(150px, 1fr); gap: 8px; padding: 10px; border-bottom: 1px solid var(--row-border); }
 .diagnostics-filters > * { min-width: 0; width: 100%; }
 .diagnostics-log { min-height: 0; flex: 1; overflow: auto; font-size: 11px; }
@@ -41,6 +44,14 @@
 .request-list-content { position: relative; width: 100%; }
 .request-list article { position: absolute; top: 0; left: 0; width: 100%; display: flex; align-items: center; gap: 12px; padding: 13px 14px; border-bottom: 1px solid var(--row-border); }
 .request-list article:hover { background: var(--hover); }
+.decision-activities article { position: static; align-items: stretch; flex-direction: column; }
+.decision-activities .button-group { margin: 0; }
+.decision-dialog { display: flex; flex-direction: column; }
+.decision-dialog > :not(.exchange-detail) { flex: none; }
+.decision-dialog .exchange-detail { min-height: 0; }
+.decision-request-table { width: 100%; min-width: 600px; border-collapse: collapse; text-align: left; font-size: 12px; }
+.decision-request-table th, .decision-request-table td { padding: 10px 8px; border-bottom: 1px solid var(--row-border); }
+.decision-request-table td small { display: block; color: var(--muted); }
 .request-list button:disabled { cursor: not-allowed; opacity: .55; }
 .request-row-main { min-width: 0; display: grid; flex: 1; gap: 5px; }
 .request-row-main header { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 11px; }

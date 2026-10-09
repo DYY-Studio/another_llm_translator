@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { api } from "../api";
 import { HistoricalDiagnosticsView } from "./HistoricalDiagnosticsView";
 import type {
+  DecisionActivity,
   DiagnosticsRequestDetail,
   DiagnosticsRequestStatus,
   DiagnosticsRequestSummary,
@@ -159,7 +160,10 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
   const [requestSummaries, setRequestSummaries] = useState<Map<string, DiagnosticsRequestSummary>>(
     () => new Map(),
   );
-  const [requestTotal, setRequestTotal] = useState(0);
+  const [requestKind, setRequestKind] = useState<"llm" | "decision">("llm");
+  const [selectedActivity, setSelectedActivity] = useState<DecisionActivity | null>(null);
+  const [decisionErrorsOnly, setDecisionErrorsOnly] = useState(false);
+  const [decisionPage, setDecisionPage] = useState(0);
   const [level, setLevel] = useState("");
   const [project, setProject] = useState("");
   const [stage, setStage] = useState("");
@@ -189,7 +193,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
   useEffect(() => {
     const bar = detailsRef.current;
     if (bar) layoutDetailsColumns(bar);
-  }, [language]);
+  }, [language, requestKind]);
 
   const load = useCallback(async () => {
     const loadId = ++summaryLoadRef.current;
@@ -216,8 +220,9 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
           feed.items.map((item) => [item.request_id, item]),
         ));
         if (previousSession && previousSession !== feed.session_id) {
-          setSelectedRequest(null);
-          setDetail(null);
+          const retainedIds = new Set(feed.items.map((item) => item.request_id));
+          setSelectedRequest((current) => current && retainedIds.has(current) ? current : null);
+          setDetail((current) => current && retainedIds.has(current.request_id) ? current : null);
           setDetailError("");
         }
       } else if (feed.items.length) {
@@ -231,7 +236,6 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
         sessionId: feed.session_id,
         cursor: feed.cursor,
       };
-      setRequestTotal(feed.total);
       setValue(nextValue);
       setError("");
     } catch (reason) {
@@ -243,7 +247,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
     summaryLoadRef.current += 1;
     requestFeedRef.current = { sessionId: "", cursor: 0 };
     setRequestSummaries(new Map());
-    setRequestTotal(0);
+    setSelectedActivity(null);
     setValue(null);
     setSelectedRequest(null);
     setDetail(null);
@@ -298,13 +302,16 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
   }, [autoScroll, value?.logs]);
 
   useEffect(() => {
-    if (!selectedRequest) return;
+    if (!selectedRequest && !selectedActivity) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSelectedRequest(null);
+      if (event.key === "Escape") {
+        if (selectedRequest) setSelectedRequest(null);
+        else setSelectedActivity(null);
+      }
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [selectedRequest]);
+  }, [selectedRequest, selectedActivity]);
 
   const openDetail = useCallback((requestId: string) => {
     setSelectedRequest(requestId);
@@ -323,6 +330,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
     const active: DiagnosticsRequestSummary[] = [];
     const finished: DiagnosticsRequestSummary[] = [];
     for (const item of requestSummaries.values()) {
+      if (item.request_kind !== "llm") continue;
       if (item.status === "running" || item.status === "retrying") {
         active.push(item);
       } else {
@@ -336,7 +344,22 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
     return { active, finished };
   }, [requestSummaries]);
 
-  const metrics = value?.metrics;
+  const requestTotal = requestGroups.active.length + requestGroups.finished.length;
+  const decisionActivities = value?.decision.activities ?? [];
+  const decisionPending = decisionActivities.reduce((total, item) => total + item.pending, 0);
+  const decisionFailures = decisionActivities.reduce((total, item) => total + item.failed + item.interrupted, 0);
+  const metrics = value ? { ...value.metrics, ...(requestKind === "decision" ? value.decision.metrics : {}) } : undefined;
+  const decisionRequests = Array.from(requestSummaries.values()).filter((item) => (
+    item.request_kind === "decision" && selectedActivity !== null
+    && (item.task_id ?? null) === selectedActivity.task_id && item.model === selectedActivity.model
+    && (!decisionErrorsOnly || item.status === "failed" || item.status === "interrupted")
+  )).sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  const decisionPageCount = Math.max(1, Math.ceil(decisionRequests.length / 20));
+  const currentDecisionPage = Math.min(decisionPage, decisionPageCount - 1);
+  const isDecisionDetail = (detail?.request_kind ?? requestSummaries.get(selectedRequest ?? "")?.request_kind) === "decision";
+  function openActivity(activity: DecisionActivity, errorsOnly = false) {
+    setSelectedActivity(activity); setDecisionErrorsOnly(errorsOnly); setDecisionPage(0);
+  }
   const throughput = metrics
     ? {
         input: metrics.throughput_input_tokens_per_second,
@@ -360,19 +383,19 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
       <div className="diagnostics-metrics">
         <article><span>{translate("diagnostics.currentRequests", language)}</span><strong>{number(metrics?.active_requests ?? 0, language)}</strong><small>{translate("diagnostics.concurrency", language)}</small></article>
         <article><span>{translate("diagnostics.totalRequests", language)}</span><strong>{number(metrics?.total_requests ?? 0, language)}</strong><small>{translate("diagnostics.logicalRequests", language)}</small></article>
-        <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{metrics?.usage_available || metrics?.usage_partial ? number(metrics.input_tokens, language) : translate("diagnostics.unavailable", language)}</strong><small>{translate(metrics?.usage_partial ? "diagnostics.runPartial" : "diagnostics.runTotal", language)}</small></article>
-        <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{metrics?.usage_available || metrics?.usage_partial ? number(metrics.output_tokens, language) : translate("diagnostics.unavailable", language)}</strong><small>{translate(metrics?.usage_partial ? "diagnostics.runPartial" : "diagnostics.runTotal", language)}</small></article>
-        <article><span>{translate("diagnostics.throughput", language)}</span><strong>{number(throughput, language)}</strong><small>{translate("diagnostics.tokensPerSecond", language)}</small></article>
+        <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{metrics?.usage_available || metrics?.usage_partial ? number(metrics.input_tokens, language) : translate("diagnostics.unavailable", language)}</strong><small>{translate("diagnostics.combinedUsage", language)}</small></article>
+        <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{metrics?.usage_available || metrics?.usage_partial ? number(metrics.output_tokens, language) : translate("diagnostics.unavailable", language)}</strong><small>{translate("diagnostics.combinedUsage", language)}</small></article>
+        <article><span>{translate(requestKind === "decision" ? "diagnostics.decisionRate" : "diagnostics.throughput", language)}</span><strong>{number(requestKind === "decision" ? decisionActivities.reduce((total, item) => total + (item.requests_per_second ?? 0), 0) : throughput, language)}</strong><small>{translate(requestKind === "decision" ? "diagnostics.requestsPerSecond" : "diagnostics.tokensPerSecond", language)}</small></article>
       </div>
 
       <div className="diagnostics-details" ref={detailsRef} aria-label={translate("diagnostics.requestSummary", language)}>
         <span>Usage <strong>{metrics?.usage_available ? translate("diagnostics.usageComplete", language) : metrics?.usage_partial ? translate("diagnostics.usagePartial", language) : translate("diagnostics.unavailable", language)}</strong></span>
         <span>{translate("diagnostics.averageLatency", language)} <strong>{number(metrics?.average_latency_ms ?? null, language, " ms")}</strong></span>
-        <span>{translate("diagnostics.p95Latency", language)} <strong>{number(metrics?.p95_latency_ms ?? null, language, " ms")}</strong></span>
+        <span title={requestKind === "decision" ? translate("diagnostics.decisionP95Hint", language) : undefined}>{translate("diagnostics.p95Latency", language)} <strong>{number(metrics?.p95_latency_ms ?? null, language, " ms")}</strong></span>
         <span>{translate("diagnostics.httpErrors", language)} <strong>{number(metrics?.http_errors ?? 0, language)}</strong></span>
         <span>{translate("diagnostics.retries", language)} <strong>{number(metrics?.retry_count ?? 0, language)}</strong></span>
         <span>{translate("diagnostics.rateLimitWaits", language)} <strong>{waitingRequests(metrics?.rate_limit_waiting_requests, language)}</strong></span>
-        <span>{translate("diagnostics.throughputMetric", language)} <select aria-label={translate("diagnostics.throughputMetric", language)} value={throughputMetric} onChange={(event) => changeThroughputMetric(event.target.value as ThroughputMetric)}><option value="total">{translate("diagnostics.throughputTotal", language)}</option><option value="input">{translate("diagnostics.throughputInput", language)}</option><option value="output">{translate("diagnostics.throughputOutput", language)}</option></select></span>
+        {requestKind === "llm" && <span>{translate("diagnostics.throughputMetric", language)} <select aria-label={translate("diagnostics.throughputMetric", language)} value={throughputMetric} onChange={(event) => changeThroughputMetric(event.target.value as ThroughputMetric)}><option value="total">{translate("diagnostics.throughputTotal", language)}</option><option value="input">{translate("diagnostics.throughputInput", language)}</option><option value="output">{translate("diagnostics.throughputOutput", language)}</option></select></span>}
       </div>
 
       <div className="diagnostics-grid">
@@ -416,11 +439,29 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
 
         <section className="diagnostics-panel request-panel">
           <div className="diagnostics-panel-heading">
-            <div>
-              <h2>{translate("diagnostics.currentRunRequests", language)}</h2>
-              <span>{translate("diagnostics.requestRetention", language, { count: requestTotal })}</span>
-            </div>
+            <nav className="diagnostics-subtabs" aria-label={translate("diagnostics.requestKind", language)}>
+              <button className={requestKind === "llm" ? "active" : ""} aria-pressed={requestKind === "llm"} onClick={() => setRequestKind("llm")}>LLM</button>
+              <button className={requestKind === "decision" ? "active" : ""} aria-pressed={requestKind === "decision"} title={translate("diagnostics.decisionIndicator", language, { pending: decisionPending, failed: decisionFailures })} onClick={() => setRequestKind("decision")}>
+                Decision{decisionPending > 0 ? ` (${decisionPending})` : ""}{decisionFailures > 0 && <i className="request-status status-failed"> · !{decisionFailures}</i>}
+              </button>
+            </nav>
+            <span>{translate(requestKind === "llm" ? "diagnostics.requestRetention" : "diagnostics.decisionCumulative", language, { count: requestTotal })}</span>
           </div>
+          {requestKind === "decision" ? <div className="request-list decision-activities">
+            {decisionActivities.length ? decisionActivities.map((activity) => <article key={`${activity.task_id ?? ""}:${activity.model}`}>
+              <div className="request-row-main">
+                <header><span>{activity.project} · {activity.stage}</span><code>{activity.task_id}</code></header>
+                <strong>{activity.model}</strong>
+                <span>{translate("diagnostics.decisionCounts", language, { pending: activity.pending, completed: activity.completed, total: activity.total_requests, questions: activity.questions })}</span>
+                <span>{number(activity.requests_per_second, language)} {translate("diagnostics.requestsPerSecond", language)} · {translate("diagnostics.averageLatency", language)} {number(activity.average_latency_ms, language, " ms")}</span>
+                <span title={translate("diagnostics.decisionP95Hint", language)}>P95 {number(activity.p95_latency_ms, language, " ms")}</span>
+              </div>
+              <div className="button-group">
+                <button className="quiet-button" onClick={() => openActivity(activity)}>{translate("diagnostics.view", language)}</button>
+                {(activity.failed + activity.interrupted > 0) && <button className="quiet-button error-text" onClick={() => openActivity(activity, true)}>{translate("diagnostics.decisionErrors", language, { count: activity.failed + activity.interrupted })}</button>}
+              </div>
+            </article>) : <div className="diagnostics-empty">{translate("diagnostics.decisionEmpty", language)}</div>}
+          </div> :
           <div className={`request-groups ${requestTotal ? "has-requests" : ""} ${!requestGroups.active.length || !requestGroups.finished.length ? "single" : ""}`}>
             {requestGroups.active.length > 0 && (
               <RequestGroup
@@ -447,9 +488,39 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
                 {translate("diagnostics.noRequests", language)}
               </div>
             )}
-          </div>
+          </div>}
         </section>
       </div>
+
+      {selectedActivity && !selectedRequest && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedActivity(null); }}>
+        <section className="modal exchange-dialog decision-dialog" role="dialog" aria-modal="true" aria-label={translate("diagnostics.decisionDetails", language)}>
+          <header className="exchange-dialog-heading">
+            <div><h2>{translate("diagnostics.decisionDetails", language)}</h2><code>{selectedActivity.project} · {selectedActivity.model}</code></div>
+            <button className="quiet-button" onClick={() => setSelectedActivity(null)}>{translate("diagnostics.close", language)}</button>
+          </header>
+          <p className="muted">{translate("diagnostics.decisionRetention", language)}</p>
+          <nav className="exchange-tabs">
+            <button className={!decisionErrorsOnly ? "active" : ""} onClick={() => { setDecisionErrorsOnly(false); setDecisionPage(0); }}>{translate("diagnostics.decisionAll", language)}</button>
+            <button className={decisionErrorsOnly ? "active" : ""} onClick={() => { setDecisionErrorsOnly(true); setDecisionPage(0); }}>{translate("diagnostics.decisionFailed", language)}</button>
+          </nav>
+          <div className="exchange-detail">
+            {decisionRequests.length ? <table className="decision-request-table">
+              <thead><tr>{["diagnostics.decisionSegment", "diagnostics.decisionQuestions", "diagnostics.status", "diagnostics.decisionLatency", "diagnostics.tabAttempts", "diagnostics.decisionAction"].map((key) => <th key={key}>{translate(key, language)}</th>)}</tr></thead>
+              <tbody>{decisionRequests.slice(currentDecisionPage * 20, (currentDecisionPage + 1) * 20).map((item) => <tr key={item.request_id}>
+                <td><code>{item.segment_id ?? "—"}</code><small>{clock(item.timestamp, language)}</small></td>
+                <td>{item.question_count}</td><td><span className={`request-status status-${item.status}`}>{statusLabels[item.status]}</span></td>
+                <td>{number(item.latest_latency_ms, language, " ms")}</td><td>{item.attempt_count}</td>
+                <td><button className="quiet-button" onClick={() => openDetail(item.request_id)}>{translate("diagnostics.view", language)}</button></td>
+              </tr>)}</tbody>
+            </table> : <div className="diagnostics-empty">{translate("diagnostics.decisionNoRecent", language)}</div>}
+          </div>
+          <div className="history-pagination">
+            <button className="quiet-button" disabled={currentDecisionPage === 0} onClick={() => setDecisionPage(currentDecisionPage - 1)}>{translate("diagnostics.history.previous", language)}</button>
+            <span>{currentDecisionPage + 1} / {decisionPageCount}</span>
+            <button className="quiet-button" disabled={currentDecisionPage + 1 >= decisionPageCount} onClick={() => setDecisionPage(currentDecisionPage + 1)}>{translate("diagnostics.history.next", language)}</button>
+          </div>
+        </section>
+      </div>}
 
       {selectedRequest && (
         <div
@@ -469,10 +540,10 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
             <nav className="exchange-tabs" aria-label={translate("diagnostics.detailTabs", language)}>
               {([
                 ["request", translate("diagnostics.tabRequest", language)],
-                ["content", "Content"],
+                ["content", isDecisionDetail ? translate("diagnostics.decisionResponse", language) : "Content"],
                 ["reasoning", "Reasoning"],
                 ["attempts", translate("diagnostics.tabAttempts", language)],
-              ] as const).map(([tab, label]) => (
+              ] as const).filter(([tab]) => tab !== "reasoning" || !isDecisionDetail).map(([tab, label]) => (
                 <button
                   key={tab}
                   className={detailTab === tab ? "active" : ""}
@@ -489,6 +560,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
             ) : (
               <div className="exchange-detail">
                 <div className="exchange-meta">
+                  {detail.request_kind === "decision" && <span>Decision · {detail.segment_id} · {translate("diagnostics.decisionQuestions", language)} {detail.question_count}</span>}
                   <span>{translate("diagnostics.model", language)} <strong>{detail.model}</strong></span>
                   <span>{translate("diagnostics.status", language)} <strong>{statusLabels[detail.status]}</strong></span>
                   {detail.transport === "sse" && <span>{translate("diagnostics.streamProgress", language)} <strong>{detail.stream_event_count} events · {bytes(detail.stream_received_bytes, language)}{detail.stream_first_event_latency_ms === null ? "" : ` · ${detail.stream_first_event_latency_ms} ms first`}</strong></span>}
@@ -503,6 +575,10 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
                         ))}
                       </div>
                     )}
+                    {detail.request_kind === "decision" && <article className="exchange-body">
+                      {detail.request_body_truncated && <p>{translate("diagnostics.truncated100kDot", language)}</p>}
+                      <pre>{detail.request_body}</pre>
+                    </article>}
                     <div className="exchange-messages">
                       {detail.messages.map((message, index) => (
                         <article key={`${message.role}-${index}`}>
@@ -539,7 +615,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
                         <span>{attempt.latency_ms} ms</span>
                         {detail.transport === "sse" && <span>{attempt.stream_event_count ?? 0} events · {bytes(attempt.stream_received_bytes ?? 0, language)}{attempt.stream_first_event_latency_ms == null ? "" : ` · ${attempt.stream_first_event_latency_ms} ms first`}</span>}
                       </article>
-                    )) : <div className="diagnostics-empty">{translate("diagnostics.noAttempts", language)}</div>}
+                    )) : <div className="diagnostics-empty">{translate(detail.request_kind === "decision" && detail.status === "failed" ? "diagnostics.decisionPreflight" : "diagnostics.noAttempts", language)}</div>}
                     {detail.error && <p className="error-text">{translate("diagnostics.errorCategory", language)}{detail.error}</p>}
                   </div>
                 )}

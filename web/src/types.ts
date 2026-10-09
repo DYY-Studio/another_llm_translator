@@ -362,6 +362,9 @@ export type DiagnosticsRequestStatus =
   | "interrupted";
 
 export interface DiagnosticsRequestSummary {
+  request_kind: "llm" | "decision";
+  segment_id: string | null;
+  question_count: number;
   timestamp: string;
   finished_at: string | null;
   project: string | null;
@@ -384,7 +387,31 @@ export interface DiagnosticsRequestSummary {
   provider_error_status: number | null;
 }
 
+export interface DecisionActivity {
+  task_id: string | null;
+  project: string | null;
+  stage: string | null;
+  model: string;
+  total_requests: number;
+  active_requests: number;
+  completed: number;
+  failed: number;
+  interrupted: number;
+  questions: number;
+  pending: number;
+  http_errors: number;
+  retry_count: number;
+  rate_limit_waiting_requests: number;
+  requests_per_second: number | null;
+  average_latency_ms: number | null;
+  p95_latency_ms: number | null;
+}
+
 export interface DiagnosticsResponse {
+  decision: {
+    activities: DecisionActivity[];
+    metrics: Pick<DecisionActivity, "total_requests" | "active_requests" | "http_errors" | "retry_count" | "rate_limit_waiting_requests" | "average_latency_ms" | "p95_latency_ms">;
+  };
   metrics: {
     project: string | null;
     stage: string | null;
@@ -425,6 +452,11 @@ export interface DiagnosticsResponse {
 }
 
 export interface DiagnosticsRequestDetail {
+  request_kind: "llm" | "decision";
+  segment_id: string | null;
+  question_count: number;
+  request_body: string | null;
+  request_body_truncated: boolean;
   timestamp: string;
   project: string | null;
   stage: string | null;
