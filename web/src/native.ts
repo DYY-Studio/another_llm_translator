@@ -30,6 +30,29 @@ export function pickNativeFolder(): Promise<string | null> {
   return pick("select_folder");
 }
 
+export async function applyDataRootRelocation(): Promise<string | null> {
+  try {
+    const result = await window.__TAURI__!.core.invoke("apply_data_root_relocation");
+    if (typeof result !== "string") return null;
+    const payload: unknown = JSON.parse(result);
+    if (typeof payload !== "object" || payload === null || !("warning" in payload)) return null;
+    return typeof payload.warning === "string" ? payload.warning : null;
+  } catch (reason) {
+    if (reason instanceof SyntaxError) throw new Error("数据目录迁移工具返回了无效结果");
+    const text = reason instanceof Error ? reason.message : String(reason ?? "");
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // Native transport errors are plain strings rather than JSON envelopes.
+    }
+    const payload = errorPayloadFrom(parsed);
+    if (payload) throw new ApiError(0, payload);
+    if (reason instanceof Error) throw reason;
+    throw new Error(text || "Native request failed");
+  }
+}
+
 export async function openExternalUrl(url: string): Promise<void> {
   if (nativeBridgeAvailable()) {
     const openUrl = window.__TAURI__?.opener?.openUrl;

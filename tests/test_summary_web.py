@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app import data_root
 from app.config import load_project_config
 from app.errors import UsageError
 from app.execution import create_run, segment_model_source
@@ -570,3 +571,40 @@ def test_specialized_summary_aggregate_route_passes_prompt_language(
 
     assert response.status_code == 400
     assert response.json()["params"]["reason"] == "prompt_language_missing"
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/api/v1/projects/demo/tasks", {"stage": "translation"}),
+        (
+            "/api/v1/projects/demo/summaries/aggregate",
+            {"boundaries": [{"file_id": "F0001", "part_id": "document"}]},
+        ),
+    ],
+)
+def test_pending_data_root_rejects_task_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    payload: dict[str, object],
+) -> None:
+    project = _project(tmp_path)
+    _full_fragment(project)
+    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
+    monkeypatch.setattr(
+        "app.user_config._platform_data_base", lambda: tmp_path / "user-data"
+    )
+    data_root.write_pending(
+        tmp_path / "old" / "another-llm-translator",
+        tmp_path / "new" / "another-llm-translator",
+        "test-transaction",
+    )
+    app = create_app(projects_root=project.parent)
+    client = TestClient(app)
+    monkeypatch.setattr(app.state.tasks, "_dispatch_locked", lambda: None)
+
+    response = client.post(path, json=payload)
+
+    assert response.status_code == 400
+    assert "数据目录迁移待执行" in response.json()["error"]

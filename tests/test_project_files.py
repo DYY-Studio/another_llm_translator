@@ -248,7 +248,7 @@ def test_file_replacement_preserves_ids_and_progress_when_inserting_segment(
     ] == old_segments[2]["segment_id"]
 
 
-def test_file_replacement_removes_changed_segments_but_keeps_history(
+def test_file_replacement_removes_changed_segments_and_unused_results(
     tmp_path: Path,
 ) -> None:
     project = init_empty(tmp_path)
@@ -289,7 +289,7 @@ def test_file_replacement_removes_changed_segments_but_keeps_history(
     active_ids = {str(item["segment_id"]) for item in read_segments(project)}
     assert active_ids == {str(old_segments[0]["segment_id"]), "F0001-S000004"}
     assert {str(item["segment_id"]) for item in read_jsonl(project, history_path)} == {
-        str(item["segment_id"]) for item in old_segments
+        str(old_segments[0]["segment_id"])
     }
 
 
@@ -1320,7 +1320,7 @@ def test_old_project_without_part_id_requires_rebuild(tmp_path: Path) -> None:
         inspect_full(project)
 
 
-def test_remove_retains_history_and_readd_does_not_reuse_ids(
+def test_remove_prunes_unused_results_and_readd_does_not_reuse_ids(
     tmp_path: Path,
 ) -> None:
     project = init_empty(tmp_path)
@@ -1350,11 +1350,9 @@ def test_remove_retains_history_and_readd_does_not_reuse_ids(
             request_id="REQ-OLD",
         ),
     )
-    history_before = read_jsonl(project, history_path)
-
     removed = remove_project_files(project, ["F0001"])
     assert removed["removed_segments"] == 1
-    assert read_jsonl(project, history_path) == history_before
+    assert read_jsonl(project, history_path) == []
     assert inspect_full(project)["stages"]["translation"]["completed"] == 0
 
     add_project_files(project, [str(first)])

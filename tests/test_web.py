@@ -21,7 +21,7 @@ import app.web_continuous as web_continuous_module
 import app.web_resource_routes as web_resource_module
 import app.web_store as web_store_module
 import app.web_tasks as web_tasks_module
-from app import sqlite_storage
+from app import data_root, sqlite_storage
 from app.config import dump_config, load_config, load_project_config
 from app.diagnostics import Diagnostics
 from app.errors import ConfigError, IncompleteError, UsageError
@@ -76,6 +76,81 @@ def make_project(tmp_path: Path, source: str = "one\ntwo") -> tuple[Path, Path]:
     )
     assert project is not None
     return projects_root, project
+
+
+def test_cancelled_dangling_pending_locator_allows_task_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects_root, _ = make_project(tmp_path)
+    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
+    monkeypatch.setattr(
+        "app.user_config._platform_data_base", lambda: tmp_path / "user-data"
+    )
+    pending = data_root.pending_path()
+    pending.parent.mkdir(parents=True)
+    pending.symlink_to(tmp_path / "missing-pending-request")
+    app = create_app(projects_root=projects_root)
+    client = TestClient(app)
+    monkeypatch.setattr(app.state.tasks, "_dispatch_locked", lambda: None)
+
+    blocked = client.post(
+        "/api/v1/projects/sample/tasks", json={"stage": "translation"}
+    )
+    cancelled = data_root.cancel_relocation(confirm=True)
+    resumed = client.post(
+        "/api/v1/projects/sample/tasks", json={"stage": "translation"}
+    )
+
+    assert blocked.status_code == 400
+    assert cancelled == {"cancelled": True}
+    assert resumed.status_code == 200
+    assert resumed.json()["task_id"]
+
+
+def test_desktop_shutdown_rejects_active_backend_tasks(tmp_path: Path) -> None:
+    app = create_app(projects_root=tmp_path / "projects")
+    app.state.uvicorn_server = type("Server", (), {"should_exit": False})()
+    app.state.tasks.active_tasks = lambda: [{"status": "running"}]
+
+    response = TestClient(app).post("/api/v1/server/desktop-shutdown")
+
+    assert response.status_code == 409
+    assert app.state.uvicorn_server.should_exit is False
+
+
+def test_desktop_shutdown_requests_uvicorn_exit_from_loopback(tmp_path: Path) -> None:
+    app = create_app(projects_root=tmp_path / "projects")
+    app.state.uvicorn_server = type("Server", (), {"should_exit": False})()
+    app.state.tasks.active_tasks = lambda: []
+
+    response = TestClient(app).post("/api/v1/server/desktop-shutdown")
+
+    assert response.status_code == 200
+    assert app.state.uvicorn_server.should_exit is True
+
+
+def test_desktop_shutdown_is_not_exposed_to_lan_clients(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(web_module, "_client_allowed_on_bind", lambda *_: True)
+    app = create_app(
+        projects_root=tmp_path / "projects",
+        server_config={
+            "lan": {"enabled": True, "bind_address": "0.0.0.0"},
+            "auth": {"required": False},
+            "tasks": {},
+        },
+    )
+    app.state.uvicorn_server = type("Server", (), {"should_exit": False})()
+    app.state.tasks.active_tasks = lambda: []
+
+    response = TestClient(app, client=("192.168.1.12", 12345)).post(
+        "http://192.168.1.10/api/v1/server/desktop-shutdown"
+    )
+
+    assert response.status_code == 403
+    assert app.state.uvicorn_server.should_exit is False
 
 
 def test_web_lists_historical_runs_with_filters_pagination_and_safe_projection(
@@ -598,13 +673,16 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
 def test_web_project_list_reports_no_repair_for_complete_project(
     tmp_path: Path,
 ) -> None:
-    projects_root, _ = make_project(tmp_path)
+    projects_root, project = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
 
     listed = client.get("/api/v1/projects")
 
     assert listed.status_code == 200
     assert listed.json()["projects"][0]["repair_needed"] is False
+    assert listed.json()["projects"][0]["created_at"] == read_json(
+        project, project / "project.json"
+    )["created_at"]
 
 
 def test_web_project_list_reports_repair_for_missing_prompt(
@@ -1367,6 +1445,7 @@ def test_web_lists_legacy_project_from_read_only_project_json(
             "selector": "legacy",
             "name": "legacy",
             "project_id": "PRJ-LEGACY",
+            "created_at": None,
             "path": str(legacy.resolve()),
             "external": False,
             "file_count": 0,
@@ -3888,11 +3967,31 @@ async def test_web_task_manager_preserves_expected_errors_and_hides_unexpected(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("resume", [False, True])
 async def test_web_task_exposes_live_progress_and_separate_token_counts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    resume: bool,
 ) -> None:
     _, project = make_project(tmp_path)
+    if resume:
+        from app.web_tasks import read_json
+
+        monkeypatch.setattr(
+            "app.web_tasks.choose_running_run",
+            lambda *_args, **_kwargs: ("RESUMED", []),
+        )
+        manifest = {
+            "usage_invocation_count": 1,
+            "usage": {
+                "input_tokens": 1200, "output_tokens": 500, "total_tokens": 1700,
+                "available": True, "partial": False,
+            },
+        }
+        monkeypatch.setattr(
+            "app.web_tasks.read_json",
+            lambda root, path: manifest if path.name == "manifest.json" else read_json(root, path),
+        )
 
     async def fake_translation(
         _: Path,
@@ -3920,9 +4019,9 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
             "failed": 0,
             "pending": 0,
             "usage": {
-                "input_tokens": 12,
-                "output_tokens": 5,
-                "total_tokens": 17,
+                "input_tokens": 1212 if resume else 12,
+                "output_tokens": 505 if resume else 5,
+                "total_tokens": 1717 if resume else 17,
                 "available": True,
                 "partial": False,
             },
@@ -3944,10 +4043,15 @@ async def test_web_task_exposes_live_progress_and_separate_token_counts(
     assert state["status"] == "completed"
     assert state["completed_segments"] == state["total_segments"] == 2
     assert state["failed_segments"] == state["pending_segments"] == 0
-    assert state["usage"]["input_tokens"] == 12
-    assert state["usage"]["output_tokens"] == 5
-    assert diagnostics.snapshot()["metrics"]["input_tokens"] == 12
-    assert diagnostics.snapshot()["metrics"]["output_tokens"] == 5
+    assert state["usage"]["input_tokens"] == (1212 if resume else 12)
+    assert state["usage"]["output_tokens"] == (505 if resume else 5)
+    diagnostics._elapsed_seconds = 2
+    metrics = diagnostics.snapshot()["metrics"]
+    assert metrics["input_tokens"] == (1212 if resume else 12)
+    assert metrics["output_tokens"] == (505 if resume else 5)
+    assert metrics["throughput_input_tokens_per_second"] == 6
+    assert metrics["throughput_output_tokens_per_second"] == 2.5
+    assert metrics["throughput_tokens_per_second"] == 8.5
 
 
 @pytest.mark.asyncio
@@ -5424,6 +5528,8 @@ def test_continuous_inspection_keeps_decision_preset_when_terms_are_missing(
         "running_runs",
         "decision_inputs",
         "options",
+        "joint_options",
+        "summary_selection",
     }
     assert result["blocking"] == []
 
@@ -5994,17 +6100,21 @@ async def test_continuous_resume_usage_includes_stage_manifest_usage(
         }
 
     monkeypatch.setattr("app.web_continuous.run_translation", fake_translation)
+    reported = []
     result = await run_continuous(
         project,
         Scope(),
         ("translation",),
         limiters=_continuous_limiter_map(project, ("translation",)),
         run_actions={"translation": "resume"},
+        on_usage=lambda total, invocation: reported.append((total, invocation)),
     )
 
     assert result["usage"]["input_tokens"] == 13
     assert result["usage"]["output_tokens"] == 6
     assert result["usage"]["total_tokens"] == 19
+    assert reported[-1][0] == result["usage"]
+    assert reported[-1][1] == current
 
 
 @pytest.mark.asyncio
@@ -6541,3 +6651,335 @@ def test_continuous_decision_resume_preflight_rejects_incompatible_run(
         item["code"] == "decision_resume_incompatible"
         for item in result["blocking"]
     )
+
+
+def test_draft_scan_options_and_invalid_combinations(tmp_path: Path) -> None:
+    projects_root, project = make_project(tmp_path)
+    app = create_app(projects_root=projects_root, app_root=tmp_path / "app-root")
+    with TestClient(app) as client:
+        options = client.get(
+            "/api/v1/projects/sample/task-options/terminology?include_draft_translation=true"
+        ).json()
+        assert options["include_draft_translation"] is True
+        assert options["draft_progress"]["translation"] == {
+            "completed": 0,
+            "failed": 0,
+            "total": 2,
+        }
+        assert options["draft_prompt_preflight"]["ok"] is True
+        for payload in (
+            {"stage": "translation", "include_draft_translation": True},
+            {"stage": "run-all", "include_draft_translation": True},
+        ):
+            assert (
+                client.post("/api/v1/projects/sample/tasks", json=payload).status_code
+                == 400
+            )
+        (project / "prompts" / "translation.zh-CN.middle.txt").unlink()
+        options = client.get(
+            "/api/v1/projects/sample/task-options/terminology?include_draft_translation=true"
+        ).json()
+        assert options["draft_prompt_preflight"]["ok"] is False
+        assert (
+            client.post(
+                "/api/v1/projects/sample/tasks",
+                json={"stage": "terminology", "include_draft_translation": True},
+            ).status_code
+            == 400
+        )
+
+
+@pytest.mark.asyncio
+async def test_draft_scan_task_reports_both_result_classes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.helpers import llm_jsonl
+
+    _, project = make_project(tmp_path, "Alice entered.")
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    original_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = [
+            {"type": "segment", "id": item["id"], "translation": "爱丽丝进来了。"}
+            for item in payload["segments"]
+        ]
+        records.insert(0, {"type": "no_terms"})
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    def client(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return original_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    manager = WebTaskManager()
+    started = await manager.start(
+        project,
+        "terminology",
+        scope=Scope(),
+        reuse_mixed_fingerprints=False,
+        run_action=None,
+        include_draft_translation=True,
+    )
+    await manager.tasks[started["task_id"]].asyncio_task
+    result = manager.tasks[started["task_id"]].view()
+    assert result["status"] == "completed"
+    assert result["include_draft_translation"] is True
+    assert result["draft_progress"] == {
+        stage: {"completed": 1, "failed": 0, "total": 1}
+        for stage in ("terminology", "translation")
+    }
+    assert result["completed_segments"] == 1
+
+
+@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
+def test_review_filters_match_visible_states_and_page_index(
+    tmp_path: Path, stage: str
+) -> None:
+    projects_root, project = make_project(
+        tmp_path,
+        "pending\nmissing-base\noutdated\naccepted\nsuggested\napplied\nfailed\nreset",
+    )
+    store = WebStore(project)
+
+    def save(
+        target: str, index: int, status: str = "completed", **fields: object
+    ) -> str:
+        record = record_header(
+            "stage_result",
+            store.project_id,
+            stage=target,
+            segment_id=f"F0001-S{index:06d}",
+            status=status,
+            **fields,
+        )
+        append_jsonl(project, project / "stages" / f"{target}.jsonl", record)
+        return record["record_id"]
+
+    for index in [1, 3, 4, 5, 6, 8]:
+        base = save("translation", index, text="译文")
+        if stage == "polishing" and index == 3:
+            base = save("proofreading_applied", index, text="校对译文")
+        if index in [3, 4, 5, 6, 8]:
+            suggestion = save(
+                stage,
+                index,
+                base_result_id=base,
+                review_status="accepted" if index == 4 else "suggested",
+                suggested_text="建议",
+            )
+            if index == 3:
+                save("proofreading_applied" if stage == "polishing" else "translation", index, text="新基准")
+            if index in [4, 6]:
+                save(
+                    f"{stage}_applied",
+                    index,
+                    suggestion_result_id=suggestion,
+                    text="应用后",
+                )
+        if index == 8:
+            save(stage, index, "reset")
+    save(stage, 7, "failed", error_message="模拟失败")
+
+    with TestClient(create_app(projects_root=projects_root)) as client:
+        for status, indexes in {
+            "pending": [1, 8],
+            "missing-base": [2],
+            "outdated": [3],
+            "accepted": [4],
+            "suggested": [5],
+            "applied": [6],
+            "failed": [7],
+        }.items():
+            payload = {"stage": stage, "status": status}
+            index = client.post("/api/v1/projects/sample/segments/ids", json=payload)
+            page = client.post("/api/v1/projects/sample/segments/query", json=payload)
+            assert index.status_code == page.status_code == 200, (index.text, page.text)
+            expected = [f"F0001-S{value:06d}" for value in indexes]
+            assert index.json()["segment_ids"] == expected
+            assert [item["segment_id"] for item in page.json()["segments"]] == expected
+            assert page.json()["total_segments"] == len(expected)
+
+        scoped = {
+            "stage": stage,
+            "status": "applied",
+            "q": "applied",
+            "file_id": "F0001",
+            "part_id": "document",
+        }
+        assert client.post("/api/v1/projects/sample/segments/ids", json=scoped).json()[
+            "segment_ids"
+        ] == ["F0001-S000006"]
+        assert (
+            client.post("/api/v1/projects/sample/segments/query", json=scoped).json()[
+                "total_segments"
+            ]
+            == 1
+        )
+
+
+def test_translation_filters_keep_warnings_failures_and_resets(tmp_path: Path) -> None:
+    projects_root, project = make_project(
+        tmp_path, "completed\nwarning\nfailed\npending\nreset"
+    )
+    project_id = WebStore(project).project_id
+    for index, status in [
+        (1, "completed"),
+        (2, "completed"),
+        (3, "failed"),
+        (5, "completed"),
+        (5, "reset"),
+    ]:
+        append_jsonl(
+            project,
+            project / "stages" / "translation.jsonl",
+            record_header(
+                "stage_result",
+                project_id,
+                stage="translation",
+                segment_id=f"F0001-S{index:06d}",
+                status=status,
+                text="译文",
+                validation_status="warning" if index == 2 else "passed",
+            ),
+        )
+    with TestClient(create_app(projects_root=projects_root)) as client:
+        for status, indexes in {
+            "completed": [1, 2],
+            "warning": [2],
+            "failed": [3],
+            "pending": [4, 5],
+        }.items():
+            payload = {"stage": "translation", "status": status}
+            index = client.post("/api/v1/projects/sample/segments/ids", json=payload)
+            page = client.post("/api/v1/projects/sample/segments/query", json=payload)
+            expected = [f"F0001-S{value:06d}" for value in indexes]
+            assert index.json()["segment_ids"] == expected
+            assert [item["segment_id"] for item in page.json()["segments"]] == expected
+            assert page.json()["total_segments"] == len(expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_stage", [None, "terminology", "content_summary"])
+@pytest.mark.parametrize("include_draft_translation", [False, True])
+async def test_continuous_joint_outputs_aggregate_before_review_and_stop_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_stage: str | None,
+    include_draft_translation: bool,
+) -> None:
+    _, project = make_project(tmp_path)
+    write_summary_participation(
+        project, [{"file_id": "F0001", "part_id": "document", "selected": True}],
+    )
+    old_aggregate_id, old_aggregate_dir = create_run(
+        project, config=load_project_config(project, stage="content_summary"),
+        stage="content_summary", fingerprint="old", prompt="old prompt",
+        selected_count=1, requested_count=1, reused_count=0,
+    )
+    calls: list[str] = []
+
+    async def terminology(*_: object, **kwargs: object) -> dict[str, object]:
+        calls.append("terminology")
+        assert kwargs["include_draft_translation"] is include_draft_translation
+        assert kwargs["include_summaries"] is True
+        kwargs["on_draft_progress"]({
+            stage: {"completed": 2, "failed": 0, "total": 2}
+            for stage in ("terminology", "translation", "content_summary")
+        })
+        return {"selected": 2, "completed": 1 if failed_stage == "terminology" else 2,
+                "failed": int(failed_stage == "terminology"), "pending": 0}
+
+    async def aggregate(_: Path, selected: object, **kwargs: object) -> dict[str, object]:
+        calls.append("content_summary")
+        assert read_json(project, old_aggregate_dir / "manifest.json")["status"] == "interrupted"
+        assert selected == [{"file_id": "F0001", "part_id": "document"}]
+        failed = int(failed_stage == "content_summary")
+        kwargs["on_progress"](1 - failed, failed, 1)
+        return {"run_id": "RUN-AGGREGATION", "selected": 1,
+                "completed": 1 - failed, "failed": failed, "pending": 0}
+
+    async def review(_: Path, stage: str, *__: object, **___: object) -> dict[str, object]:
+        calls.append(stage)
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    async def standard_translation(*_: object, **__: object) -> dict[str, object]:
+        assert not include_draft_translation, "联合粗翻不应调用标准翻译"
+        calls.append("translation")
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr(web_continuous_module, "run_terminology", terminology)
+    monkeypatch.setattr(web_continuous_module, "aggregate_summaries", aggregate)
+    monkeypatch.setattr(web_continuous_module, "run_review", review)
+    monkeypatch.setattr(web_continuous_module, "run_translation", standard_translation)
+    manager = WebTaskManager()
+    options = web_tasks_module.task_options(
+        project, "continuous", continuous_stages=("terminology",),
+        include_summaries=True, aggregate_full_summaries=True,
+    )
+    aggregate_option = next(step for step in options["steps"] if step["stage"] == "content_summary")
+    assert aggregate_option["running_run"]["run_id"] == old_aggregate_id
+    assert aggregate_option["running_run"]["resume_compatible"] is False
+    for actions in ({}, {"content_summary": "resume"}):
+        with pytest.raises(UsageError):
+            await manager.start(
+                project, "continuous", scope=Scope(), reuse_mixed_fingerprints=False,
+                run_action=None, continuous_stages=("terminology",),
+                include_summaries=True, aggregate_full_summaries=True,
+                continuous_run_actions=actions,
+            )
+    started = await manager.start(
+        project, "continuous", scope=Scope(), reuse_mixed_fingerprints=False,
+        run_action=None,
+        continuous_stages=("terminology", "terminology_decision", "translation", "proofreading"),
+        include_draft_translation=include_draft_translation, include_summaries=True,
+        aggregate_full_summaries=True, apply_terminology_decision=True,
+        continuous_run_actions={"content_summary": "decline"},
+    )
+    assert started["include_draft_translation"] is include_draft_translation
+    assert started["aggregate_full_summaries"] is True
+    assert [step["stage"] for step in started["steps"]] == [
+        "terminology", "content_summary", "terminology_decision", "translation", "proofreading",
+    ]
+    translation = next(step for step in started["steps"] if step["stage"] == "translation")
+    if include_draft_translation:
+        assert translation["reason"] == "joint_draft_translation"
+        assert translation["selected"] == 0
+    else:
+        assert translation["status"] != "skipped"
+    await manager.tasks[started["task_id"]].asyncio_task
+    result = manager.get(started["task_id"])
+    if failed_stage is None:
+        assert result["status"] == "completed"
+        assert calls == (["terminology", "content_summary", "proofreading"] if include_draft_translation
+                         else ["terminology", "content_summary", "translation", "proofreading"])
+        aggregate_step = next(step for step in result["steps"] if step["stage"] == "content_summary")
+        assert aggregate_step["run_id"] == "RUN-AGGREGATION"
+    else:
+        assert result["status"] == "failed"
+        assert result["current_stage"] == failed_stage
+        assert calls == (["terminology"] if failed_stage == "terminology" else ["terminology", "content_summary"])
+
+
+@pytest.mark.asyncio
+async def test_continuous_joint_draft_ends_on_last_executed_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+
+    async def terminology(*_: object, **__: object) -> dict[str, object]:
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr(web_continuous_module, "run_terminology", terminology)
+    manager = WebTaskManager()
+    started = await manager.start(
+        project, "continuous", scope=Scope(), reuse_mixed_fingerprints=False,
+        run_action=None, continuous_stages=("terminology", "terminology_decision", "translation"),
+        include_draft_translation=True, apply_terminology_decision=True,
+    )
+    await manager.tasks[started["task_id"]].asyncio_task
+    result = manager.get(started["task_id"])
+    assert result["status"] == "completed"
+    assert result["current_stage"] == "terminology"
+    assert result["steps"][-1]["reason"] == "joint_draft_translation"

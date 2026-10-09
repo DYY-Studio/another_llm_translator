@@ -112,8 +112,10 @@
 .project-picker-status { flex: none; max-width: 150px; overflow: hidden; padding: 3px 6px; border: 1px solid var(--info-border); border-radius: 999px; background: var(--info-bg); color: var(--info-text); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .project-picker-chevron { flex: none; color: var(--muted); font-size: 16px; line-height: 1; }
 .project-picker-popover { position: absolute; top: calc(100% + 6px); left: 0; z-index: 12; width: 100%; overflow: hidden; border: 1px solid var(--input-border); border-radius: 8px; background: var(--surface); box-shadow: 0 16px 40px var(--modal-shadow); }
-.project-search { padding: 10px; border-bottom: 1px solid var(--row-border); }
+.project-search { padding: 10px; }
 .project-search input { width: 100%; background: var(--surface-soft); }
+.project-sort { display: flex; align-items: center; gap: 10px; padding: 0 10px 10px; border-bottom: 1px solid var(--row-border); font-size: 12px; color: var(--muted); }
+.project-sort select { min-width: 0; flex: 1; }
 .project-options { max-height: min(320px, 42vh); overflow-y: auto; }
 .project-option { width: 100%; min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 14px; border: 0; border-bottom: 1px solid var(--row-border); background: transparent; color: var(--text); text-align: left; }
 .project-option:last-child { border-bottom: 0; }

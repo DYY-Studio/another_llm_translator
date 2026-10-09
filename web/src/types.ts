@@ -90,6 +90,7 @@ export interface ResultView {
   suggested_text?: string | null;
   reason?: string | null;
   validation_status?: "passed" | "warning";
+  generation_origin?: "terminology_draft" | null;
 }
 
 export interface ReviewView {
@@ -166,6 +167,7 @@ export interface SegmentQueryResponse {
 }
 
 export interface ProjectSummary {
+  created_at: string | null;
   selector: string;
   name: string;
   project_id: string;
@@ -247,7 +249,21 @@ export interface StorageLogGroup {
   blocked_reason: string | null;
 }
 
+export interface DatabaseMaintenanceResult {
+  deleted_records: number;
+  deduplicated_applied_records: number;
+  before_bytes: number;
+  after_bytes: number;
+  reclaimed_bytes: number;
+}
+
 export interface StorageProjectDetail {
+  database_maintenance: {
+    obsolete_stage_records: number | null;
+    deduplicatable_applied_records: number | null;
+    can_maintain: boolean;
+    blocked_reason: string | null;
+  };
   complete: boolean;
   project: StorageProjectSummary;
   debug_runs: StorageDebugRun[];
@@ -259,6 +275,18 @@ export interface StorageProjectDetail {
 export interface StorageCleanupResult {
   affected_files: number;
   reclaimed_bytes: number;
+}
+
+export interface DataRootRelocation {
+  source_root: string;
+  target_root: string;
+}
+
+export interface DataRootStatus {
+  active_root: string;
+  default_root: string;
+  mode: "environment" | "default" | "custom";
+  pending: DataRootRelocation | null;
 }
 
 export interface ErrorPayload {
@@ -290,6 +318,9 @@ export interface TaskState {
   final_review?: boolean;
   status: string;
   include_summaries?: boolean;
+  include_draft_translation?: boolean;
+  aggregate_full_summaries?: boolean;
+  draft_progress?: DraftProgress | null;
   summary_selection?: Array<{ file_id: string; part_id: string }>;
   error?: ErrorPayload | null;
   summary?: Record<string, unknown> | null;
@@ -305,6 +336,7 @@ export interface TaskState {
 export interface TaskStep {
   stage: string;
   status: string;
+  reason?: string;
   selected: number;
   completed: number;
   failed: number;
@@ -576,7 +608,14 @@ export interface ModelRow {
   display: string;
 }
 
+export type DraftProgress = Record<"terminology", { completed: number; failed: number; total: number }> & Partial<Record<"translation" | "content_summary", { completed: number; failed: number; total: number }>>;
+
 export interface TaskOptions {
+  summary_progress?: { completed: number; total: number };
+  include_summaries?: boolean;
+  include_draft_translation?: boolean;
+  draft_progress?: DraftProgress;
+  draft_prompt_preflight?: { ok: boolean; language: string; missing: string[] };
   stage: RunStage;
   final_review?: boolean;
   preset: {
@@ -617,6 +656,7 @@ export interface ContinuousTaskOptions {
   stage: "continuous";
   stages: LLMStage[];
   steps: ContinuousOptionStep[];
+  terminology_options: TaskOptions | null;
   blocking: Array<{ code: string; message: string; stage?: string }>;
   rules: {
     canonical_order?: string[];
@@ -628,6 +668,8 @@ export interface ContinuousTaskOptions {
 }
 
 export interface RunningRun {
+  include_summaries?: boolean;
+  include_draft_translation?: boolean;
   run_id: string;
   started_at: string | null;
   scope: Record<string, unknown> | null;
@@ -671,9 +713,14 @@ export interface ContinuousRunDecision {
   reuse_mixed_fingerprints: boolean;
   final_review: boolean;
   apply_terminology_decision: boolean;
+  include_draft_translation: boolean;
+  include_summaries: boolean;
+  aggregate_full_summaries: boolean;
 }
 
 export interface RunDecision {
+  include_summaries?: boolean;
+  include_draft_translation?: boolean;
   force: boolean;
   reuse_mixed_fingerprints: boolean;
   run_action: "resume" | "decline" | null;
@@ -913,6 +960,11 @@ export interface ProjectConfig {
   retry: {
     http_max_attempts: number;
     format_max_attempts: number;
+    empty_truncated_mode: "retry" | "split";
+    empty_truncated_max_attempts: number;
+    empty_unknown_mode: "retry" | "split";
+    empty_unknown_max_attempts: number;
+    unresolved_retry_scope: "unresolved" | "chunk";
     base_delay_seconds: number;
     max_delay_seconds: number;
     jitter_seconds: number;
@@ -927,9 +979,17 @@ export interface ProjectConfig {
   };
 }
 
+export interface AdapterCapabilities {
+  temperature: boolean;
+  max_output_tokens: boolean;
+  streaming: "required" | "optional" | "unsupported";
+  connection: { base_url: string; credential: LLMPreset["credential"]; proxy_source: "preset" | "connection" } | null;
+}
+
 export interface LLMPresetSummary {
   preset_id: string;
   adapter_id?: string;
+  temperature_supported?: boolean;
   model?: string;
   stream?: boolean;
   selected: boolean;
@@ -963,7 +1023,7 @@ export interface LLMPreset {
 }
 
 export interface LLMCredential {
-  kind: "environment" | "keychain";
+  kind: "environment" | "keychain" | "chatgpt";
   name: string;
 }
 

@@ -14,11 +14,13 @@ import httpx
 
 from .config import load_project_config
 from .documents import (
+    DocumentAdapter,
     aozora_safe_split_positions,
 )
 from .errors import (
     ConfigError,
     ContextLengthError,
+    EmptyResponseSplitError,
     ExternalError,
     FatalExternalError,
     IncompleteError,
@@ -49,9 +51,9 @@ from .execution import (
     segment_model_text,
 )
 from .i18n import SUPPORTED_LANGUAGES, resolve_language
-from .llm_client import LLMClient, SlidingWindowLimiter
+from .llm_client import empty_response_split_scope, LLMClient, SlidingWindowLimiter
 from .llm_keys import KeyPool
-from .llm_response import TerminologyResponseMode
+from .llm_response import TerminologyResponseMode, response_record_types
 from .logging_utils import get_logger
 from .plugins import (
     get_document_adapter,
@@ -65,6 +67,7 @@ from .project import (
 )
 from .sqlite_storage import (
     latest_stage_states,
+    resolve_stage_result_texts,
     read_json,
 )
 
@@ -116,6 +119,69 @@ def _frozen_run_options(project: Path, run_id: str | None) -> dict[str, dict[str
     return result
 
 
+def document_prompt_context(
+    project: Path,
+    file_record: dict[str, Any],
+    frozen_run_options: dict[str, dict[str, str]] | None = None,
+    *, state_record: dict[str, Any] | None = None,
+) -> tuple[DocumentAdapter, dict[str, Any] | None, dict[str, str]]:
+    file_id = str(file_record["file_id"])
+    state_path = file_record.get("document_adapter_state")
+    state_record = state_record if state_record is not None else (
+        read_json(project, project / state_path)
+        if isinstance(state_path, str)
+        else None
+    )
+    state = state_record.get("state") if isinstance(state_record, dict) else None
+    adapter = get_document_adapter(str(file_record["document_adapter_id"]))
+    if frozen_run_options is not None:
+        raw_run_options = frozen_run_options.get(file_id)
+        if raw_run_options is None:
+            raise ConfigError(f"Run 缺少 File 的运行设置快照：{file_id}")
+    elif state_record is None:
+        raw_run_options = {}
+    else:
+        raw_run_options = state_record.get("run_options")
+        if raw_run_options is None:
+            if adapter.run_options:
+                raise ConfigError(f"Document Adapter 状态缺少 run_options：{file_id}")
+            raw_run_options = {}
+    try:
+        run_options = validate_document_run_options(
+            adapter, raw_run_options, use_defaults=False
+        )
+    except UsageError as exc:
+        raise ConfigError(f"Document Adapter run_options 无效：{file_id}") from exc
+    if state is not None and not isinstance(state, dict):
+        raise ConfigError(
+            f"Document Adapter 状态缺少有效 state：{file_record['file_id']}"
+        )
+    return adapter, state, run_options
+
+
+def document_prompt_requirements(
+    adapter: DocumentAdapter,
+    state: dict[str, Any] | None,
+    run_options: dict[str, str],
+    stage: str,
+) -> dict[str, str]:
+    requirements: dict[str, str] = {}
+    for language in PROMPT_LANGUAGES:
+        requirement = adapter.model_prompt_requirements(
+            stage=stage,
+            language=language,
+            opaque_state=state,
+            run_options=run_options,
+        )
+        if requirement is not None and not isinstance(requirement, str):
+            raise ConfigError(
+                f"Document Adapter 返回了无效的模型 Prompt 要求：{adapter.adapter_id}"
+            )
+        if requirement:
+            requirements[language] = requirement
+    return requirements
+
+
 def _project_context(
     project: Path,
     *,
@@ -146,40 +212,9 @@ def _project_context(
             "adapter_id": str(file_record["document_adapter_id"]),
             "version": str(file_record["document_adapter_version"]),
         }
-        state_path = file_record.get("document_adapter_state")
-        state_record = (
-            read_json(project, project / state_path)
-            if isinstance(state_path, str)
-            else None
+        adapter, state, run_options = document_prompt_context(
+            project, file_record, frozen_run_options
         )
-        state = state_record.get("state") if isinstance(state_record, dict) else None
-        if stage is not None and state is not None and not isinstance(state, dict):
-            raise ConfigError(
-                f"Document Adapter 状态缺少有效 state：{file_record['file_id']}"
-            )
-        adapter = get_document_adapter(str(file_record["document_adapter_id"]))
-        if frozen_run_options is not None:
-            raw_run_options = frozen_run_options.get(file_id)
-            if raw_run_options is None:
-                raise ConfigError(f"Run 缺少 File 的运行设置快照：{file_id}")
-        elif state_record is None:
-            raw_run_options = {}
-        else:
-            raw_run_options = state_record.get("run_options")
-            if raw_run_options is None:
-                if adapter.run_options:
-                    raise ConfigError(
-                        f"Document Adapter 状态缺少 run_options：{file_id}"
-                    )
-                raw_run_options = {}
-        try:
-            run_options = validate_document_run_options(
-                adapter, raw_run_options, use_defaults=False
-            )
-        except UsageError as exc:
-            raise ConfigError(
-                f"Document Adapter run_options 无效：{file_id}"
-            ) from exc
         adapter_options[file_id] = run_options
         for segment in (item for item in segments if str(item["file_id"]) == file_id):
             segment["_adapter_state"] = state
@@ -195,22 +230,9 @@ def _project_context(
                     )
                 segment["model_source"] = rendered_model_source
         if stage is not None:
-            requirements: dict[str, str] = {}
-            for language in PROMPT_LANGUAGES:
-                requirement = adapter.model_prompt_requirements(
-                    stage=stage,
-                    language=language,
-                    opaque_state=state,
-                    run_options=run_options,
-                )
-                if requirement is not None and not isinstance(requirement, str):
-                    raise ConfigError(
-                        "Document Adapter 返回了无效的模型 Prompt 要求："
-                        f"{file_record['document_adapter_id']}"
-                    )
-                if requirement:
-                    requirements[language] = requirement
-            adapter_prompt_requirements[file_id] = requirements
+            adapter_prompt_requirements[file_id] = document_prompt_requirements(
+                adapter, state, run_options, stage
+            )
     if frozen_run_options is not None:
         expected_file_ids = {str(item["file_id"]) for item in files}
         unknown_file_ids = sorted(set(frozen_run_options) - expected_file_ids)
@@ -526,6 +548,7 @@ def _split_oversized_preflight(
                 if cleanup_probe is not None:
                     cleanup_probe(f"{segment['segment_id']}-PROBE")
         part_ids: list[str] = []
+        source_offset = 0
         for index, part in enumerate(accepted_parts, start=1):
             part_id = f"{segment['segment_id']}-P{index:03d}"
             try:
@@ -533,6 +556,8 @@ def _split_oversized_preflight(
             except ConfigError as exc:
                 fail_planning(exc)
                 raise
+            accepted["_source_offset"] = source_offset
+            source_offset += len(str(accepted["source"]))
             request_segments.append(accepted)
             part_original[part_id] = str(segment["segment_id"])
             part_ids.append(part_id)
@@ -579,7 +604,7 @@ async def _execute_stage_run(
     prompt_partition_key: Callable[[dict[str, Any]], object],
     process_once: Callable[..., Awaitable[None]],
     record_preflight_failure: Callable[[list[dict[str, Any]]], Awaitable[None]],
-    record_context_failure: Callable[[list[dict[str, Any]]], Awaitable[None]],
+    record_context_failure: Callable[..., Awaitable[None]],
     before_finalize: Callable[[], Awaitable[None]],
     completed_count: Callable[[], int],
     failed_count: Callable[[], int],
@@ -700,20 +725,24 @@ async def _execute_stage_run(
             else:
                 groups = ()
             if not groups:
-                await record_context_failure(items)
+                if isinstance(exc, EmptyResponseSplitError):
+                    await record_context_failure(items, exc)
+                else:
+                    await record_context_failure(items)
                 return
             if runtime_split_observer is not None:
                 runtime_split_observer(list(items), [list(group) for group in groups])
             for group in groups:
-                await process(
-                    ChunkPlan(
-                        file_id=str(group[0]["file_id"]),
-                        segments=tuple(group),
-                        payload={},
-                        estimated_input_tokens=0,
-                    ),
-                    exc.request_id,
-                )
+                with empty_response_split_scope(exc):
+                    await process(
+                        ChunkPlan(
+                            file_id=str(group[0]["file_id"]),
+                            segments=tuple(group),
+                            payload={},
+                            estimated_input_tokens=0,
+                        ),
+                        exc.request_id,
+                    )
 
     usage: dict[str, Any] | None = None
 
@@ -884,7 +913,7 @@ async def _localized_request_loop(
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
         estimated = _request_estimate(messages, config, request_id)
         try:
-            response, _ = await llm.chat(
+            response, request_id = await llm.chat(
                 messages=messages,
                 temperature=config["llm"][f"temperature_{stage}"],
                 estimated_input_tokens=estimated,
@@ -907,9 +936,13 @@ async def _localized_request_loop(
             await save_error(expected, request_id, str(exc))
             continue
         complete_id_mismatch = parsed.has_valid_end and not parsed.ids_complete
-        if complete_id_mismatch:
+        retry_whole_chunk = (
+            config["retry"]["unresolved_retry_scope"] == "chunk" and bool(unresolved)
+        )
+        if complete_id_mismatch or retry_whole_chunk:
             valid = {}
             unresolved = expected.copy()
+        if complete_id_mismatch:
             parse_errors.append("合法 end 响应的 Segment ID 与请求不一致")
         for segment_id, value in valid.items():
             try:
@@ -934,7 +967,7 @@ async def _localized_request_loop(
         if not unresolved:
             tasks.append(([], request_id, format_attempt + 1, anchor))
             continue
-        unresolved_groups = contiguous_groups(
+        unresolved_groups = [items] if retry_whole_chunk else contiguous_groups(
             (by_id[segment_id] for segment_id in unresolved),
             all_segments=segments,
             cross_boundary=stage in config["chunking"]["cross_boundary_batching"],
@@ -1114,6 +1147,7 @@ def _prompt_factory(
     stage: str,
     language: str | None = None,
     response_mode: TerminologyResponseMode | str | None = None,
+    require_term_declaration: bool = False,
 ) -> Callable[[Iterable[str]], str]:
     try:
         parsed_mode = (
@@ -1128,16 +1162,20 @@ def _prompt_factory(
         stage == "terminology"
         and parsed_mode is TerminologyResponseMode.SUMMARY_ONLY
     )
-    summary_mode = (
-        stage == "terminology"
-        and response_mode is not None
-        and parsed_mode is not TerminologyResponseMode.TERMS_ONLY
-    )
+    types = response_record_types(parsed_mode) if parsed_mode is not None else ()
+    translation_mode = "segment" in types
+    summary_mode = "summary" in types
     required_stages = (
-        ("fragment_summary",)
-        if summary_only
-        else ("terminology", "fragment_summary")
-        if summary_mode
+        tuple(
+            name
+            for name, enabled in (
+                ("terminology", not parsed_mode or "term" in types),
+                ("fragment_summary", summary_mode),
+                ("translation", translation_mode),
+            )
+            if enabled
+        )
+        if stage == "terminology"
         else (stage,)
     )
     language = _prompt_language_for_stages(project, language, required_stages)
@@ -1158,6 +1196,14 @@ def _prompt_factory(
         except OSError as exc:
             raise StorageError(f"无法读取 Prompt：{fragment_name}: {exc}") from exc
 
+    translation_middle = (
+        (project / "prompts" / prompt_file("translation", language)).read_text(
+            encoding="utf-8"
+        )
+        if translation_mode
+        else None
+    )
+
     def build(requirements: Iterable[str]) -> str:
         return full_prompt(
             prompt_stage,
@@ -1166,6 +1212,8 @@ def _prompt_factory(
             document_requirements=requirements,
             response_mode=None if summary_only else response_mode,
             fragment_summary_middle=fragment_summary_middle,
+            translation_middle=translation_middle,
+            require_term_declaration=require_term_declaration,
         )
 
     return build
@@ -1267,6 +1315,9 @@ def _replace_with_runtime_parts(
         _split_segment_source(segment, part_ids[0], left_source),
         _split_segment_source(segment, part_ids[1], right_source),
     ]
+    source_offset = int(segment.get("_source_offset", 0))
+    parts[0]["_source_offset"] = source_offset
+    parts[1]["_source_offset"] = source_offset + len(left_source)
     expected = original_parts.setdefault(original_id, [segment_id])
     index = expected.index(segment_id)
     expected[index : index + 1] = part_ids
@@ -1324,7 +1375,8 @@ def _base_results(
             ).items()
             if isinstance(state.get("completed"), dict)
         }
-        return {**translations, **applied}
+        return {**translations, **{str(record["segment_id"]): record for record
+            in resolve_stage_result_texts(project, applied.values())}}
     translations = {
         str(key): value
         for key, value in classify_stage(
@@ -1340,4 +1392,5 @@ def _base_results(
         load_stage_history(project, "proofreading_applied"),
         force=False,
     ).latest_completed
-    return {**translations, **{str(key): value for key, value in applied.items()}}
+    return {**translations, **{str(record["segment_id"]): record for record
+        in resolve_stage_result_texts(project, applied.values())}}

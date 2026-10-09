@@ -20,6 +20,7 @@ Another LLM Translator 是一个面向本机和可信局域网使用、支持中
 - 分阶段执行翻译、校对和润色，明确选择是否应用建议。
 - 以 Segment 为单位保存进度；取消、失败或重启后可继续未完成内容。
 - 连接 OpenAI-compatible、OpenAI Responses、Gemini 和 Anthropic 等请求格式。
+- 通过官方 OAuth 使用自己的 ChatGPT Plan；从全局设置的 ChatGPT Plan 入口连接，操作见[用户指南](docs/USER_GUIDE.md#使用-chatgpt-plan)。
 - 为不同阶段选择不同 LLM Preset，并显式选择流式请求。
 - 在 Web 中管理项目、Prompt、术语、译文、诊断和导出文件。
 

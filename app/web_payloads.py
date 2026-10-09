@@ -75,6 +75,8 @@ class TaskStartPayload(_WebPayload):
     replace_draft: StrictBool = False
     acknowledge_manual_review: StrictBool = False
     include_summaries: StrictBool = False
+    include_draft_translation: StrictBool = False
+    aggregate_full_summaries: StrictBool = False
     reuse_mixed_fingerprints: StrictBool = False
     final_review: StrictBool = False
     run_action: str | None = None
@@ -86,6 +88,10 @@ class TaskStartPayload(_WebPayload):
 
 class StorageConfirmPayload(_WebPayload):
     confirm: StrictBool
+
+
+class DataRootRelocationPayload(StorageConfirmPayload):
+    parent_dir: StrictStr = Field(min_length=1)
 
 
 class StorageOutputClearPayload(StorageConfirmPayload):

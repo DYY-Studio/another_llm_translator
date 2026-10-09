@@ -219,12 +219,16 @@ def test_web_prompt_endpoints_serve_language_views_and_reject_unknown(
     assert set(terminology["assembled_modes"]) == {
         "terms-only",
         "terms+fragment-summary",
+        "terms+translation",
         "summary-only",
+        "terms+translation+fragment-summary",
     }
     assert terminology["assembled_mode_languages"] == {
         "terms-only": "zh-CN",
         "terms+fragment-summary": "zh-CN",
+        "terms+translation": "zh-CN",
         "summary-only": "zh-CN",
+        "terms+translation+fragment-summary": "zh-CN",
     }
     assert terminology["assembled_modes"]["terms+fragment-summary"].index(
         (tmp_path / "app-root" / "prompts" / "terminology.zh-CN.middle.txt")
@@ -290,7 +294,10 @@ def test_project_terms_only_prompt_preview_survives_missing_fragment_prompt(
     assert response.status_code == 200
     value = response.json()
     assert "terms-only" in value["assembled_modes"]
-    assert value["assembled_mode_languages"] == {"terms-only": "zh-CN"}
+    assert value["assembled_mode_languages"] == {
+        "terms-only": "zh-CN",
+        "terms+translation": "zh-CN",
+    }
     assert "terms+fragment-summary" not in value["assembled_modes"]
     assert "summary-only" not in value["assembled_modes"]
 
@@ -409,11 +416,13 @@ def test_prompt_library_terminology_entry_previews_all_response_modes(
     assert detail.json()["assembled_mode_languages"] == {
         "terms-only": "en",
         "terms+fragment-summary": "en",
+        "terms+translation": "en",
         "summary-only": "en",
     }
     assert set(modes) == {
         "terms-only",
         "terms+fragment-summary",
+        "terms+translation",
         "summary-only",
     }
     assert "Library terminology policy." in modes["terms-only"]
@@ -450,6 +459,7 @@ def test_prompt_library_joint_preview_falls_back_to_one_language_pair(
     value = detail.json()
     assert value["assembled_mode_languages"] == {
         "terms-only": "en",
+        "terms+translation": "en",
         "terms+fragment-summary": "zh-CN",
         "summary-only": "zh-CN",
     }
@@ -620,3 +630,213 @@ def make_project(tmp_path: Path) -> tuple[Path, Path]:
     )
     assert project is not None
     return projects_root, project
+
+
+def test_draft_prompt_preview_uses_runtime_contract_and_current_language(
+    tmp_path: Path,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    language = "en"
+    translation = project / "prompts" / "translation.en.middle.txt"
+    translation.write_text("Current project translation policy.", encoding="utf-8")
+    client = TestClient(create_app(projects_root=projects_root))
+    value = client.get(
+        "/api/v1/projects/sample/prompts/terminology", params={"language": language}
+    ).json()
+    expected = full_prompt(
+        "terminology",
+        value["content"],
+        language,
+        response_mode="terms+translation",
+        translation_middle=translation.read_text(),
+    )
+    assert value["assembled_modes"]["terms+translation"] == expected
+    assert "no_terms" in expected
+    assert "Current project translation policy." in expected
+    translation.unlink()
+    value = client.get(
+        "/api/v1/projects/sample/prompts/terminology", params={"language": language}
+    ).json()
+    assert "terms+translation" not in value["assembled_modes"]
+    assert "terms+translation" in value["assembled_mode_errors"]
+
+
+def test_project_prompt_preview_includes_selected_adapter_requirements(
+    tmp_path: Path,
+) -> None:
+    from tests.test_documents import make_epub
+    from app.execution import Scope
+    from app.project import load_source_files, update_file_run_options
+    from app.stage_runtime import (
+        _project_context,
+        _prompt_factory,
+        _document_prompt_requirement_helpers,
+    )
+    from app.stage_terminology_draft import DraftTerminologyScan, draft_run_context
+
+    app_root = make_app_root(tmp_path)
+    txt = tmp_path / "plain.txt"
+    txt.write_text("one", encoding="utf-8")
+    epub = tmp_path / "ruby.epub"
+    make_epub(epub)
+    second_txt = tmp_path / "second.txt"
+    second_txt.write_text("two", encoding="utf-8")
+    second_epub = tmp_path / "second.epub"
+    make_epub(second_epub)
+    projects = tmp_path / "projects"
+    project, _ = init_project(
+        [str(txt), str(second_txt), str(epub), str(second_epub)],
+        document_adapter_id=None,
+        name="preview",
+        app_root=app_root,
+        projects_root=projects,
+    )
+    assert project is not None
+    files = load_source_files(project)
+    txt_id = next(
+        item["file_id"] for item in files if item["document_adapter_id"] == "txt"
+    )
+    epub_id = next(
+        item["file_id"] for item in files if item["document_adapter_id"] == "epub"
+    )
+    second_epub_id = next(
+        item["file_id"] for item in files if item["original_name"] == "second.epub"
+    )
+    with TestClient(create_app(projects_root=projects, app_root=app_root)) as client:
+        endpoint = "/api/v1/projects/preview/prompts/translation"
+        txt_view = client.get(endpoint, params={"file_id": txt_id}).json()
+        epub_view = client.get(endpoint, params={"file_id": epub_id}).json()
+        assert "Ruby" not in txt_view["assembled"]
+        assert "｜已译base《" in epub_view["assembled"]
+        assert epub_view["document_context"]["file_id"] == epub_id
+        groups = epub_view["document_context"]["groups"]
+        assert len(groups) == 2
+        assert [group["file_count"] for group in groups] == [2, 2]
+        assert [group["has_requirements"] for group in groups] == [False, True]
+        update_file_run_options(project, second_epub_id, {"ruby_mode": "compact"})
+        compact = client.get(endpoint, params={"file_id": second_epub_id}).json()
+        assert len(compact["document_context"]["groups"]) == 3
+        assert "⟦R:base|Y:reading⟧" in compact["assembled"]
+        assert "｜已译base《" not in compact["assembled"]
+        config, _, _, segments = _project_context(project, stage="translation")
+        selected = [item for item in segments if item["file_id"] == epub_id]
+        requirements = _document_prompt_requirement_helpers(config, "zh-CN")[0](
+            selected
+        )
+        assert epub_view["assembled"] == _prompt_factory(project, "translation")(
+            requirements
+        )
+        combo = client.get(
+            "/api/v1/projects/preview/prompts/terminology", params={"file_id": epub_id}
+        ).json()
+        draft_config, _, _, draft_segments = draft_run_context(
+            project, include_summaries=True
+        )
+        draft_requirements = _document_prompt_requirement_helpers(
+            draft_config, "zh-CN"
+        )[0]([item for item in draft_segments if item["file_id"] == epub_id])
+        assert combo["assembled_modes"][
+            "terms+translation+fragment-summary"
+        ] == _prompt_factory(
+            project, "terminology", response_mode="terms+translation+fragment-summary"
+        )(draft_requirements)
+        for language in ("zh-CN", "en"):
+            preview = client.get(
+                "/api/v1/projects/preview/prompts/terminology",
+                params={"file_id": epub_id, "language": language},
+            ).json()
+            draft_config, metadata, _, draft_segments = draft_run_context(
+                project, include_summaries=True
+            )
+            selected = [item for item in draft_segments if item["file_id"] == epub_id]
+            scan = DraftTerminologyScan(
+                project,
+                metadata,
+                draft_config,
+                Scope(),
+                None,
+                language,
+                selected,
+                set(),
+            )
+            for mode in preview["assembled_modes"]:
+                if mode not in {item.value for item in TerminologyResponseMode}:
+                    continue
+                runtime = _prompt_factory(
+                    project,
+                    "terminology",
+                    language,
+                    response_mode=None if mode == "terms-only" else mode,
+                )(scan.requirements(selected, TerminologyResponseMode(mode)))
+                assert runtime == preview["assembled_modes"][mode]
+        update_file_run_options(project, epub_id, {"ruby_mode": "base_only"})
+        plain = client.get(endpoint, params={"file_id": epub_id}).json()
+        assert "Ruby" not in plain["assembled"]
+        assert len(plain["document_context"]["groups"]) == 2
+        empty_group = next(
+            group
+            for group in plain["document_context"]["groups"]
+            if not group["has_requirements"]
+        )
+        assert empty_group["file_count"] == 3
+        assert empty_group["adapter_ids"] == ["txt", "epub"]
+        assert client.get(endpoint, params={"file_id": "missing"}).status_code == 400
+
+@pytest.mark.parametrize("language", ["zh-CN", "en"])
+@pytest.mark.parametrize("mode", list(TerminologyResponseMode))
+def test_combined_prefix_explains_only_active_fields_once(language, mode):
+    from app.llm_response import response_record_types
+
+    types = response_record_types(mode)
+    prefix = full_prompt(
+        "terminology",
+        "term middle",
+        language,
+        response_mode=mode,
+        fragment_summary_middle="summary middle",
+        translation_middle="translation middle",
+    ).split("\n\n", 1)[0]
+    fields = {"target_language", "reference_context"}
+    if "term" in types or "summary" in types:
+        fields.add("source_segments")
+    if "segment" in types:
+        fields |= {
+            "segments[].source",
+            "terms",
+            "summary_context",
+            "summary_context_relation",
+            "validation_repair",
+        }
+    for field in fields:
+        assert prefix.count(field + ":") == 1
+    for field in {"segments[].current_text", "summaries"}:
+        assert field + ":" not in prefix
+    if "segment" not in types:
+        assert "summary_context:" not in prefix
+        assert "terms:" not in prefix
+
+
+@pytest.mark.parametrize("language", ["zh-CN", "en"])
+@pytest.mark.parametrize("mode", list(TerminologyResponseMode))
+def test_result_protocols_share_one_end_rule(language, mode):
+    from app.llm_response import response_record_types
+
+    prompt = full_prompt(
+        "terminology",
+        "term middle",
+        language,
+        response_mode=mode,
+        fragment_summary_middle="summary middle",
+        translation_middle="translation middle",
+    )
+    assert prompt.count('{"type":"end"}') == 1
+    assert ('{"type":"no_terms"}' in prompt) == (
+        "term" in response_record_types(mode)
+        and mode != TerminologyResponseMode.TERMS_ONLY
+    )
+    if "summary" in response_record_types(mode):
+        assert (
+            'one or more type="summary"' in prompt
+            if language == "en"
+            else '一条或多条 type="summary"' in prompt
+        )

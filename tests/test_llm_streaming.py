@@ -1035,3 +1035,13 @@ async def test_builtin_provider_stream_protocols(
 
     assert response.content == expected
     assert llm.usage_summary() == {**usage, "available": True, "partial": False}
+
+
+@pytest.mark.asyncio
+async def test_api_key_sse_still_requires_content_type(tmp_path):
+    def handler(request):
+        response = stream_response({"choices": [{"delta": {"content": "ok"}}]}, "[DONE]")
+        del response.headers["content-type"]
+        return response
+    with pytest.raises(ExternalError, match="HTTP 200，Content-Type: 缺失"):
+        await run_client(streaming_config(tmp_path), tmp_path, handler)

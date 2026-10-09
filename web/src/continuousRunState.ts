@@ -112,6 +112,9 @@ export interface ContinuousPayloadOptions {
   force: boolean;
   reuseMixedFingerprints: boolean;
   runActions: Record<string, ContinuousRunAction>;
+  includeDraftTranslation: boolean;
+  includeSummaries: boolean;
+  aggregateFullSummaries: boolean;
 }
 
 export function continuousPayload(
@@ -130,5 +133,8 @@ export function continuousPayload(
     force: options.force,
     reuse_mixed_fingerprints: options.reuseMixedFingerprints,
     run_actions: options.runActions,
+    include_draft_translation: stages.includes("terminology") && options.includeDraftTranslation,
+    include_summaries: stages.includes("terminology") && options.includeSummaries,
+    aggregate_full_summaries: stages.includes("terminology") && options.includeSummaries && options.aggregateFullSummaries,
   };
 }

@@ -17,7 +17,16 @@ struct WebProcess {
     stderr_reader: Option<std::thread::JoinHandle<()>>,
 }
 
+#[derive(Clone, Copy)]
+enum NativeCommand {
+    Apply,
+    Retry,
+    Reset,
+}
+
 static WEB_PROCESS: Mutex<Option<WebProcess>> = Mutex::new(None);
+static LIFECYCLE_OPERATION: Mutex<()> = Mutex::new(());
+static STARTUP_ERROR_STATE: Mutex<Option<bool>> = Mutex::new(None);
 
 fn web_port() -> String {
     std::env::var("ANOTHER_LLM_WEB_PORT").unwrap_or_else(|_| "8765".into())
@@ -69,8 +78,16 @@ fn python_command(python: &std::path::Path, port: &str) -> Command {
     command
 }
 
-fn start_web_process(app: &tauri::AppHandle) -> Result<WebProcess, String> {
-    let port = web_port();
+fn data_root_command(python: &std::path::Path, args: &[&str]) -> Command {
+    let mut command = Command::new(python);
+    command.args(["-I", "-B", "-m", "app.data_root"]);
+    command.args(args);
+    command.env_remove("PYTHONPATH");
+    command.env_remove("PYTHONHOME");
+    command
+}
+
+fn managed_python_for_app(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let resource_dir = app
         .path()
         .resource_dir()
@@ -84,9 +101,193 @@ fn start_web_process(app: &tauri::AppHandle) -> Result<WebProcess, String> {
         debug_runtime_root.as_deref(),
         cfg!(debug_assertions),
     )?;
-    let python = managed_python_path(&runtime_root)?;
+    managed_python_path(&runtime_root)
+}
+
+fn start_web_process(app: &tauri::AppHandle) -> Result<WebProcess, String> {
+    let port = web_port();
+    let python = managed_python_for_app(app)?;
     let source = format!("{} -I -B -m app.web --port {port}", python.display());
     spawn_web_process(python_command(&python, &port), source)
+}
+
+fn run_data_root_helper(app: &tauri::AppHandle, args: &[&str]) -> Result<String, String> {
+    let python = managed_python_for_app(app)?;
+    let command_name = format!(
+        "{} -I -B -m app.data_root {}",
+        python.display(),
+        args.join(" ")
+    );
+    let output = data_root_command(&python, args)
+        .output()
+        .map_err(|error| format!("无法启动数据目录工具 {command_name}：{error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = [stderr, stdout]
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!(
+            "数据目录工具执行失败（{}）{details}",
+            exit_status_description(output.status)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[derive(Debug)]
+enum RelocationError {
+    ServiceAvailable(String),
+    RecoveryRequired(String),
+}
+
+impl RelocationError {
+    fn message(&self) -> &str {
+        match self {
+            Self::ServiceAvailable(message) | Self::RecoveryRequired(message) => message,
+        }
+    }
+}
+
+fn run_relocation_sequence<T: std::fmt::Display>(
+    stop: impl FnOnce() -> Result<(), RelocationError>,
+    relocate: impl FnOnce() -> Result<T, String>,
+    restart: impl FnOnce() -> Result<(), String>,
+) -> Result<T, RelocationError> {
+    stop()?;
+    let relocation_result = relocate();
+    let restart_result = restart();
+    match (relocation_result, restart_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(RelocationError::ServiceAvailable(error)),
+        (Ok(value), Err(error)) => Err(RelocationError::RecoveryRequired(format!(
+            "数据目录工具已完成：{value}\nWeb 服务启动失败：{error}"
+        ))),
+        (Err(relocation), Err(restart)) => Err(RelocationError::RecoveryRequired(format!(
+            "数据目录迁移失败：{relocation}\n恢复 Web 服务也失败：{restart}"
+        ))),
+    }
+}
+
+fn validate_data_root_reset(confirm: bool, web_process_running: bool) -> Result<(), String> {
+    if !confirm {
+        return Err("切换默认数据目录需要显式确认".to_string());
+    }
+    if web_process_running {
+        return Err("Web 服务运行时不能重置数据目录".to_string());
+    }
+    Ok(())
+}
+
+fn with_lifecycle_lock<T>(lock: &Mutex<()>, operation: impl FnOnce() -> T) -> T {
+    let _guard = lock.lock().unwrap();
+    operation()
+}
+
+fn startup_error_allows_reset(error: &str) -> bool {
+    error.contains("invalid user data locator") || error.contains("custom user root is unavailable")
+}
+
+fn startup_error_state() -> Option<bool> {
+    *STARTUP_ERROR_STATE.lock().unwrap()
+}
+
+fn is_web_service_url(url: &tauri::Url, port: &str) -> bool {
+    let Ok(port) = port.parse::<u16>() else {
+        return false;
+    };
+    url.scheme() == "http"
+        && url.host_str() == Some("127.0.0.1")
+        && url.port_or_known_default() == Some(port)
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+fn is_startup_error_url(url: &tauri::Url) -> bool {
+    let app_local_origin = if cfg!(windows) {
+        url.scheme() == "http" && url.host_str() == Some("tauri.localhost")
+    } else {
+        url.scheme() == "tauri" && url.host_str() == Some("localhost")
+    };
+    app_local_origin
+        && url.port().is_none()
+        && url.path() == "/startup-error.html"
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+fn allowed_webview_navigation(
+    url: &tauri::Url,
+    port: &str,
+    web_process_running: bool,
+    startup_error_state: Option<bool>,
+) -> bool {
+    (web_process_running && is_web_service_url(url, port))
+        || (startup_error_state.is_some() && is_startup_error_url(url))
+}
+
+fn validate_native_command(
+    command: NativeCommand,
+    url: &tauri::Url,
+    web_process_running: bool,
+    startup_error_state: Option<bool>,
+    port: &str,
+) -> Result<(), String> {
+    let authorized = match command {
+        NativeCommand::Apply => web_process_running && is_web_service_url(url, port),
+        NativeCommand::Retry => startup_error_state.is_some() && is_startup_error_url(url),
+        NativeCommand::Reset => {
+            !web_process_running && startup_error_state == Some(true) && is_startup_error_url(url)
+        }
+    };
+    if authorized {
+        Ok(())
+    } else {
+        Err("不允许从当前页面执行此操作".to_string())
+    }
+}
+
+fn authorize_window_command(
+    window: &tauri::WebviewWindow,
+    command: NativeCommand,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("不允许从当前窗口执行此操作".to_string());
+    }
+    let url = window
+        .url()
+        .map_err(|error| format!("无法确认命令调用页面：{error}"))?;
+    validate_native_command(
+        command,
+        &url,
+        WEB_PROCESS.lock().unwrap().is_some(),
+        startup_error_state(),
+        &web_port(),
+    )
+}
+
+fn start_and_store_web_process(app: &tauri::AppHandle) -> Result<(), String> {
+    let port = web_port();
+    let mut process = start_web_process(app)?;
+    if let Err(error) = server_ready(&mut process, &port, Duration::from_secs(30)) {
+        process.stop();
+        return Err(error);
+    }
+    *WEB_PROCESS.lock().unwrap() = Some(process);
+    *STARTUP_ERROR_STATE.lock().unwrap() = None;
+    Ok(())
+}
+
+fn navigate_to_web_service(app: &tauri::AppHandle) -> Result<(), String> {
+    let url = format!("http://127.0.0.1:{}", web_port())
+        .parse()
+        .map_err(|error| format!("服务地址无效：{error}"))?;
+    app.get_webview_window("main")
+        .ok_or_else(|| "找不到主窗口".to_string())?
+        .navigate(url)
+        .map_err(|error| format!("无法打开 Web 服务：{error}"))
 }
 
 fn spawn_web_process(mut command: Command, source: String) -> Result<WebProcess, String> {
@@ -276,9 +477,129 @@ fn percent_encode_query(value: &str) -> String {
 
 fn startup_error_url(error: &str) -> WebviewUrl {
     WebviewUrl::App(PathBuf::from(format!(
-        "startup-error.html?error={}",
-        percent_encode_query(error)
+        "startup-error.html?error={}&allowReset={}",
+        percent_encode_query(error),
+        startup_error_allows_reset(error)
     )))
+}
+
+fn startup_error_navigation_url(error: &str, allow_reset: bool) -> Result<tauri::Url, String> {
+    let origin = if cfg!(windows) {
+        "http://tauri.localhost"
+    } else {
+        "tauri://localhost"
+    };
+    tauri::Url::parse(&format!(
+        "{origin}/startup-error.html?error={}&allowReset={allow_reset}",
+        percent_encode_query(error),
+    ))
+    .map_err(|error| format!("启动错误页地址无效：{error}"))
+}
+
+fn request_graceful_shutdown(port: &str, timeout: Duration) -> Result<(), RelocationError> {
+    let address: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|error| RelocationError::RecoveryRequired(format!("服务地址无效：{error}")))?;
+    let mut stream = TcpStream::connect_timeout(&address, timeout).map_err(|error| {
+        RelocationError::RecoveryRequired(format!("无法请求服务安全停服：{error}"))
+    })?;
+    stream.set_write_timeout(Some(timeout)).map_err(|error| {
+        RelocationError::RecoveryRequired(format!("无法设置停服请求超时：{error}"))
+    })?;
+    stream.set_read_timeout(Some(timeout)).map_err(|error| {
+        RelocationError::RecoveryRequired(format!("无法设置停服响应超时：{error}"))
+    })?;
+    stream
+        .write_all(b"POST /api/v1/server/desktop-shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+        .map_err(|error| {
+            RelocationError::RecoveryRequired(format!("无法发送安全停服请求：{error}"))
+        })?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).map_err(|error| {
+        RelocationError::RecoveryRequired(format!("读取安全停服响应失败：{error}"))
+    })?;
+    let response = String::from_utf8_lossy(&response);
+    let status = response.lines().next().unwrap_or("无状态行");
+    let status_code = status
+        .split_ascii_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok());
+    if status_code == Some(200) {
+        Ok(())
+    } else {
+        let body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or("")
+            .trim();
+        let detail = if body.is_empty() {
+            status.to_string()
+        } else {
+            format!("{status}：{body}")
+        };
+        if status_code == Some(409) {
+            Err(RelocationError::ServiceAvailable(format!(
+                "服务拒绝安全停服请求：{detail}"
+            )))
+        } else {
+            Err(RelocationError::RecoveryRequired(format!(
+                "无法确认安全停服请求结果：{detail}"
+            )))
+        }
+    }
+}
+
+fn graceful_stop_web_process(
+    process: &mut WebProcess,
+    port: &str,
+    timeout: Duration,
+) -> Result<(), RelocationError> {
+    request_graceful_shutdown(port, timeout.min(Duration::from_secs(2)))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match process.child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                process.finish_stderr();
+                return Ok(());
+            }
+            Ok(Some(status)) => {
+                process.finish_stderr();
+                return Err(RelocationError::RecoveryRequired(process.failure(
+                    "等待安全停服",
+                    format!("服务退出失败（{}）", exit_status_description(status)),
+                )));
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100).min(deadline - Instant::now()));
+            }
+            Ok(None) => {
+                return Err(RelocationError::RecoveryRequired(
+                    "服务已接受安全停服请求，但等待退出超时".to_string(),
+                ));
+            }
+            Err(error) => {
+                return Err(RelocationError::RecoveryRequired(format!(
+                    "检查服务停服状态失败：{error}"
+                )));
+            }
+        }
+    }
+}
+
+fn stop_web_process_for_relocation(port: &str) -> Result<(), RelocationError> {
+    let current_process = WEB_PROCESS.lock().unwrap().take();
+    let Some(mut process) = current_process else {
+        return Err(RelocationError::RecoveryRequired(
+            "找不到正在运行的 Web 服务进程".to_string(),
+        ));
+    };
+    match graceful_stop_web_process(&mut process, port, Duration::from_secs(15)) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            *WEB_PROCESS.lock().unwrap() = Some(process);
+            Err(error)
+        }
+    }
 }
 
 fn http_request(
@@ -327,8 +648,12 @@ fn http_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_stderr_tail, http_request, managed_python_path, managed_runtime_root,
-        python_command, server_ready, spawn_web_process, stderr_snapshot, STDERR_TAIL_LIMIT,
+        allowed_webview_navigation, append_stderr_tail, data_root_command,
+        graceful_stop_web_process, http_request, is_startup_error_url, is_web_service_url,
+        managed_python_path, managed_runtime_root, python_command, run_relocation_sequence,
+        server_ready, spawn_web_process, startup_error_allows_reset, startup_error_navigation_url,
+        stderr_snapshot, validate_data_root_reset, validate_native_command, with_lifecycle_lock,
+        NativeCommand, RelocationError, STDERR_TAIL_LIMIT,
     };
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -336,6 +661,15 @@ mod tests {
     use std::process::Command;
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    fn startup_error_test_url(query: &str) -> tauri::Url {
+        let origin = if cfg!(windows) {
+            "http://tauri.localhost"
+        } else {
+            "tauri://localhost"
+        };
+        tauri::Url::parse(&format!("{origin}/startup-error.html?{query}")).unwrap()
+    }
 
     #[test]
     fn release_runtime_root_uses_tauri_resources_even_with_debug_override() {
@@ -409,6 +743,264 @@ mod tests {
     }
 
     #[test]
+    fn data_root_helper_command_uses_managed_python_and_clears_python_overrides() {
+        let command = data_root_command(
+            std::path::Path::new("/runtime/bin/python3"),
+            &["apply-pending"],
+        );
+
+        assert_eq!(command.get_program(), "/runtime/bin/python3");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["-I", "-B", "-m", "app.data_root", "apply-pending"]
+        );
+        for name in ["PYTHONPATH", "PYTHONHOME"] {
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(env_name, _)| *env_name == std::ffi::OsStr::new(name))
+                    .map(|(_, value)| value),
+                Some(None),
+                "{name} must not leak into the bundled runtime"
+            );
+        }
+    }
+
+    #[test]
+    fn relocation_restarts_after_helper_failure_and_reports_both_errors() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let error = run_relocation_sequence(
+            || {
+                calls.borrow_mut().push("stop");
+                Ok::<(), RelocationError>(())
+            },
+            || {
+                calls.borrow_mut().push("helper");
+                Err::<String, _>("relocation failed".to_string())
+            },
+            || {
+                calls.borrow_mut().push("restart");
+                Err("restart failed".to_string())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(*calls.borrow(), ["stop", "helper", "restart"]);
+        assert!(matches!(error, RelocationError::RecoveryRequired(_)));
+        assert!(error.message().contains("relocation failed"));
+        assert!(error.message().contains("restart failed"));
+    }
+
+    #[test]
+    fn relocation_does_not_run_helper_when_graceful_stop_fails() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let error = run_relocation_sequence(
+            || {
+                calls.borrow_mut().push("stop");
+                Err(RelocationError::ServiceAvailable(
+                    "graceful stop timed out".to_string(),
+                ))
+            },
+            || {
+                calls.borrow_mut().push("helper");
+                Ok::<String, String>("completed".to_string())
+            },
+            || {
+                calls.borrow_mut().push("restart");
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(*calls.borrow(), ["stop"]);
+        assert!(matches!(error, RelocationError::ServiceAvailable(_)));
+        assert!(error.message().contains("graceful stop timed out"));
+    }
+
+    #[test]
+    fn relocation_preserves_successful_helper_output_when_restart_fails() {
+        let error = run_relocation_sequence(
+            || Ok(()),
+            || Ok("{\"warning\":\"old directory retained\"}".to_string()),
+            || Err("restart failed".to_string()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, RelocationError::RecoveryRequired(_)));
+        assert!(error.message().contains("old directory retained"));
+        assert!(error.message().contains("restart failed"));
+    }
+
+    #[test]
+    fn data_root_reset_requires_confirmation_and_no_running_web_process() {
+        assert!(validate_data_root_reset(false, false).is_err());
+        assert!(validate_data_root_reset(true, true).is_err());
+        assert!(validate_data_root_reset(true, false).is_ok());
+    }
+
+    #[test]
+    fn data_root_reset_is_not_authorized_without_startup_error_state() {
+        let error_page = startup_error_test_url("allowReset=true");
+        assert!(
+            validate_native_command(NativeCommand::Reset, &error_page, false, None, "8765",)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn webview_navigation_allows_only_current_service_and_active_error_page() {
+        let service = tauri::Url::parse("http://127.0.0.1:9123/").unwrap();
+        let other_port = tauri::Url::parse("http://127.0.0.1:9124/").unwrap();
+        let startup_error = startup_error_test_url("allowReset=false");
+
+        assert!(allowed_webview_navigation(&service, "9123", true, None));
+        assert!(!allowed_webview_navigation(&other_port, "9123", true, None));
+        assert!(allowed_webview_navigation(
+            &startup_error,
+            "9123",
+            false,
+            Some(false)
+        ));
+        assert!(!allowed_webview_navigation(
+            &startup_error,
+            "9123",
+            false,
+            None
+        ));
+    }
+
+    #[test]
+    fn startup_error_url_requires_the_platform_app_origin_and_exact_path() {
+        let (expected, other_platform_origin) = if cfg!(windows) {
+            (
+                "http://tauri.localhost/startup-error.html?error=broken",
+                "tauri://localhost/startup-error.html?error=broken",
+            )
+        } else {
+            (
+                "tauri://localhost/startup-error.html?error=broken",
+                "https://tauri.localhost/startup-error.html?error=broken",
+            )
+        };
+        assert!(is_startup_error_url(&tauri::Url::parse(expected).unwrap()));
+        assert!(!is_startup_error_url(
+            &tauri::Url::parse(other_platform_origin).unwrap()
+        ));
+        assert!(!is_startup_error_url(
+            &tauri::Url::parse("tauri://localhost/other.html").unwrap()
+        ));
+        assert!(!is_startup_error_url(
+            &tauri::Url::parse("tauri://user@localhost/startup-error.html").unwrap()
+        ));
+    }
+
+    #[test]
+    fn relocation_recovery_url_is_trusted_and_preserves_reset_authorization() {
+        let error = "invalid user data locator /custom";
+        let url = startup_error_navigation_url(error, true).unwrap();
+
+        assert!(is_startup_error_url(&url));
+        assert!(url.query().unwrap().contains("allowReset=true"));
+        assert!(
+            validate_native_command(NativeCommand::Reset, &url, false, Some(true), "8765",).is_ok()
+        );
+    }
+
+    #[test]
+    fn web_service_origin_uses_the_configured_port() {
+        let service = tauri::Url::parse("http://127.0.0.1:9123/").unwrap();
+        let wrong_port = tauri::Url::parse("http://127.0.0.1:8765/").unwrap();
+        let wrong_host = tauri::Url::parse("http://localhost:9123/").unwrap();
+
+        assert!(is_web_service_url(&service, "9123"));
+        assert!(!is_web_service_url(&wrong_port, "9123"));
+        assert!(!is_web_service_url(&wrong_host, "9123"));
+    }
+
+    #[test]
+    fn native_command_authorization_uses_page_and_service_lifecycle() {
+        let service = tauri::Url::parse("http://127.0.0.1:9123/").unwrap();
+        let error_page = startup_error_test_url("allowReset=true");
+
+        assert!(
+            validate_native_command(NativeCommand::Apply, &service, true, None, "9123",).is_ok()
+        );
+        assert!(validate_native_command(
+            NativeCommand::Apply,
+            &service,
+            false,
+            Some(false),
+            "9123",
+        )
+        .is_err());
+        assert!(validate_native_command(
+            NativeCommand::Retry,
+            &error_page,
+            false,
+            Some(false),
+            "9123",
+        )
+        .is_ok());
+        assert!(validate_native_command(
+            NativeCommand::Retry,
+            &error_page,
+            true,
+            Some(false),
+            "9123",
+        )
+        .is_ok());
+        assert!(validate_native_command(
+            NativeCommand::Reset,
+            &error_page,
+            false,
+            Some(false),
+            "9123",
+        )
+        .is_err());
+        assert!(validate_native_command(
+            NativeCommand::Reset,
+            &error_page,
+            false,
+            Some(true),
+            "9123",
+        )
+        .is_ok());
+        assert!(
+            validate_native_command(NativeCommand::Retry, &service, true, None, "9123",).is_err()
+        );
+    }
+
+    #[test]
+    fn lifecycle_lock_serializes_operations() {
+        let lifecycle = std::sync::Arc::new(std::sync::Mutex::new(()));
+        let guard = lifecycle.lock().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker_lock = std::sync::Arc::clone(&lifecycle);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            with_lifecycle_lock(&worker_lock, || finished_tx.send(()).unwrap());
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(finished_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(guard);
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn locator_errors_allow_default_reset_but_plugin_errors_do_not() {
+        assert!(startup_error_allows_reset("invalid user data locator /x"));
+        assert!(startup_error_allows_reset(
+            "custom user root is unavailable: /x"
+        ));
+        assert!(!startup_error_allows_reset(
+            "plugin protocol version is unsupported"
+        ));
+    }
+
+    #[test]
     fn http_request_preserves_error_response_body() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port().to_string();
@@ -473,6 +1065,142 @@ mod tests {
         process.stop();
 
         assert!(process.child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn graceful_stop_requests_shutdown_and_waits_for_process_exit() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let (request_tx, request_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 512];
+            let size = stream.read(&mut request).unwrap();
+            request_tx
+                .send(String::from_utf8_lossy(&request[..size]).into_owned())
+                .unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 0.1; exit 0"]);
+        let mut process = spawn_web_process(command, "/bin/sh graceful exit".to_string()).unwrap();
+
+        graceful_stop_web_process(&mut process, &port, Duration::from_secs(2)).unwrap();
+
+        server.join().unwrap();
+        let request = request_rx.recv().unwrap();
+        assert!(request.starts_with("POST /api/v1/server/desktop-shutdown HTTP/1.1"));
+        assert_eq!(process.child.try_wait().unwrap().unwrap().code(), Some(0));
+    }
+
+    #[test]
+    fn graceful_stop_timeout_does_not_kill_the_web_process() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 512];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 60"]);
+        let mut process =
+            spawn_web_process(command, "/bin/sh long-running service".to_string()).unwrap();
+        let helper_ran = std::cell::Cell::new(false);
+
+        let error = run_relocation_sequence(
+            || graceful_stop_web_process(&mut process, &port, Duration::from_millis(100)),
+            || {
+                helper_ran.set(true);
+                Ok::<String, String>("completed".to_string())
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+
+        server.join().unwrap();
+        assert!(matches!(error, RelocationError::RecoveryRequired(_)));
+        assert!(error.message().contains("超时"));
+        assert!(!helper_ran.get());
+        assert!(process.child.try_wait().unwrap().is_none());
+        process.stop();
+        assert!(process.child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn graceful_stop_rejects_server_conflict_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 512];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 409 Conflict\r\nContent-Length: 20\r\nConnection: close\r\n\r\nactive backend tasks")
+                .unwrap();
+        });
+
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 60"]);
+        let mut process =
+            spawn_web_process(command, "/bin/sh active backend rejection".to_string()).unwrap();
+        let helper_ran = std::cell::Cell::new(false);
+        let error = run_relocation_sequence(
+            || graceful_stop_web_process(&mut process, &port, Duration::from_secs(1)),
+            || {
+                helper_ran.set(true);
+                Ok::<String, String>("completed".to_string())
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+
+        server.join().unwrap();
+        assert!(matches!(error, RelocationError::ServiceAvailable(_)));
+        assert!(error.message().contains("409 Conflict"));
+        assert!(error.message().contains("active backend tasks"));
+        assert!(!helper_ran.get());
+        assert!(process.child.try_wait().unwrap().is_none());
+        process.stop();
+    }
+
+    #[test]
+    fn lost_shutdown_response_requires_recovery_without_running_helper() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let expected = b"POST /api/v1/server/desktop-shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            let mut request = vec![0; expected.len()];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(request, expected);
+        });
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 60"]);
+        let mut process =
+            spawn_web_process(command, "/bin/sh lost shutdown response".to_string()).unwrap();
+        let helper_ran = std::cell::Cell::new(false);
+
+        let error = run_relocation_sequence(
+            || graceful_stop_web_process(&mut process, &port, Duration::from_secs(1)),
+            || {
+                helper_ran.set(true);
+                Ok::<String, String>("completed".to_string())
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+
+        server.join().unwrap();
+        assert!(!helper_ran.get());
+        assert!(matches!(error, RelocationError::RecoveryRequired(_)));
+        assert!(process.child.try_wait().unwrap().is_none());
+        process.stop();
     }
 
     #[test]
@@ -568,6 +1296,76 @@ fn select_folder() -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn apply_data_root_relocation(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<String, String> {
+    with_lifecycle_lock(&LIFECYCLE_OPERATION, || {
+        authorize_window_command(&window, NativeCommand::Apply)?;
+        match run_relocation_sequence(
+            || stop_web_process_for_relocation(&web_port()),
+            || run_data_root_helper(&app, &["apply-pending"]),
+            || start_and_store_web_process(&app),
+        ) {
+            Ok(value) => Ok(value),
+            Err(RelocationError::ServiceAvailable(error)) => Err(error),
+            Err(RelocationError::RecoveryRequired(error)) => {
+                let allow_reset = startup_error_allows_reset(&error);
+                *STARTUP_ERROR_STATE.lock().unwrap() = Some(allow_reset);
+                let url = startup_error_navigation_url(&error, allow_reset)?;
+                window.navigate(url).map_err(|navigation_error| {
+                    format!("{error}\n无法打开恢复页面：{navigation_error}")
+                })?;
+                Err(error)
+            }
+        }
+    })
+}
+
+#[tauri::command]
+fn retry_web_service(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    with_lifecycle_lock(&LIFECYCLE_OPERATION, || {
+        authorize_window_command(&window, NativeCommand::Retry)?;
+        let old_process = WEB_PROCESS.lock().unwrap().take();
+        if let Some(mut process) = old_process {
+            match process.child.try_wait() {
+                Ok(Some(_)) => process.finish_stderr(),
+                Ok(None) => {
+                    *WEB_PROCESS.lock().unwrap() = Some(process);
+                    return Err("Web 服务仍在安全退出，请稍后重试".to_string());
+                }
+                Err(error) => {
+                    *WEB_PROCESS.lock().unwrap() = Some(process);
+                    return Err(format!("检查旧 Web 服务状态失败：{error}"));
+                }
+            }
+        }
+        start_and_store_web_process(&app)?;
+        navigate_to_web_service(&app)
+    })
+}
+
+#[tauri::command]
+fn reset_data_root(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    confirm: bool,
+) -> Result<String, String> {
+    with_lifecycle_lock(&LIFECYCLE_OPERATION, || {
+        authorize_window_command(&window, NativeCommand::Reset)?;
+        validate_data_root_reset(confirm, WEB_PROCESS.lock().unwrap().is_some())?;
+        let result = run_relocation_sequence(
+            || Ok(()),
+            || run_data_root_helper(&app, &["reset", "--confirm"]),
+            || start_and_store_web_process(&app),
+        )
+        .map_err(|error| error.message().to_string())?;
+        navigate_to_web_service(&app)?;
+        Ok(result)
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
@@ -579,41 +1377,45 @@ pub fn run() {
     );
     builder
         .setup(|app| {
-            let port = web_port();
-            let url = match start_web_process(&app.handle()) {
-                Ok(mut process) => {
-                    match server_ready(&mut process, &port, Duration::from_secs(30)) {
-                        Ok(()) => {
-                            *WEB_PROCESS.lock().unwrap() = Some(process);
-                            WebviewUrl::External(
-                                format!("http://127.0.0.1:{port}")
-                                    .parse()
-                                    .expect("invalid Web service URL"),
-                            )
-                        }
-                        Err(error) => {
-                            process.stop();
-                            eprintln!("{error}");
-                            startup_error_url(&error)
-                        }
-                    }
-                }
-                Err(reason) => {
-                    let error = format!("Web 服务启动失败\n阶段：启动 Web 服务\n原因：{reason}");
+            let url = match start_and_store_web_process(&app.handle()) {
+                Ok(()) => WebviewUrl::External(
+                    format!("http://127.0.0.1:{}", web_port())
+                        .parse()
+                        .expect("invalid Web service URL"),
+                ),
+                Err(error) => {
+                    let error = if error.contains("Web 服务启动失败") {
+                        error
+                    } else {
+                        format!("Web 服务启动失败\n阶段：启动 Web 服务\n原因：{error}")
+                    };
                     eprintln!("{error}");
+                    *STARTUP_ERROR_STATE.lock().unwrap() = Some(startup_error_allows_reset(&error));
                     startup_error_url(&error)
                 }
             };
+            let port = web_port();
             let _ = tauri::WebviewWindowBuilder::new(app, "main", url)
                 .title("译工坊")
                 .inner_size(1280.0, 860.0)
+                .on_navigation(move |url| {
+                    allowed_webview_navigation(
+                        url,
+                        &port,
+                        WEB_PROCESS.lock().unwrap().is_some(),
+                        startup_error_state(),
+                    )
+                })
                 .build();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             select_file,
             select_folder,
-            save_export
+            save_export,
+            apply_data_root_relocation,
+            retry_web_service,
+            reset_data_root
         ])
         .build(tauri::generate_context!())
         .expect("failed to build tauri app")

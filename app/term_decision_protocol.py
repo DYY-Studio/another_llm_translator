@@ -107,7 +107,7 @@ _SEMANTIC_RETRY_GUIDANCE = {
 
 _PROTOCOL = {
     "zh-CN": (
-        "以下固定输出协议优先于可编辑中段。terms[] 是唯一决策目标；每项必须恰好输出一条 "
+        "必须遵守以下输出协议。terms[] 是唯一决策目标；每项必须恰好输出一条 "
         "decision 并逐字照录 normalized。anchors[]、evidence、conflicts、source、disabled、第一阶段 "
         "action/reason 均为只读数据，不得输出 anchor 决策。第一阶段存在 category "
         "或 preferred_translation 冲突时不得 keep；update 必须为每个冲突字段提供非空决议，无法"
@@ -134,7 +134,7 @@ _PROTOCOL = {
         '{"type":"end"}'
     ),
     "en": (
-        "The following fixed output contract takes precedence over the editable middle. "
+        "Follow this output contract. "
         "terms[] are the only decision targets; output exactly one decision per item and copy "
         "normalized verbatim. anchors[], evidence, conflicts, source, disabled, and prior-phase "
         "action/reason are read-only; never output an anchor decision. In phase one, a term with "
@@ -171,7 +171,7 @@ def terminology_decision_protocol(language: str) -> str:
 
 _FINAL_REVIEW_PROTOCOL = {
     "zh-CN": (
-        "以下固定终审协议优先于可编辑中段。terms[] 是唯一决策目标；每项必须恰好输出一条 decision，"
+        "必须遵守以下终审输出协议。terms[] 是唯一决策目标；每项必须恰好输出一条 decision，"
         "并逐字照录 normalized。anchors[]、evidence、windows、conflicts、source、disabled 和 prior action/reason "
         "均为只读数据，不得输出 anchor 决策。每条记录必须有非空字符串 reason。终审 action 只能是 keep、update 或 disable；"
         "keep、disable 必须且只能含 type、normalized、action、reason，update 必须且只能含 type、normalized、action、reason、changes。"
@@ -189,7 +189,7 @@ _FINAL_REVIEW_PROTOCOL = {
         '{"type":"end"}'
     ),
     "en": (
-        "The following fixed final-review contract takes precedence over the editable middle. terms[] are the only decision targets; "
+        "Follow this final-review output contract. terms[] are the only decision targets; "
         "output exactly one decision per item and copy normalized verbatim. anchors[], evidence, windows, conflicts, source, disabled, "
         "and prior action/reason are read-only; never output an anchor decision. Every record requires a non-empty string reason. "
         "Final-review action may only be keep, update, or disable. keep and disable contain exactly type, normalized, action, reason; "

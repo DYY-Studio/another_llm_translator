@@ -25,10 +25,12 @@ from .sqlite_storage import (
     latest_stage_summary,
     read_json,
     read_jsonl,
+    read_summary_participation,
     record_exists,
 )
 from .stage_review import run_apply, run_review
-from .stage_runtime import prompt_middle_digests
+from .stage_runtime import prompt_middle_digests, prompt_preflight
+from .summary_aggregation import aggregate_summaries
 from .stage_terminology import run_terminology
 from .stage_translation import run_translation
 from .term_decision import (
@@ -323,10 +325,24 @@ def inspect_continuous(
     run_actions: Mapping[str, str] | None = None,
     apply_terminology_decision: bool = False,
     final_review: bool = False,
+    include_draft_translation: bool = False,
+    include_summaries: bool = False,
+    aggregate_full_summaries: bool = False,
+    terminology_options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_stages(stages)
+    if (include_draft_translation or include_summaries) and "terminology" not in normalized:
+        raise UsageError("联合输出要求连续运行包含术语阶段")
+    if aggregate_full_summaries and not include_summaries:
+        raise UsageError("完整概括聚合要求启用联合概括")
+    execution_stages = tuple(
+        stage for stage in normalized
+        if not (stage == "translation" and include_draft_translation)
+    )
+    if aggregate_full_summaries:
+        execution_stages = (execution_stages[0], "content_summary", *execution_stages[1:])
     actions = dict(run_actions or {})
-    unknown_actions = sorted(set(actions) - set(normalized))
+    unknown_actions = sorted(set(actions) - (set(normalized) | set(execution_stages)))
     if unknown_actions:
         raise UsageError(
             "连续运行 run_actions 包含未选择阶段："
@@ -337,6 +353,8 @@ def inspect_continuous(
     )
     if invalid_actions:
         raise UsageError("run_actions 必须是 resume 或 decline")
+    if include_draft_translation and "translation" in actions:
+        raise UsageError("联合粗翻已替代标准翻译，不能指定标准翻译 run_action")
     if force and reuse_mixed_fingerprints:
         raise UsageError("连续运行 force 与 reuse_mixed_fingerprints 不能同时使用")
     has_decision = "terminology_decision" in normalized
@@ -355,7 +373,7 @@ def inspect_continuous(
         terms if terms is not None and bool(terms.get("terms")) else None
     )
     configs = {
-        stage: load_project_config(project, stage=stage) for stage in normalized
+        stage: load_project_config(project, stage=stage) for stage in execution_stages
     }
     limiter_identities: dict[tuple[str, str], tuple[int, int, int, int]] = {}
     for stage, config in configs.items():
@@ -375,8 +393,26 @@ def inspect_continuous(
 
     running_runs: dict[str, list[dict[str, Any]]] = {}
     blocking: list[dict[str, str]] = []
-    for stage in normalized:
+    for stage in execution_stages:
         runs = [_run_summary(item) for item in find_running_runs(project, stage)]
+        if stage == "content_summary":
+            for run in runs:
+                run["resume_compatible"] = False
+                run["resume_incompatibility_reason"] = "内容概括聚合不支持续用；请结束旧 Run 并重新启动"
+            if actions.get(stage) == "resume":
+                blocking.append(_blocking("summary_resume_unsupported", "内容概括聚合不支持续用；请结束旧 Run 并重新启动", stage=stage))
+        if stage == "terminology" and terminology_options is not None:
+            running = terminology_options.get("running_run")
+            runs = [dict(running)] if running else []
+            for run in runs:
+                compatible = (
+                    bool(run.get("include_draft_translation")) == include_draft_translation
+                    and bool(run.get("include_summaries")) == include_summaries
+                )
+                run["resume_compatible"] = compatible
+                run["resume_incompatibility_reason"] = None if compatible else "续用 Run 必须保持原有粗翻和概括选项"
+                if actions.get(stage) == "resume" and not compatible:
+                    blocking.append(_blocking("terminology_resume_incompatible", run["resume_incompatibility_reason"], stage=stage))
         running_runs[stage] = runs
         action = actions.get(stage)
         if runs and action is None:
@@ -450,7 +486,7 @@ def inspect_continuous(
         )
 
     fingerprints: dict[str, str] = {}
-    for stage in normalized:
+    for stage in execution_stages:
         if stage == "terminology_decision":
             fingerprints[stage] = _stable_digest(
                 {
@@ -482,29 +518,47 @@ def inspect_continuous(
                 ),
             )
 
-    stage_summaries: dict[str, dict[str, Any]] = {}
-    for stage in normalized:
-        if stage == "terminology_decision":
-            continue
-        stage_summaries[stage] = (
-            terminology_summary(
-                project,
-                configs[stage],
-                active_segment_ids=set(segments),
-                nonempty_count=len(segments),
-            )
-            if stage == "terminology"
-            else stage_summary(
-                project,
-                stage,
-                configs[stage],
-                active_segment_ids=set(segments),
-                nonempty_count=len(segments),
-                terms_revision=(
-                    int(terms["terms_revision"]) if terms is not None else None
-                ),
-            )
+    if include_draft_translation:
+        from .stage_terminology_draft import draft_run_context, draft_translation_fingerprint
+
+        draft_config, _, _, _ = draft_run_context(project, include_summaries=include_summaries)
+        fingerprints["draft_translation"] = draft_translation_fingerprint(
+            project, draft_config, int(terms["terms_revision"]) if terms else None
         )
+    elif include_summaries:
+        fingerprints["fragment_summary"] = _stable_digest(
+            prompt_middle_digests(project, "fragment_summary")
+        )
+
+    stage_summaries: dict[str, dict[str, Any]] = {}
+    for stage in execution_stages:
+        if stage in {"terminology_decision", "content_summary"}:
+            continue
+        if stage == "terminology" and terminology_options is not None:
+            stage_summaries[stage] = {
+                key: terminology_options[key]
+                for key in ("completed", "failed", "pending", "current_fingerprint_completed", "mismatched_fingerprint_completed")
+            }
+        else:
+            stage_summaries[stage] = (
+                terminology_summary(
+                    project,
+                    configs[stage],
+                    active_segment_ids=set(segments),
+                    nonempty_count=len(segments),
+                )
+                if stage == "terminology"
+                else stage_summary(
+                    project,
+                    stage,
+                    configs[stage],
+                    active_segment_ids=set(segments),
+                    nonempty_count=len(segments),
+                    terms_revision=(
+                        int(terms["terms_revision"]) if terms is not None else None
+                    ),
+                )
+            )
         if (
             stage_summaries[stage]["mismatched_fingerprint_completed"]
             and not force
@@ -655,6 +709,27 @@ def inspect_continuous(
             )
         )
 
+    participation = (terminology_options or {}).get("summary_participation", [])
+    if include_summaries and actions.get("terminology") == "decline":
+        participation = read_summary_participation(project)
+    summary_selection = [
+        {"file_id": str(item["file_id"]), "part_id": str(item["part_id"])}
+        for item in participation
+        if item["selected"]
+    ]
+    if terminology_options is not None:
+        for key in ("draft_prompt_preflight", "summary_prompt_preflight"):
+            preflight = terminology_options.get(key)
+            if preflight and not preflight["ok"]:
+                blocking.append(_blocking("joint_prompt_missing", f"联合输出缺少 Prompt：{', '.join(preflight['missing'])}", stage="terminology"))
+        if include_summaries and not summary_selection:
+            blocking.append(_blocking("summary_selection_empty", "请在概括页面选择参与范围", stage="terminology"))
+        if include_summaries and terminology_options.get("summary_only_work"):
+            blocking.append(_blocking("summary_cross_boundary", "联合概括要求关闭术语跨边界分组", stage="terminology"))
+    if aggregate_full_summaries:
+        preflight = prompt_preflight(project, prompt_language, ("content_summary",))
+        if not preflight["ok"]:
+            blocking.append(_blocking("summary_prompt_missing", f"完整聚合缺少 Prompt：{', '.join(preflight['missing'])}", stage="content_summary"))
     options = {
         "force": bool(force),
         "reuse_mixed_fingerprints": bool(reuse_mixed_fingerprints),
@@ -663,6 +738,9 @@ def inspect_continuous(
         "final_review": bool(decision_final_review),
         "prompt_language": prompt_language,
         "whole_project": True,
+        "include_draft_translation": include_draft_translation,
+        "include_summaries": include_summaries,
+        "aggregate_full_summaries": aggregate_full_summaries,
     }
     snapshot = {
         "stages": list(normalized),
@@ -673,11 +751,15 @@ def inspect_continuous(
             decision_inputs["digest"] if decision_inputs is not None else None
         ),
         "options": _stable_digest(options),
+        "joint_options": _stable_digest(terminology_options),
+        "summary_selection": summary_selection,
     }
     steps: list[dict[str, Any]] = []
     for stage in normalized:
-        stage_running = running_runs[stage]
-        if stage == "terminology_decision" and decision_inputs is not None:
+        stage_running = running_runs.get(stage, [])
+        if stage == "translation" and include_draft_translation:
+            step = {"stage": stage, "status": "skipped", "selected": 0, "reason": "joint_draft_translation", "running_run": None}
+        elif stage == "terminology_decision" and decision_inputs is not None:
             status = str(decision_inputs["status"])
             step: dict[str, Any] = {
                 "stage": stage,
@@ -699,6 +781,8 @@ def inspect_continuous(
             if stage in stage_summaries:
                 step.update(stage_summaries[stage])
         steps.append(step)
+        if stage == "terminology" and aggregate_full_summaries:
+            steps.append({"stage": "content_summary", "status": "ready", "selected": len(summary_selection), "preset": _preset_summary(configs["content_summary"]), "running_run": next(iter(running_runs["content_summary"]), None)})
     return {
         "stage": CONTINUOUS_STAGE,
         "stages": list(normalized),
@@ -718,6 +802,9 @@ def inspect_continuous(
         "decision_inputs": decision_inputs,
         "options": options,
         "snapshot": snapshot,
+        "execution_stages": list(execution_stages),
+        "terminology_options": terminology_options,
+        "summary_selection": summary_selection,
     }
 
 
@@ -869,13 +956,20 @@ async def run_continuous(
     run_actions: Mapping[str, str] | None = None,
     apply_terminology_decision: bool = False,
     final_review: bool = False,
+    include_draft_translation: bool = False,
+    include_summaries: bool = False,
+    aggregate_full_summaries: bool = False,
+    summary_selection: tuple[tuple[str, str], ...] = (),
     prompt_language: str | None = None,
     planned_steps: Iterable[Mapping[str, Any]] = (),
     on_stage: Callable[[str, str, Mapping[str, Any]], None] | None = None,
     on_progress: Callable[[str, int, int, int], None] | None = None,
-    on_usage: Callable[[dict[str, Any] | None], None] | None = None,
+    on_usage: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+    on_draft_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_stages(stages)
+    if aggregate_full_summaries:
+        normalized = (normalized[0], "content_summary", *normalized[1:])
     actions = dict(run_actions or {})
     has_decision = "terminology_decision" in normalized
     decision_final_review = (
@@ -896,6 +990,8 @@ async def run_continuous(
     usage_base_by_stage: dict[str, dict[str, Any] | None] = {}
     stage_limiters: dict[str, SlidingWindowLimiter | KeyPool] = {}
     for stage in normalized:
+        if stage == "translation" and include_draft_translation:
+            continue
         config = load_project_config(project, stage=stage)
         identity = _limiter_identity(config)
         try:
@@ -908,6 +1004,7 @@ async def run_continuous(
         if on_usage is None:
             return
         aggregate: dict[str, Any] | None = None
+        invocation: dict[str, Any] | None = None
         for stage_name in normalized:
             base = usage_base_by_stage.get(stage_name)
             current_value = usage_by_stage.get(stage_name)
@@ -917,7 +1014,8 @@ async def run_continuous(
                 else current_value
             )
             aggregate = combine_usage(aggregate, value)
-        on_usage(aggregate or unavailable_usage())
+            invocation = combine_usage(invocation, current_value)
+        on_usage(aggregate or unavailable_usage(), invocation or unavailable_usage())
 
     def report_progress(stage: str, completed: int, failed: int, total: int) -> None:
         for step in steps:
@@ -937,6 +1035,11 @@ async def run_continuous(
             on_stage(stage, status, step)
 
     for stage in normalized:
+        if stage == "translation" and include_draft_translation:
+            step = {"stage": stage, "status": "skipped", "selected": 0, "completed": 0, "failed": 0, "pending": 0, "reason": "joint_draft_translation"}
+            steps.append(step)
+            emit(stage, "skipped", step)
+            continue
         step = {
             "stage": stage,
             "status": "running",
@@ -1016,7 +1119,7 @@ async def run_continuous(
                     if normalized[-1] != "terminology_decision":
                         _ensure_downstream_fingerprints_after_decision(
                             project,
-                            normalized,
+                            tuple(value for value in normalized if value != "content_summary" and not (value == "translation" and include_draft_translation)),
                             scope,
                             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
                         )
@@ -1074,6 +1177,9 @@ async def run_continuous(
                         stage_name, current
                     ),
                     limiter=stage_limiters[stage],
+                    include_draft_translation=include_draft_translation,
+                    include_summaries=include_summaries,
+                    on_draft_progress=on_draft_progress,
                 )
                 step.update(
                     _continuous_step_summary(
@@ -1083,6 +1189,16 @@ async def run_continuous(
                         run_id=str(summary.get("run_id", resume_run_id or "")) or None,
                     )
                 )
+            elif stage == "content_summary":
+                summary = await aggregate_summaries(
+                    project,
+                    [{"file_id": file_id, "part_id": part_id} for file_id, part_id in summary_selection],
+                    limiter=stage_limiters[stage],
+                    prompt_language=prompt_language,
+                    on_progress=lambda completed, failed, total: report_progress("content_summary", completed, failed, total),
+                    on_usage=lambda current: report_usage("content_summary", current),
+                )
+                step.update(_continuous_step_summary(stage, summary, selected_hint=planned.get(stage, 0), run_id=summary.get("run_id")))
             elif stage == "translation":
                 summary = await run_translation(
                     project,

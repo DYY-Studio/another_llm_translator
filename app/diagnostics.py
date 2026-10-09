@@ -75,6 +75,7 @@ class Diagnostics:
         self._latency_samples_seconds: list[float] = []
         self._latency_total_seconds = 0.0
         self.usage: dict[str, Any] | None = None
+        self._invocation_usage: dict[str, Any] | None = None
         self._started_monotonic: float | None = None
         self._elapsed_seconds = 0.0
         self._running = False
@@ -119,6 +120,7 @@ class Diagnostics:
         self._latency_samples_seconds.clear()
         self._latency_total_seconds = 0.0
         self.usage = None
+        self._invocation_usage = None
         self.requests.clear()
         self._retained_terminal_details.clear()
         self._request_session = uuid.uuid4().hex
@@ -356,8 +358,13 @@ class Diagnostics:
             0, self.rate_limit_waiting_requests - 1
         )
 
-    def set_usage(self, usage: dict[str, Any]) -> None:
+    def set_usage(
+        self, usage: dict[str, Any], *, invocation_usage: dict[str, Any] | None = None
+    ) -> None:
         self.usage = dict(usage)
+        self._invocation_usage = dict(
+            usage if invocation_usage is None else invocation_usage
+        )
 
     def complete_request(
         self, request_id: str, *, content: str, reasoning_content: str | None
@@ -480,10 +487,18 @@ class Diagnostics:
         throughput_input = None
         throughput_output = None
         throughput_total = None
-        if usage_observed and elapsed > 0:
-            throughput_input = round(input_tokens / elapsed, 2)
-            throughput_output = round(output_tokens / elapsed, 2)
-            throughput_total = round((input_tokens + output_tokens) / elapsed, 2)
+        invocation = self._invocation_usage
+        if (
+            invocation
+            and (invocation.get("available") or invocation.get("partial"))
+            and elapsed > 0
+        ):
+            throughput_input = round(int(invocation["input_tokens"]) / elapsed, 2)
+            throughput_output = round(int(invocation["output_tokens"]) / elapsed, 2)
+            throughput_total = round(
+                (int(invocation["input_tokens"]) + int(invocation["output_tokens"])) / elapsed,
+                2,
+            )
         latency_count = len(self._latency_samples_seconds)
         average_latency_ms = None
         p95_latency_ms = None
@@ -707,12 +722,14 @@ class DiagnosticsHub(Diagnostics):
         with session.activate(project, stage, task_id=task_id):
             yield
 
-    def set_usage(self, usage: dict[str, Any]) -> None:
+    def set_usage(
+        self, usage: dict[str, Any], *, invocation_usage: dict[str, Any] | None = None
+    ) -> None:
         target = self._active_session()
         if target is not None:
-            target.set_usage(usage)
+            target.set_usage(usage, invocation_usage=invocation_usage)
             return
-        super().set_usage(usage)
+        super().set_usage(usage, invocation_usage=invocation_usage)
 
     @staticmethod
     def _session_matches(
@@ -842,10 +859,21 @@ class DiagnosticsHub(Diagnostics):
         throughput_input = None
         throughput_output = None
         throughput_total = None
-        if observed_usage and elapsed > 0:
-            throughput_input = round(input_tokens / elapsed, 2)
-            throughput_output = round(output_tokens / elapsed, 2)
-            throughput_total = round((input_tokens + output_tokens) / elapsed, 2)
+        invocations = [
+            session._invocation_usage
+            for session in metric_sessions
+            if session._invocation_usage is not None
+            and (
+                session._invocation_usage.get("available")
+                or session._invocation_usage.get("partial")
+            )
+        ]
+        if invocations and elapsed > 0:
+            invocation_input = sum(int(usage["input_tokens"]) for usage in invocations)
+            invocation_output = sum(int(usage["output_tokens"]) for usage in invocations)
+            throughput_input = round(invocation_input / elapsed, 2)
+            throughput_output = round(invocation_output / elapsed, 2)
+            throughput_total = round((invocation_input + invocation_output) / elapsed, 2)
 
         all_requests: list[tuple[Diagnostics, dict[str, Any]]] = [
             (session, request)

@@ -55,6 +55,7 @@ FastAPI 应用装配、鉴权、生命周期、静态资源和 route 注册。�
 
 按资源职责处理 HTTP 边界：
 
+- `web_chatgpt_routes.py`：ChatGPT 状态、本机连接管理与 Plan 局域网会话边界。
 - `web_resource_routes.py`：全局配置、Prompt、Adapter、Preset、凭据和服务设置。
 - `web_project_routes.py`：项目创建、打开、删除、File 管理与替换。
 - `web_segment_routes.py`：Segment 浏览、编辑和阶段结果重置。
@@ -78,12 +79,16 @@ Route 只校验 HTTP 输入并调用共享后端。请求模型集中在 `web_pa
 ### `app/sqlite_storage.py`
 
 项目数据库的唯一持久化实现，负责 schema 初始化/迁移、事务、File/Segment、术语、阶段结果、
-Run 索引和内容概括记录。调用者通过明确方法读写，不在 route 或阶段模块中直接拼接 SQL。
+Run 索引和内容概括记录；批量解析应用正文的精确引用，业务副本与持久化载荷分离。调用者通过明确方法读写，不在 route 或阶段模块中直接拼接 SQL。
 
 ### `app/file_replacement.py`
 
 单 File 替换的预览、保守内容对应和提交输入。它只判断哪些既有 Segment 身份可以安全保留；
 实际事务写入仍由项目和存储模块完成。
+
+### `app/stage_result_retention.py`
+
+在存储事务内整理受影响阶段记录，维护当前结果、重置屏障和必要父链；提供显式项目整理的完整保留闭包。
 
 ### `app/project_export.py`
 
@@ -107,30 +112,38 @@ Run 索引和内容概括记录。调用者通过明确方法读写，不在 rou
 拥有 Scope、Chunk 规划、Run 生命周期、Token/用量汇总、有限并发调度和取消传播。Chunk 只在
 本次执行中存在；该模块不得用 Chunk 推断持久进度。
 
+内容处理 Prompt 在此按静态字段、任务和结果协议声明装配，联合执行按标识去重；设置预览复用同一入口。术语决策保留专用语义。
+
 ### `app/stage_runtime.py`
 
-模型阶段共享运行逻辑，包括前置检查、设置差异处理、Prompt 装配、请求执行、响应归属和结果提交。
+模型阶段共享运行逻辑，包括前置检查、设置差异处理、Prompt 装配、请求执行、响应归属和结果提交。Document Adapter 状态、运行选项和 Prompt 要求的读取由运行及项目设置预览共享。
 具体阶段规则不得堆回此模块。
 
 ### 具体阶段模块
 
 - `stage_translation.py`：翻译 payload、结果校验、翻译校验与修复。
 - `stage_review.py`：校对/润色的基准选择、accepted/suggested 结果，以及建议应用。
-- `stage_terminology.py`：术语扫描、候选任务、联合片段概括和发布。
+- `stage_terminology.py`：术语扫描、候选任务、联合片段概括和发布，分别跟踪术语与概括的切片覆盖。
+- `stage_terminology_draft.py`：实验粗翻及联合概括的扫描状态、合并请求与独立结果恢复，分别跟踪各类结果的切片覆盖，按本次响应模式选择 Document Adapter 要求；复用翻译执行器进行译文校验和保存。
 - `stages.py`：跨阶段公共入口、成功校验、完整状态检查和 `run-all` 编排；不承载各阶段算法。
 
 ### 内容概括
 
 - `summary_aggregation.py`：按内容边界聚合片段、递归压缩和独立发布完整结果。
-- `summary_provenance.py`：概括依赖构建与校验、过期原因和翻译上下文可用性判定。
+- `summary_provenance.py`：概括依赖构建与校验、过期原因和翻译上下文可用性判定，以及普通联合扫描与粗翻联合扫描共享的片段保存和整段采用。
 
 内容概括复用阶段执行、LLM、存储和 Document Adapter 边界，不建立另一套项目或请求框架。
 
 ## 6. LLM 通信
 
+### ChatGPT 连接
+
+- `app/chatgpt_oauth.py`：主机 OAuth 回调、身份验证、账户注册映射、钥匙串令牌及跨进程刷新、撤销；提供 Plan 凭据目标与请求约束及终止错误分类。
+- `web/src/components/ChatGPTSettings.tsx`：连接设置、授权状态和用量入口；登录浏览器由后端打开。
+
 ### `app/llm_adapter.py`
 
-声明式 JSON LLM Adapter 的加载、严格校验、模板渲染、响应指针和 SSE 规则。协议字段以
+声明式 JSON LLM Adapter 的加载、严格校验、模板渲染、能力摘要、固定连接约束、响应指针和 SSE 规则。协议字段以
 [Adapter 契约](ADAPTERS.md)为准。
 
 ### `app/llm_preset.py` 与 `app/llm_keys.py`
@@ -140,13 +153,12 @@ Run 索引和内容概括记录。调用者通过明确方法读写，不在 rou
 
 ### `app/llm_client.py`
 
-宿主 HTTP Client、普通/流式传输、超时、重试、取消、诊断与请求审计。Adapter 只描述 wire
+宿主 HTTP Client、普通/流式传输、超时、重试、取消、诊断与请求审计；按 Adapter 结束原因分类空正文，执行原样重试并维护拆分路径预算。实际拆分沿用阶段及概括聚合逻辑。Adapter 只描述 wire
 转换，不能自行发送请求或绕过本模块。
 
 ### `app/llm_response.py`
 
-规范化模型正文、严格 JSONL 解析、短请求 ID 校验和部分响应判定。具体字段条件由调用它的阶段
-模块提供。
+规范化模型正文、严格 JSONL 解析、短请求 ID 校验和部分响应判定；集中标准与实验扫描共用的术语字段校验及实验术语声明校验。其他阶段的字段条件由调用模块提供。
 
 ### `app/llm_migration.py`
 
@@ -196,7 +208,8 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 ## 9. 配置、资源与诊断
 
 - `config.py`：项目配置 schema、严格加载和规范写入。
-- `user_config.py`：平台用户数据根与内置/用户资源覆盖路径。
+- `user_config.py`：按环境变量、应用定位和平台默认顺序解析用户数据根，并提供内置/用户资源覆盖路径。
+- `data_root.py`：用户数据根状态、待迁移请求、离线迁移与默认位置重置；不拥有 Web 或桌面进程生命周期。
 - `prompt_library.py`：用户级 Prompt 条目及项目载入边界。
 - `credentials.py`：环境变量和系统钥匙串访问，不向持久化层暴露密钥正文。
 - `server_config.py`：监听、局域网共享与认证设置。
@@ -214,16 +227,18 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 创建、选择、替换、输入、导出、诊断、Segment、术语、自动决策、概括和设置分别由对应组件
 拥有。共享 API 类型位于 `web/src/types.ts`，通用选择行为位于 `useClassicSelection.ts`。
 
-`StorageView.tsx` 负责设置页中的存储汇总、项目明细和逐项清理交互；它不复制后端扫描或安全判断，
-清理后重新读取服务端状态。
+`StorageView.tsx` 负责设置页中的存储汇总、数据位置设置、项目明细和逐项清理交互；它不复制后端
+扫描、迁移或安全判断，操作后重新读取服务端状态。`web_storage_routes.py` 暴露数据根状态和迁移
+请求/取消，并拒绝活动任务期间的变更；实际迁移委托给 `data_root.py`。
 
 页面局部 UI 状态留在对应 workspace/component；服务端拥有的项目、运行和结果状态必须重新
 读取 API，不在前端建立权威副本。
 
 `src-tauri/src/` 负责桌面窗口、从应用资源目录定位 bundled managed Python 并以
 `-m app.web` 启动 Web 服务、管理该进程及原生选择器；开发构建从明确的 runtime 目录启动，
-正式构建使用 app 内的 runtime。`packaging/` 与 `scripts/` 负责 runtime 组装、检查和 Tauri
-打包；桌面壳不实现独立业务后端。
+正式构建使用 app 内的 runtime。它也负责迁移期间停止和重启服务，以及自定义根不可用时的重试和
+重置入口；数据复制与定位由 Python 后端完成。`packaging/` 与 `scripts/` 负责 runtime 组装、检查
+和 Tauri 打包；桌面壳不实现独立业务后端。
 
 ## 11. 变更规则
 

@@ -334,6 +334,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
                 {
                     "selector": selector,
                     "name": metadata["name"],
+                    "created_at": metadata.get("created_at"),
                     "project_id": metadata["project_id"],
                     "path": str(item),
                     "external": item.parent != projects_root.resolve(),

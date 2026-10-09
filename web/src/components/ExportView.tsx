@@ -45,6 +45,7 @@ export function ExportView({
   const [stage, setStage] = useState("translated");
   const [format, setFormat] = useState("original");
   const [bilingual, setBilingual] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [exportError, setExportError] = useState<ErrorPayload | null>(null);
   const [message, setMessage] = useState("");
@@ -81,6 +82,7 @@ export function ExportView({
   }
 
   async function run() {
+    setGenerating(true);
     setError(null); setExportError(null); setMessage(""); setHighlighted([]);
     try {
       const value = await api<Record<string, unknown>>(`/api/v1/projects/${project}/export`, {
@@ -107,6 +109,8 @@ export function ExportView({
       const payload = errorPayloadFrom(reason);
       if (payload?.code === "export_error") setExportError(payload);
       else setError(reason);
+    } finally {
+      setGenerating(false);
     }
   }
 
@@ -209,7 +213,7 @@ export function ExportView({
             <label>{translate("export.resultStage", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="translated">{translate("stage.translation", language)}</option><option value="proofread">{translate("export.proofread", language)}</option><option value="polished">{translate("export.polished", language)}</option></select></label>
             <label>{translate("export.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="original">{translate("export.keepFormat", language)}</option><option value="txt">{translate("export.txt", language)}</option></select></label>
             <label className="check-row"><input type="checkbox" checked={bilingual} onChange={(event) => setBilingual(event.target.checked)} /> {translate("export.bilingual", language)}</label>
-            <button className="primary-button" onClick={() => void run()}>{translate("export.generate", language)}</button>
+            <button className="primary-button" disabled={generating} onClick={() => void run()}>{translate(generating ? "export.generating" : "export.generate", language)}</button>
             {exportError && (
               <div className="export-error-card" role="alert">
                 <div className="export-error-heading">

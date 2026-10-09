@@ -1,14 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
 import { errorMessage, translate, type Language } from "../i18n";
+import { applyDataRootRelocation, nativeBridgeAvailable, pickNativeFolder } from "../native";
+import { ConfirmDialog } from "./TermDialogs";
+import { DirectoryPicker } from "./DirectoryPicker";
 import {
+  cancelDataRootRelocation,
   clearDebugAttachments,
   clearGlobalLogs,
   clearOutputFile,
   clearProjectLogs,
+  fetchDataRoot,
   fetchStorage,
   fetchStorageProject,
+  maintainProjectDatabase,
+  requestDataRootRelocation,
 } from "../queries";
 import type {
+  DataRootStatus,
   StorageCategory,
   StorageCategoryId,
   StorageCleanupResult,
@@ -96,6 +104,10 @@ function EmptyStorage({ language, text }: { language: Language; text?: string })
 
 export function StorageView({ language }: { language: Language }) {
   const [summary, setSummary] = useState<StorageSummary | null>(null);
+  const [dataRoot, setDataRoot] = useState<DataRootStatus | null>(null);
+  const [directoryPicker, setDirectoryPicker] = useState(false);
+  const [rootBusy, setRootBusy] = useState(false);
+  const [databaseConfirm, setDatabaseConfirm] = useState(false);
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [detail, setDetail] = useState<StorageProjectDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -128,6 +140,16 @@ export function StorageView({ language }: { language: Language }) {
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetchDataRoot(controller.signal)
+      .then(setDataRoot)
+      .catch((reason: unknown) => {
+        if (!controller.signal.aborted) setError(errorMessage(reason, language));
       });
     return () => controller.abort();
   }, []);
@@ -169,6 +191,7 @@ export function StorageView({ language }: { language: Language }) {
   function closeProjectDetail() {
     if (busyAction !== null) return;
     setSelectedProject(null);
+    setDatabaseConfirm(false);
     setDetail(null);
     setDetailError("");
     setError("");
@@ -178,11 +201,14 @@ export function StorageView({ language }: { language: Language }) {
   useEffect(() => {
     if (!selectedProject) return;
     function closeOnEscape(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape" && busyAction === null) closeProjectDetail();
+      if (event.key === "Escape" && busyAction === null) {
+        if (databaseConfirm) setDatabaseConfirm(false);
+        else closeProjectDetail();
+      }
     }
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [busyAction, selectedProject]);
+  }, [busyAction, selectedProject, databaseConfirm]);
 
   async function refresh() {
     setRefreshing(true);
@@ -195,6 +221,106 @@ export function StorageView({ language }: { language: Language }) {
       setError(errorMessage(reason, language));
     } finally {
       setRefreshing(false);
+    }
+  }
+
+  function pathParent(path: string): string {
+    const normalized = path.replace(/[\\/]+$/, "");
+    const separator = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
+    if (separator < 0) return path.slice(0, 1);
+    if (separator === 0) return normalized.slice(0, 1);
+    if (separator === 2 && normalized[1] === ":") return normalized.slice(0, 3);
+    return normalized.slice(0, separator);
+  }
+
+  function joinRoot(parent: string, currentRoot: string): string {
+    const name = currentRoot.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) ?? "";
+    const normalizedParent = parent.replace(/[\\/]+$/, "");
+    const separator = parent.includes("\\") ? "\\" : "/";
+    return `${normalizedParent}${separator}${name}`;
+  }
+
+  async function applyPendingRoot() {
+    setRootBusy(true);
+    setError("");
+    try {
+      const warning = await applyDataRootRelocation();
+      if (warning) window.alert(warning);
+      window.location.reload();
+    } catch (reason) {
+      setError(errorMessage(reason, language));
+      try {
+        setDataRoot(await fetchDataRoot());
+      } catch {
+        // Keep the last pending state available for another retry.
+      }
+    } finally {
+      setRootBusy(false);
+    }
+  }
+
+  async function relocateDataRoot(parentDir: string, targetRoot: string) {
+    if (!dataRoot) return;
+    const confirmationKey = nativeBridgeAvailable()
+      ? "storage.dataRootConfirmNative"
+      : "storage.dataRootConfirmWeb";
+    if (!window.confirm(translate(confirmationKey, language, {
+      source: dataRoot.active_root,
+      target: targetRoot,
+    }))) return;
+    setRootBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      await requestDataRootRelocation(parentDir);
+      if (nativeBridgeAvailable()) {
+        setDataRoot(await fetchDataRoot());
+        const warning = await applyDataRootRelocation();
+        if (warning) window.alert(warning);
+        window.location.reload();
+      } else {
+        setDataRoot(await fetchDataRoot());
+        setMessage(translate("storage.dataRootSaved", language));
+      }
+    } catch (reason) {
+      setError(errorMessage(reason, language));
+      if (nativeBridgeAvailable()) {
+        try {
+          setDataRoot(await fetchDataRoot());
+        } catch {
+          // Keep the last known state available for another retry.
+        }
+      }
+    } finally {
+      setRootBusy(false);
+    }
+  }
+
+  async function cancelPendingRoot() {
+    setRootBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      await cancelDataRootRelocation();
+      setDataRoot(await fetchDataRoot());
+    } catch (reason) {
+      setError(errorMessage(reason, language));
+    } finally {
+      setRootBusy(false);
+    }
+  }
+
+  async function chooseDataRoot() {
+    if (!dataRoot) return;
+    if (!nativeBridgeAvailable()) {
+      setDirectoryPicker(true);
+      return;
+    }
+    try {
+      const parentDir = await pickNativeFolder();
+      if (parentDir) await relocateDataRoot(parentDir, joinRoot(parentDir, dataRoot.active_root));
+    } catch (reason) {
+      setError(errorMessage(reason, language));
     }
   }
 
@@ -218,6 +344,31 @@ export function StorageView({ language }: { language: Language }) {
     } catch (reason) {
       setError(errorMessage(reason, language));
     } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function maintainDatabase() {
+    if (!selectedProject || !detail?.database_maintenance.can_maintain) return;
+    setDatabaseConfirm(false);
+    setBusyAction("database");
+    setError("");
+    setMessage("");
+    try {
+      const result = await maintainProjectDatabase(selectedProject);
+      setMessage(translate("storage.databaseDone", language, {
+        records: result.deleted_records, deduplicated: result.deduplicated_applied_records, size: formatSize(result.reclaimed_bytes),
+      }));
+    } catch (reason) {
+      setError(errorMessage(reason, language));
+    } finally {
+      try {
+        await loadSummary();
+      } catch (reason) {
+        const refreshError = translate("storage.refreshFailed", language, { message: errorMessage(reason, language) });
+        setError((current) => current ? `${current}\n${refreshError}` : refreshError);
+      }
+      setDetailRevision((current) => current + 1);
       setBusyAction(null);
     }
   }
@@ -275,6 +426,35 @@ export function StorageView({ language }: { language: Language }) {
       </header>
       {!selectedProject && error && <div className="error-banner" role="alert">{error}</div>}
       {!selectedProject && message && <p className="success-text storage-message">{message}</p>}
+      {dataRoot && (
+        <section className="storage-panel storage-root-panel">
+          <div className="storage-panel-heading">
+            <div><h2>{translate("storage.dataRoot", language)}</h2></div>
+            <span className="storage-root-mode">{translate(`storage.dataRootMode.${dataRoot.mode}`, language)}</span>
+          </div>
+          <dl className="storage-root-paths">
+            <div><dt>{translate("storage.dataRootActive", language)}</dt><dd><code>{dataRoot.active_root}</code></dd></div>
+            <div><dt>{translate("storage.dataRootDefault", language)}</dt><dd><code>{dataRoot.default_root}</code></dd></div>
+          </dl>
+          {dataRoot.mode === "environment" && <p className="storage-root-hint muted">{translate("storage.dataRootEnvironmentHint", language)}</p>}
+          {dataRoot.pending && (
+            <div className="storage-root-pending">
+              <strong>{translate("storage.dataRootPending", language)}</strong>
+              <p>{translate("storage.dataRootSource", language)}: <code>{dataRoot.pending.source_root}</code></p>
+              <p>{translate("storage.dataRootTarget", language)}: <code>{dataRoot.pending.target_root}</code></p>
+              {dataRoot.mode === "environment" ? null : nativeBridgeAvailable()
+                ? <button className="primary-button" type="button" disabled={rootBusy} onClick={() => void applyPendingRoot()}>{translate("storage.dataRootApply", language)}</button>
+                : <><p className="muted">{translate("storage.dataRootWebSteps", language)}</p><button className="quiet-button" type="button" disabled={rootBusy} onClick={() => void cancelPendingRoot()}>{translate("storage.dataRootCancel", language)}</button></>}
+            </div>
+          )}
+          {dataRoot.mode !== "environment" && !dataRoot.pending && (
+            <div className="storage-root-actions">
+              <button className="quiet-button" type="button" disabled={rootBusy} onClick={() => void chooseDataRoot()}>{translate("storage.dataRootChange", language)}</button>
+              {dataRoot.mode === "custom" && dataRoot.active_root !== dataRoot.default_root && <button className="quiet-button" type="button" disabled={rootBusy} onClick={() => void relocateDataRoot(pathParent(dataRoot.default_root), dataRoot.default_root)}>{translate("storage.dataRootRestore", language)}</button>}
+            </div>
+          )}
+        </section>
+      )}
       {summary && (
         <>
           <div className="storage-summary-strip">
@@ -381,6 +561,19 @@ export function StorageView({ language }: { language: Language }) {
                       <div key={category.id}><span>{categoryLabel(category.id, language)}</span><strong>{formatSize(category.bytes)}</strong></div>
                     ))}
                   </div>
+                  <section className="storage-detail-section">
+                    <div className="storage-section-heading settings-action-heading">
+                      <div>
+                        <h3>{translate("storage.databaseTitle", language)}</h3>
+                        <p>{translate("storage.databaseObsolete", language, { records: detail.database_maintenance.obsolete_stage_records ?? "—" })}</p>
+                        <p>{translate("storage.databaseDeduplicatable", language, { records: detail.database_maintenance.deduplicatable_applied_records ?? "—" })}</p>
+                        {!detail.database_maintenance.can_maintain && <p>{blockedLabel(detail.database_maintenance.blocked_reason, language)}</p>}
+                      </div>
+                      <button className="danger-button" type="button" disabled={busyAction !== null || !detail.database_maintenance.can_maintain} onClick={() => setDatabaseConfirm(true)}>
+                        {translate(busyAction === "database" ? "storage.databaseBusy" : "storage.databaseMaintain", language)}
+                      </button>
+                    </div>
+                  </section>
                   <StorageDebugSection language={language} runs={detail.debug_runs} busyAction={busyAction} onClear={clearDebugRun} />
                   <StorageOutputSection language={language} files={detail.output_files} busyAction={busyAction} onClear={clearOutput} />
                   <StorageLogsSection language={language} logs={detail.logs} busyAction={busyAction} onClear={clearProjectLog} />
@@ -390,6 +583,22 @@ export function StorageView({ language }: { language: Language }) {
           </section>
         </div>
       )}
+      {databaseConfirm && <ConfirmDialog
+        language={language} title={translate("storage.databaseMaintain", language)}
+        text={translate("storage.confirmDatabase", language)}
+        confirmLabel={translate("storage.databaseMaintain", language)}
+        confirming={busyAction !== null} onCancel={() => setDatabaseConfirm(false)}
+        onConfirm={() => void maintainDatabase()}
+      />}
+      {directoryPicker && dataRoot && <DirectoryPicker
+        initialPath={pathParent(dataRoot.active_root)}
+        language={language}
+        onClose={() => setDirectoryPicker(false)}
+        onSelect={(parentDir) => {
+          setDirectoryPicker(false);
+          void relocateDataRoot(parentDir, joinRoot(parentDir, dataRoot.active_root));
+        }}
+      />}
     </section>
   );
 }

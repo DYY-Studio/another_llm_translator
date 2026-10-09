@@ -14,6 +14,7 @@ from .config import load_project_config
 from .errors import (
     AppError,
     ContextLengthError,
+    EmptyResponseSplitError,
     ExportError,
     ExternalError,
     FatalExternalError,
@@ -28,7 +29,7 @@ from .execution import (
     segment_model_source,
     stage_fingerprint,
 )
-from .llm_client import LLMClient, SlidingWindowLimiter
+from .llm_client import empty_response_split_scope, LLMClient, SlidingWindowLimiter
 from .llm_keys import KeyPool
 from .llm_response import TerminologyResponseMode, parse_terminology_response
 from .project import load_segments
@@ -512,7 +513,7 @@ async def aggregate_summaries(
                     )
                 request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
                 async with request_semaphore:
-                    response, _ = await llm.chat(
+                    response, request_id = await llm.chat(
                         messages=messages,
                         temperature=config["llm"]["temperature_content_summary"],
                         estimated_input_tokens=estimated,
@@ -527,7 +528,6 @@ async def aggregate_summaries(
                     response.content,
                     mode=TerminologyResponseMode.SUMMARY_ONLY,
                     source_refs=tuple(str(index + 1) for index in range(len(children))),
-                    source_texts=tuple(str(item["text"]) for item in children),
                 )
                 if not parsed.complete or not parsed.summaries:
                     raise UsageError(
@@ -613,6 +613,7 @@ async def aggregate_summaries(
                     final: bool,
                     depth: int = 0,
                 ) -> dict[str, Any]:
+                    split_error = None
                     before_estimate = estimate(children)
                     if before_estimate <= limit:
                         try:
@@ -622,65 +623,76 @@ async def aggregate_summaries(
                                 children,
                                 kind="full" if final else "reduction",
                             )
-                        except ContextLengthError:
-                            pass
+                        except ContextLengthError as exc:
+                            split_error = exc
                     if len(children) < 2 or depth >= MAX_REDUCTION_DEPTH:
+                        if isinstance(split_error, EmptyResponseSplitError):
+                            raise UsageError(f"{split_error}；当前范围不能继续拆分")
                         raise UsageError(
                             "聚合失败：递归压缩不收敛，最小请求仍超过模型上下文预算"
                         )
-                    midpoint = len(children) // 2
-                    child_tasks = [
-                        asyncio.create_task(fit(children[:midpoint], False)),
-                        asyncio.create_task(fit(children[midpoint:], False)),
-                    ]
-                    try:
-                        done, _ = await asyncio.wait(
-                            child_tasks,
-                            return_when=asyncio.FIRST_EXCEPTION,
-                        )
-                        for task in done:
-                            error = (
-                                asyncio.CancelledError()
-                                if task.cancelled()
-                                else task.exception()
+                    with empty_response_split_scope(split_error):
+                        midpoint = len(children) // 2
+                        child_tasks = [
+                            asyncio.create_task(fit(children[:midpoint], False)),
+                            asyncio.create_task(fit(children[midpoint:], False)),
+                        ]
+                        try:
+                            done, _ = await asyncio.wait(
+                                child_tasks,
+                                return_when=asyncio.FIRST_EXCEPTION,
                             )
-                            if error is not None and is_global_error(error):
-                                for child_task in child_tasks:
-                                    child_task.cancel()
-                                await asyncio.gather(
-                                    *child_tasks,
-                                    return_exceptions=True,
+                            for task in done:
+                                error = (
+                                    asyncio.CancelledError()
+                                    if task.cancelled()
+                                    else task.exception()
                                 )
+                                if error is not None and is_global_error(error):
+                                    for child_task in child_tasks:
+                                        child_task.cancel()
+                                    await asyncio.gather(
+                                        *child_tasks,
+                                        return_exceptions=True,
+                                    )
+                                    raise error
+                            left, right = await asyncio.gather(
+                                *child_tasks,
+                                return_exceptions=True,
+                            )
+                        except asyncio.CancelledError:
+                            for child_task in child_tasks:
+                                child_task.cancel()
+                            await asyncio.gather(
+                                *child_tasks,
+                                return_exceptions=True,
+                            )
+                            raise
+                        reduction_errors = [
+                            result
+                            for result in (left, right)
+                            if isinstance(result, BaseException)
+                        ]
+                        for error in reduction_errors:
+                            if is_global_error(error):
                                 raise error
-                        left, right = await asyncio.gather(
-                            *child_tasks,
-                            return_exceptions=True,
+                        if reduction_errors:
+                            raise reduction_errors[0]
+                        reduced = [
+                            _child_from_artifact(left),
+                            _child_from_artifact(right),
+                        ]
+                        after_estimate = estimate(reduced)
+                        before_digest = _digest(
+                            [str(item["text"]) for item in children]
                         )
-                    except asyncio.CancelledError:
-                        for child_task in child_tasks:
-                            child_task.cancel()
-                        await asyncio.gather(
-                            *child_tasks,
-                            return_exceptions=True,
-                        )
-                        raise
-                    reduction_errors = [
-                        result
-                        for result in (left, right)
-                        if isinstance(result, BaseException)
-                    ]
-                    for error in reduction_errors:
-                        if is_global_error(error):
-                            raise error
-                    if reduction_errors:
-                        raise reduction_errors[0]
-                    reduced = [_child_from_artifact(left), _child_from_artifact(right)]
-                    after_estimate = estimate(reduced)
-                    before_digest = _digest([str(item["text"]) for item in children])
-                    after_digest = _digest([str(item["text"]) for item in reduced])
-                    if after_estimate >= before_estimate or after_digest == before_digest:
-                        raise UsageError("聚合失败：递归压缩不收敛，输入未缩小")
-                    return await fit(reduced, final, depth + 1)
+                        after_digest = _digest([str(item["text"]) for item in reduced])
+                        if (
+                            after_estimate >= before_estimate
+                            or after_digest == before_digest
+                        ):
+                            raise UsageError("聚合失败：递归压缩不收敛，输入未缩小")
+                        return await fit(reduced, final, depth + 1)
 
                 return await fit(original, True)
 

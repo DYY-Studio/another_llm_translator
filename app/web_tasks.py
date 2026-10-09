@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import data_root
 from .config import LLM_STAGES, load_project_config, load_run_config
 from .diagnostics import Diagnostics
 from .errors import (
@@ -141,6 +142,11 @@ def _running_run(
         "previous": _endpoint_summary(old_config),
         "current": _endpoint_summary(current_config),
     }
+    if stage == "terminology":
+        result["include_summaries"] = bool(manifest.get("include_summaries", False))
+        result["include_draft_translation"] = bool(
+            manifest.get("include_draft_translation", False)
+        )
     if stage == TERMINOLOGY_DECISION_STAGE and "final_review" in manifest:
         result["final_review"] = manifest["final_review"]
         target_count = manifest.get("final_review_target_count")
@@ -156,20 +162,35 @@ def task_options(
     stage: str,
     *,
     include_summaries: bool = False,
+    include_draft_translation: bool = False,
+    aggregate_full_summaries: bool = False,
     prompt_language: str | None = None,
     final_review: bool = False,
     continuous_stages: Iterable[object] = (),
     apply_terminology_decision: bool = False,
 ) -> dict[str, Any]:
+    if include_draft_translation and stage not in {"terminology", CONTINUOUS_STAGE}:
+        raise UsageError("粗翻开关仅支持术语扫描")
     if final_review and stage not in {
         TERMINOLOGY_DECISION_STAGE,
         CONTINUOUS_STAGE,
     }:
         raise UsageError("final_review 只允许自动术语决策")
+    if aggregate_full_summaries and stage != CONTINUOUS_STAGE:
+        raise UsageError("完整聚合选项只允许连续运行")
     if stage == "continuous":
+        continuous_stages = tuple(continuous_stages)
+        terminology_options = task_options(
+            project, "terminology", include_summaries=include_summaries,
+            include_draft_translation=include_draft_translation, prompt_language=prompt_language,
+        ) if "terminology" in continuous_stages else None
         return inspect_continuous(
             project,
             continuous_stages,
+            include_draft_translation=include_draft_translation,
+            include_summaries=include_summaries,
+            aggregate_full_summaries=aggregate_full_summaries,
+            terminology_options=terminology_options,
             prompt_language=prompt_language,
             apply_terminology_decision=apply_terminology_decision,
             final_review=final_review,
@@ -339,8 +360,25 @@ def task_options(
         "running_run": _running_run(project, stage, config),
         "document_adapter_run_options": _document_adapter_run_option_summary(project),
     }
+    result["include_summaries"] = include_summaries
     if stage == "terminology" and include_summaries:
         participation = read_summary_participation(project)
+        running = result["running_run"]
+        if (
+            running
+            and running.get("include_summaries")
+            and bool(running.get("include_draft_translation"))
+            == include_draft_translation
+        ):
+            manifest = read_json(
+                project, project / "runs" / str(running["run_id"]) / "manifest.json"
+            )
+            participation = (
+                [{**item, "selected": True} for item in manifest["summary_selection"]]
+                if include_draft_translation
+                else manifest["summary_participation"]
+            )
+        result["summary_participation"] = participation
         selected_boundaries = sum(
             1 for item in participation if bool(item["selected"])
         )
@@ -354,6 +392,55 @@ def task_options(
             ("terminology", "fragment_summary")
             if selected_boundaries
             else ("terminology",),
+        )
+    if stage == "terminology" and include_summaries and not include_draft_translation:
+        from .stage_terminology import _summary_covered_segments
+        from .stage_runtime import (
+            _project_context,
+            _prompt_factory,
+            _document_prompt_requirement_helpers,
+        )
+        from .summary_provenance import digest
+
+        summary_ids = {
+            (str(item["file_id"]), str(item["part_id"]))
+            for item in participation if item["selected"]
+        }
+        summary_segments = [
+            item
+            for item in nonempty
+            if (str(item["file_id"]), str(item["part_id"])) in summary_ids
+        ]
+        covered: set[str] = set()
+        if summary_segments and result["summary_prompt_preflight"]["ok"]:
+            context, _, _, _ = _project_context(project, stage="fragment_summary")
+            language = str(result["summary_prompt_preflight"]["language"])
+            factory = _prompt_factory(project, "fragment_summary", language)
+            requirements, _ = _document_prompt_requirement_helpers(context, language)
+            covered = _summary_covered_segments(
+                project,
+                summary_segments,
+                prompt_digests=lambda items: {digest(factory(requirements(items)))},
+                model=str(config["llm"]["model"]),
+                target_language=str(config["project"]["target_language"]),
+            )
+        result["summary_progress"] = {
+            "completed": len(covered),
+            "total": len(summary_segments),
+        }
+    if include_draft_translation:
+        from .stage_terminology_draft import draft_scan_options
+
+        running = result["running_run"]
+        resume_id = (
+            str(running["run_id"])
+            if running
+            and running.get("include_draft_translation")
+            and bool(running.get("include_summaries")) == include_summaries
+            else None
+        )
+        result.update(
+            draft_scan_options(project, prompt_language, include_summaries, resume_id)
         )
     return result
 
@@ -522,6 +609,9 @@ class WebTask:
     _replace_draft: bool = field(default=False, repr=False)
     _acknowledge_manual_review: bool = field(default=False, repr=False)
     _include_summaries: bool = field(default=False, repr=False)
+    _include_draft_translation: bool = field(default=False, repr=False)
+    _aggregate_full_summaries: bool = field(default=False, repr=False)
+    draft_progress: dict[str, Any] | None = None
     _summary_selection: tuple[tuple[str, str], ...] = field(default_factory=tuple, repr=False)
     _continuous_stages: tuple[str, ...] = field(default_factory=tuple, repr=False)
     _continuous_run_actions: dict[str, str] = field(default_factory=dict, repr=False)
@@ -538,6 +628,9 @@ class WebTask:
             "steps": [dict(step) for step in self.steps],
             "final_review": self._final_review,
             "include_summaries": self._include_summaries,
+            "include_draft_translation": self._include_draft_translation,
+            "aggregate_full_summaries": self._aggregate_full_summaries,
+            "draft_progress": self.draft_progress,
             "summary_selection": [
                 {"file_id": file_id, "part_id": part_id}
                 for file_id, part_id in self._summary_selection
@@ -552,9 +645,7 @@ class WebTask:
             "failed_segments": self.failed_segments,
             "pending_segments": max(
                 0,
-                self.total_segments
-                - self.completed_segments
-                - self.failed_segments,
+                self.total_segments - self.completed_segments - self.failed_segments,
             ),
             "total_segments": self.total_segments,
             "summary_selection_progress": (
@@ -791,6 +882,8 @@ class WebTaskManager:
         ensure_unique: bool,
         prompt_language: str | None,
         include_summaries: bool = False,
+        include_draft_translation: bool = False,
+        aggregate_full_summaries: bool = False,
         summary_selection: tuple[tuple[str, str], ...] = (),
         final_review: bool = False,
         continuous_stages: Iterable[object] = (),
@@ -808,9 +901,11 @@ class WebTaskManager:
             CONTINUOUS_STAGE,
         }:
             raise UsageError(f"未知后台阶段：{stage}")
-        if include_summaries and stage != "terminology":
+        if include_draft_translation and stage not in {"terminology", CONTINUOUS_STAGE}:
+            raise UsageError("粗翻开关仅支持术语扫描")
+        if include_summaries and stage not in {"terminology", CONTINUOUS_STAGE}:
             raise UsageError(
-                "include_summaries 只允许术语阶段的摘要子页面入口",
+                "include_summaries 只允许术语阶段",
                 reason="include_summaries_outside_terminology",
             )
         if include_summaries and any(
@@ -825,6 +920,8 @@ class WebTaskManager:
             raise UsageError(
                 "include_summaries 要求完整项目范围，不支持部分 Scope"
             )
+        if aggregate_full_summaries and stage != CONTINUOUS_STAGE:
+            raise UsageError("完整聚合选项只允许连续运行")
         force = scope.force
         if force and reuse_mixed_fingerprints:
             raise UsageError("force 与 reuse_mixed_fingerprints 不能同时使用")
@@ -863,7 +960,7 @@ class WebTaskManager:
         continuous_steps: tuple[dict[str, Any], ...] = ()
         inspection: dict[str, Any] | None = None
         if stage == CONTINUOUS_STAGE:
-            if include_summaries or any(
+            if any(
                 value is not None
                 for value in (
                     scope.from_file,
@@ -875,9 +972,17 @@ class WebTaskManager:
                 raise UsageError("连续运行只支持整个项目范围")
             if run_action is not None:
                 raise UsageError("连续运行必须通过 run_actions 指定各阶段动作")
+            terminology_options = task_options(
+                project, "terminology", include_summaries=include_summaries,
+                include_draft_translation=include_draft_translation, prompt_language=prompt_language,
+            ) if "terminology" in continuous_stages else None
             inspection = inspect_continuous(
                 project,
                 continuous_stages,
+                include_draft_translation=include_draft_translation,
+                include_summaries=include_summaries,
+                aggregate_full_summaries=aggregate_full_summaries,
+                terminology_options=terminology_options,
                 prompt_language=prompt_language,
                 force=force,
                 reuse_mixed_fingerprints=reuse_mixed_fingerprints,
@@ -886,6 +991,7 @@ class WebTaskManager:
                 final_review=final_review,
             )
             require_continuous_ready(inspection)
+            summary_selection = tuple((item["file_id"], item["part_id"]) for item in inspection["summary_selection"])
             continuous_snapshot = inspection["snapshot"]
             continuous_steps = tuple(
                 {
@@ -978,7 +1084,25 @@ class WebTaskManager:
             elif run_action == "decline" and not force:
                 raise UsageError("结束自动决策 Run 时必须同时指定 force")
         elif stage != "run-all":
-            options = task_options(project, stage)
+            options = (
+                task_options(
+                    project,
+                    stage,
+                    include_draft_translation=True,
+                    include_summaries=include_summaries,
+                    prompt_language=prompt_language,
+                )
+                if include_draft_translation
+                else task_options(project, stage)
+            )
+            if (
+                include_draft_translation
+                and not options["draft_prompt_preflight"]["ok"]
+            ):
+                raise UsageError(
+                    "术语粗翻缺少必要 Prompt："
+                    + ", ".join(options["draft_prompt_preflight"]["missing"])
+                )
             options_selected_count = int(options["selected"])
             selection = _selection_snapshot(
                 project,
@@ -1015,6 +1139,18 @@ class WebTaskManager:
                     raise UsageError(f"{stage} 没有可续用的 running Run")
                 if force or reuse_mixed_fingerprints:
                     raise UsageError("续用 Run 时不能同时指定 force 或复用结果")
+                if (
+                    stage == "terminology"
+                    and bool(running_run.get("include_draft_translation", False))
+                    != include_draft_translation
+                ):
+                    raise UsageError("续用 Run 必须保持原有粗翻选项")
+                if (
+                    stage == "terminology"
+                    and bool(running_run.get("include_summaries", False))
+                    != include_summaries
+                ):
+                    raise UsageError("续用 Run 必须保持原有概括选项")
             else:
                 if running_run is not None and run_action != "decline":
                     raise UsageError(
@@ -1087,8 +1223,29 @@ class WebTaskManager:
         else:
             fingerprints = ((stage, _stage_fingerprint_snapshot(project, stage)),)
             decision_inputs = None
+            if include_draft_translation:
+                from .stage_terminology_draft import (
+                    draft_run_context,
+                    draft_translation_fingerprint,
+                )
+
+                draft_config, _, _, _ = draft_run_context(
+                    project, include_summaries=include_summaries
+                )
+                library = load_terms(project)
+                fingerprints += (
+                    (
+                        "draft_translation",
+                        draft_translation_fingerprint(
+                            project,
+                            draft_config,
+                            int(library["terms_revision"]) if library else None,
+                        ),
+                    ),
+                )
+                decision_inputs = _stable_digest(options.get("draft_progress"))
         relevant_stages = (
-            tuple(inspection["stages"])
+            tuple(inspection["execution_stages"])
             if stage == CONTINUOUS_STAGE
             else LLM_STAGES
             if stage == "run-all"
@@ -1142,6 +1299,8 @@ class WebTaskManager:
                     replace_draft=state._replace_draft,
                     acknowledge_manual_review=state._acknowledge_manual_review,
                     include_summaries=state._include_summaries,
+                    include_draft_translation=state._include_draft_translation,
+                    aggregate_full_summaries=state._aggregate_full_summaries,
                     summary_selection=state._summary_selection,
                 )
             )
@@ -1177,6 +1336,8 @@ class WebTaskManager:
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
+        include_draft_translation: bool = False,
+        aggregate_full_summaries: bool = False,
         summary_selection: Iterable[dict[str, str]] = (),
         final_review: bool = False,
         continuous_stages: Iterable[object] = (),
@@ -1186,6 +1347,9 @@ class WebTaskManager:
         async with self.guard:
             if self._shutting_down:
                 raise UsageError("任务管理器正在关闭")
+            pending = data_root.pending_path()
+            if pending.exists() or pending.is_symlink():
+                raise UsageError("数据目录迁移待执行，不能启动新任务")
             if stage == CONTINUOUS_STAGE and (
                 replace_draft or acknowledge_manual_review
             ):
@@ -1204,6 +1368,8 @@ class WebTaskManager:
                 ensure_unique=True,
                 prompt_language=prompt_language,
                 include_summaries=include_summaries,
+                include_draft_translation=include_draft_translation,
+                aggregate_full_summaries=aggregate_full_summaries,
                 summary_selection=tuple(
                     (str(item["file_id"]), str(item["part_id"]))
                     for item in summary_selection
@@ -1232,6 +1398,8 @@ class WebTaskManager:
             state._replace_draft = replace_draft
             state._acknowledge_manual_review = acknowledge_manual_review
             state._include_summaries = include_summaries
+            state._include_draft_translation = include_draft_translation
+            state._aggregate_full_summaries = aggregate_full_summaries
             state._summary_selection = decision.summary_selection
             state._continuous_stages = tuple(
                 str(value) for value in continuous_stages
@@ -1256,6 +1424,8 @@ class WebTaskManager:
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
+        include_draft_translation: bool = False,
+        aggregate_full_summaries: bool = False,
         summary_selection: tuple[tuple[str, str], ...] = (),
         final_review: bool = False,
         continuous_stages: tuple[str, ...] = (),
@@ -1272,13 +1442,17 @@ class WebTaskManager:
             state.failed_segments = failed
             state.total_segments = total
 
+        def draft_progress(value: dict[str, Any]) -> None:
+            state.draft_progress = value
+
         def boundary_progress(completed: int, failed: int, total: int) -> None:
             state.summary_selection_counts = (completed, failed, total)
 
         def continuous_stage(
             stage: str, status: str, step: Mapping[str, Any]
         ) -> None:
-            state.current_stage = stage
+            if status != "skipped":
+                state.current_stage = stage
             for index, current in enumerate(state.steps):
                 if current.get("stage") == stage:
                     state.steps[index] = dict(step)
@@ -1321,10 +1495,20 @@ class WebTaskManager:
                 },
             )
 
-        def usage_changed(current: dict[str, Any] | None) -> None:
+        def usage_changed(
+            current: dict[str, Any] | None,
+            invocation_usage: dict[str, Any] | None = None,
+        ) -> None:
             state.usage = _task_usage(usage_base, current, resuming=resuming)
             if self.diagnostics is not None:
-                self.diagnostics.set_usage(state.usage)
+                self.diagnostics.set_usage(
+                    state.usage,
+                    invocation_usage=(
+                        invocation_usage
+                        if invocation_usage is not None
+                        else current or unavailable_usage()
+                    ),
+                )
 
         try:
             diagnostics_context = (
@@ -1345,6 +1529,8 @@ class WebTaskManager:
                     ensure_unique=False,
                     prompt_language=prompt_language,
                     include_summaries=include_summaries,
+                    include_draft_translation=include_draft_translation,
+                    aggregate_full_summaries=aggregate_full_summaries,
                     summary_selection=summary_selection,
                     final_review=final_review,
                     continuous_stages=continuous_stages,
@@ -1360,7 +1546,10 @@ class WebTaskManager:
                     tuple[str, str], SlidingWindowLimiter | KeyPool
                 ] = {}
                 if state.stage == CONTINUOUS_STAGE:
-                    limiter_stages = state._continuous_stages
+                    limiter_stages = tuple(
+                        step["stage"] for step in state.steps
+                        if not (step["stage"] == "translation" and include_draft_translation)
+                    )
                 elif state.stage == "run-all":
                     limiter_stages = LLM_STAGES
                 else:
@@ -1421,6 +1610,11 @@ class WebTaskManager:
                         apply_terminology_decision=apply_terminology_decision,
                         final_review=final_review,
                         prompt_language=prompt_language,
+                        include_draft_translation=include_draft_translation,
+                        include_summaries=include_summaries,
+                        aggregate_full_summaries=aggregate_full_summaries,
+                        summary_selection=summary_selection,
+                        on_draft_progress=draft_progress,
                         planned_steps=state.steps,
                         on_stage=continuous_stage,
                         on_progress=continuous_progress,
@@ -1461,6 +1655,8 @@ class WebTaskManager:
                         on_usage=usage_changed,
                         limiter=next(iter(shared_limiters.values())),
                         include_summaries=include_summaries,
+                        include_draft_translation=include_draft_translation,
+                        on_draft_progress=draft_progress,
                     )
                 elif state.stage == "translation":
                     summary = await run_translation(
@@ -1501,7 +1697,8 @@ class WebTaskManager:
             if state.stage == CONTINUOUS_STAGE:
                 state.steps = [dict(step) for step in summary.get("steps", [])]
                 state.current_stage = (
-                    str(state.steps[-1]["stage"]) if state.steps else None
+                    next((str(step["stage"]) for step in reversed(state.steps)
+                          if step["status"] != "skipped"), None)
                 )
                 state.completed_segments = sum(
                     int(step.get("completed", 0)) for step in state.steps

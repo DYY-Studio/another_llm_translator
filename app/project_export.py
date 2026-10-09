@@ -9,15 +9,13 @@ from .documents import (
     publish_document_exports,
 )
 from .errors import ExportError, UsageError
-from .execution import (
-    classify_stage,
-    load_stage_history,
-)
+from .config import load_project_config
+from .project import load_source_files, load_segments
 from .logging_utils import get_logger
 from .plugins import get_document_adapter
-from .sqlite_storage import read_json
+from .sqlite_storage import read_json, latest_stage_states, stage_result_lineage, resolve_stage_result_texts
 from .stage_runtime import (
-    _project_context,
+    document_prompt_context,
     _require_nonempty_segments,
     _restore_leading_whitespace,
 )
@@ -37,7 +35,9 @@ def export_project(
     if output_format not in {"original", "txt"}:
         raise UsageError(f"不支持的导出格式：{output_format}")
     logger = get_logger("export")
-    config, _, files, segments = _project_context(project)
+    config = load_project_config(project)
+    files = load_source_files(project)
+    segments = load_segments(project)
     if file_ids is not None:
         if not file_ids:
             raise UsageError("导出文件范围不能为空")
@@ -58,39 +58,34 @@ def export_project(
             for item in segments
             if str(item["file_id"]) in selected_file_ids
         ]
+    state_records = {}
+    for file_record in files:
+        state_path = file_record.get("document_adapter_state")
+        state_record = read_json(project, project / str(state_path)) if state_path is not None else None
+        document_prompt_context(project, file_record, state_record=state_record)
+        state_records[str(file_record["file_id"])] = state_record
     _require_nonempty_segments(segments)
     stage_name = {
         "translated": "translation",
         "proofread": "proofreading_applied",
         "polished": "polishing_applied",
     }[export_stage]
-    histories = {
-        stage: load_stage_history(project, stage)
-        for stage in (
-            "translation",
-            "proofreading",
-            "proofreading_applied",
-            "polishing",
-            "polishing_applied",
-        )
-    }
-    primary = classify_stage(
-        [],
-        histories[stage_name],
-        force=False,
-    ).latest_completed
-    translation = classify_stage(
-        [], histories["translation"], force=False
-    ).latest_completed
-    proofread = classify_stage(
-        [], histories["proofreading_applied"], force=False
-    ).latest_completed
-    records_by_id = {
-        str(record["record_id"]): record
-        for history in histories.values()
-        for record in history
-        if record.get("record_id")
-    }
+    selected_ids = [str(item["segment_id"]) for item in segments if not item["is_empty"]]
+    def current(stage: str, ids: list[str]) -> dict[str, dict[str, Any]]:
+        return {key: state["completed"] for key, state in latest_stage_states(project, stage, ids).items()
+                if state["completed"] is not None}
+    primary = current(stage_name, selected_ids)
+    missing_ids = [key for key in selected_ids if key not in primary] if allow_missing else []
+    proofread = current("proofreading_applied", missing_ids) if export_stage == "polished" else {}
+    translation_ids = [key for key in missing_ids if key not in proofread]
+    translation = current("translation", translation_ids) if export_stage != "translated" else {}
+    records_by_id = stage_result_lineage(project, [*primary.values(), *proofread.values(), *translation.values()])
+    records_by_id.update((str(record["record_id"]), record) for record in
+        resolve_stage_result_texts(project, [*primary.values(), *proofread.values(), *translation.values()],
+                                   records_by_id=records_by_id))
+    primary = {key: records_by_id[value["record_id"]] for key, value in primary.items()}
+    proofread = {key: records_by_id[value["record_id"]] for key, value in proofread.items()}
+    translation = {key: records_by_id[value["record_id"]] for key, value in translation.items()}
 
     def result_lineage(record: dict[str, Any]) -> list[dict[str, Any]]:
         lineage: list[dict[str, Any]] = []
@@ -203,7 +198,7 @@ def export_project(
                 )
             state_path = file_record.get("document_adapter_state")
             if state_path is not None:
-                state_record = read_json(project, project / str(state_path))
+                state_record = state_records[str(file_record["file_id"])]
                 if (
                     not isinstance(state_record, dict)
                     or state_record.get("adapter_id") != adapter_id

@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .execution import segment_model_source
@@ -360,3 +361,146 @@ def assess_full_summary(
     if leaf_ids != active_fragment_ids:
         return _expired(DEPENDENCY_CHANGED)
     return SummaryExpiryAssessment(expired=False)
+
+
+def write_fragment_summary(
+    project: Path,
+    *,
+    project_id: str,
+    config: dict[str, Any],
+    items: list[dict[str, Any]],
+    values: list[dict[str, Any]],
+    run_id: str,
+    request_id: str,
+    prompt_digest: str,
+    fragment_prompt_digest: str,
+    segments: list[dict[str, Any]],
+    warnings: list[str],
+    status: str,
+    text: str | None = None,
+    refs: list[str] | None = None,
+    error_class: str | None = None,
+    error_message: str | None = None,
+) -> dict[str, Any]:
+    from .errors import StorageError
+    from .sqlite_storage import (
+        record_header,
+        write_content_summary,
+        read_content_summaries,
+        publish_content_summary_fulls,
+    )
+
+    boundaries = {(str(item["file_id"]), str(item["part_id"])) for item in items}
+    if len(boundaries) != 1:
+        raise StorageError("内容概括请求不能跨越 file_id/part_id 边界")
+    file_id, part_id = next(iter(boundaries))
+    source_digest = digest(values)
+    input_digest = digest(
+        [
+            {"segment_id": value["segment_id"], "model_text": value["model_text"]}
+            for value in values
+        ]
+    )
+    source_range = {
+        "file_id": file_id,
+        "part_id": part_id,
+        "segment_ids": list(dict.fromkeys(value["segment_id"] for value in values)),
+        "segments": values,
+    }
+    summary_id = (
+        "SUMMARY-FRAGMENT-"
+        + digest(
+            [
+                file_id,
+                part_id,
+                source_digest,
+                input_digest,
+                prompt_digest,
+                config["llm"]["model"],
+                config["project"]["target_language"],
+                str(run_id),
+            ]
+        )[7:31].upper()
+    )
+    record = record_header(
+        "content_summary",
+        project_id,
+        record_id=summary_id,
+        kind="fragment",
+        file_id=file_id,
+        part_id=part_id,
+        status=status,
+        text=text,
+        source_range=source_range,
+        source_digest=source_digest,
+        input_digest=input_digest,
+        prompt_digest=prompt_digest,
+        fragment_prompt_digest=fragment_prompt_digest,
+        model=str(config["llm"]["model"]),
+        target_language=str(config["project"]["target_language"]),
+        run_id=run_id,
+        refs=list(refs or []),
+        request_id=request_id,
+        error_class=error_class,
+        error_message=error_message,
+    )
+    write_content_summary(project, record)
+    if status == "completed":
+        current_fragments = [
+            item
+            for item in read_content_summaries(
+                project,
+                file_id=file_id,
+                part_id=part_id,
+                kind="fragment",
+                status="completed",
+            )
+            if not bool(item.get("source_changed", False))
+        ]
+        current_segment_ids = {
+            str(item["segment_id"])
+            for item in segments
+            if not item["is_empty"]
+            and str(item["file_id"]) == file_id
+            and str(item["part_id"]) == part_id
+        }
+        source_segment_ids = list(
+            dict.fromkeys(
+                str(value.get("original_segment_id") or value.get("segment_id"))
+                for value in values
+                if value.get("original_segment_id") or value.get("segment_id")
+            )
+        )
+        if (
+            len(current_fragments) == 1
+            and current_fragments[0].get("record_id") == record["record_id"]
+            and set(source_segment_ids) == current_segment_ids
+        ):
+            provenance, input_digest = build_provenance("adopted_fragment", [record])
+            full_record = {
+                **record,
+                "record_id": (
+                    "SUMMARY-FULL-"
+                    + digest(
+                        [
+                            file_id,
+                            part_id,
+                            record["record_id"],
+                            record.get("text"),
+                        ]
+                    )[7:31].upper()
+                ),
+                "kind": "full",
+                "refs": source_segment_ids,
+                "input_digest": input_digest,
+                "provenance": provenance,
+            }
+            cleanup_report = publish_content_summary_fulls(project, [full_record])
+            for skipped in cleanup_report["skipped"]:
+                warning = (
+                    "内容概括历史清理已跳过："
+                    f"{skipped['file_id']}/{skipped['part_id']} 的 provenance 无法验证"
+                )
+                if warning not in warnings:
+                    warnings.append(warning)
+    return record

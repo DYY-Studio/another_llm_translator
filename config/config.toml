@@ -116,6 +116,15 @@ exhausted_mode = "fail"
 http_max_attempts = 6
 # 初始响应之后允许进行的格式修正请求轮数；设为 0 表示不修正格式。
 format_max_attempts = 2
+# 空正文独立于格式修正：retry 原样重试，split 拆分重试；次数不含首次请求。
+# split 的次数为每条拆分路径的最大层数，子请求继承父级已用层数；0 表示不重试。
+empty_truncated_mode = "split"
+empty_truncated_max_attempts = 2
+empty_unknown_mode = "retry"
+empty_unknown_max_attempts = 1
+# 翻译、校对和润色中未解决 ID 的重试范围：unresolved 沿用现有策略；
+# chunk 丢弃本次部分结果并重试整个请求 Chunk。
+unresolved_retry_scope = "unresolved"
 # HTTP 重试指数退避的初始等待时间（秒）。
 base_delay_seconds = 2.0
 # HTTP 重试退避等待时间的上限（秒），不得小于 base_delay_seconds。

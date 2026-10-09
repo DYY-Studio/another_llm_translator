@@ -123,7 +123,9 @@ export function SegmentWorkspace({
   onJumpConsumed?: () => void;
 }) {
   const statusLabels: Record<string, string> = Object.fromEntries(
-    ["all", "pending", "completed", "warning", "missing-base", "outdated", "accepted", "suggested", "applied", "error"]
+    (stage === "translation"
+      ? ["all", "pending", "completed", "warning", "error"]
+      : ["all", "pending", "missing-base", "outdated", "accepted", "suggested", "applied", "error"])
       .map((key) => [key, translate(`status.${key}`, language)]),
   );
   const selection = useClassicSelection();
@@ -650,7 +652,7 @@ export function SegmentWorkspace({
                 >
                   <span className={`status-dot ${itemStatus}`} />
                   <span className="segment-id">{item.segment_id.replace("F0001-S", "")}</span>
-                  <span className="preview"><strong>{item.source}</strong><small>{item.format_count ? translate("workspace.formatRanges", language, { count: item.format_count }) : ""}{preview || translate("workspace.noResultYet", language)}</small></span>
+                  <span className="preview"><strong>{item.source}</strong><small>{preview || translate("workspace.noResultYet", language)}</small></span>
                 </button>
               );
             })}
@@ -663,11 +665,12 @@ export function SegmentWorkspace({
       <section className="editor-pane">
         {!selected ? <div className="empty">{translate("workspace.noEditable", language)}</div> : (
           <>
-            <h2>{translate("workspace.source", language)}</h2>
+            <h2 className="source-heading">{translate("workspace.source", language)}{selected.format_count ? <small>{translate("workspace.formatRanges", language, { count: selected.format_count })}</small> : null}</h2>
             <div className="source-box">{selected.source}</div>
             {selected.model_source && selected.model_source !== selected.source && (
               <details className="source-model-preview"><summary>{translate("workspace.modelText", language)}</summary><div className="source-box">{selected.model_source}</div></details>
             )}
+            {stage === "translation" && selected.translation?.generation_origin === "terminology_draft" && <small>{translate("workspace.draftOrigin", language)}</small>}
             {review?.outdated && <div className="warning-banner">{translate("workspace.baseChanged", language)}</div>}
             <div className={stage === "translation" ? "comparison single" : "comparison"}>
               {stage !== "translation" && (

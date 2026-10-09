@@ -99,6 +99,20 @@ class ContextLengthError(ExternalError):
         self.segment_ids = segment_ids
 
 
+class EmptyResponseError(ExternalError):
+    code = "empty_response"
+
+
+class EmptyResponseSplitError(ContextLengthError):
+    """An empty completion requires a smaller request, under its own budget."""
+
+    code = "empty_response"
+
+    def __init__(self, message: str, *, request_id: str, kind: str) -> None:
+        super().__init__(message, request_id=request_id)
+        self.kind = kind
+
+
 class FatalExternalError(ExternalError):
     """Authentication or endpoint failure that stops the whole stage."""
 

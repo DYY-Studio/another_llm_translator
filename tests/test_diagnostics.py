@@ -19,6 +19,38 @@ from app.web import create_app
 from tests.test_execution import config
 
 
+@pytest.mark.parametrize("diagnostics_type", [Diagnostics, DiagnosticsHub])
+def test_throughput_uses_current_invocation_usage(
+    tmp_path: Path, diagnostics_type: type[Diagnostics]
+) -> None:
+    diagnostics = diagnostics_type(tmp_path / "logs" / "app.log")
+    total = {
+        "input_tokens": 1212, "output_tokens": 505, "total_tokens": 1717,
+        "available": True, "partial": False,
+    }
+    with diagnostics.activate("project", "translation", task_id="T1"):
+        diagnostics.set_usage(total, invocation_usage={
+            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+            "available": False, "partial": False,
+        })
+        metrics = diagnostics.snapshot()["metrics"]
+        assert metrics["input_tokens"] == 1212
+        assert metrics["throughput_tokens_per_second"] is None
+        diagnostics.set_usage(total, invocation_usage={
+            "input_tokens": 12, "output_tokens": 5, "total_tokens": 17,
+            "available": False, "partial": True,
+        })
+
+    session = diagnostics.sessions["T1"] if isinstance(diagnostics, DiagnosticsHub) else diagnostics
+    session._elapsed_seconds = 2
+    metrics = diagnostics.snapshot()["metrics"]
+    assert metrics["input_tokens"] == 1212
+    assert metrics["output_tokens"] == 505
+    assert metrics["throughput_input_tokens_per_second"] == 6
+    assert metrics["throughput_output_tokens_per_second"] == 2.5
+    assert metrics["throughput_tokens_per_second"] == 8.5
+
+
 def test_diagnostics_keeps_bounded_global_logs_and_filters(tmp_path: Path) -> None:
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
     logger = get_logger("translation")

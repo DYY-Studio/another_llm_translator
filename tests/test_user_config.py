@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import keyring
@@ -21,7 +22,73 @@ def test_user_root_honors_environment_override(
 ) -> None:
     override = tmp_path / "custom-user-root"
     monkeypatch.setenv("ANOTHER_LLM_USER_ROOT", str(override))
+    monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
+    (tmp_path / "another-llm-translator-location.json").write_text(
+        '{"version": 1, "active_root": "/locator-root"}', encoding="utf-8"
+    )
     assert user_root() == override
+
+
+def test_user_root_uses_locator_before_platform_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
+    monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
+    custom = tmp_path / "external" / "another-llm-translator"
+    custom.mkdir(parents=True)
+    (tmp_path / "another-llm-translator-location.json").write_text(
+        '{"version": 1, "active_root": "' + str(custom) + '"}', encoding="utf-8"
+    )
+
+    assert user_root() == custom
+
+
+def test_user_root_rejects_locator_with_wrong_directory_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
+    monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
+    custom = tmp_path / "external" / "translator-data"
+    custom.mkdir(parents=True)
+    (tmp_path / "another-llm-translator-location.json").write_text(
+        json.dumps({"version": 1, "active_root": str(custom)}), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="locator"):
+        user_root()
+
+
+def test_user_root_rejects_locator_root_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
+    monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
+    actual = tmp_path / "actual-root"
+    actual.mkdir()
+    custom = tmp_path / "another-llm-translator"
+    try:
+        custom.symlink_to(actual, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+    (tmp_path / "another-llm-translator-location.json").write_text(
+        json.dumps({"version": 1, "active_root": str(custom)}), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="locator"):
+        user_root()
+
+
+def test_user_root_fails_on_invalid_locator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
+    monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
+    (tmp_path / "another-llm-translator-location.json").write_text(
+        "{", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="locator"):
+        user_root()
 
 
 def test_user_root_does_not_scan_or_move_legacy_default_root(

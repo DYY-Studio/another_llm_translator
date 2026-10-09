@@ -167,6 +167,34 @@ test("keeps a currently executing step skipped when the service reports it", () 
   );
 });
 
+for (const status of ["cancelled", "failed"]) {
+  for (const currentStage of ["terminology", "content_summary"]) {
+    test(`marks future steps unexecuted after ${status} during ${currentStage}`, () => {
+      const steps = [
+        { stage: "terminology", status: currentStage === "terminology" ? status : "completed" },
+        { stage: "content_summary", status: currentStage === "content_summary" ? status : "ready" },
+        { stage: "terminology_decision", status: "skipped" },
+        { stage: "translation", status: "skipped" },
+        { stage: "proofreading", status: "queued" },
+      ];
+      assert.deepEqual(
+        steps.map((step) => displayableTaskStepStatus(step, steps, { current_stage: currentStage, status })),
+        currentStage === "terminology"
+          ? [status, "not_executed", "not_executed", "not_executed", "not_executed"]
+          : ["completed", status, "not_executed", "not_executed", "not_executed"],
+      );
+    });
+  }
+}
+
+test("preserves an actual skip before a later cancellation", () => {
+  const steps = [
+    { stage: "terminology_decision", status: "skipped" },
+    { stage: "proofreading", status: "cancelled" },
+  ];
+  assert.equal(displayableTaskStepStatus(steps[0], steps, { current_stage: "proofreading", status: "cancelled" }), "skipped");
+});
+
 test("preserves terminal continuous step statuses", () => {
   const steps = [
     { stage: "terminology", status: "completed" },
@@ -250,4 +278,8 @@ test("removes only the task captured as missing when terminal fetch fails", () =
   );
   assert.equal(merged.one, undefined);
   assert.equal(merged.two.task_id, "T2");
+});
+
+test("draft scan translation failures open the translation results", () => {
+  assert.equal(displayableFailureStage({ stage: "terminology", draft_progress: { translation: { failed: 1 } } }), "translation");
 });

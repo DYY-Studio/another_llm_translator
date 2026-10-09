@@ -1274,7 +1274,7 @@ def test_web_store_translation_appends_results_and_exports_latest(tmp_path: Path
 
     history = load_stage_history(project, "translation")
     latest = latest_completed_by_segment(history)["F0001-S000001"]
-    assert len(history) == 2
+    assert len(history) == 1
     assert first["record_id"] != second["record_id"]
     assert latest["text"] == "第二版"
     assert latest["origin"] == "web"
@@ -1422,7 +1422,8 @@ def test_web_store_saves_and_applies_review_results_with_current_lineage(
     applied = latest_completed_by_segment(
         load_stage_history(project, "proofreading_applied")
     )["F0001-S000001"]
-    assert applied["text"] == "译文二"
+    assert "text" not in applied
+    assert store.segment_detail("F0001-S000001")["reviews"]["proofreading"]["applied"]["text"] == "译文二"
     current = store.overview()["segments"][0]["reviews"]["proofreading"]
     assert current["outdated"] is False
     assert current["applied_current"] is True
@@ -1675,3 +1676,19 @@ def test_web_store_keeps_case_distinct_aliases_when_case_insensitive_off(
     assert added["terms"][0]["aliases"] == ["alice"]
     spec = TermNormalization("NFKC", False)
     assert [item["source"] for item in match_terms("alice arrived", load_terms(project), 10, spec)] == ["Alice"]
+
+
+def test_detail_reuses_adapter_context_only_within_operation(tmp_path: Path, monkeypatch) -> None:
+    import app.web_store as module
+    project = create_web_store_project(tmp_path, "one\ntwo")
+    store = WebStore(project)
+    calls = []
+    original = module._read_adapter_context
+    def read(*args):
+        calls.append(args[1]["file_id"])
+        return original(*args)
+    monkeypatch.setattr(module, "_read_adapter_context", read)
+    store.segment_detail("F0001-S000001")
+    assert len(calls) == 1
+    store.segment_detail("F0001-S000001")
+    assert len(calls) == 2

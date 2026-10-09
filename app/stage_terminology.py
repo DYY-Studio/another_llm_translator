@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from .config import load_project_config
 
 from .errors import (
     ContextLengthError,
+    EmptyResponseSplitError,
     ExternalError,
     FatalExternalError,
     StorageError,
@@ -34,15 +36,16 @@ from .llm_client import SlidingWindowLimiter
 from .llm_keys import KeyPool
 from .llm_response import (
     TerminologyResponseMode,
+    _validate_terminology_record,
     parse_jsonl_document,
     parse_terminology_response,
+    response_record_types,
 )
 from .logging_utils import get_logger
 from .sqlite_storage import (
     append_jsonl,
     atomic_write_json,
     mark_content_summary_fragments_stale,
-    publish_content_summary_fulls,
     read_content_summaries,
     read_json,
     read_jsonl,
@@ -75,7 +78,7 @@ from .stage_runtime import (
     _split_source_once,
     prompt_middle_digests,
 )
-from .summary_provenance import build_provenance
+from .summary_provenance import write_fragment_summary
 from .term_library import _merge_and_publish_terms, load_terms
 
 _SUMMARY_MODE_KEY = "_terminology_response_mode"
@@ -206,13 +209,17 @@ def _summary_covered_segments(
         if current is None:
             continue
         ordered = sorted(values.values(), key=lambda value: int(value["slice_index"]))
-        if [int(value["slice_index"]) for value in ordered] != list(
-            range(len(ordered))
-        ):
-            continue
-        if "".join(str(value["source"]) for value in ordered) != str(current["source"]):
-            continue
-        covered.add(segment_id)
+        source = str(current["source"])
+        covered_positions = {0}
+        for value in ordered:
+            piece = str(value["source"])
+            covered_positions |= {
+                position + len(piece)
+                for position in covered_positions
+                if source.startswith(piece, position)
+            }
+        if len(source) in covered_positions:
+            covered.add(segment_id)
     return covered
 
 
@@ -223,33 +230,17 @@ def _validate_term_items(
     terms: list[dict[str, Any]] = []
     errors = list(document.errors)
     for index, item in enumerate(document.records, start=1):
-        item_errors: list[str] = []
-        for key in ("source", "category"):
-            if not isinstance(item.get(key), str) or not item[key].strip():
-                item_errors.append(f"术语记录 {index} 缺少有效 {key}")
-        description = item.get("description")
-        if description is not None and not isinstance(description, str):
-            item_errors.append(f"术语记录 {index} 的 description 类型错误")
-        preferred = item.get("preferred_translation")
-        if preferred is not None and not isinstance(preferred, str):
-            item_errors.append(f"术语记录 {index} 的 preferred_translation 类型错误")
-        aliases = item.get("aliases", [])
-        if not isinstance(aliases, list) or not all(
-            isinstance(alias, str) for alias in aliases
-        ):
-            item_errors.append(f"术语记录 {index} 的 aliases 类型错误")
-        if item_errors:
-            errors.extend(item_errors)
-            continue
-        terms.append(
-            {
-                "source": item["source"].strip(),
-                "category": item["category"].strip(),
-                "description": description.strip() if description else None,
-                "preferred_translation": preferred.strip() if preferred else None,
-                "aliases": [alias.strip() for alias in aliases if alias.strip()],
-            }
-        )
+        error, term = _validate_terminology_record(item)
+        if error:
+            field = error.removeprefix("invalid_")
+            detail = (
+                f"缺少有效 {field}"
+                if field in {"source", "category"}
+                else f"的 {field} 类型错误"
+            )
+            errors.append(f"术语记录 {index} {detail}")
+        elif term is not None:
+            terms.append({key: value for key, value in term.items() if key != "type"})
     return terms, errors, document.complete and not errors
 
 
@@ -288,7 +279,49 @@ async def run_terminology(
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
     include_summaries: bool = False,
+    include_draft_translation: bool = False,
+    on_draft_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    if resume_run_id is not None:
+        manifest = read_json(
+            project, project / "runs" / resume_run_id / "manifest.json"
+        )
+        if (
+            bool(manifest.get("include_draft_translation", False))
+            != include_draft_translation
+        ):
+            raise UsageError("续用 Run 必须保持原有粗翻选项")
+    if include_draft_translation and include_summaries:
+        if any(
+            value is not None
+            for value in (
+                scope.from_file,
+                scope.only_file,
+                scope.only_segment,
+                scope.segment_ids,
+            )
+        ):
+            raise UsageError("同时生成概括要求完整项目范围")
+        summary_config = load_project_config(project, stage="terminology")
+        if "terminology" in summary_config["chunking"]["cross_boundary_batching"]:
+            raise UsageError("同时生成概括要求关闭术语跨边界合并")
+    if include_draft_translation:
+        from .stage_translation import run_translation
+
+        return await run_translation(
+            project,
+            scope,
+            http_client=http_client,
+            limiter=limiter,
+            resume_run_id=resume_run_id,
+            reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+            prompt_language=prompt_language,
+            on_progress=on_progress,
+            on_usage=on_usage,
+            _draft_terminology=True,
+            _include_summaries=include_summaries,
+            _on_draft_progress=on_draft_progress,
+        )
     logger = get_logger("terminology")
     preparation_started_at = time.perf_counter()
     scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
@@ -381,6 +414,7 @@ async def run_terminology(
                 response_mode=(
                     None if mode is TerminologyResponseMode.TERMS_ONLY else mode
                 ),
+                require_term_declaration=include_summaries,
             )
             mode_prompt_factories[mode] = factory
         return factory
@@ -966,13 +1000,7 @@ async def run_terminology(
         source_digest = _digest(source)
         model_text = segment_model_source(item)
         model_text_digest = _digest(model_text)
-        expected = original_parts.get(stable_id, [request_segment_id])
-        try:
-            slice_index = expected.index(request_segment_id)
-        except ValueError:
-            raise StorageError(
-                f"概括请求切片不在稳定 Segment 范围内：{request_segment_id}"
-            ) from None
+        slice_index = int(item.get("_source_offset", 0))
         return {
             "segment_id": stable_id,
             "original_segment_id": stable_id,
@@ -1126,6 +1154,17 @@ async def run_terminology(
         "term": {},
         "summary": {},
     }
+    class_parts = (
+        {
+            kind: {
+                owner: list(original_parts.get(owner, [owner]))
+                for owner in required_modes
+            }
+            for kind in ("term", "summary")
+        }
+        if include_summaries
+        else {}
+    )
     class_failed_originals: dict[str, set[str]] = {"term": set(), "summary": set()}
     term_scan_recorded: set[str] = set()
     summary_run_record: dict[str, Any] | None = None
@@ -1260,6 +1299,24 @@ async def run_terminology(
     def observe_summary_split(
         items: list[dict[str, Any]], _groups: list[list[dict[str, Any]]]
     ) -> None:
+        for item in items:
+            part_id = str(item["segment_id"])
+            owner = original_id(item)
+            children = [
+                str(child["segment_id"])
+                for group in _groups
+                for child in group
+                if original_id(child) == owner
+            ]
+            if part_id in children:
+                continue
+            mode = mode_for_item(item, default=TerminologyResponseMode.TERMS_ONLY)
+            for kind in response_record_types(mode):
+                if kind not in class_parts:
+                    continue
+                expected = class_parts[kind][owner]
+                index = expected.index(part_id)
+                expected[index : index + 1] = children
         if summary_run_record is None:
             return
         for item in items:
@@ -1276,9 +1333,6 @@ async def run_terminology(
     def original_id(segment: dict[str, Any]) -> str:
         return part_original.get(str(segment["segment_id"]), str(segment["segment_id"]))
 
-    def expected_part_ids(segment_id: str) -> list[str]:
-        return original_parts.get(segment_id, [segment_id])
-
     def mark_class_success(items: list[dict[str, Any]], result_class: str) -> list[str]:
         by_original = class_success_parts[result_class]
         for item in items:
@@ -1288,7 +1342,7 @@ async def run_terminology(
         completed: list[str] = []
         for item in items:
             owner = original_id(item)
-            if set(expected_part_ids(owner)) <= by_original.get(owner, set()):
+            if set(class_parts[result_class][owner]) <= by_original.get(owner, set()):
                 if owner not in completed:
                     completed.append(owner)
                 class_failed_originals[result_class].discard(owner)
@@ -1299,7 +1353,8 @@ async def run_terminology(
         if not required:
             return
         if all(
-            original in class_success_parts[result_class]
+            set(class_parts[result_class][original])
+            <= class_success_parts[result_class].get(original, set())
             and not class_failed_originals[result_class].__contains__(original)
             for result_class in required
         ):
@@ -1323,6 +1378,20 @@ async def run_terminology(
     )
 
     def report_progress() -> None:
+        if include_summaries and on_draft_progress is not None:
+            progress = {}
+            for kind, name, total, reused in (
+                ("term", "terminology", len(selected), len(selected) - sum("term" in modes for modes in required_modes.values())),
+                ("summary", "content_summary", len(summary_candidates), len(covered_summary_ids)),
+            ):
+                completed = sum(
+                    set(parts) <= class_success_parts[kind].get(owner, set())
+                    and owner not in class_failed_originals[kind]
+                    for owner, parts in class_parts[kind].items()
+                    if kind in required_modes[owner]
+                )
+                progress[name] = {"completed": reused + completed, "failed": len(class_failed_originals[kind]), "total": total}
+            on_draft_progress(progress)
         if on_progress is not None:
             on_progress(
                 len(selected) - len(work) + len(completed_original_ids),
@@ -1342,127 +1411,24 @@ async def run_terminology(
         error_class: str | None = None,
         error_message: str | None = None,
     ) -> dict[str, Any]:
-        values: list[dict[str, Any]] = []
-        for item in items:
-            values.append(summary_slice_provenance(item))
-        boundaries = {(str(item["file_id"]), str(item["part_id"])) for item in items}
-        if len(boundaries) != 1:
-            raise StorageError("内容概括请求不能跨越 file_id/part_id 边界")
-        file_id, part_id = next(iter(boundaries))
-        source_digest = _digest(values)
-        input_digest = _digest(
-            [
-                {"segment_id": value["segment_id"], "model_text": value["model_text"]}
-                for value in values
-            ]
-        )
-        prompt_digest = summary_prompt_digest_for(items)
-        fragment_prompt_digest = fragment_prompt_digest_for(items)
-        source_range = {
-            "file_id": file_id,
-            "part_id": part_id,
-            "segment_ids": list(dict.fromkeys(value["segment_id"] for value in values)),
-            "segments": values,
-        }
-        summary_id = (
-            "SUMMARY-FRAGMENT-"
-            + _digest(
-                [
-                    file_id,
-                    part_id,
-                    source_digest,
-                    input_digest,
-                    prompt_digest,
-                    config["llm"]["model"],
-                    config["project"]["target_language"],
-                    str(run_id),
-                ]
-            )[7:31].upper()
-        )
-        record = record_header(
-            "content_summary",
-            str(metadata["project_id"]),
-            record_id=summary_id,
-            kind="fragment",
-            file_id=file_id,
-            part_id=part_id,
+        return write_fragment_summary(
+            project,
+            project_id=str(metadata["project_id"]),
+            config=config,
+            items=items,
+            values=[summary_slice_provenance(item) for item in items],
+            run_id=str(run_id),
+            request_id=run_request_id,
+            prompt_digest=summary_prompt_digest_for(items),
+            fragment_prompt_digest=fragment_prompt_digest_for(items),
+            segments=segments,
+            warnings=warnings,
             status=status,
             text=text,
-            source_range=source_range,
-            source_digest=source_digest,
-            input_digest=input_digest,
-            prompt_digest=prompt_digest,
-            fragment_prompt_digest=fragment_prompt_digest,
-            model=str(config["llm"]["model"]),
-            target_language=str(config["project"]["target_language"]),
-            run_id=run_id,
-            refs=list(refs or []),
-            request_id=run_request_id,
+            refs=refs,
             error_class=error_class,
             error_message=error_message,
         )
-        write_content_summary(project, record)
-        if status == "completed":
-            current_fragments = [
-                item
-                for item in read_content_summaries(
-                    project,
-                    file_id=file_id,
-                    part_id=part_id,
-                    kind="fragment",
-                    status="completed",
-                )
-                if not bool(item.get("source_changed", False))
-            ]
-            current_segment_ids = {
-                str(item["segment_id"])
-                for item in segments
-                if not item["is_empty"]
-                and str(item["file_id"]) == file_id
-                and str(item["part_id"]) == part_id
-            }
-            source_segment_ids = list(
-                dict.fromkeys(
-                    str(value.get("original_segment_id") or value.get("segment_id"))
-                    for value in values
-                    if value.get("original_segment_id") or value.get("segment_id")
-                )
-            )
-            if (
-                len(current_fragments) == 1
-                and current_fragments[0].get("record_id") == record["record_id"]
-                and set(source_segment_ids) == current_segment_ids
-            ):
-                provenance, input_digest = build_provenance(
-                    "adopted_fragment", [record]
-                )
-                full_record = {
-                    **record,
-                    "record_id": (
-                        "SUMMARY-FULL-"
-                        + _digest(
-                            [
-                                file_id,
-                                part_id,
-                                record["record_id"],
-                                record.get("text"),
-                            ]
-                        )[7:31].upper()
-                    ),
-                    "kind": "full",
-                    "refs": source_segment_ids,
-                    "input_digest": input_digest,
-                    "provenance": provenance,
-                }
-                cleanup_report = publish_content_summary_fulls(project, [full_record])
-                for skipped in cleanup_report["skipped"]:
-                    warning = (
-                        "内容概括历史清理已跳过："
-                        f"{skipped['file_id']}/{skipped['part_id']} 的 provenance 无法验证"
-                    )
-                    if warning not in warnings:
-                        warnings.append(warning)
-        return record
 
     def mark_failed(
         items: list[dict[str, Any]],
@@ -1507,7 +1473,7 @@ async def run_terminology(
             estimated = _request_estimate(messages, config, request_id)
             await record_prompt_variant(actual_mode, prompt_text, requirements)
             try:
-                response, _ = await state.llm.chat(
+                response, request_id = await state.llm.chat(
                     messages=messages,
                     temperature=config["llm"]["temperature_terminology"],
                     estimated_input_tokens=estimated,
@@ -1519,9 +1485,6 @@ async def run_terminology(
                     response.content,
                     mode=failed_class,
                     source_refs=source_refs,
-                    source_texts=tuple(
-                        segment_model_source(item) for item in unresolved
-                    ),
                 )
             except FatalExternalError:
                 raise
@@ -1655,6 +1618,7 @@ async def run_terminology(
                 ):
                     for owner in mark_class_success(unresolved, "summary"):
                         maybe_complete(owner)
+                report_progress()
             if term_ok and summary_ok:
                 return len(unresolved), 0
             if (
@@ -1682,14 +1646,7 @@ async def run_terminology(
         chunk: ChunkPlan,
         initial_parent_request_id: str | None = None,
     ) -> tuple[int, int]:
-        if (
-            str(
-                chunk.segments[0].get(
-                    _SUMMARY_MODE_KEY, TerminologyResponseMode.TERMS_ONLY.value
-                )
-            )
-            != TerminologyResponseMode.TERMS_ONLY.value
-        ):
+        if include_summaries:
             return await process_summary_once(chunk, initial_parent_request_id)
         unresolved = list(chunk.segments)
         parent_request_id = initial_parent_request_id
@@ -1708,7 +1665,7 @@ async def run_terminology(
             estimated = _request_estimate(messages, config, request_id)
             await record_prompt_variant(actual_mode, prompt_text, requirements)
             try:
-                response, _ = await state.llm.chat(
+                response, request_id = await state.llm.chat(
                     messages=messages,
                     temperature=config["llm"]["temperature_terminology"],
                     estimated_input_tokens=estimated,
@@ -1924,7 +1881,18 @@ async def run_terminology(
 
     async def record_context_failure(
         items: list[dict[str, Any]],
+        error: ContextLengthError | None = None,
     ) -> None:
+        message = (
+            str(error) + "；当前范围不能继续拆分"
+            if isinstance(error, EmptyResponseSplitError)
+            else "模型报告上下文过长"
+        )
+        category = (
+            "empty_response"
+            if isinstance(error, EmptyResponseSplitError)
+            else "context_error"
+        )
         original_id = part_original.get(
             str(items[0]["segment_id"]), str(items[0]["segment_id"])
         )
@@ -1942,18 +1910,18 @@ async def run_terminology(
                     items,
                     status="failed",
                     run_request_id=f"CONTEXT-{original_id}",
-                    error_class="context_error",
-                    error_message="模型报告上下文过长",
+                    error_class=category,
+                    error_message=message,
                 )
                 maybe_complete(original_id)
             if mode is TerminologyResponseMode.SUMMARY_ONLY:
                 failed_originals.add(original_id)
-                failure_counts["context_error"] += 1
+                failure_counts[category] += 1
                 report_progress()
                 return
             if original_id not in failed_originals:
                 failed_originals.add(original_id)
-                failure_counts["context_error"] += 1
+                failure_counts[category] += 1
                 report_progress()
                 append_jsonl(
                     project,
@@ -1968,8 +1936,8 @@ async def run_terminology(
                         request_id=None,
                         active_task_id=task_id,
                         stage_fingerprint=fingerprint,
-                        error_class="context_error",
-                        error_message="模型报告上下文过长",
+                        error_class=category,
+                        error_message=message,
                     ),
                 )
 

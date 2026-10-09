@@ -2382,3 +2382,561 @@ async def test_validation_repair_context_error_splits_without_part_results(
     assert len(completed) == 1
     assert completed[0]["segment_id"] == "F0001-S000001"
     assert completed[0]["text"] == "好" * 8
+
+
+@pytest.mark.asyncio
+async def test_draft_scan_saves_translation_and_reuses_both_results(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice entered.")
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        records = [
+            {
+                "type": "term",
+                "source": "Alice",
+                "category": "人名",
+                "preferred_translation": "爱丽丝",
+            }
+        ]
+        records.extend(
+            {"type": "segment", "id": item["id"], "translation": "爱丽丝进来了。"}
+            for item in payload["segments"]
+        )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": llm_jsonl(records)}}],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project, Scope(), http_client=client, include_draft_translation=True
+        )
+        repeated = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            include_draft_translation=True,
+            reuse_mixed_fingerprints=True,
+        )
+    translations = load_stage_history(project, "translation")
+    assert len(requests) == 1
+    assert requests[0]["response_mode"] == "terms+translation"
+    assert result["failed"] == 0
+    assert result["usage"]["total_tokens"] == 15
+    assert repeated["requested"] == 0
+    assert translations[0]["text"] == "爱丽丝进来了。"
+    assert translations[0]["generation_origin"] == "terminology_draft"
+    assert translations[0]["run_id"] == result["run_id"]
+    assert translations[0]["validation_status"] == "passed"
+    from app.web_store import WebStore
+
+    assert (
+        WebStore(project).segment_detail("F0001-S000001")["translation"][
+            "generation_origin"
+        ]
+        == "terminology_draft"
+    )
+    assert load_terms(project)["terms"][0]["source"] == "Alice"
+
+
+@pytest.mark.asyncio
+async def test_draft_scan_retries_translation_without_rescanning_terms(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice entered.")
+    modes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        modes.append(payload["response_mode"])
+        records = (
+            [{"type": "term", "source": "Alice", "category": "人名"}]
+            if len(modes) == 1
+            else [
+                {"type": "segment", "id": item["id"], "translation": "爱丽丝进来了。"}
+                for item in payload["segments"]
+            ]
+        )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project, Scope(), http_client=client, include_draft_translation=True
+        )
+    assert modes == ["terms+translation", "translation-only"]
+    assert result["failed"] == 0
+    assert len(read_jsonl(project, project / "terminology" / "scans.jsonl")) == 1
+    assert load_stage_history(project, "translation")[0]["text"] == "爱丽丝进来了。"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair", [False, True])
+async def test_draft_scan_uses_translation_split_and_validation(
+    tmp_path: Path, repair: bool
+) -> None:
+    project = await create_project(tmp_path, "Alice entered.")
+    if repair:
+        path = project / "config.toml"
+        path.write_text(
+            path.read_text().replace(
+                "validators = []", 'validators = ["japanese_kana"]'
+            )
+        )
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        if not repair and any(len(item["source"]) > 4 for item in payload["segments"]):
+            return httpx.Response(
+                400, text="context_length_exceeded: maximum context tokens"
+            )
+        records = []
+        if payload["response_mode"] != "translation-only":
+            records = (
+                [{"type": "term", "source": "Alice", "category": "人名"}]
+                if "Alice" in "".join(item["source"] for item in payload["segments"])
+                else [{"type": "no_terms"}]
+            )
+        records.extend(
+            {
+                "type": "segment",
+                "id": item["id"],
+                "translation": "あ"
+                if repair and "validation_repair" not in payload
+                else "译",
+            }
+            for item in payload["segments"]
+        )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project, Scope(), http_client=client, include_draft_translation=True
+        )
+    translations = load_stage_history(project, "translation")
+    assert result["completed"] == 1
+    assert result["failed"] == 0
+    assert len(translations) == 1
+    assert translations[0]["segment_id"] == "F0001-S000001"
+    assert translations[0]["validation_status"] == "passed"
+    assert translations[0]["text"] == ("译" if repair else "译译译译")
+    if repair:
+        assert requests[-1]["response_mode"] == "translation-only"
+        assert "validation_repair" in requests[-1]
+
+
+@pytest.mark.asyncio
+async def test_draft_scan_preserves_existing_translation_until_force(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "Alice entered.")
+    modes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        mode = payload.get("response_mode", "translation-only")
+        modes.append(mode)
+        records = (
+            [{"type": "term", "source": "Alice", "category": "人名"}]
+            if mode != "translation-only"
+            else []
+        )
+        if mode != "terms-only":
+            records.extend(
+                {
+                    "type": "segment",
+                    "id": item["id"],
+                    "translation": "原译" if len(modes) == 1 else "新译",
+                }
+                for item in payload["segments"]
+            )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await run_translation(project, Scope(), http_client=client)
+        await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            include_draft_translation=True,
+            reuse_mixed_fingerprints=True,
+        )
+        assert [
+            record["text"] for record in load_stage_history(project, "translation")
+        ] == ["原译"]
+        result = await run_terminology(
+            project,
+            Scope(force=True),
+            http_client=client,
+            include_draft_translation=True,
+        )
+    assert modes == ["translation-only", "terms-only", "terms+translation"]
+    assert [
+        record["text"] for record in load_stage_history(project, "translation")
+    ] == ["新译"]
+    assert result["completed"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("crash", [False, True])
+async def test_draft_scan_resume_keeps_successful_results_and_original_scope(
+    tmp_path: Path, crash: bool
+) -> None:
+    project = await create_project(tmp_path, "Alice entered.\nBob waved.")
+    use_llm_preset(tmp_path, target_chunk_input_tokens=1)
+    requests: list[dict] = []
+    cancel = True
+
+    class ProcessCrash(BaseException):
+        pass
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        if cancel and "Bob" in payload["segments"][0]["source"]:
+            raise ProcessCrash if crash else asyncio.CancelledError
+        records = [
+            {"type": "segment", "id": item["id"], "translation": "译文"}
+            for item in payload["segments"]
+        ]
+        if payload["response_mode"] != "translation-only":
+            records.insert(0, {"type": "no_terms"})
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ProcessCrash if crash else asyncio.CancelledError):
+            await run_terminology(
+                project, Scope(), http_client=client, include_draft_translation=True
+            )
+        from app.execution import find_running_runs
+
+        running = find_running_runs(project, "terminology")
+        run_id = running[0]["run_id"] if crash else None
+        assert len(load_stage_history(project, "translation")) == 1
+        cancel = False
+        result = await run_terminology(
+            project,
+            Scope(only_segment="F0001-S000001") if crash else Scope(),
+            http_client=client,
+            include_draft_translation=True,
+            resume_run_id=run_id,
+        )
+    if crash:
+        assert result["run_id"] == run_id
+    assert result["selected"] == 2
+    assert len(load_stage_history(project, "translation")) == 2
+    assert sum("Alice" in payload["segments"][0]["source"] for payload in requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_draft_translation_proofreading_uses_published_decisions(
+    tmp_path: Path,
+) -> None:
+    from app.stage_review import run_review
+    from app.web_store import WebStore
+
+    project = await create_project(tmp_path, "Alice entered.")
+    seen_review: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if "response_mode" in payload:
+            records = [
+                {
+                    "type": "term",
+                    "source": "Alice",
+                    "category": "人名",
+                    "preferred_translation": "爱丽丝",
+                },
+                {"type": "segment", "id": "1", "translation": "爱丽丝进来了。"},
+            ]
+        else:
+            seen_review.append(payload)
+            records = [
+                {
+                    "type": "segment",
+                    "id": "1",
+                    "status": "suggested",
+                    "suggested_text": "艾莉丝进来了。",
+                    "reason": "应用已发布术语",
+                }
+            ]
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await run_terminology(
+            project, Scope(), http_client=client, include_draft_translation=True
+        )
+        WebStore(project).save_term(
+            {
+                "source": "Alice",
+                "old_normalized": "alice",
+                "preferred_translation": "艾莉丝",
+                "category": "人名",
+            }
+        )
+        result = await run_review(project, "proofreading", Scope(), http_client=client)
+    assert result["completed"] == 1
+    assert seen_review[0]["terms"][0]["preferred_translation"] == "艾莉丝"
+    assert seen_review[0]["segments"][0]["current_text"] == "爱丽丝进来了。"
+    assert load_stage_history(project, "translation")[0]["text"] == "爱丽丝进来了。"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_summaries", [False, True])
+async def test_draft_scan_repairs_epub_markers_without_repeating_scan(
+    tmp_path: Path,
+    include_summaries: bool,
+) -> None:
+    from tests.test_documents import make_epub
+    from app.sqlite_storage import write_summary_participation, read_content_summaries
+    from app.llm_response import response_record_types
+
+    source = tmp_path / "markers.epub"
+    make_epub(
+        source,
+        xhtml=b'<html xmlns="http://www.w3.org/1999/xhtml"><body><p>A <em>B</em> C</p></body></html>',
+    )
+    project, _ = init_project(
+        [str(source)],
+        name="markers",
+        document_adapter_id="epub",
+        adapter_options={
+            "epub": {"inline_format_mode": "markers", "inline_format_policy": "strict"}
+        },
+        app_root=make_app_root(tmp_path),
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    os.environ["LLM_API_KEY"] = "test"
+    if include_summaries:
+        segment = read_segments(project)[0]
+        write_summary_participation(
+            project,
+            [
+                {
+                    "file_id": segment["file_id"],
+                    "part_id": segment["part_id"],
+                    "selected": True,
+                }
+            ],
+        )
+    modes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        modes.append(payload["response_mode"])
+        text = (
+            "甲 <em999>乙</em999> 丙"
+            if len(modes) == 1
+            else payload["segments"][0]["source"]
+            .replace("A", "甲")
+            .replace("B", "乙")
+            .replace("C", "丙")
+        )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": llm_jsonl(
+                                (
+                                    [
+                                        {
+                                            "type": "summary",
+                                            "text": "人物移动。",
+                                            "refs": [
+                                                item["id"]
+                                                for item in payload["source_segments"]
+                                            ],
+                                        }
+                                    ]
+                                    if "summary"
+                                    in response_record_types(payload["response_mode"])
+                                    else []
+                                )
+                                + (
+                                    [{"type": "no_terms"}]
+                                    if payload["response_mode"] != "translation-only"
+                                    else []
+                                )
+                                + [{"type": "segment", "id": "1", "translation": text}]
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project,
+            Scope(),
+            http_client=client,
+            include_draft_translation=True,
+            include_summaries=include_summaries,
+        )
+    assert modes == [
+        "terms+translation+fragment-summary"
+        if include_summaries
+        else "terms+translation",
+        "translation-only",
+    ]
+    assert result["failed"] == 0
+    assert load_stage_history(project, "translation")[0]["text"] == "甲 乙 丙"
+    if include_summaries:
+        assert (
+            len(read_content_summaries(project, kind="fragment", status="completed"))
+            == 1
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "declaration", [None, {"type": "no_terms", "extra": True}, {"type": "no_terms"}]
+)
+async def test_draft_scan_requires_explicit_term_response_before_saving(
+    tmp_path: Path,
+    declaration: dict | None,
+) -> None:
+    project = await create_project(tmp_path, "The door opened.")
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        # A missing or malformed declaration must not save even valid translations.
+        if len(requests) == 2:
+            assert load_stage_history(project, "translation") == []
+            assert read_jsonl(project, project / "terminology" / "scans.jsonl") == []
+        records = [declaration] if len(requests) == 1 and declaration else []
+        if len(requests) > 1:
+            records = [{"type": "no_terms"}]
+        records.extend(
+            {"type": "segment", "id": item["id"], "translation": "门开了。"}
+            for item in payload["segments"]
+        )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project, Scope(), http_client=client, include_draft_translation=True
+        )
+    assert result["failed"] == 0
+    assert len(requests) == (1 if declaration == {"type": "no_terms"} else 2)
+    assert all(request["response_mode"] == "terms+translation" for request in requests)
+    if len(requests) == 2:
+        assert "format_correction" in requests[1]
+    assert load_stage_history(project, "translation")[0]["text"] == "门开了。"
+
+
+@pytest.mark.asyncio
+async def test_missing_draft_term_declaration_fails_with_format_reason(
+    tmp_path: Path,
+) -> None:
+    project = await create_project(tmp_path, "The door opened.")
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": llm_jsonl(
+                                [
+                                    {
+                                        "type": "segment",
+                                        "id": "1",
+                                        "translation": "门开了。",
+                                    }
+                                ]
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project, Scope(), http_client=client, include_draft_translation=True
+        )
+    assert result["failed"] == 1
+    assert len(requests) == 3
+    assert all(payload["response_mode"] == "terms+translation" for payload in requests)
+    records = load_stage_history(project, "translation")
+    assert not any(record["status"] == "completed" for record in records)
+    assert records[-1]["error_class"] == "format_error"
+    assert "术语响应声明" in records[-1]["error_message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source", ["｜星《せい》｜河《が》学園に入った。", "星河にある学園に入った。"]
+)
+async def test_draft_scan_accepts_model_merged_term_and_alias_without_retry(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    project = await create_project(tmp_path, source)
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        records = [
+            {
+                "type": "term",
+                "source": "星河学園",
+                "category": "学校名",
+                "aliases": ["せいが"],
+                "preferred_translation": "星河学院",
+            }
+        ]
+        records.extend(
+            {"type": "segment", "id": item["id"], "translation": "进入了星河学院。"}
+            for item in payload["segments"]
+        )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project, Scope(), http_client=client, include_draft_translation=True
+        )
+    assert result["failed"] == 0
+    assert len(requests) == 1
+    assert load_terms(project)["terms"][0]["source"] == "星河学園"
+    assert load_terms(project)["terms"][0]["aliases"] == ["せいが"]
+    assert result["draft_progress"]["terminology"]["completed"] == 1
+    assert result["draft_progress"]["translation"]["completed"] == 1

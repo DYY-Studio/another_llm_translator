@@ -74,6 +74,11 @@ SCHEMA: dict[str, Any] = {
     "retry": {
         "http_max_attempts": None,
         "format_max_attempts": None,
+        "empty_truncated_mode": None,
+        "empty_truncated_max_attempts": None,
+        "empty_unknown_mode": None,
+        "empty_unknown_max_attempts": None,
+        "unresolved_retry_scope": None,
         "base_delay_seconds": None,
         "max_delay_seconds": None,
         "jitter_seconds": None,
@@ -204,6 +209,14 @@ def validate_config(config: dict[str, Any]) -> None:
             or value <= 0
         ):
             raise ConfigError(f"{section}.{key} 必须是正整数")
+    for kind in ("truncated", "unknown"):
+        mode_key = f"empty_{kind}_mode"
+        count_key = f"empty_{kind}_max_attempts"
+        if config["retry"][mode_key] not in ("retry", "split"):
+            raise ConfigError(f"retry.{mode_key} 必须是 retry 或 split")
+        count = config["retry"][count_key]
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ConfigError(f"retry.{count_key} 必须是非负整数")
     format_attempts = config["retry"]["format_max_attempts"]
     if (
         not isinstance(format_attempts, int)
@@ -211,6 +224,8 @@ def validate_config(config: dict[str, Any]) -> None:
         or format_attempts < 0
     ):
         raise ConfigError("retry.format_max_attempts 必须是非负整数")
+    if config["retry"]["unresolved_retry_scope"] not in ("unresolved", "chunk"):
+        raise ConfigError("retry.unresolved_retry_scope 必须是 unresolved 或 chunk")
 
     confidence = config["input"]["encoding_confidence_threshold"]
     if (
@@ -406,6 +421,13 @@ def load_config(path: Path) -> dict[str, Any]:
         config = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"无法读取配置：{path}: {exc}") from exc
+    retry = config.get("retry")
+    if isinstance(retry, dict):
+        retry.setdefault("unresolved_retry_scope", "unresolved")
+        retry.setdefault("empty_truncated_mode", "split")
+        retry.setdefault("empty_truncated_max_attempts", 2)
+        retry.setdefault("empty_unknown_mode", "retry")
+        retry.setdefault("empty_unknown_max_attempts", 1)
     terminology = config.get("terminology")
     if isinstance(terminology, dict):
         terminology.setdefault("alias_primary_collision", "merge")
@@ -568,6 +590,7 @@ def _resolve_llm_config(
     adapter = load_json_adapter(adapter_file)
     if adapter.adapter_id != preset.adapter_id:
         raise ConfigError("LLM Adapter 文件中的 adapter_id 与配置不一致")
+    adapter.validate_preset(definition)
     config["llm"].update(
         {
             key: definition[key]
@@ -612,6 +635,16 @@ def _resolve_llm_config(
         for key, value in definition.items()
         if key not in {"target_chunk_input_tokens", "endpoint", "stream_endpoint"}
     }
+    if definition["credential"]["kind"] == "chatgpt":
+        from .chatgpt_oauth import ChatGPTConnection
+        connection = ChatGPTConnection()
+        state = connection.read()
+        config["llm"]["proxy_url"] = state["proxy_url"]
+        config["_chatgpt_identity"] = connection.identity() if state["active"] else None
+        fingerprint_definition["chatgpt_connection"] = state["active"]
+        fingerprint_definition["proxy_url"] = state["proxy_url"]
+        if adapter.endpoint != "/responses" or adapter.streaming_spec is None or adapter.streaming_spec["endpoint"] != "/responses" or adapter.messages_format != "responses":
+            raise ConfigError("ChatGPT Plan Adapter 必须使用 /responses 和 responses 消息格式")
     config["_llm_preset_stage_hash"] = "sha256:" + hashlib.sha256(
         json.dumps(
             fingerprint_definition,

@@ -7,8 +7,10 @@ import type {
   HistoricalRunSummary,
   RelatedTermsResponse,
   StorageCleanupResult,
+  DatabaseMaintenanceResult,
   StorageProjectDetail,
   StorageSummary,
+  DataRootStatus,
   SummariesResponse,
   TermHitsResponse,
   TermsResponse,
@@ -105,6 +107,24 @@ export function fetchSummaries(project: string, signal?: AbortSignal): Promise<S
 
 export function fetchStorage(signal?: AbortSignal): Promise<StorageSummary> {
   return api<StorageSummary>("/api/v1/storage", { signal });
+}
+
+export function fetchDataRoot(signal?: AbortSignal): Promise<DataRootStatus> {
+  return api<DataRootStatus>("/api/v1/storage/data-root", { signal });
+}
+
+export function requestDataRootRelocation(parentDir: string): Promise<void> {
+  return api<void>("/api/v1/storage/data-root/relocation", {
+    method: "POST",
+    body: JSON.stringify({ parent_dir: parentDir, confirm: true }),
+  });
+}
+
+export function cancelDataRootRelocation(): Promise<void> {
+  return api<void>("/api/v1/storage/data-root/relocation", {
+    method: "DELETE",
+    body: JSON.stringify({ confirm: true }),
+  });
 }
 
 export function fetchStorageProject(
@@ -205,4 +225,10 @@ export function fetchHistoricalRequest(
     `/api/v1/projects/${encodeURIComponent(project)}/runs/${encodeURIComponent(runId)}/requests/${encodeURIComponent(requestId)}${suffix}`,
     { signal },
   );
+}
+
+export function maintainProjectDatabase(project: string): Promise<DatabaseMaintenanceResult> {
+  return api<DatabaseMaintenanceResult>(`/api/v1/projects/${encodeURIComponent(project)}/storage/database/maintain`, {
+    method: "POST", body: JSON.stringify({ confirm: true }),
+  });
 }
