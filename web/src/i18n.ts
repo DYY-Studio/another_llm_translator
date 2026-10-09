@@ -12,6 +12,7 @@ const messages: Record<Language, Record<string, string>> = {
     "decision.urlHint": "填写完整 URL，包含最终请求 Path。",
     "decision.protocol": "协议",
     "decision.timeoutHint": "每次请求的超时秒数。",
+    "decision.contextWindowHint": "模型上下文容量；按完整请求估算 Token，扣除安全余量后超限则失败。",
     "preset.exists": "该 Preset ID 已存在。",
 
     "runDialog.summaryToggle": "同时生成概括（实验）",
@@ -1286,6 +1287,7 @@ const messages: Record<Language, Record<string, string>> = {
     "decision.urlHint": "Enter the complete URL, including the final request path.",
     "decision.protocol": "Protocol",
     "decision.timeoutHint": "Timeout in seconds for each request.",
+    "decision.contextWindowHint": "Model context capacity. Estimate tokens for the complete request; fail if it exceeds capacity after the safety margin.",
     "preset.exists": "This Preset ID already exists.",
 
     "runDialog.summaryToggle": "Generate summaries while scanning (experimental)",

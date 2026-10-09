@@ -47,7 +47,8 @@ def decision_preset_path(root: Path, preset_id: str) -> Path:
 
 def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
     required = {"preset_id", "protocol", "url", "model", "credential", "proxy_url",
-                "request_timeout_seconds", "requests_per_minute", "max_parallel"}
+                "request_timeout_seconds", "requests_per_minute", "max_parallel",
+                "context_window_tokens", "context_safety_margin_tokens"}
     if set(value) != required:
         raise ConfigError("Decision Preset 字段不完整或包含未知字段")
     decision_preset_path(Path(), value["preset_id"])
@@ -83,9 +84,12 @@ def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
             or not isinstance(credential["kind"], str) or credential["kind"] not in {"environment", "keychain"}
             or not isinstance(credential["name"], str) or not credential["name"].strip()):
         raise ConfigError("Decision 凭据引用无效")
-    for key, minimum in (("requests_per_minute", 0), ("max_parallel", 1)):
+    for key, minimum in (("requests_per_minute", 0), ("max_parallel", 1),
+                         ("context_window_tokens", 1), ("context_safety_margin_tokens", 0)):
         if type(value[key]) is not int or value[key] < minimum:
             raise ConfigError(f"Decision {key} 无效")
+    if value["context_safety_margin_tokens"] >= value["context_window_tokens"]:
+        raise ConfigError("Decision 安全余量必须小于上下文窗口")
     timeout = value["request_timeout_seconds"]
     if type(timeout) not in {int, float} or not math.isfinite(timeout) or timeout <= 0:
         raise ConfigError("Decision 超时必须是有限正数")
@@ -126,6 +130,12 @@ class DecisionClient:
             body = dict(model=self.preset["model"], input=json.dumps(state, ensure_ascii=False),
                         questions=[dict(type="choice", name=q.name, instructions=q.instructions,
                                         choices=[dict(value=k, description=v) for k, v in q.choices.items()]) for q in questions])
+        from .execution import estimate_tokens
+        estimated = estimate_tokens(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
+        available = self.preset["context_window_tokens"] - self.preset["context_safety_margin_tokens"]
+        if estimated > available:
+            segment = f"（Segment {segment_id}）" if segment_id else ""
+            raise FatalExternalError(f"Decision 请求{segment}估算 {estimated} Token，超过可用上下文 {available} Token")
         if self.http_client is not None:
             return await self._request(self.http_client, body, questions, segment_id)
         async with httpx.AsyncClient(proxy=self.preset["proxy_url"] or None) as http:

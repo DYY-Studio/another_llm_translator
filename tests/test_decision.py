@@ -13,7 +13,38 @@ def preset(protocol: str = "typesafe") -> dict:
     return dict(preset_id="local", protocol=protocol,
                 url="http://localhost:9876/custom/path", model="test-model", proxy_url="",
                 credential={"kind": "environment", "name": "DECISION_TEST_KEY"},
+                context_window_tokens=32000, context_safety_margin_tokens=512,
                 request_timeout_seconds=10, requests_per_minute=0, max_parallel=2)
+
+
+@pytest.mark.parametrize("protocol", ["typesafe", "openai-decisions"])
+@pytest.mark.parametrize("part", ["state", "instructions", "choices", "margin"])
+def test_oversized_decision_fails_before_http(protocol, part, monkeypatch):
+    monkeypatch.setenv("DECISION_TEST_KEY", "secret")
+    value = preset(protocol)
+    value.update(context_window_tokens=1000, context_safety_margin_tokens=100)
+    if part == "margin":
+        value.update(context_window_tokens=4000, context_safety_margin_tokens=3999)
+    state = "正文" * 1000 if part == "state" else "short"
+    question = DecisionQuestion("term", "说明" * 1000 if part == "instructions" else "Question",
+                                {"a": "选项" * 1000 if part == "choices" else "A", "b": "B"})
+    async def run():
+        def unexpected_request(request):
+            pytest.fail("Oversized Decision must not send HTTP")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected_request)) as http:
+            client = DecisionClient(value, http_client=http)
+            with pytest.raises(ExternalError, match="Decision.*Token"):
+                await client.choose(state, [question], segment_id="SEG-1")
+            assert client.pool.active == 0
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("window,margin", [(0, 0), (1000, -1), (1000, 1000), (1000, True)])
+def test_preset_rejects_invalid_context_budget(window, margin):
+    value = preset()
+    value.update(context_window_tokens=window, context_safety_margin_tokens=margin)
+    with pytest.raises(ConfigError):
+        validate_decision_preset(value)
 
 
 @pytest.mark.parametrize("protocol", ["typesafe", "openai-decisions"])

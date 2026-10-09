@@ -996,6 +996,8 @@ export interface DecisionPreset {
   model: string;
   proxy_url: string;
   credential: { kind: "environment" | "keychain"; name: string };
+  context_window_tokens: number;
+  context_safety_margin_tokens: number;
   request_timeout_seconds: number;
   requests_per_minute: number;
   max_parallel: number;

@@ -25,6 +25,7 @@ from tests.test_terminology_translation import create_project
     ("uncertain", 0.9, 0, "warning"),
     ("still_missing", 0.9, 1, "warning"),
     ("http_error", 0, 0, "failed"),
+    ("context_error", 0, 0, "failed"),
 ])
 async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypatch, choice, confidence, repairs, status):
     project = await create_project(tmp_path, "Alice arrived.")
@@ -35,6 +36,8 @@ async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypa
                     description="A character", preferred_translation="爱丽丝", aliases=[],
                     group_primary=None, conflicts={})]))
     value = preset()
+    if choice == "context_error":
+        value.update(context_window_tokens=513, context_safety_margin_tokens=512)
     write_user("decision_presets/local.json").write_text(json.dumps(value), encoding="utf-8")
     config = load_config(project / "config.toml")
     config["validation"]["translation"].update(validators=["preferred_term_usage"], decision_enabled=True, decision_preset="local")
@@ -45,6 +48,7 @@ async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypa
         body = json.loads(request.content)
         calls.append(body)
         if str(request.url) == value["url"]:
+            assert choice != "context_error", "Oversized Decision must not send HTTP"
             if choice == "http_error":
                 return httpx.Response(401)
             selected = "required" if choice == "still_missing" else choice
@@ -58,6 +62,13 @@ async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypa
             dict(type="segment", id=item["id"], translation=text) for item in payload["segments"]])))],
             usage=dict(prompt_tokens=20, completion_tokens=5, total_tokens=25)))
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        if choice == "context_error":
+            with pytest.raises(FatalExternalError, match="Decision.*Token"):
+                await run_translation(project, Scope(), http_client=http)
+            manifest = read_json(project, next((project / "runs").iterdir()) / "manifest.json")
+            assert manifest["status"] == "failed"
+            assert len(calls) == 1
+            return
         if choice == "http_error":
             with pytest.raises(FatalExternalError, match="HTTP 401"):
                 await run_translation(project, Scope(), http_client=http)
