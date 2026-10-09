@@ -24,7 +24,7 @@ export function canCancelTaskStatus(status: string): boolean {
 export function displayableFailureStage(
   task: Pick<TaskState, "stage" | "current_stage" | "draft_progress">,
 ): LLMStage | null {
-  if (task.stage === "terminology" && task.draft_progress?.translation.failed) return "translation";
+  if ((task.stage === "terminology" || (task.stage === "continuous" && task.current_stage === "terminology")) && task.draft_progress?.translation?.failed) return "translation";
   const candidate = task.stage === "continuous"
     ? task.current_stage
     : task.stage;
@@ -38,18 +38,14 @@ export function displayableTaskStepStatus(
   steps: Array<Pick<TaskStep, "stage" | "status">>,
   task: Pick<TaskState, "current_stage" | "status">,
 ): string {
-  if (isTerminalTaskStatus(task.status)) {
-    return step.status;
-  }
-  if (step.status === "ready") return "queued";
-  if (step.status !== "skipped") return step.status;
+  if (!["ready", "queued", "skipped"].includes(step.status)) return step.status;
   const currentIndex = task.current_stage
     ? steps.findIndex((current) => current.stage === task.current_stage)
     : -1;
   const stepIndex = steps.findIndex((current) => current.stage === step.stage);
-  return currentIndex >= 0 && stepIndex >= 0 && stepIndex <= currentIndex
-    ? "skipped"
-    : "queued";
+  const reached = currentIndex >= 0 && stepIndex >= 0 && stepIndex <= currentIndex;
+  if (step.status === "skipped" && (reached || task.status === "completed")) return "skipped";
+  return isTerminalTaskStatus(task.status) ? "not_executed" : "queued";
 }
 
 export function mergeTaskCollection(

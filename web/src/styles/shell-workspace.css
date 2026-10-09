@@ -37,7 +37,7 @@
 .task-step-track-node { position: relative; z-index: 1; grid-column: 1; grid-row: 2; width: 14px; height: 14px; border: 2px solid var(--status-idle); border-radius: 50%; background: var(--surface-raised); }
 .task-step-track-item.status-running .task-step-track-node, .task-step-track-item.status-cancelling .task-step-track-node { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .task-step-track-item.status-completed .task-step-track-node { border-color: var(--status-success); background: var(--status-success); }
-.task-step-track-item.status-skipped .task-step-track-node, .task-step-track-item.status-cancelled .task-step-track-node { border-color: var(--status-warning); background: var(--status-warning); }
+.task-step-track-item.status-cancelled .task-step-track-node { border-color: var(--status-warning); background: var(--status-warning); }
 .task-step-track-item.status-failed .task-step-track-node { border-color: var(--danger); background: var(--danger); }
 .task-step-track-label { position: relative; z-index: 1; grid-column: 1 / -1; grid-row: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 11px; line-height: 16px; white-space: nowrap; }
 .task-step-track-item.current .task-step-track-label { color: var(--accent-text); font-weight: 650; }
@@ -46,11 +46,11 @@
 .task-step-track-item-connector > span { display: block; height: 100%; transition: width .2s ease; }
 .task-step-track-connector-completed { background: var(--status-success); }
 .task-step-track-connector-failed { background: var(--danger); }
-.status-skipped .task-step-track-connector-completed { background: var(--status-warning); }
 .task-step-track-progress { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; }
+.task-step-track-progress:has(.draft-result-progress) { grid-template-columns: minmax(0, auto) minmax(60px, 1fr); }
 .task-step-track-progress-bar { display: flex; min-width: 0; height: 5px; overflow: hidden; border-radius: 999px; background: var(--border); }
 .task-step-track-progress-bar > span { display: block; height: 100%; transition: width .2s ease; }
-.task-step-track-progress strong { color: var(--muted); font-size: 10px; font-weight: 550; line-height: 1; white-space: nowrap; }
+.task-step-track-progress > strong { color: var(--muted); font-size: 10px; font-weight: 550; line-height: 1; white-space: nowrap; }
 .global-run-status > .task-step-track { min-width: 0; }
 .global-run-status.continuous { grid-template-columns: max-content minmax(0, 1fr) max-content max-content max-content; }
 .global-run-status.continuous > .task-step-track { min-width: 0; }

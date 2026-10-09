@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import {
   CONTINUOUS_ORDER,
@@ -24,7 +24,7 @@ import type {
 
 function stageLabel(stage: string, language: Language): string {
   return translate(
-    stage === "terminology_decision" ? "stage.terminologyDecision" : `stage.${stage}`,
+    stage === "terminology_decision" ? "stage.terminologyDecision" : stage === "content_summary" ? "stage.contentSummary" : `stage.${stage}`,
     language,
   );
 }
@@ -57,6 +57,9 @@ export function ContinuousRunDialog({
   const [finalReview, setFinalReview] = useState(false);
   const [applyTerminologyDecision, setApplyTerminologyDecision] = useState(false);
   const [resultPolicy, setResultPolicy] = useState<ContinuousResultPolicy>("pending");
+  const [includeDraftTranslation, setIncludeDraftTranslation] = useState(false);
+  const [includeSummaries, setIncludeSummaries] = useState(false);
+  const [aggregateFullSummaries, setAggregateFullSummaries] = useState(false);
   const [runActions, setRunActions] = useState<Record<string, RunActionSelection>>({});
   const [submitting, setSubmitting] = useState(false);
 
@@ -69,8 +72,13 @@ export function ContinuousRunDialog({
   params.set("language", language);
   params.set("final_review", String(hasDecision && (terminalDecision ? finalReview : true)));
   params.set("apply_terminology_decision", String(decisionInMiddle && applyTerminologyDecision));
+  params.set("include_draft_translation", String(includeDraftTranslation));
+  params.set("include_summaries", String(includeSummaries));
+  params.set("aggregate_full_summaries", String(aggregateFullSummaries));
   const request = `/api/v1/projects/${project}/task-options/continuous?${params.toString()}`;
   const options = preflight?.request === request ? preflight.options : null;
+  const terminologyOptions = options?.terminology_options;
+  const jointOptionsLocked = submitting || runActions.terminology?.action === "resume";
   const displaySteps = displayCache.project === project ? displayCache.steps : {};
   useEffect(() => {
     let active = true;
@@ -99,11 +107,12 @@ export function ContinuousRunDialog({
   useEffect(() => {
     setRunActions((current) => {
       const scoped = Object.fromEntries(
-        Object.entries(current).filter(([stage]) => stages.includes(stage as LLMStage)),
+        Object.entries(current).filter(([stage]) => stages.includes(stage as LLMStage)
+          || (stage === "content_summary" && aggregateFullSummaries)),
       );
       return options ? reconcileRunActions(scoped, options.steps) : scoped;
     });
-  }, [options, stages]);
+  }, [options, stages, aggregateFullSummaries]);
 
   useEffect(() => {
     if (options?.steps?.some((step) => step.mismatched_fingerprint_completed)) {
@@ -120,6 +129,11 @@ export function ContinuousRunDialog({
     setApplyTerminologyDecision(false);
     setFinalReview(false);
     setResultPolicy("pending");
+    if (next !== "terminology") {
+      setIncludeDraftTranslation(false);
+      setIncludeSummaries(false);
+      setAggregateFullSummaries(false);
+    }
   }
 
   function changeEnd(stageIndex: number, checked: boolean) {
@@ -127,6 +141,7 @@ export function ContinuousRunDialog({
     setEndIndex(nextEndIndex);
     setRunActions((current) => Object.fromEntries(
       Object.entries(current).filter(([stage]) => {
+        if (stage === "content_summary") return aggregateFullSummaries;
         const index = CONTINUOUS_ORDER.indexOf(stage as LLMStage);
         return index >= CONTINUOUS_ORDER.indexOf(startStage) && index <= nextEndIndex;
       }),
@@ -140,9 +155,7 @@ export function ContinuousRunDialog({
     setResultPolicy((current) => resultPolicyAfterRunAction(current, stage, action));
   }
 
-  const runningSteps = stages
-    .map((stage) => stepFor(options, stage))
-    .filter((step): step is ContinuousOptionStep => Boolean(step?.running_run));
+  const runningSteps = (options?.steps ?? []).filter((step) => step.running_run);
   const missingActions = runningSteps.filter((step) => !runActions[step.stage]);
   const hasResume = Object.values(runActions).some((selection) => selection.action === "resume");
   const decisionDeclineNeedsForce = runActions.terminology_decision?.action === "decline"
@@ -191,6 +204,9 @@ export function ContinuousRunDialog({
         force: resultPolicy === "force",
         reuseMixedFingerprints: resultPolicy === "reuse",
         runActions: runActionsPayload(runActions),
+        includeDraftTranslation,
+        includeSummaries,
+        aggregateFullSummaries,
       }));
     } catch (reason) {
       setSubmitError(reason);
@@ -240,35 +256,65 @@ export function ContinuousRunDialog({
                 : stageIndex <= endIndex + 1;
               const stageState = selected ? "selected" : canToggle ? "next" : "disabled";
               const step = stepFor(options, stage);
-              const displayStep = displaySteps[stage];
+              const displayStep = stage === "translation" && includeDraftTranslation ? undefined : displaySteps[stage];
               const stageBlocking = blocking.filter((item) => item.stage === stage);
               return (
-                <label className={`continuous-run-stage ${stageState}`} key={stage}>
-                  <input
-                    type="checkbox"
-                    checked={selected}
-                    disabled={!canToggle || submitting}
-                    onChange={(event) => changeEnd(stageIndex, event.target.checked)}
-                  />
-                  <span className="continuous-run-stage-main">
-                    <strong>{stageLabel(stage, language)}</strong>
-                    {stage === "terminology_decision" && startStage === "terminology" && (
-                      <small>{translate("continuousRun.decisionInserted", language)}</small>
-                    )}
-                    {displayStep?.preset && <small>{displayStep.preset.id} · {displayStep.preset.model} · {displayStep.selected}</small>}
-                    {step?.status === "skipped" && <small>{translate("continuousRun.skipped", language, { reason: step.reason ?? "" })}</small>}
-                    {stageBlocking.map((item) => (
-                      <small className="error-text" key={item.code}>
-                        {item.code === "mismatched_fingerprint"
-                          ? translate("continuousRun.stageFingerprintWarning", language)
-                          : item.message}
-                      </small>
-                    ))}
-                  </span>
-                </label>
+                <Fragment key={stage}>
+                  <label className={`continuous-run-stage ${stageState}`}>
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      disabled={!canToggle || submitting}
+                      onChange={(event) => changeEnd(stageIndex, event.target.checked)}
+                    />
+                    <span className="continuous-run-stage-main">
+                      <strong>{stageLabel(stage, language)}</strong>
+                      {stage === "terminology_decision" && startStage === "terminology" && (
+                        <small>{translate(includeDraftTranslation ? "continuousRun.decisionAfterDraft" : "continuousRun.decisionInserted", language)}</small>
+                      )}
+                      {displayStep?.preset && <small>{displayStep.preset.id} · {displayStep.preset.model} · {displayStep.selected}</small>}
+                      {stage === "translation" && includeDraftTranslation
+                        ? <small>{translate("continuousRun.jointDraftSkipped", language)}</small>
+                        : step?.status === "skipped" && <small>{translate("continuousRun.skipped", language, { reason: step.reason ?? "" })}</small>}
+                      {stageBlocking.map((item) => (
+                        <small className="error-text" key={item.code}>
+                          {item.code === "mismatched_fingerprint"
+                            ? translate("continuousRun.stageFingerprintWarning", language)
+                            : item.message}
+                        </small>
+                      ))}
+                    </span>
+                  </label>
+                  {stage === "terminology" && aggregateFullSummaries && <label className="continuous-run-stage selected">
+                    <input type="checkbox" checked disabled />
+                    <span className="continuous-run-stage-main">
+                      <strong>{translate("continuousRun.aggregateSummaries", language)}</strong>
+                      {displaySteps.content_summary?.preset && <small>{displaySteps.content_summary.preset.id} · {displaySteps.content_summary.preset.model} · {displaySteps.content_summary.selected}</small>}
+                      {blocking.filter((item) => item.stage === "content_summary").map((item) => <small className="error-text" key={item.code}>{item.message}</small>)}
+                    </span>
+                  </label>}
+                </Fragment>
               );
             })}
           </fieldset>
+
+          {startStage === "terminology" && <div className="run-decision-info run-generation-options">
+            {terminologyOptions && <small>{translate("runDialog.jointModelHint", language, { model: terminologyOptions.preset.model })}</small>}
+            <label className="config-toggle">
+              <span><input type="checkbox" checked={includeDraftTranslation} disabled={jointOptionsLocked} onChange={(event) => setIncludeDraftTranslation(event.target.checked)} />{translate("runDialog.draftToggle", language)}</span>
+            </label>
+            <label className="config-toggle">
+              <span><input type="checkbox" checked={includeSummaries} disabled={jointOptionsLocked} onChange={(event) => { setIncludeSummaries(event.target.checked); if (!event.target.checked) setAggregateFullSummaries(false); }} />{translate("runDialog.summaryToggle", language)}</span>
+              <small>{translate("runDialog.summaryHint", language)}</small>
+            </label>
+            {includeSummaries && <>
+              {terminologyOptions && <small>{translate("runDialog.summaryScope", language, { count: terminologyOptions.summary_selected_boundaries ?? 0 })}</small>}
+              <label className="config-toggle">
+                <span><input type="checkbox" checked={aggregateFullSummaries} disabled={submitting} onChange={(event) => setAggregateFullSummaries(event.target.checked)} />{translate("continuousRun.aggregateSummaries", language)}</span>
+                <small>{translate("continuousRun.aggregateSummariesHint", language)}</small>
+              </label>
+            </>}
+          </div>}
 
           {hasDecision && (
             <section className="continuous-run-section">
@@ -287,7 +333,7 @@ export function ContinuousRunDialog({
               {decisionInMiddle && (
                 <label className="check-row">
                   <input type="checkbox" checked={applyTerminologyDecision} onChange={(event) => setApplyTerminologyDecision(event.target.checked)} disabled={submitting} />
-                  <span>{translate("continuousRun.applyDecision", language)}</span>
+                  <span>{translate(includeDraftTranslation ? "continuousRun.applyDecisionAfterDraft" : "continuousRun.applyDecision", language)}</span>
                 </label>
               )}
             </section>

@@ -319,6 +319,7 @@ export interface TaskState {
   status: string;
   include_summaries?: boolean;
   include_draft_translation?: boolean;
+  aggregate_full_summaries?: boolean;
   draft_progress?: DraftProgress | null;
   summary_selection?: Array<{ file_id: string; part_id: string }>;
   error?: ErrorPayload | null;
@@ -335,6 +336,7 @@ export interface TaskState {
 export interface TaskStep {
   stage: string;
   status: string;
+  reason?: string;
   selected: number;
   completed: number;
   failed: number;
@@ -606,7 +608,7 @@ export interface ModelRow {
   display: string;
 }
 
-export type DraftProgress = Record<"terminology" | "translation", { completed: number; failed: number; total: number }> & { content_summary?: { completed: number; failed: number; total: number } };
+export type DraftProgress = Record<"terminology", { completed: number; failed: number; total: number }> & Partial<Record<"translation" | "content_summary", { completed: number; failed: number; total: number }>>;
 
 export interface TaskOptions {
   summary_progress?: { completed: number; total: number };
@@ -654,6 +656,7 @@ export interface ContinuousTaskOptions {
   stage: "continuous";
   stages: LLMStage[];
   steps: ContinuousOptionStep[];
+  terminology_options: TaskOptions | null;
   blocking: Array<{ code: string; message: string; stage?: string }>;
   rules: {
     canonical_order?: string[];
@@ -710,6 +713,9 @@ export interface ContinuousRunDecision {
   reuse_mixed_fingerprints: boolean;
   final_review: boolean;
   apply_terminology_decision: boolean;
+  include_draft_translation: boolean;
+  include_summaries: boolean;
+  aggregate_full_summaries: boolean;
 }
 
 export interface RunDecision {

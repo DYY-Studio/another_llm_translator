@@ -99,11 +99,12 @@
   .run-task-details .run-failure-link { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .run-task-details .run-error { min-width: 0; max-width: none; }
   .global-run-status.terminal .run-dismiss { grid-column: 2; grid-row: 1; justify-self: end; margin-inline-start: 0; }
-  .global-run-status:not(.terminal) > .danger-link { grid-column: 1 / -1; }
+  .global-run-status:not(.terminal):not(.continuous) > .danger-link { grid-column: 1 / -1; }
   .warning-banner-sticky { top: calc(58px + var(--mobile-run-status-height)); z-index: 2; }
   .run-identity { max-width: none; }
   .run-progress { grid-column: 1 / -1; grid-template-columns: auto minmax(60px, 1fr); }
   .run-progress:has(.draft-result-progress) { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .task-step-track-progress:has(.draft-result-progress) { grid-template-columns: minmax(0, 1fr); }
   .run-tokens { min-width: 0; gap: 12px; white-space: normal; }
   .overview-page { width: auto; height: auto; max-width: none; min-height: 0; display: block; overflow: visible; padding-bottom: 76px; }
   .overview-page .overview-project-bar { margin-bottom: 18px; }

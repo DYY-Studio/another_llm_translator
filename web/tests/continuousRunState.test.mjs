@@ -35,6 +35,9 @@ test("continuous payload forces middle decision review and explicit apply", () =
         force: false,
         reuseMixedFingerprints: false,
         runActions: { translation: "resume" },
+        includeDraftTranslation: false,
+        includeSummaries: false,
+        aggregateFullSummaries: false,
       },
     ),
     {
@@ -45,6 +48,9 @@ test("continuous payload forces middle decision review and explicit apply", () =
       force: false,
       reuse_mixed_fingerprints: false,
       run_actions: { translation: "resume" },
+      include_draft_translation: false,
+      include_summaries: false,
+      aggregate_full_summaries: false,
     },
   );
 });
@@ -57,6 +63,9 @@ test("terminal decision keeps optional final review and does not authorize apply
       force: true,
       reuseMixedFingerprints: false,
       runActions: {},
+      includeDraftTranslation: false,
+      includeSummaries: false,
+      aggregateFullSummaries: false,
     }),
     {
       stage: "continuous",
@@ -66,6 +75,9 @@ test("terminal decision keeps optional final review and does not authorize apply
       force: true,
       reuse_mixed_fingerprints: false,
       run_actions: {},
+      include_draft_translation: false,
+      include_summaries: false,
+      aggregate_full_summaries: false,
     },
   );
 });
@@ -107,4 +119,26 @@ test("only decision decline selects force; resume clears reuse or force", () => 
     }, "pending"),
     true,
   );
+});
+
+test("continuous joint options require terminology and aggregation requires summaries", () => {
+  const options = {
+    finalReview: false,
+    applyTerminologyDecision: false,
+    force: false,
+    reuseMixedFingerprints: false,
+    runActions: {},
+    includeDraftTranslation: true,
+    includeSummaries: true,
+    aggregateFullSummaries: true,
+  };
+  const joint = continuousPayload(["terminology"], options);
+  assert.equal(joint.include_draft_translation, true);
+  assert.equal(joint.include_summaries, true);
+  assert.equal(joint.aggregate_full_summaries, true);
+  assert.equal(continuousPayload(["terminology"], { ...options, includeSummaries: false }).aggregate_full_summaries, false);
+  const standard = continuousPayload(["translation"], options);
+  assert.equal(standard.include_draft_translation, false);
+  assert.equal(standard.include_summaries, false);
+  assert.equal(standard.aggregate_full_summaries, false);
 });
