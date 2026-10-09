@@ -768,7 +768,7 @@ async def run_translation(
         )
         original_id = part_original.get(segment_id)
         if original_id is None:
-            findings = validate_translation_text(
+            findings = await validate_translation_text(
                 validation_context(segment_id, text), translation_validators
             )
             if findings:
@@ -787,7 +787,7 @@ async def run_translation(
             return
         combined = "".join(part_results[original_id][part_id][0] for part_id in expected_parts)
         combined_request_id = part_results[original_id][expected_parts[-1]][1]
-        findings = validate_translation_text(
+        findings = await validate_translation_text(
             validation_context(original_id, combined), translation_validators
         )
         if findings:
@@ -968,7 +968,7 @@ async def run_translation(
                         part_id: {
                             "segment": part,
                             "candidate": candidate_part,
-                            "findings": validate_translation_text(
+                            "findings": await validate_translation_text(
                                 validation_context(part_id, candidate_part),
                                 translation_validators,
                             ),
@@ -1153,7 +1153,7 @@ async def run_translation(
                         combined,
                         request_id,
                         validation_status="warning",
-                        findings=validate_translation_text(
+                        findings=await validate_translation_text(
                             validation_context(original_id, combined),
                             translation_validators,
                         ),

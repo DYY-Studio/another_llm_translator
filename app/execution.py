@@ -710,6 +710,8 @@ def stage_fingerprint(
                     for summary in config.get("_translation_validators", [])
                 ],
                 "exhausted_mode": config["validation"]["translation"]["exhausted_mode"],
+                "decision_preset": config.get("_decision_preset_definition"),
+                "decision_confidence_threshold": config["validation"]["translation"].get("decision_confidence_threshold", 0.8),
             }
     encoded = json.dumps(
         data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -1499,6 +1501,8 @@ def continue_run(
     return run_id, run_dir, index
 
 def _write_llm_snapshots(path: Path, config: dict[str, Any]) -> None:
+    if config.get("_decision_preset_definition") is not None:
+        atomic_write_json(path / "decision_preset.json", config["_decision_preset_definition"])
     adapter = config.get("_llm_adapter")
     if not isinstance(adapter, JSONLLMAdapter):
         raise ConfigError("项目配置缺少已加载的 LLM Adapter")

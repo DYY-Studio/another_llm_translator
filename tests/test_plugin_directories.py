@@ -73,7 +73,7 @@ def _validator_body(
         "def descriptor():\n"
         f"{marker_code}"
         f"{count_code}"
-        f"    return PluginDescriptor({descriptor_id!r}, '1.0.0', 12, translation_validators=(Validator(),))\n"
+        f"    return PluginDescriptor({descriptor_id!r}, '1.0.0', {PLUGIN_PROTOCOL_VERSION}, translation_validators=(Validator(),))\n"
     )
 
 

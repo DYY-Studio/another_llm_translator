@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
 
 import pytest
 
@@ -42,6 +43,16 @@ def test_source_text_residual_reports_complete_and_long_partial_matches() -> Non
     assert partial[0].text == "这是一个需要完整翻译的原文句子"
     assert partial[0].start == 3
     assert partial[0].end == 3 + len(partial[0].text)
+
+
+def test_async_validator_preserves_nonrepairable_advisory() -> None:
+    class Validator:
+        validator_id = "async"
+        async def validate(self, context):
+            return [TranslationValidationMatch("uncertain", None, None, None,
+                                              severity="advisory", repairable=False)]
+    findings = asyncio.run(validate_translation_text(TranslationValidationContext("source", "target"), (Validator(),)))
+    assert findings[0]["repairable"] is False
 
 
 def test_source_text_residual_handles_whitespace_and_nfkc_without_numeric_noise() -> None:
@@ -102,10 +113,10 @@ def test_translation_validation_rejects_invalid_plugin_match() -> None:
             ]
 
     with pytest.raises(ProjectError, match="越界或不一致"):
-        validate_translation_text(
+        asyncio.run(validate_translation_text(
             TranslationValidationContext("source", "translation"),
             (InvalidValidator(),),
-        )
+        ))
 
 
 def test_plugin_host_rejects_duplicate_translation_validator(

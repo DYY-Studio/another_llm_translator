@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -683,10 +685,10 @@ class WebStore:
         if not isinstance(text, str):
             raise UsageError("译文必须是字符串")
         text = normalize_model_text(files, segment, text, "translation")
-        findings = validate_translation_text(
+        findings = asyncio.run(validate_translation_text(
             self._translation_validation_context(segment, text),
             self.config["_translation_validator_instances"],
-        )
+        ))
         record = record_header(
             "stage_result",
             self.project_id,

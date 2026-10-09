@@ -102,6 +102,9 @@ allow_soft_target_overflow = true
 anchor_overflow_mode = "error"
 
 [validation.translation]
+decision_enabled = false
+decision_preset = ""
+decision_confidence_threshold = 0.8
 # 启用的翻译校验器 ID；可由可信 Python 插件扩展。原文残留默认关闭。
 validators = []
 # 初始翻译通过结构校验后，文字校验失败时最多执行多少轮定向修复。

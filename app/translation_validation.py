@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import difflib
+import inspect
+from collections.abc import Awaitable
+from typing import TYPE_CHECKING
 import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Protocol
 
 from .errors import ProjectError
+
+if TYPE_CHECKING:
+    from .decision import DecisionClient
 
 
 @dataclass(frozen=True)
@@ -17,6 +23,8 @@ class TranslationTermMatch:
     matched_text: str
     match_type: str
     preferred_translation: str | None
+    category: str | None = None
+    description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -26,6 +34,8 @@ class TranslationValidationContext:
     source: str
     translation: str
     terms: tuple[TranslationTermMatch, ...] = ()
+    decision: DecisionClient | None = None
+    decision_confidence_threshold: float = 0.8
 
 
 @dataclass(frozen=True)
@@ -45,6 +55,7 @@ class TranslationValidationMatch:
     term_source: str | None = None
     matched_source: str | None = None
     expected_translation: str | None = None
+    repairable: bool = True
 
 
 class TranslationValidator(Protocol):
@@ -57,6 +68,7 @@ class TranslationValidator(Protocol):
     ) -> (
         list[TranslationValidationMatch]
         | tuple[TranslationValidationMatch, ...]
+        | Awaitable[list[TranslationValidationMatch] | tuple[TranslationValidationMatch, ...]]
     ): ...
 
 
@@ -181,7 +193,7 @@ class SourceTextResidualValidator:
         )
 
 
-def validate_translation_text(
+async def validate_translation_text(
     context: TranslationValidationContext,
     validators: tuple[TranslationValidator, ...],
 ) -> list[dict[str, object]]:
@@ -190,6 +202,8 @@ def validate_translation_text(
         validator_id = str(validator.validator_id)
         try:
             matches = validator.validate(context)
+            if inspect.isawaitable(matches):
+                matches = await matches
             matches = list(matches)
         except Exception as exc:
             raise ProjectError(f"翻译校验器执行失败：{validator_id}") from exc
@@ -209,6 +223,8 @@ def validate_translation_text(
                 raise ProjectError(
                     f"翻译校验器返回了无效严重性：{validator_id}"
                 )
+            if type(match.repairable) is not bool or (match.severity == "error" and not match.repairable):
+                raise ProjectError(f"翻译校验器返回了无效修复标记：{validator_id}")
             has_span = (
                 match.text is not None
                 or match.start is not None
@@ -249,6 +265,8 @@ def validate_translation_text(
                 "start": match.start,
                 "end": match.end,
             }
+            if not match.repairable:
+                finding["repairable"] = False
             if match.text is not None:
                 finding["matched_text"] = match.text
             if match.term_source is not None:

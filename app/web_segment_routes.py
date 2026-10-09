@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -59,7 +61,7 @@ def register_segment_routes(*, app: FastAPI, projects_root: Path, app_root: Path
     async def save_translation(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        return WebStore(project(name)).save_translation(payload)
+        return await asyncio.to_thread(WebStore(project(name)).save_translation, payload)
 
     @app.post("/api/v1/projects/{name}/reviews")
     async def save_review(

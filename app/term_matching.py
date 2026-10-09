@@ -338,6 +338,8 @@ class _PreparedTermMatcher:
                             matched_text=term_source,
                             match_type="source",
                             preferred_translation=preferred,
+                            category=term.get("category"),
+                            description=term.get("description"),
                         )
                     )
                 continue
@@ -360,6 +362,8 @@ class _PreparedTermMatcher:
                         matched_text=alias,
                         match_type="alias",
                         preferred_translation=preferred,
+                        category=term.get("category"),
+                        description=term.get("description"),
                     )
                 )
         return tuple(matches)

@@ -67,6 +67,9 @@ SCHEMA: dict[str, Any] = {
     "validation": {
         "translation": {
             "validators": None,
+            "decision_enabled": None,
+            "decision_preset": None,
+            "decision_confidence_threshold": None,
             "max_retry_attempts": None,
             "exhausted_mode": None,
         }
@@ -259,6 +262,14 @@ def validate_config(config: dict[str, Any]) -> None:
         "warning",
     }:
         raise ConfigError("validation.translation.exhausted_mode 必须是 fail 或 warning")
+    decision = config["validation"]["translation"]
+    if type(decision["decision_enabled"]) is not bool or not isinstance(decision["decision_preset"], str):
+        raise ConfigError("Decision 校验配置无效")
+    threshold = decision["decision_confidence_threshold"]
+    if type(threshold) not in {int, float} or not 0 <= threshold <= 1:
+        raise ConfigError("Decision 置信度门槛必须在 0 到 1 之间")
+    if decision["decision_enabled"] and (not decision["decision_preset"] or "preferred_term_usage" not in decision["validators"]):
+        raise ConfigError("Decision 复核需要启用 preferred_term_usage 并选择 Decision Preset")
     validators = config["validation"]["translation"]["validators"]
     if not isinstance(validators, list) or any(
         not isinstance(validator_id, str) or not validator_id.strip()
@@ -483,6 +494,11 @@ def load_config(path: Path) -> dict[str, Any]:
             ]
             for key in legacy_keys:
                 del translation_validation[key]
+    translation_validation = config.get("validation", {}).get("translation")
+    if isinstance(translation_validation, dict):
+        translation_validation.setdefault("decision_enabled", False)
+        translation_validation.setdefault("decision_preset", "")
+        translation_validation.setdefault("decision_confidence_threshold", 0.8)
     validate_config(config)
     return config
 
@@ -519,6 +535,7 @@ def _resolve_config(
     config["_translation_validator_instances"] = tuple(
         validator for validator, _ in validator_bindings
     )
+    _resolve_decision_config(config, root)
     configured_preset_id = _preset_id_for_stage(config, stage)
     preset_path(root, configured_preset_id)
     preset = load_llm_preset(
@@ -570,8 +587,23 @@ def _preset_id_for_stage(config: dict[str, Any], stage: str | None) -> str:
     return str(override or config["llm"]["preset"])
 
 
+def _resolve_decision_config(config: dict[str, Any], root: Path, *, snapshot: bool = False) -> None:
+    from .decision import decision_preset_path, load_decision_preset
+    options = config["validation"]["translation"]
+    if not options["decision_enabled"]:
+        return
+    preset_id = options["decision_preset"]
+    path = root / "decision_preset.json" if snapshot else effective_path(
+        str(decision_preset_path(Path(), preset_id)), builtin_root=root)
+    definition = load_decision_preset(path)
+    if definition["preset_id"] != preset_id:
+        raise ConfigError("Decision Preset ID 与配置不一致")
+    config["_decision_preset_definition"] = definition
+
+
 def load_run_config(run_dir: Path) -> dict[str, Any]:
     config = load_config(run_dir / "config.toml")
+    _resolve_decision_config(config, run_dir, snapshot=True)
     preset = load_llm_preset(run_dir / "llm_preset.json")
     return _resolve_llm_config(
         config,
