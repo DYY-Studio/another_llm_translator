@@ -523,7 +523,9 @@ def inspect_continuous(
             project, draft_config, int(terms["terms_revision"]) if terms else None
         )
     elif include_summaries:
-        fingerprints["fragment_summary"] = stage_fingerprint_snapshot(project, "fragment_summary")
+        fingerprints["fragment_summary"] = _stable_digest(
+            prompt_middle_digests(project, "fragment_summary")
+        )
 
     stage_summaries: dict[str, dict[str, Any]] = {}
     for stage in execution_stages:

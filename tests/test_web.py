@@ -6864,8 +6864,10 @@ def test_translation_filters_keep_warnings_failures_and_resets(tmp_path: Path) -
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failed_stage", [None, "terminology", "content_summary"])
+@pytest.mark.parametrize("include_draft_translation", [False, True])
 async def test_continuous_joint_outputs_aggregate_before_review_and_stop_on_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_stage: str | None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_stage: str | None,
+    include_draft_translation: bool,
 ) -> None:
     _, project = make_project(tmp_path)
     write_summary_participation(
@@ -6875,7 +6877,7 @@ async def test_continuous_joint_outputs_aggregate_before_review_and_stop_on_fail
 
     async def terminology(*_: object, **kwargs: object) -> dict[str, object]:
         calls.append("terminology")
-        assert kwargs["include_draft_translation"] is True
+        assert kwargs["include_draft_translation"] is include_draft_translation
         assert kwargs["include_summaries"] is True
         kwargs["on_draft_progress"]({
             stage: {"completed": 2, "failed": 0, "total": 2}
@@ -6897,7 +6899,9 @@ async def test_continuous_joint_outputs_aggregate_before_review_and_stop_on_fail
         return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
 
     async def standard_translation(*_: object, **__: object) -> dict[str, object]:
-        raise AssertionError("联合粗翻不应调用标准翻译")
+        assert not include_draft_translation, "联合粗翻不应调用标准翻译"
+        calls.append("translation")
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
 
     monkeypatch.setattr(web_continuous_module, "run_terminology", terminology)
     monkeypatch.setattr(web_continuous_module, "aggregate_summaries", aggregate)
@@ -6908,22 +6912,26 @@ async def test_continuous_joint_outputs_aggregate_before_review_and_stop_on_fail
         project, "continuous", scope=Scope(), reuse_mixed_fingerprints=False,
         run_action=None,
         continuous_stages=("terminology", "terminology_decision", "translation", "proofreading"),
-        include_draft_translation=True, include_summaries=True,
+        include_draft_translation=include_draft_translation, include_summaries=True,
         aggregate_full_summaries=True, apply_terminology_decision=True,
     )
-    assert started["include_draft_translation"] is True
+    assert started["include_draft_translation"] is include_draft_translation
     assert started["aggregate_full_summaries"] is True
     assert [step["stage"] for step in started["steps"]] == [
         "terminology", "content_summary", "terminology_decision", "translation", "proofreading",
     ]
     translation = next(step for step in started["steps"] if step["stage"] == "translation")
-    assert translation["reason"] == "joint_draft_translation"
-    assert translation["selected"] == 0
+    if include_draft_translation:
+        assert translation["reason"] == "joint_draft_translation"
+        assert translation["selected"] == 0
+    else:
+        assert translation["status"] != "skipped"
     await manager.tasks[started["task_id"]].asyncio_task
     result = manager.get(started["task_id"])
     if failed_stage is None:
         assert result["status"] == "completed"
-        assert calls == ["terminology", "content_summary", "proofreading"]
+        assert calls == (["terminology", "content_summary", "proofreading"] if include_draft_translation
+                         else ["terminology", "content_summary", "translation", "proofreading"])
         aggregate_step = next(step for step in result["steps"] if step["stage"] == "content_summary")
         assert aggregate_step["run_id"] == "RUN-AGGREGATION"
     else:
