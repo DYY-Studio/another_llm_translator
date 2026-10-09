@@ -9,7 +9,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Protocol
 
-from .errors import ProjectError
+from .errors import ExternalError, ProjectError
 
 if TYPE_CHECKING:
     from .decision import DecisionClient
@@ -36,6 +36,7 @@ class TranslationValidationContext:
     terms: tuple[TranslationTermMatch, ...] = ()
     decision: DecisionClient | None = None
     decision_confidence_threshold: float = 0.8
+    segment_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -205,6 +206,8 @@ async def validate_translation_text(
             if inspect.isawaitable(matches):
                 matches = await matches
             matches = list(matches)
+        except ExternalError:
+            raise
         except Exception as exc:
             raise ProjectError(f"翻译校验器执行失败：{validator_id}") from exc
         for match in matches:

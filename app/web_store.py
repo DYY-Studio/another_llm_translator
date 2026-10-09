@@ -6,6 +6,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from .decision import DecisionClient
 from .config import load_project_config
 from .documents import DocumentAdapter
 from .errors import ProjectError, TermGroupError, UsageError
@@ -187,6 +188,9 @@ class WebStore:
             source=str(segment["source"]),
             translation=text,
             terms=terms,
+            decision=DecisionClient(self.config["_decision_preset_definition"], retry=self.config["retry"]) if self.config.get("_decision_preset_definition") else None,
+            decision_confidence_threshold=self.config["validation"]["translation"]["decision_confidence_threshold"],
+            segment_id=str(segment["segment_id"]),
         )
 
     def _fingerprint(self, stage: str) -> str:
@@ -685,8 +689,9 @@ class WebStore:
         if not isinstance(text, str):
             raise UsageError("译文必须是字符串")
         text = normalize_model_text(files, segment, text, "translation")
+        context = self._translation_validation_context(segment, text)
         findings = asyncio.run(validate_translation_text(
-            self._translation_validation_context(segment, text),
+            context,
             self.config["_translation_validator_instances"],
         ))
         record = record_header(
@@ -703,6 +708,7 @@ class WebStore:
             run_id=None,
             request_id=None,
             origin="web",
+            decision_validation=context.decision.records if context.decision else [],
         )
         append_jsonl(self.project, stage_result_path(self.project, "translation"), record)
         return self._result_view(record) or {}

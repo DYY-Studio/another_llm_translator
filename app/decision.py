@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .credentials import resolve_api_keys
-from .errors import ConfigError, ExternalError
+from .errors import ConfigError, ExternalError, FatalExternalError
 from .llm_keys import KeyPool
 
 
@@ -92,7 +92,7 @@ class DecisionClient:
         self.pool = KeyPool(preset["requests_per_minute"], 0,
                             preset["max_parallel"], preset["max_parallel"])
 
-    async def choose(self, state: Any, questions: list[DecisionQuestion]) -> dict[str, DecisionAnswer]:
+    async def choose(self, state: Any, questions: list[DecisionQuestion], *, segment_id: str | None = None) -> dict[str, DecisionAnswer]:
         if not questions:
             return {}
         if len({q.name for q in questions}) != len(questions):
@@ -107,18 +107,23 @@ class DecisionClient:
                         questions=[dict(type="choice", name=q.name, instructions=q.instructions,
                                         choices=[dict(value=k, description=v) for k, v in q.choices.items()]) for q in questions])
         if self.http_client is not None:
-            return await self._request(self.http_client, body, questions)
+            return await self._request(self.http_client, body, questions, segment_id)
         async with httpx.AsyncClient(trust_env=False) as http:
-            return await self._request(http, body, questions)
+            return await self._request(http, body, questions, segment_id)
 
     async def _request(self, http: httpx.AsyncClient, body: dict[str, Any],
-                       questions: list[DecisionQuestion]) -> dict[str, DecisionAnswer]:
-        keys = resolve_api_keys(self.preset["credential"])
+                       questions: list[DecisionQuestion], segment_id: str | None) -> dict[str, DecisionAnswer]:
+        try:
+            keys = resolve_api_keys(self.preset["credential"])
+        except ExternalError as exc:
+            raise FatalExternalError(str(exc)) from exc
         key_ids = [hashlib.sha256(key.encode()).hexdigest() for key in keys]
         for attempt in range(self.retry["http_max_attempts"]):
             lease = await self.pool.acquire(key_ids, estimated_tokens=0)
             started = time.monotonic()
-            record: dict[str, Any] = {"attempt": attempt + 1, "questions": [q.name for q in questions]}
+            record: dict[str, Any] = {"attempt": attempt + 1, "segment_id": segment_id,
+                                    "questions": [q.name for q in questions],
+                                    "evidence_digest": hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True).encode()).hexdigest()}
             try:
                 response = await http.post(self.preset["url"], json=body,
                                            headers={"Authorization": f"Bearer {keys[lease.key_index]}"},
@@ -127,18 +132,18 @@ class DecisionClient:
                 if response.status_code == 429 or 500 <= response.status_code <= 599:
                     raise httpx.HTTPStatusError("Decision 暂时不可用", request=response.request, response=response)
                 if not response.is_success:
-                    raise ExternalError(f"Decision 请求失败：HTTP {response.status_code}")
+                    raise FatalExternalError(f"Decision 请求失败：HTTP {response.status_code}")
                 try:
                     data = response.json()
                     answers = self._parse(data, questions)
                 except (ValueError, TypeError, KeyError) as exc:
-                    raise ExternalError("Decision 响应无效") from exc
+                    raise FatalExternalError("Decision 响应无效") from exc
                 record.update(model=data["model"], answers={k: asdict(v) for k, v in answers.items()}, usage=data.get("usage"))
                 return answers
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
                 record["error"] = type(exc).__name__
                 if attempt + 1 >= self.retry["http_max_attempts"]:
-                    raise ExternalError("Decision 请求失败，重试预算耗尽") from exc
+                    raise FatalExternalError("Decision 请求失败，重试预算耗尽") from exc
             except ExternalError:
                 record["error"] = "decision_error"
                 raise
@@ -148,6 +153,21 @@ class DecisionClient:
                 await lease.release()
             await asyncio.sleep(self.retry["base_delay_seconds"] * 2 ** attempt)
         raise AssertionError("unreachable")
+
+    def usage_summary(self) -> dict[str, Any] | None:
+        from .execution import combine_usage, unavailable_usage
+        if not self.records:
+            return None
+        summary = None
+        for record in self.records:
+            usage = record.get("usage")
+            if isinstance(usage, dict) and all(type(usage.get(k)) is int and usage[k] >= 0 for k in ("input_tokens", "output_tokens")):
+                value = dict(input_tokens=usage["input_tokens"], output_tokens=usage["output_tokens"],
+                             total_tokens=usage["input_tokens"] + usage["output_tokens"], available=True, partial=False)
+            else:
+                value = unavailable_usage()
+            summary = combine_usage(summary, value)
+        return summary
 
     def _parse(self, data: Any, questions: list[DecisionQuestion]) -> dict[str, DecisionAnswer]:
         if not isinstance(data, dict) or not isinstance(data.get("model"), str):

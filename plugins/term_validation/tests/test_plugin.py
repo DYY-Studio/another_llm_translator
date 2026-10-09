@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
+
+import pytest
+
 from app.plugin_api import (
+    DecisionAnswer,
     TranslationTermMatch,
     TranslationValidationContext,
 )
@@ -65,3 +71,25 @@ def test_descriptor_uses_fixed_protocol_version() -> None:
     value = descriptor()
     assert value.plugin_id == "term-validation"
     assert value.protocol_version == 13
+
+
+@pytest.mark.parametrize("choice,confidence,count,repairable", [
+    ("required", 0.9, 1, True),
+    ("ordinary", 0.9, 0, False),
+    ("required", 0.5, 1, False),
+    ("uncertain", 0.9, 1, False),
+])
+def test_decision_reviews_only_missing_terms(choice, confidence, count, repairable):
+    class Decision:
+        async def choose(self, state, questions, **kwargs):
+            assert state["source"] == "Alice"
+            assert state["translation"] == "其他"
+            assert len(questions) == 1
+            assert state["terms"][questions[0].name]["matched_text"] == "Ally"
+            return {questions[0].name: DecisionAnswer(choice, {}, confidence)}
+    validator = PreferredTermUsageValidator()
+    findings = asyncio.run(validator.validate(replace(_context("其他"), decision=Decision())))
+    assert len(findings) == count
+    if count:
+        assert findings[0].repairable is repairable
+    assert validator.validate(replace(_context("爱丽丝"), decision=Decision())) == ()

@@ -12,6 +12,7 @@ from .errors import (
     ContextLengthError,
     EmptyResponseSplitError,
 )
+from .decision import DecisionClient
 from .term_library import (load_terms, term_normalization)
 from .term_matching import _TermMatchCache
 from .execution import (
@@ -624,6 +625,7 @@ async def run_translation(
         }
 
     assert run_id is not None and run_dir is not None
+    decision_client = DecisionClient(config["_decision_preset_definition"], http_client=http_client, retry=config["retry"]) if config.get("_decision_preset_definition") else None
     result_path = stage_result_path(project, "translation")
     write_lock = asyncio.Lock()
     validation_pending: dict[str, dict[str, Any]] = {}
@@ -648,6 +650,9 @@ async def run_translation(
             source=str(item["source"]),
             translation=translation,
             terms=term_match_cache.validation_matches_for_item(item),
+            decision=decision_client if segment_id not in part_original else None,
+            decision_confidence_threshold=config["validation"]["translation"]["decision_confidence_threshold"],
+            segment_id=original_id or segment_id,
         )
 
     def report_progress() -> None:
@@ -812,6 +817,7 @@ async def run_translation(
         warnings=warnings,
         run_id=run_id,
         run_dir=run_dir,
+        decision=decision_client,
         continuation_index=continuation_index,
         on_usage=on_usage,
         preparation_started_at=preparation_started_at,
@@ -1099,6 +1105,7 @@ async def run_translation(
                 segment_id: item
                 for segment_id, item in validation_pending.items()
                 if segment_id not in advisory_repair_attempted
+                and any(finding.get("repairable", True) for finding in item["findings"])
             }
             if not advisory_pending:
                 break
@@ -1230,6 +1237,12 @@ async def run_translation(
             runtime_parts_kwargs={"by_id": by_id},
         )
     finally:
+        if decision_client is not None:
+            from .sqlite_storage import read_json, write_json
+            path = run_dir / "manifest.json"
+            manifest = read_json(project, path)
+            manifest["decision_validation"] = [*manifest.get("decision_validation", []), *decision_client.records]
+            write_json(project, path, manifest)
         if draft_scan is not None:
             draft_scan.finish_summary_run(run_id)
     failed_count = len(draft_scan.failed()) if draft_scan else len(failed_ids)

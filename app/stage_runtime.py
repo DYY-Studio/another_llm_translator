@@ -12,6 +12,7 @@ from typing import Any, NamedTuple
 
 import httpx
 
+from .decision import DecisionClient
 from .config import load_project_config
 from .documents import (
     DocumentAdapter,
@@ -32,6 +33,7 @@ from .execution import (
     ChunkPlan,
     Scope,
     classify_stage,
+    combine_usage,
     contiguous_groups,
     continue_run,
     create_run,
@@ -589,6 +591,7 @@ class StageRunState:
     on_usage: Callable[[dict[str, Any] | None], None] | None = None
     preparation_started_at: float | None = None
     llm: LLMClient | None = None
+    decision: DecisionClient | None = None
 
 
 async def _execute_stage_run(
@@ -619,6 +622,11 @@ async def _execute_stage_run(
     ]
     | None = None,
 ) -> dict[str, Any] | None:
+    def usage_summary() -> dict[str, Any] | None:
+        generation = state.llm.usage_summary() if state.llm is not None else None
+        validation = state.decision.usage_summary() if state.decision is not None else None
+        return combine_usage(generation, validation) if validation is not None else generation
+
     logger = get_logger(state.stage)
     logger.info("run start run=%s", state.run_id)
     planned = iter_chunk_plans(
@@ -774,11 +782,11 @@ async def _execute_stage_run(
             )
             await before_finalize()
         _extend_unique(state.warnings, llm.warnings)
-        usage = llm.usage_summary()
+        usage = usage_summary()
     except asyncio.CancelledError:
         if state.llm is not None:
             _extend_unique(state.warnings, state.llm.warnings)
-        usage = state.llm.usage_summary() if state.llm is not None else None
+        usage = usage_summary()
         finalize_run(
             state.project,
             state.run_dir,
@@ -795,7 +803,7 @@ async def _execute_stage_run(
         if state.llm is not None:
             _extend_unique(state.warnings, state.llm.warnings)
         if isinstance(exc, FatalExternalError) and state.llm is not None:
-            usage = state.llm.usage_summary()
+            usage = usage_summary()
         finalize_run(
             state.project,
             state.run_dir,
@@ -816,7 +824,7 @@ async def _execute_stage_run(
     except StorageError as exc:
         if state.llm is not None:
             _extend_unique(state.warnings, state.llm.warnings)
-            usage = state.llm.usage_summary()
+            usage = usage_summary()
             usage_invoked = state.llm.send_count > 0
         else:
             usage_invoked = False
@@ -899,9 +907,8 @@ async def _localized_request_loop(
                         item,
                         str(repair_candidates[str(item["segment_id"])]["candidate"]),
                     ),
-                    "validation_matches": repair_candidates[str(item["segment_id"])][
-                        "findings"
-                    ],
+                    "validation_matches": [finding for finding in repair_candidates[str(item["segment_id"])]["findings"]
+                                           if finding.get("repairable", True)],
                 }
                 for item in items
             ]
