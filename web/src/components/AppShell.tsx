@@ -63,14 +63,15 @@ function TaskSteps({
     return (
       <div className="task-steps task-step-track" role="list" aria-label={translate("run.steps", language)}>
         <div className="task-step-track-stages">
-          {steps.map((step) => {
+          {steps.filter((step) => step.reason !== "joint_draft_translation").map((step) => {
             const status = displayableTaskStepStatus(step, steps, { current_stage: currentStage, status: taskStatus });
             const current = step.stage === currentStage;
-            const failedPercent = status === "queued" || status === "skipped" || !step.selected ? 0 : step.failed / step.selected * 100;
-            const completedPercent = status === "completed" || status === "skipped"
+            const empty = status === "queued" || status === "skipped" || status === "not_executed";
+            const failedPercent = empty || !step.selected ? 0 : step.failed / step.selected * 100;
+            const completedPercent = status === "completed"
               ? 100 - failedPercent
-              : status === "queued" || !step.selected ? 0 : step.completed / step.selected * 100;
-            const label = translate(step.reason === "joint_draft_translation" ? "stage.draftTranslation" : taskStageLabelKey(step.stage), language);
+              : empty || !step.selected ? 0 : step.completed / step.selected * 100;
+            const label = translate(taskStageLabelKey(step.stage), language);
             const statusLabel = translate(`run.${status}`, language);
             const progress = translate("run.stepProgressCompact", language, {
               completed: step.completed,
@@ -83,7 +84,7 @@ function TaskSteps({
                 role="listitem"
                 aria-current={current ? "step" : undefined}
                 aria-label={`${label}: ${statusLabel}${current ? `, ${progress}` : ""}`}
-                title={step.reason === "joint_draft_translation" ? translate("continuousRun.jointDraftSkipped", language) : label}
+                title={`${label}: ${statusLabel}`}
               >
                 <span className="task-step-track-node" aria-hidden="true" />
                 <span className="task-step-track-label">{label}</span>
