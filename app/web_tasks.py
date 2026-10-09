@@ -1451,7 +1451,8 @@ class WebTaskManager:
         def continuous_stage(
             stage: str, status: str, step: Mapping[str, Any]
         ) -> None:
-            state.current_stage = stage
+            if status != "skipped":
+                state.current_stage = stage
             for index, current in enumerate(state.steps):
                 if current.get("stage") == stage:
                     state.steps[index] = dict(step)
@@ -1696,7 +1697,8 @@ class WebTaskManager:
             if state.stage == CONTINUOUS_STAGE:
                 state.steps = [dict(step) for step in summary.get("steps", [])]
                 state.current_stage = (
-                    str(state.steps[-1]["stage"]) if state.steps else None
+                    next((str(step["stage"]) for step in reversed(state.steps)
+                          if step["status"] != "skipped"), None)
                 )
                 state.completed_segments = sum(
                     int(step.get("completed", 0)) for step in state.steps

@@ -342,7 +342,7 @@ def inspect_continuous(
     if aggregate_full_summaries:
         execution_stages = (execution_stages[0], "content_summary", *execution_stages[1:])
     actions = dict(run_actions or {})
-    unknown_actions = sorted(set(actions) - set(normalized))
+    unknown_actions = sorted(set(actions) - (set(normalized) | set(execution_stages)))
     if unknown_actions:
         raise UsageError(
             "连续运行 run_actions 包含未选择阶段："
@@ -353,6 +353,8 @@ def inspect_continuous(
     )
     if invalid_actions:
         raise UsageError("run_actions 必须是 resume 或 decline")
+    if include_draft_translation and "translation" in actions:
+        raise UsageError("联合粗翻已替代标准翻译，不能指定标准翻译 run_action")
     if force and reuse_mixed_fingerprints:
         raise UsageError("连续运行 force 与 reuse_mixed_fingerprints 不能同时使用")
     has_decision = "terminology_decision" in normalized
@@ -391,13 +393,14 @@ def inspect_continuous(
 
     running_runs: dict[str, list[dict[str, Any]]] = {}
     blocking: list[dict[str, str]] = []
-    for stage in normalized:
-        if stage not in execution_stages:
-            if stage in actions:
-                raise UsageError("联合粗翻已替代标准翻译，不能指定标准翻译 run_action")
-            running_runs[stage] = []
-            continue
+    for stage in execution_stages:
         runs = [_run_summary(item) for item in find_running_runs(project, stage)]
+        if stage == "content_summary":
+            for run in runs:
+                run["resume_compatible"] = False
+                run["resume_incompatibility_reason"] = "内容概括聚合不支持续用；请结束旧 Run 并重新启动"
+            if actions.get(stage) == "resume":
+                blocking.append(_blocking("summary_resume_unsupported", "内容概括聚合不支持续用；请结束旧 Run 并重新启动", stage=stage))
         if stage == "terminology" and terminology_options is not None:
             running = terminology_options.get("running_run")
             runs = [dict(running)] if running else []
@@ -753,7 +756,7 @@ def inspect_continuous(
     }
     steps: list[dict[str, Any]] = []
     for stage in normalized:
-        stage_running = running_runs[stage]
+        stage_running = running_runs.get(stage, [])
         if stage == "translation" and include_draft_translation:
             step = {"stage": stage, "status": "skipped", "selected": 0, "reason": "joint_draft_translation", "running_run": None}
         elif stage == "terminology_decision" and decision_inputs is not None:
@@ -779,7 +782,7 @@ def inspect_continuous(
                 step.update(stage_summaries[stage])
         steps.append(step)
         if stage == "terminology" and aggregate_full_summaries:
-            steps.append({"stage": "content_summary", "status": "ready", "selected": len(summary_selection), "preset": _preset_summary(configs["content_summary"]), "running_run": None})
+            steps.append({"stage": "content_summary", "status": "ready", "selected": len(summary_selection), "preset": _preset_summary(configs["content_summary"]), "running_run": next(iter(running_runs["content_summary"]), None)})
     return {
         "stage": CONTINUOUS_STAGE,
         "stages": list(normalized),
@@ -1048,15 +1051,13 @@ async def run_continuous(
         steps.append(step)
         emit(stage, "running", step)
         try:
-            resume_run_id = None
-            if stage != "content_summary":
-                resume_run_id, _ = choose_running_run(
-                    project,
-                    stage,
-                    action=actions.get(stage),
-                    dry_run=False,
-                    interactive=False,
-                )
+            resume_run_id, _ = choose_running_run(
+                project,
+                stage,
+                action=actions.get(stage),
+                dry_run=False,
+                interactive=False,
+            )
             usage_base_by_stage[stage] = None
             if resume_run_id is not None:
                 manifest_path = (

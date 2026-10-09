@@ -107,11 +107,12 @@ export function ContinuousRunDialog({
   useEffect(() => {
     setRunActions((current) => {
       const scoped = Object.fromEntries(
-        Object.entries(current).filter(([stage]) => stages.includes(stage as LLMStage)),
+        Object.entries(current).filter(([stage]) => stages.includes(stage as LLMStage)
+          || (stage === "content_summary" && aggregateFullSummaries)),
       );
       return options ? reconcileRunActions(scoped, options.steps) : scoped;
     });
-  }, [options, stages]);
+  }, [options, stages, aggregateFullSummaries]);
 
   useEffect(() => {
     if (options?.steps?.some((step) => step.mismatched_fingerprint_completed)) {
@@ -140,6 +141,7 @@ export function ContinuousRunDialog({
     setEndIndex(nextEndIndex);
     setRunActions((current) => Object.fromEntries(
       Object.entries(current).filter(([stage]) => {
+        if (stage === "content_summary") return aggregateFullSummaries;
         const index = CONTINUOUS_ORDER.indexOf(stage as LLMStage);
         return index >= CONTINUOUS_ORDER.indexOf(startStage) && index <= nextEndIndex;
       }),
@@ -153,9 +155,7 @@ export function ContinuousRunDialog({
     setResultPolicy((current) => resultPolicyAfterRunAction(current, stage, action));
   }
 
-  const runningSteps = stages
-    .map((stage) => stepFor(options, stage))
-    .filter((step): step is ContinuousOptionStep => Boolean(step?.running_run));
+  const runningSteps = (options?.steps ?? []).filter((step) => step.running_run);
   const missingActions = runningSteps.filter((step) => !runActions[step.stage]);
   const hasResume = Object.values(runActions).some((selection) => selection.action === "resume");
   const decisionDeclineNeedsForce = runActions.terminology_decision?.action === "decline"

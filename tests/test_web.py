@@ -6873,6 +6873,11 @@ async def test_continuous_joint_outputs_aggregate_before_review_and_stop_on_fail
     write_summary_participation(
         project, [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
+    old_aggregate_id, old_aggregate_dir = create_run(
+        project, config=load_project_config(project, stage="content_summary"),
+        stage="content_summary", fingerprint="old", prompt="old prompt",
+        selected_count=1, requested_count=1, reused_count=0,
+    )
     calls: list[str] = []
 
     async def terminology(*_: object, **kwargs: object) -> dict[str, object]:
@@ -6888,6 +6893,7 @@ async def test_continuous_joint_outputs_aggregate_before_review_and_stop_on_fail
 
     async def aggregate(_: Path, selected: object, **kwargs: object) -> dict[str, object]:
         calls.append("content_summary")
+        assert read_json(project, old_aggregate_dir / "manifest.json")["status"] == "interrupted"
         assert selected == [{"file_id": "F0001", "part_id": "document"}]
         failed = int(failed_stage == "content_summary")
         kwargs["on_progress"](1 - failed, failed, 1)
@@ -6908,12 +6914,28 @@ async def test_continuous_joint_outputs_aggregate_before_review_and_stop_on_fail
     monkeypatch.setattr(web_continuous_module, "run_review", review)
     monkeypatch.setattr(web_continuous_module, "run_translation", standard_translation)
     manager = WebTaskManager()
+    options = web_tasks_module.task_options(
+        project, "continuous", continuous_stages=("terminology",),
+        include_summaries=True, aggregate_full_summaries=True,
+    )
+    aggregate_option = next(step for step in options["steps"] if step["stage"] == "content_summary")
+    assert aggregate_option["running_run"]["run_id"] == old_aggregate_id
+    assert aggregate_option["running_run"]["resume_compatible"] is False
+    for actions in ({}, {"content_summary": "resume"}):
+        with pytest.raises(UsageError):
+            await manager.start(
+                project, "continuous", scope=Scope(), reuse_mixed_fingerprints=False,
+                run_action=None, continuous_stages=("terminology",),
+                include_summaries=True, aggregate_full_summaries=True,
+                continuous_run_actions=actions,
+            )
     started = await manager.start(
         project, "continuous", scope=Scope(), reuse_mixed_fingerprints=False,
         run_action=None,
         continuous_stages=("terminology", "terminology_decision", "translation", "proofreading"),
         include_draft_translation=include_draft_translation, include_summaries=True,
         aggregate_full_summaries=True, apply_terminology_decision=True,
+        continuous_run_actions={"content_summary": "decline"},
     )
     assert started["include_draft_translation"] is include_draft_translation
     assert started["aggregate_full_summaries"] is True
@@ -6938,3 +6960,26 @@ async def test_continuous_joint_outputs_aggregate_before_review_and_stop_on_fail
         assert result["status"] == "failed"
         assert result["current_stage"] == failed_stage
         assert calls == (["terminology"] if failed_stage == "terminology" else ["terminology", "content_summary"])
+
+
+@pytest.mark.asyncio
+async def test_continuous_joint_draft_ends_on_last_executed_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project = make_project(tmp_path)
+
+    async def terminology(*_: object, **__: object) -> dict[str, object]:
+        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
+
+    monkeypatch.setattr(web_continuous_module, "run_terminology", terminology)
+    manager = WebTaskManager()
+    started = await manager.start(
+        project, "continuous", scope=Scope(), reuse_mixed_fingerprints=False,
+        run_action=None, continuous_stages=("terminology", "terminology_decision", "translation"),
+        include_draft_translation=True, apply_terminology_decision=True,
+    )
+    await manager.tasks[started["task_id"]].asyncio_task
+    result = manager.get(started["task_id"])
+    assert result["status"] == "completed"
+    assert result["current_stage"] == "terminology"
+    assert result["steps"][-1]["reason"] == "joint_draft_translation"
