@@ -62,7 +62,8 @@ class Diagnostics:
         self._request_reset_sink = request_reset_sink
         self.logs: deque[dict[str, Any]] = deque(maxlen=1000)
         self.requests: dict[str, dict[str, Any]] = {}
-        self._retained_terminal_details: deque[str] = deque()
+        self._retained_terminal_details: dict[str, deque[str]] = {"llm": deque(), "decision": deque()}
+        self._decision_activities: dict[str, dict[str, Any]] = {}
         self._request_session = uuid.uuid4().hex
         self._request_cursor = 0
         self.project: str | None = None
@@ -122,7 +123,9 @@ class Diagnostics:
         self.usage = None
         self._invocation_usage = None
         self.requests.clear()
-        self._retained_terminal_details.clear()
+        for retained in self._retained_terminal_details.values():
+            retained.clear()
+        self._decision_activities.clear()
         self._request_session = uuid.uuid4().hex
         self._request_cursor = 0
         self._started_monotonic = None
@@ -144,9 +147,12 @@ class Diagnostics:
         try:
             yield
         finally:
-            for request in self.requests.values():
+            for request in list(self.requests.values()):
                 if request["status"] in {"running", "retrying"}:
                     self._finish_request(request, status="interrupted")
+            for activity in self._decision_activities.values():
+                activity["active_requests"] = 0
+                activity["rate_limit_waiting_requests"] = 0
             self.active_requests = 0
             self.rate_limit_waiting_requests = 0
             if self._started_monotonic is not None:
@@ -164,8 +170,23 @@ class Diagnostics:
         max_attempts: int,
         segment_id_map: dict[str, str] | None = None,
         transport: str = "non_streaming",
+        request_kind: str = "llm",
+        segment_id: str | None = None,
+        question_count: int = 0,
+        request_body: str | None = None,
     ) -> None:
-        self.total_requests += 1
+        if request_kind == "decision":
+            activity = self._decision_activities.setdefault(model, {
+                "model": model, "total_requests": 0, "active_requests": 0,
+                "completed": 0, "failed": 0, "interrupted": 0, "questions": 0,
+                "http_errors": 0, "retry_count": 0, "rate_limit_waiting_requests": 0,
+                "latency_total": 0.0, "attempt_count": 0,
+                "samples": deque(maxlen=1000), "started": time.monotonic(), "finished": None,
+            })
+            activity["total_requests"] += 1
+            activity["questions"] += question_count
+        else:
+            self.total_requests += 1
         normalized_messages = []
         for message in messages:
             content, truncated = _bounded(
@@ -186,6 +207,11 @@ class Diagnostics:
             "request_id": request_id,
             "task_id": self.task_id,
             "model": model,
+            "request_kind": request_kind,
+            "segment_id": segment_id,
+            "question_count": question_count,
+            "request_body": _bounded(request_body, _MESSAGE_LIMIT)[0] if request_body is not None else None,
+            "request_body_truncated": request_body is not None and len(request_body) > _MESSAGE_LIMIT,
             "transport": transport,
             "segment_id_map": dict(segment_id_map or {}),
             "status": "running",
@@ -231,26 +257,32 @@ class Diagnostics:
             request["error"] = error
         if not was_terminal:
             request["finished_at"] = _now()
-            self._retained_terminal_details.append(request["request_id"])
+            self._retained_terminal_details[request["request_kind"]].append(request["request_id"])
+            if request["request_kind"] == "decision":
+                activity = self._decision_activities[request["model"]]
+                activity[status] += 1
+                activity["finished"] = time.monotonic()
         self._touch_request(request)
         self._prune_terminal_details()
         if not was_terminal and self._terminal_sink is not None:
             self._terminal_sink(self, request["request_id"])
 
     def _prune_terminal_details(self) -> None:
-        while len(self._retained_terminal_details) > _REQUEST_DETAIL_LIMIT:
-            request_id = self._retained_terminal_details.popleft()
-            request = self.requests.get(request_id)
-            if request is None:
-                continue
-            del self.requests[request_id]
-            self._request_session = uuid.uuid4().hex
-            if self._request_reset_sink is not None:
-                self._request_reset_sink()
+        for retained in self._retained_terminal_details.values():
+            while len(retained) > _REQUEST_DETAIL_LIMIT:
+                request_id = retained.popleft()
+                if self.requests.pop(request_id, None) is None:
+                    continue
+                self._request_session = uuid.uuid4().hex
+                if self._request_reset_sink is not None:
+                    self._request_reset_sink()
 
     def request_started(self, request_id: str) -> None:
-        self.active_requests += 1
         request = self._request(request_id)
+        if request is not None and request["request_kind"] == "decision":
+            self._decision_activities[request["model"]]["active_requests"] += 1
+        else:
+            self.active_requests += 1
         if request is not None:
             request["status"] = "running"
             request["stream_event_count"] = 0
@@ -292,12 +324,21 @@ class Diagnostics:
         provider_error_status: int | None = None,
         outcome: str | None = None,
     ) -> None:
-        self.active_requests = max(0, self.active_requests - 1)
-        self._latency_samples_seconds.append(latency_seconds)
-        self._latency_total_seconds += latency_seconds
-        if error or (status is not None and status >= 400):
-            self.http_errors += 1
         request = self._request(request_id)
+        if request is not None and request["request_kind"] == "decision":
+            activity = self._decision_activities[request["model"]]
+            activity["active_requests"] = max(0, activity["active_requests"] - 1)
+            activity["samples"].append(latency_seconds)
+            activity["latency_total"] += latency_seconds
+            activity["attempt_count"] += 1
+            if error or (status is not None and status >= 400):
+                activity["http_errors"] += 1
+        else:
+            self.active_requests = max(0, self.active_requests - 1)
+            self._latency_samples_seconds.append(latency_seconds)
+            self._latency_total_seconds += latency_seconds
+            if error or (status is not None and status >= 400):
+                self.http_errors += 1
         if request is None:
             return
         request["provider_error_status"] = provider_error_status
@@ -342,21 +383,34 @@ class Diagnostics:
                 request["status"] = "retrying"
                 self._touch_request(request)
             elif request["status"] not in _TERMINAL_REQUEST_STATUSES:
-                self._finish_request(request, status="failed")
+                if request["request_kind"] == "llm":
+                    self._finish_request(request, status="failed")
+                else:
+                    self._touch_request(request)
         else:
             self._touch_request(request)
 
-    def retried(self) -> None:
-        self.retry_count += 1
+    def retried(self, request_id: str | None = None) -> None:
+        request = self._request(request_id) if request_id is not None else None
+        if request is not None and request["request_kind"] == "decision":
+            self._decision_activities[request["model"]]["retry_count"] += 1
+        else:
+            self.retry_count += 1
 
-    def rate_limit_wait_started(self) -> None:
-        if self._running:
+    def rate_limit_wait_started(self, request_id: str | None = None) -> None:
+        request = self._request(request_id) if request_id is not None else None
+        if request is not None and request["request_kind"] == "decision":
+            self._decision_activities[request["model"]]["rate_limit_waiting_requests"] += 1
+        elif self._running:
             self.rate_limit_waiting_requests += 1
 
-    def rate_limit_wait_finished(self) -> None:
-        self.rate_limit_waiting_requests = max(
-            0, self.rate_limit_waiting_requests - 1
-        )
+    def rate_limit_wait_finished(self, request_id: str | None = None) -> None:
+        request = self._request(request_id) if request_id is not None else None
+        if request is not None and request["request_kind"] == "decision":
+            activity = self._decision_activities[request["model"]]
+            activity["rate_limit_waiting_requests"] = max(0, activity["rate_limit_waiting_requests"] - 1)
+        else:
+            self.rate_limit_waiting_requests = max(0, self.rate_limit_waiting_requests - 1)
 
     def set_usage(
         self, usage: dict[str, Any], *, invocation_usage: dict[str, Any] | None = None
@@ -385,12 +439,12 @@ class Diagnostics:
             request["has_reasoning"] = True
         self._finish_request(request, status="completed")
 
-    def fail_request(self, request_id: str, error: str) -> None:
+    def fail_request(self, request_id: str, error: str, *, interrupted: bool = False) -> None:
         request = self._request(request_id)
         if request is not None:
-            if request["attempts"]:
+            if request["attempts"] and request["request_kind"] == "llm":
                 request["attempts"][-1]["outcome"] = error
-            self._finish_request(request, status="failed", error=error)
+            self._finish_request(request, status="interrupted" if interrupted else "failed", error=error)
 
     def request_detail(self, request_id: str) -> dict[str, Any]:
         request = self._request(request_id)
@@ -417,6 +471,9 @@ class Diagnostics:
             "stage": request["stage"],
             "request_id": request["request_id"],
             "model": request["model"],
+            "request_kind": request["request_kind"],
+            "segment_id": request["segment_id"],
+            "question_count": request["question_count"],
             "transport": request["transport"],
             "status": request["status"],
             "attempt_count": len(request["attempts"]),
@@ -529,6 +586,7 @@ class Diagnostics:
                 "throughput_output_tokens_per_second": throughput_output,
                 "throughput_tokens_per_second": throughput_total,
             },
+            "decision": _decision_snapshot([self]),
             "logs": logs,
             "requests": {
                 "session_id": self._request_session,
@@ -556,6 +614,43 @@ class Diagnostics:
         }
 
 
+def _decision_snapshot(sessions: list[Diagnostics]) -> dict[str, Any]:
+    activities = []
+    samples = []
+    attempts = 0
+    latency_total = 0.0
+    for session in sessions:
+        for activity in session._decision_activities.values():
+            pending = activity["total_requests"] - sum(activity[key] for key in ("completed", "failed", "interrupted"))
+            end = time.monotonic() if session._running else activity["finished"] or activity["started"]
+            elapsed = end - activity["started"]
+            recent = sorted(activity["samples"])
+            count = activity["attempt_count"]
+            activities.append({
+                "task_id": session.task_id, "project": session.project, "stage": session.stage,
+                **{key: activity[key] for key in (
+                    "model", "total_requests", "active_requests", "completed", "failed", "interrupted",
+                    "questions", "http_errors", "retry_count", "rate_limit_waiting_requests",
+                )},
+                "pending": pending,
+                "requests_per_second": round(activity["total_requests"] / elapsed, 2) if elapsed > 0 else None,
+                "average_latency_ms": round(activity["latency_total"] / count * 1000, 1) if count else None,
+                "p95_latency_ms": round(recent[math.ceil(len(recent) * .95) - 1] * 1000, 1) if recent else None,
+            })
+            samples.extend(recent)
+            attempts += count
+            latency_total += activity["latency_total"]
+    samples.sort()
+    metrics = {key: sum(item[key] for item in activities) for key in (
+        "total_requests", "active_requests", "http_errors", "retry_count", "rate_limit_waiting_requests",
+    )}
+    metrics.update(
+        average_latency_ms=round(latency_total / attempts * 1000, 1) if attempts else None,
+        p95_latency_ms=round(samples[math.ceil(len(samples) * .95) - 1] * 1000, 1) if samples else None,
+    )
+    return {"metrics": metrics, "activities": activities}
+
+
 class RunDiagnostics(Diagnostics):
     """Diagnostics state owned by one running Web task."""
 
@@ -568,7 +663,7 @@ class DiagnosticsHub(Diagnostics):
         self.sessions: dict[str, Diagnostics] = {}
         self._hub_request_session = uuid.uuid4().hex
         self._hub_request_cursor = 0
-        self._hub_retained_terminal_details: deque[tuple[Diagnostics, str]] = deque()
+        self._hub_retained_terminal_details: dict[str, deque[tuple[Diagnostics, str]]] = {"llm": deque(), "decision": deque()}
 
     def _next_hub_revision(self) -> int:
         self._hub_request_cursor += 1
@@ -595,11 +690,10 @@ class DiagnosticsHub(Diagnostics):
         request = session.requests.get(request_id)
         if request is None or not request["detail_available"]:
             return
-        self._hub_retained_terminal_details.append((session, request_id))
-        while len(self._hub_retained_terminal_details) > _REQUEST_DETAIL_LIMIT:
-            old_session, old_request_id = (
-                self._hub_retained_terminal_details.popleft()
-            )
+        retained = self._hub_retained_terminal_details[request["request_kind"]]
+        retained.append((session, request_id))
+        while len(retained) > _REQUEST_DETAIL_LIMIT:
+            old_session, old_request_id = retained.popleft()
             old_request = old_session.requests.get(old_request_id)
             if old_request is None:
                 continue
@@ -619,7 +713,8 @@ class DiagnosticsHub(Diagnostics):
 
     def _reset_batch(self) -> None:
         self.sessions.clear()
-        self._hub_retained_terminal_details.clear()
+        for retained in self._hub_retained_terminal_details.values():
+            retained.clear()
         self._reset_run_state()
         self.project = None
         self.stage = None
@@ -654,26 +749,26 @@ class DiagnosticsHub(Diagnostics):
             return
         super().request_finished(**kwargs)
 
-    def retried(self) -> None:
+    def retried(self, request_id: str | None = None) -> None:
         target = self._active_session()
         if target is not None:
-            target.retried()
+            target.retried(request_id)
             return
-        super().retried()
+        super().retried(request_id)
 
-    def rate_limit_wait_started(self) -> None:
+    def rate_limit_wait_started(self, request_id: str | None = None) -> None:
         target = self._active_session()
         if target is not None:
-            target.rate_limit_wait_started()
+            target.rate_limit_wait_started(request_id)
             return
-        super().rate_limit_wait_started()
+        super().rate_limit_wait_started(request_id)
 
-    def rate_limit_wait_finished(self) -> None:
+    def rate_limit_wait_finished(self, request_id: str | None = None) -> None:
         target = self._active_session()
         if target is not None:
-            target.rate_limit_wait_finished()
+            target.rate_limit_wait_finished(request_id)
             return
-        super().rate_limit_wait_finished()
+        super().rate_limit_wait_finished(request_id)
 
     def complete_request(
         self, request_id: str, *, content: str, reasoning_content: str | None
@@ -688,12 +783,12 @@ class DiagnosticsHub(Diagnostics):
             request_id, content=content, reasoning_content=reasoning_content
         )
 
-    def fail_request(self, request_id: str, error: str) -> None:
+    def fail_request(self, request_id: str, error: str, *, interrupted: bool = False) -> None:
         target = self._active_session()
         if target is not None:
-            target.fail_request(request_id, error)
+            target.fail_request(request_id, error, interrupted=interrupted)
             return
-        super().fail_request(request_id, error)
+        super().fail_request(request_id, error, interrupted=interrupted)
 
     @contextmanager
     def activate(
@@ -912,6 +1007,7 @@ class DiagnosticsHub(Diagnostics):
                 "throughput_output_tokens_per_second": throughput_output,
                 "throughput_tokens_per_second": throughput_total,
             },
+            "decision": _decision_snapshot(metric_sessions),
             "logs": logs,
             "requests": {
                 "session_id": self._hub_request_session,

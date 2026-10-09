@@ -7,6 +7,7 @@ import json
 import math
 import re
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -14,6 +15,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .diagnostics import current_diagnostics
 from .credentials import resolve_api_keys
 from .errors import ConfigError, ExternalError, FatalExternalError
 from .llm_keys import KeyPool
@@ -131,49 +133,83 @@ class DecisionClient:
                         questions=[dict(type="choice", name=q.name, instructions=q.instructions,
                                         choices=[dict(value=k, description=v) for k, v in q.choices.items()]) for q in questions])
         from .execution import estimate_tokens
-        estimated = estimate_tokens(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
-        available = self.preset["context_window_tokens"] - self.preset["context_safety_margin_tokens"]
-        if estimated > available:
-            segment = f"（Segment {segment_id}）" if segment_id else ""
-            raise FatalExternalError(f"Decision 请求{segment}估算 {estimated} Token，超过可用上下文 {available} Token")
-        if self.http_client is not None:
-            return await self._request(self.http_client, body, questions, segment_id)
-        async with httpx.AsyncClient(proxy=self.preset["proxy_url"] or None) as http:
-            return await self._request(http, body, questions, segment_id)
+        request_id = f"decision-{uuid.uuid4().hex}"
+        diagnostics = current_diagnostics()
+        if diagnostics is not None:
+            diagnostics.begin_request(
+                request_id=request_id, model=self.preset["model"], messages=[],
+                max_attempts=self.retry["http_max_attempts"], request_kind="decision",
+                segment_id=segment_id, question_count=len(questions),
+                request_body=json.dumps(body, ensure_ascii=False, indent=2),
+            )
+        try:
+            estimated = estimate_tokens(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
+            available = self.preset["context_window_tokens"] - self.preset["context_safety_margin_tokens"]
+            if estimated > available:
+                segment = f"（Segment {segment_id}）" if segment_id else ""
+                raise FatalExternalError(f"Decision 请求{segment}估算 {estimated} Token，超过可用上下文 {available} Token")
+            if self.http_client is not None:
+                return await self._request(self.http_client, body, questions, segment_id, request_id)
+            async with httpx.AsyncClient(proxy=self.preset["proxy_url"] or None) as http:
+                return await self._request(http, body, questions, segment_id, request_id)
+        except asyncio.CancelledError:
+            if diagnostics is not None:
+                diagnostics.fail_request(request_id, "cancelled", interrupted=True)
+            raise
+        except Exception as exc:
+            if diagnostics is not None:
+                diagnostics.fail_request(request_id, str(exc))
+            raise
 
     async def _request(self, http: httpx.AsyncClient, body: dict[str, Any],
-                       questions: list[DecisionQuestion], segment_id: str | None) -> dict[str, DecisionAnswer]:
+                       questions: list[DecisionQuestion], segment_id: str | None, request_id: str) -> dict[str, DecisionAnswer]:
+        diagnostics = current_diagnostics()
         try:
             keys = resolve_api_keys(self.preset["credential"])
         except ExternalError as exc:
             raise FatalExternalError(str(exc)) from exc
         key_ids = [hashlib.sha256(key.encode()).hexdigest() for key in keys]
         for attempt in range(self.retry["http_max_attempts"]):
-            lease = await self.pool.acquire(key_ids, estimated_tokens=0)
+            lease = await self.pool.acquire(key_ids, estimated_tokens=0,
+                on_wait_start=(lambda: diagnostics.rate_limit_wait_started(request_id)) if diagnostics is not None else None,
+                on_wait_end=(lambda: diagnostics.rate_limit_wait_finished(request_id)) if diagnostics is not None else None)
+            if diagnostics is not None:
+                diagnostics.request_started(request_id)
             started = time.monotonic()
             record: dict[str, Any] = {"attempt": attempt + 1, "segment_id": segment_id,
                                     "questions": [q.name for q in questions],
                                     "evidence_digest": hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True).encode()).hexdigest()}
+            outcome = "succeeded"
+            retrying = False
             try:
                 response = await http.post(self.preset["url"], json=body,
                                            headers={"Authorization": f"Bearer {keys[lease.key_index]}"},
                                            timeout=self.preset["request_timeout_seconds"])
                 record["http_status"] = response.status_code
                 if response.status_code == 429 or 500 <= response.status_code <= 599:
+                    outcome = "rate_limit_error" if response.status_code == 429 else "http_error"
                     raise httpx.HTTPStatusError("Decision 暂时不可用", request=response.request, response=response)
                 if not response.is_success:
+                    outcome = "http_error"
                     raise FatalExternalError(f"Decision 请求失败：HTTP {response.status_code}")
                 try:
                     data = response.json()
                     answers = self._parse(data, questions)
                 except (ValueError, TypeError, KeyError) as exc:
+                    outcome = "response_parse_error"
                     raise FatalExternalError("Decision 响应无效") from exc
                 record.update(model=data["model"], answers={k: asdict(v) for k, v in answers.items()}, usage=data.get("usage"))
+                if diagnostics is not None:
+                    diagnostics.complete_request(request_id, content=json.dumps(data, ensure_ascii=False, indent=2), reasoning_content=None)
                 return answers
             except asyncio.CancelledError:
+                outcome = "cancelled"
                 record["error"] = "cancelled"
                 raise
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                if isinstance(exc, httpx.TransportError):
+                    outcome = "network_error"
+                retrying = attempt + 1 < self.retry["http_max_attempts"]
                 record["error"] = type(exc).__name__
                 if attempt + 1 >= self.retry["http_max_attempts"]:
                     raise FatalExternalError("Decision 请求失败，重试预算耗尽") from exc
@@ -183,6 +219,12 @@ class DecisionClient:
             finally:
                 record["elapsed_seconds"] = time.monotonic() - started
                 self.records.append(record)
+                if diagnostics is not None:
+                    diagnostics.request_finished(request_id=request_id, attempt=attempt + 1,
+                        key_index=lease.key_index + 1, latency_seconds=record["elapsed_seconds"],
+                        status=record.get("http_status"), error=outcome != "succeeded", retrying=retrying, outcome=outcome)
+                    if retrying:
+                        diagnostics.retried(request_id)
                 await lease.release()
             await asyncio.sleep(min(self.retry.get("max_delay_seconds", 60), self.retry["base_delay_seconds"] * 2 ** attempt))
         raise AssertionError("unreachable")

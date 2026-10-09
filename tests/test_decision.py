@@ -7,6 +7,61 @@ import pytest
 
 from app.decision import DecisionClient, DecisionQuestion, validate_decision_preset
 from app.errors import ConfigError, ExternalError
+from app.diagnostics import Diagnostics, DiagnosticsHub
+
+
+@pytest.mark.parametrize("diagnostics_type", [Diagnostics, DiagnosticsHub])
+def test_decision_diagnostics_retains_counts_after_detail_eviction(tmp_path, diagnostics_type):
+    diagnostics = diagnostics_type(tmp_path / "app.log")
+    with diagnostics.activate("project", "translation", task_id="TASK"):
+        diagnostics.begin_request(request_id="LLM", model="generator", messages=[], max_attempts=1)
+        diagnostics.complete_request("LLM", content="translation", reasoning_content=None)
+        for index in range(201):
+            request_id = f"DEC-{index}"
+            diagnostics.begin_request(request_id=request_id, model="judge", messages=[], max_attempts=1,
+                                      request_kind="decision", segment_id="SEG", question_count=2)
+            diagnostics.request_started(request_id)
+            diagnostics.request_finished(request_id=request_id, attempt=1, latency_seconds=.01,
+                                         status=200, error=False)
+            diagnostics.complete_request(request_id, content="{}", reasoning_content=None)
+        snapshot = diagnostics.snapshot()
+        assert snapshot["metrics"]["total_requests"] == 1
+        assert snapshot["decision"]["metrics"]["total_requests"] == 201
+        assert snapshot["decision"]["activities"][0]["completed"] == 201
+        assert snapshot["decision"]["activities"][0]["questions"] == 402
+        assert len(snapshot["requests"]["items"]) == 201
+        assert diagnostics.request_detail("LLM")["response_content"] == "translation"
+        with pytest.raises(ValueError):
+            diagnostics.request_detail("DEC-0")
+
+
+def test_decision_diagnostics_tracks_retry_and_preflight_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("DECISION_TEST_KEY", "secret")
+    diagnostics = Diagnostics(tmp_path / "app.log")
+    responses = iter([httpx.Response(429), httpx.Response(200, json={
+        "model": "test-model", "answers": {"term": {"type": "refusal"}},
+    })])
+    async def run():
+        with diagnostics.activate("project", "translation"):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: next(responses))) as http:
+                value = preset()
+                client = DecisionClient(value, http_client=http,
+                                        retry={"http_max_attempts": 2, "base_delay_seconds": 0})
+                await client.choose("evidence", [DecisionQuestion("term", "Question", {"a": "A", "b": "B"})], segment_id="SEG")
+                value.update(context_window_tokens=513, context_safety_margin_tokens=512)
+                with pytest.raises(ExternalError):
+                    await client.choose("evidence", [DecisionQuestion("term", "Question", {"a": "A", "b": "B"})], segment_id="SEG")
+            snapshot = diagnostics.snapshot()
+            assert snapshot["metrics"]["total_requests"] == 0
+            assert snapshot["decision"]["metrics"]["retry_count"] == 1
+            assert snapshot["decision"]["activities"][0]["completed"] == 1
+            assert snapshot["decision"]["activities"][0]["failed"] == 1
+            items = snapshot["requests"]["items"]
+            assert [item["attempt_count"] for item in items] == [2, 0]
+            assert items[0]["segment_id"] == "SEG"
+            import json
+            assert json.loads(diagnostics.request_detail(items[0]["request_id"])["request_body"])["state"] == "evidence"
+    asyncio.run(run())
 
 
 def preset(protocol: str = "typesafe") -> dict:
