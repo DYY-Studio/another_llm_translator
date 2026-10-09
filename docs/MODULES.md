@@ -199,7 +199,7 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 
 ## 8. 术语
 
-- `term_library.py`：术语规范化、候选合并、发布库、override 和组关系。
+- `term_library.py`：术语规范化、候选合并、发布库、override 和组关系；统一检测组主 Alias 重叠，并记录归组移除的 Alias 供发布边界同步。
 - `term_exchange.py`：JSON/CSV 交换格式的完整校验、导入与导出。
 - `term_matching.py`：运行时逐 Segment 匹配和注入选择，不持久化 occurrence。
 - `term_decision.py`：自动术语决策执行入口和阶段编排。

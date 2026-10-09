@@ -512,12 +512,28 @@ def test_changing_group_primary_cannot_introduce_alias_overlap(tmp_path):
     assert read_json(project, project / "terminology" / "overrides.json") == overrides
 
 
-def test_automatic_group_alias_removal_survives_later_manual_edits(tmp_path):
+@pytest.mark.parametrize("creation", ["manual", "import", "scan"])
+def test_automatic_group_alias_removal_survives_later_manual_edits(tmp_path, creation):
     from app.web_store import WebStore
     project = make_project(tmp_path)
     store = WebStore(project)
     store.save_term(term("Alpha", aliases=["Beta"]))
-    store.save_term(term("Beta"))
+    if creation == "manual":
+        store.save_term(term("Beta"))
+    elif creation == "import":
+        source = tmp_path / "beta.json"
+        write_exchange(source, [term("Beta")])
+        import_terms(project, source, dry_run=False)
+    else:
+        metadata = read_json(project, project / "project.json")
+        task_id = "SCAN-BETA"
+        write_json(project, project / "terminology" / "active_task.json", record_header(
+            "terminology_task", metadata["project_id"], record_id=task_id, active_task_id=task_id,
+            status="active", initial_stage_fingerprint="test"))
+        append_jsonl(project, project / "terminology" / "candidates.jsonl", record_header(
+            "terminology_candidates", metadata["project_id"], active_task_id=task_id,
+            run_id="RUN-BETA", terms=[term("Beta")]))
+        publish_partial_terms(project)
     store.save_term(term("Gamma"))
     rows = {item["source"]: item for item in load_terms(project)["terms"]}
     assert rows["Alpha"]["aliases"] == []

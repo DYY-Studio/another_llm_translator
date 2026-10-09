@@ -5026,7 +5026,6 @@ async def test_automatic_decision_resolves_existing_group_alias_overlap(tmp_path
     library["terms"][0]["aliases"] = ["Bob"]
     library["terms"][1]["group_primary"] = "alice"
     write_json(project, project / "terminology" / "terms.json", library)
-    calls = []
     def respond(request):
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         records = []
@@ -5039,7 +5038,6 @@ async def test_automatic_decision_resolves_existing_group_alias_overlap(tmp_path
             else:
                 record = dict(type="decision", normalized=key, action="keep", reason="保持")
             records.append(record)
-        calls.append(payload)
         return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         await run_terminology_decision(project, http_client=http)
@@ -5058,3 +5056,66 @@ async def test_automatic_decision_resolves_existing_group_alias_overlap(tmp_path
         else:
             assert set(rows) == {"alice"}
             assert rows["alice"]["aliases"] == ["Bob"]
+
+
+@pytest.mark.asyncio
+async def test_group_alias_partial_rejection_cannot_publish_invalid_combination(tmp_path):
+    project = create_decision_project(tmp_path)
+    library = load_terms(project)
+    library["terms"][1]["group_primary"] = "alice"
+    write_json(project, project / "terminology" / "terms.json", library)
+    overrides = read_json(project, project / "terminology" / "overrides.json")
+    def respond(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = []
+        for item in payload["terms"]:
+            key = item["normalized"]
+            if key == "alice" and "Bob" not in item["aliases"]:
+                record = dict(type="decision", normalized=key, action="update", reason="合并名称", changes={"aliases": ["Ally", "Bob"]})
+            elif key == "bob" and not item.get("disabled", False):
+                record = dict(type="decision", normalized=key, action="disable", reason="以别名保留")
+            else:
+                record = dict(type="decision", normalized=key, action="keep", reason="保持")
+            records.append(record)
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        await run_terminology_decision(project, http_client=http)
+    draft = current_decision_draft(project)
+    assert len(draft["proposals"]) == 1
+    proposal = draft["proposals"][0]
+    # Recheck accepted states even if a stored draft separates a dependent change.
+    draft["proposals"] = [{**proposal, "proposal_id": key, "normalized": [key],
+        "before": [state for state in proposal["before"] if state["normalized"] == key],
+        "after": [state for state in proposal["after"] if state["normalized"] == key]} for key in ("alice", "bob")]
+    run_dir = project / "runs" / draft["run_id"]
+    (run_dir / DRAFT_FILE).write_text(json.dumps(draft), encoding="utf-8")
+    manifest = read_json(project, run_dir / "manifest.json")
+    with pytest.raises(UsageError, match="未解决 alias 或组争用"):
+        apply_decision_draft(project, confirm_all=True, rejected_proposal_ids=["bob"])
+    assert load_terms(project) == library
+    assert read_json(project, project / "terminology" / "overrides.json") == overrides
+    assert read_json(project, run_dir / "manifest.json") == manifest
+
+
+@pytest.mark.asyncio
+async def test_group_alias_conflict_does_not_modify_protected_root(tmp_path):
+    project = create_decision_project(tmp_path)
+    library = load_terms(project)
+    library["terms"][0]["aliases"] = ["Bob"]
+    library["terms"][1]["group_primary"] = "alice"
+    write_json(project, project / "terminology" / "terms.json", library)
+    overrides = read_json(project, project / "terminology" / "overrides.json")
+    overrides["overrides"] = [{"normalized": "alice", "source": "Alice", "aliases": ["Bob"]}]
+    write_json(project, project / "terminology" / "overrides.json", overrides)
+    def respond(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        assert all(item["normalized"] != "alice" for item in payload["terms"])
+        records = [dict(type="decision", normalized=item["normalized"], action="keep", reason="保持") for item in payload["terms"]]
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        await run_terminology_decision(project, http_client=http)
+    draft = current_decision_draft(project)
+    assert draft["proposals"] == []
+    assert any(item["normalized"] == "bob" for item in draft["needs_review"])
+    assert load_terms(project) == library
+    assert read_json(project, project / "terminology" / "overrides.json") == overrides

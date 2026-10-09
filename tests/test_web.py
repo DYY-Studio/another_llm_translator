@@ -2855,16 +2855,9 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
 ) -> None:
     projects_root, _ = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
-    for payload in (
-        {
-            "source": "Alice",
-            "preferred_translation": "爱丽丝",
-            "category": "人物",
-            "description": "主角",
-            "aliases": ["Alicia"],
-            "disabled": False,
-        },
-        {
+    assert client.post(
+        "/api/v1/projects/sample/terms",
+        json={
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
             "category": "别名条目",
@@ -2872,13 +2865,23 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
             "aliases": ["Alicia Jr"],
             "disabled": False,
         },
-    ):
-        assert client.post("/api/v1/projects/sample/terms", json=payload).status_code == 200
+    ).status_code == 200
     removed = client.post(
         "/api/v1/projects/sample/terms/remove",
         json={"normalized": ["alicia"]},
     )
     assert removed.status_code == 200
+    assert client.post(
+        "/api/v1/projects/sample/terms",
+        json={
+            "source": "Alice",
+            "preferred_translation": "爱丽丝",
+            "category": "人物",
+            "description": "主角",
+            "aliases": ["Alicia"],
+            "disabled": False,
+        },
+    ).status_code == 200
     restored = client.post(
         "/api/v1/projects/sample/terms/materialize",
         json={"normalized": "alice", "alias": "Alicia"},

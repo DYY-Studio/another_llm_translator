@@ -298,6 +298,14 @@ Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。�
 
 合并请求使用规范的 Prefix 和 Suffix 包围当前语言的对应 Prompt。需要返回片段引用时，输入在对应文本对象中携带请求内短 `id`，不另发 ID 数组。仅术语请求不携带片段 ID。粗翻为每个请求 Segment 返回一条完整 `segment` 译文记录；概括返回覆盖 `source_segments` 中 `id` 的 `summary` 记录，且出现在 `term` 或 `no_terms` 之前。三项合并时同时返回这些结果，末行只输出一条 `end`。仅补译与概括时返回 `segment` 和 `summary`，不声明术语结果。响应均遵循严格 JSONL。
 
+### 自动术语决策关系校验
+
+`changes` 按完整最终状态检查 [术语组规则](MINIMAL.md#51-术语)，覆盖新增 Alias、
+组关系变更和成员重新启用。新增非法关系返回 `invalid_relationship`；普通决策无法完整
+解决时使用 `needs_review`，自动终审仍必须给出合法最终状态，否则执行失败。
+受保护条目只作为只读证据。草案应用时对实际接受的组合重新检查，未解决的受影响关系拒绝写入。
+当前决策规则版本为 8；旧规则草案须重新生成，不作转换。
+
 ## 2. Document Adapter（Beta）
 
 Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` 与 `epub`；官方目录插件
