@@ -8,6 +8,8 @@ import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
 import { StorageView } from "./StorageView";
 import { Icon } from "./Icons";
+import { Modal } from "./Modal";
+import { ConfirmDialog } from "./TermDialogs";
 
 type ContextStage = keyof ProjectConfig["context"];
 type ConfigScope = "project" | "global";
@@ -400,75 +402,106 @@ function CredentialPicker({ language, credential, credentials, onChange }: {
   </>;
 }
 
+function PresetIdDialog({ language, existingIds, onCancel, onCreate }: { language: Language; existingIds: string[]; onCancel: () => void; onCreate: (id: string) => Promise<void> }) {
+  const [id, setId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit() {
+    const nextId = id.trim();
+    if (existingIds.includes(nextId)) { setError(translate("preset.exists", language)); return; }
+    setBusy(true); setError("");
+    try { await onCreate(nextId); } catch (reason) { setError(errorMessage(reason, language)); } finally { setBusy(false); }
+  }
+  return <Modal ariaLabel={translate("common.new", language)}>
+    <h2>{translate("common.new", language)}</h2>
+    <form onSubmit={(event) => { event.preventDefault(); if (!busy && id.trim()) void submit(); }}>
+      <Field label={translate("preset.newId", language)}><input autoFocus disabled={busy} value={id} onChange={(event) => { setId(event.target.value); setError(""); }} /></Field>
+      {error && <div className="error-banner">{error}</div>}
+      <div className="modal-actions"><button type="button" className="quiet-button" disabled={busy} onClick={onCancel}>{translate("common.cancel", language)}</button><button type="submit" className="primary-button" disabled={busy || !id.trim()}>{translate("common.new", language)}</button></div>
+    </form>
+  </Modal>;
+}
+
 function DecisionPresetSettings({ language }: { language: Language }) {
   const [presets, setPresets] = useState<DecisionPresetSummary[]>([]);
+  const [selected, setSelected] = useState("");
   const [preset, setPreset] = useState<DecisionPreset | null>(null);
-  const [newPreset, setNewPreset] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  async function loadList() {
+  const switchingPreset = loading || Boolean(preset && preset.preset_id !== selected);
+  async function loadList(preferred?: string | null) {
     const result = await api<{ presets: DecisionPresetSummary[] }>("/api/v1/global/decision-presets");
     setPresets(result.presets);
+    const firstValid = result.presets.find((item) => item.valid)?.preset_id ?? "";
+    setSelected(preferred === null ? firstValid : preferred || selected || firstValid);
   }
   useEffect(() => {
+    void loadList().catch((reason) => setError(errorMessage(reason, language)));
+    void api<{ credentials: CredentialSummary[] }>("/api/v1/credentials")
+      .then((result) => setCredentials(result.credentials))
+      .catch((reason) => setError(errorMessage(reason, language)));
+  }, []);
+  useEffect(() => {
+    if (!selected) return;
     let active = true;
-    void Promise.all([
-      api<{ presets: DecisionPresetSummary[] }>("/api/v1/global/decision-presets"),
-      api<{ credentials: CredentialSummary[] }>("/api/v1/credentials"),
-    ]).then(([list, keys]) => { if (active) { setPresets(list.presets); setCredentials(keys.credentials); } })
-      .catch((reason) => { if (active) setError(errorMessage(reason, language)); });
+    setLoading(true); setMessage(""); setError("");
+    void api<DecisionPreset>(`/api/v1/global/decision-presets/${selected}`)
+      .then((value) => { if (active) setPreset(value); })
+      .catch((reason) => { if (active) { setPreset(null); setError(errorMessage(reason, language)); } })
+      .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [language]);
+  }, [selected]);
   function update(change: (draft: DecisionPreset) => void) {
-    setMessage("");
-    setError("");
+    setMessage(""); setError("");
     setPreset((current) => { if (!current) return current; const next = structuredClone(current); change(next); return next; });
   }
   async function perform(action: () => Promise<void>) {
     setBusy(true); setError(""); setMessage("");
     try { await action(); } catch (reason) { setError(errorMessage(reason, language)); } finally { setBusy(false); }
   }
-  function create() {
-    setError(""); setMessage("");
-    setNewPreset(true);
-    setPreset({ preset_id: "", protocol: "typesafe", url: "https://api.typesafe.ai/v1/systemone", model: "jev-latest", proxy_url: "",
-      credential: { kind: "environment", name: "TYPESAFE_API_KEY" }, request_timeout_seconds: 60, requests_per_minute: 0, max_parallel: 1 });
+  async function createPreset(id: string) {
+    if (!preset) return;
+    await api(`/api/v1/global/decision-presets/${id}`, { method: "PUT", body: JSON.stringify({ ...preset, preset_id: id }) });
+    await loadList(id); setCreating(false);
   }
   return <div className="preset-layout">
-    <div className="page-heading preset-list-heading"><div><h1>Decision Preset</h1><p>{translate("decision.subtitle", language)}</p></div><button className="quiet-button" disabled={busy} onClick={create}>{translate("common.new", language)}</button></div>
+    <div className="page-heading preset-list-heading"><div><h1>Decision Preset</h1><p>{translate("preset.subtitle", language)}</p></div><button className="quiet-button" disabled={!preset || switchingPreset || busy} onClick={() => setCreating(true)}>{translate("common.new", language)}</button></div>
     <aside className="preset-list-body">
-      {presets.map((item) => <button key={item.preset_id} disabled={busy} className={!newPreset && preset?.preset_id === item.preset_id ? "preset-row active" : "preset-row"} onClick={() => void perform(async () => { setPreset(await api<DecisionPreset>(`/api/v1/global/decision-presets/${item.preset_id}`)); setNewPreset(false); })}><strong>{item.preset_id}</strong><small>{item.valid ? `${item.protocol} · ${item.model}` : item.error}</small></button>)}
+      {presets.map((item) => <button key={item.preset_id} disabled={busy} className={selected === item.preset_id ? "preset-row active" : "preset-row"} onClick={() => setSelected(item.preset_id)}><strong>{item.preset_id}</strong><small>{item.valid ? `${item.protocol} · ${item.model}` : item.error}</small></button>)}
     </aside>
-    <div className="page-heading settings-action-heading preset-editor-heading"><div><h1>{preset?.preset_id || translate("preset.editor", language)}</h1><p>{translate("decision.urlHint", language)}</p></div>
+    <div className="page-heading settings-action-heading preset-editor-heading"><div><h1>{preset?.preset_id ?? (loading ? translate("preset.loading", language, { id: selected }) : translate("preset.editor", language))}</h1><p>{switchingPreset ? translate("preset.loading", language, { id: selected }) : preset ? translate("preset.changeHint", language) : translate("preset.selectHint", language)}</p></div>
       {preset && <div className="button-group">
-        {!newPreset && <button className="danger-button" disabled={busy} onClick={() => {
-          if (!window.confirm(translate("preset.deleteConfirm", language, { id: preset.preset_id }))) return;
-          void perform(async () => { await api(`/api/v1/global/decision-presets/${preset.preset_id}`, { method: "DELETE" }); setPreset(null); await loadList(); });
-        }}>{translate("common.delete", language)}</button>}
-        <button className="primary-button" disabled={busy || !preset.preset_id} onClick={() => void perform(async () => {
-          if (newPreset && presets.some((item) => item.preset_id === preset.preset_id)) throw new Error(translate("decision.exists", language));
+        <button className="danger-button" disabled={busy || switchingPreset} onClick={() => setDeleting(true)}>{translate("common.delete", language)}</button>
+        <button className="primary-button" disabled={busy || switchingPreset} onClick={() => void perform(async () => {
           await api(`/api/v1/global/decision-presets/${preset.preset_id}`, { method: "PUT", body: JSON.stringify(preset) });
-          await loadList(); setNewPreset(false); setMessage(translate("preset.saved", language));
+          await loadList(preset.preset_id); setMessage(translate("preset.saved", language));
         })}>{translate("common.validateSave", language)}</button>
       </div>}
     </div>
-    <section className="preset-editor-body" aria-busy={busy}>
+    <section className="preset-editor-body" aria-busy={busy || switchingPreset}>
       {error && <div className="error-banner">{error}</div>}
       {message && <p className="success-text">{message}</p>}
-      {!preset ? <p className="muted">{translate("decision.empty", language)}</p> : <fieldset className="config-grid preset-fields" disabled={busy}>
-        {newPreset && <Field className="grid-span" label={translate("preset.newId", language)}><input value={preset.preset_id} onChange={(event) => update((draft) => { draft.preset_id = event.target.value; })} /></Field>}
+      {!preset ? <p className="muted">{translate(loading ? "preset.loadingPreset" : "preset.selectHint", language)}</p> : <fieldset className="config-grid preset-fields" disabled={busy || switchingPreset}>
         <Field label={translate("decision.protocol", language)}><select value={preset.protocol} onChange={(event) => update((draft) => { draft.protocol = event.target.value as DecisionPreset["protocol"]; })}><option value="typesafe">TypeSafe</option><option value="openai-decisions">OpenAI Decisions</option></select></Field>
-        <Field label="Model"><input value={preset.model} onChange={(event) => update((draft) => { draft.model = event.target.value; })} /></Field>
-        <Field className="grid-span" label={translate("decision.url", language)}><input value={preset.url} onChange={(event) => update((draft) => { draft.url = event.target.value; })} /></Field>
-        <Field className="grid-span" label={translate("preset.credential", language)}><div className="credential-selector"><CredentialPicker language={language} credential={preset.credential} credentials={credentials} onChange={(value) => update((draft) => { draft.credential = value; })} /></div></Field>
-        <Field className="grid-span" label={translate("preset.proxyUrl", language)} help={translate("preset.proxyUrlHint", language)}><input value={preset.proxy_url} onChange={(event) => update((draft) => { draft.proxy_url = event.target.value; })} /></Field>
-        <NumberField label={translate("preset.rpm", language)} value={preset.requests_per_minute} min={0} step={1} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} />
-        <NumberField label={translate("preset.maxConcurrency", language)} value={preset.max_parallel} min={1} step={1} onChange={(value) => update((draft) => { draft.max_parallel = value; })} />
-        <NumberField label={translate("preset.timeoutSeconds", language)} value={preset.request_timeout_seconds} min={0.01} step={1} onChange={(value) => update((draft) => { draft.request_timeout_seconds = value; })} />
+        <Field label={translate("decision.url", language)} help={translate("decision.urlHint", language)}><input value={preset.url} onChange={(event) => update((draft) => { draft.url = event.target.value; })} /></Field>
+        <Field className="grid-span" label={translate("preset.credential", language)} help={translate("preset.credentialHint", language)}><div className="credential-selector"><CredentialPicker language={language} credential={preset.credential} credentials={credentials} onChange={(value) => update((draft) => { draft.credential = value; })} /></div></Field>
+        <Field label={translate("preset.modelId", language)}><input value={preset.model} onChange={(event) => update((draft) => { draft.model = event.target.value; })} /></Field>
+        <Field label={translate("preset.proxyUrl", language)} help={translate("preset.proxyUrlHint", language)}><input value={preset.proxy_url} onChange={(event) => update((draft) => { draft.proxy_url = event.target.value; })} /></Field>
+        <NumberField label={translate("preset.rpm", language)} value={preset.requests_per_minute} min={0} step={1} help={translate("preset.rpmHint", language)} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} />
+        <NumberField label={translate("preset.maxConcurrency", language)} value={preset.max_parallel} min={1} step={1} help={translate("preset.maxConcurrencyHint", language)} onChange={(value) => update((draft) => { draft.max_parallel = value; })} />
+        <NumberField label={translate("preset.timeoutSeconds", language)} value={preset.request_timeout_seconds} min={0.01} step={1} help={translate("decision.timeoutHint", language)} onChange={(value) => update((draft) => { draft.request_timeout_seconds = value; })} />
       </fieldset>}
     </section>
+    {creating && <PresetIdDialog language={language} existingIds={presets.map((item) => item.preset_id)} onCancel={() => setCreating(false)} onCreate={createPreset} />}
+    {deleting && preset && <ConfirmDialog language={language} title={translate("common.delete", language)} text={translate("preset.deleteConfirm", language, { id: preset.preset_id })} confirmLabel={translate("common.delete", language)} confirming={busy} onCancel={() => setDeleting(false)} onConfirm={() => {
+      setDeleting(false);
+      void perform(async () => { await api(`/api/v1/global/decision-presets/${preset.preset_id}`, { method: "DELETE" }); setPreset(null); setSelected(""); await loadList(null); });
+    }} />}
   </div>;
 }
 
@@ -476,6 +509,8 @@ function PresetSettings({ language }: { language: Language }) {
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
   const [adapters, setAdapters] = useState<AdapterRow[]>([]);
   const [selected, setSelected] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [preset, setPreset] = useState<LLMPreset | null>(null);
   const [presetLoading, setPresetLoading] = useState(false);
   const switchingPreset = presetLoading || Boolean(preset && preset.preset_id !== selected);
@@ -591,19 +626,16 @@ function PresetSettings({ language }: { language: Language }) {
     } catch (reason) { setError(errorMessage(reason, language)); }
   }
 
-  async function createPreset() {
-    const presetId = window.prompt(translate("preset.newId", language));
-    if (!presetId || !preset) return;
-    try {
-      const definition = { ...preset, preset_id: presetId, extra_body: JSON.parse(extraBody) as unknown, extra_headers: JSON.parse(extraHeaders) as unknown };
-      await api(`/api/v1/global/presets/${presetId}`, { method: "PUT", body: JSON.stringify(definition) });
-      await loadLists(presetId);
-      setMessage(translate("preset.created", language, { id: presetId }));
-    } catch (reason) { setError(errorMessage(reason, language)); }
+  async function createPreset(presetId: string) {
+    if (!preset) return;
+    const definition = { ...preset, preset_id: presetId, extra_body: JSON.parse(extraBody) as unknown, extra_headers: JSON.parse(extraHeaders) as unknown };
+    await api(`/api/v1/global/presets/${presetId}`, { method: "PUT", body: JSON.stringify(definition) });
+    await loadLists(presetId); setCreating(false);
   }
 
   async function removePreset() {
-    if (!preset || !window.confirm(translate("preset.deleteConfirm", language, { id: preset.preset_id }))) return;
+    if (!preset) return;
+    setDeleting(false);
     try {
       await api(`/api/v1/global/presets/${preset.preset_id}`, { method: "DELETE" });
       setPreset(null); setSelected(""); await loadLists(null);
@@ -612,13 +644,13 @@ function PresetSettings({ language }: { language: Language }) {
 
   return (
     <div className="preset-layout">
-      <div className="page-heading preset-list-heading"><div><h1>{translate("preset.title", language)}</h1><p>{translate("preset.subtitle", language)}</p></div><button className="quiet-button" disabled={!preset || switchingPreset} onClick={createPreset}>{translate("common.new", language)}</button></div>
+      <div className="page-heading preset-list-heading"><div><h1>{translate("preset.title", language)}</h1><p>{translate("preset.subtitle", language)}</p></div><button className="quiet-button" disabled={!preset || switchingPreset} onClick={() => setCreating(true)}>{translate("common.new", language)}</button></div>
       <aside className="preset-list-body">
         {presets.map((item) => <button key={item.preset_id} className={selected === item.preset_id ? "preset-row active" : "preset-row"} onClick={() => setSelected(item.preset_id)}><strong>{item.preset_id}</strong><small>{item.valid ? `${item.adapter_id} · ${item.model}` : item.error}</small></button>)}
       </aside>
       <div className="page-heading settings-action-heading preset-editor-heading">
         <div><h1>{preset?.preset_id ?? (presetLoading ? translate("preset.loading", language, { id: selected }) : translate("preset.editor", language))}</h1><p>{switchingPreset ? translate("preset.loading", language, { id: selected }) : preset ? translate("preset.changeHint", language) : translate("preset.selectHint", language)} </p></div>
-        {preset && <div className="button-group"><button className="danger-button" disabled={switchingPreset} onClick={removePreset}>{translate("common.delete", language)}</button><button className="primary-button" disabled={switchingPreset} onClick={save}>{translate("common.validateSave", language)}</button></div>}
+        {preset && <div className="button-group"><button className="danger-button" disabled={switchingPreset} onClick={() => setDeleting(true)}>{translate("common.delete", language)}</button><button className="primary-button" disabled={switchingPreset} onClick={save}>{translate("common.validateSave", language)}</button></div>}
       </div>
       <section className="preset-editor-body" aria-busy={switchingPreset}>
         {!preset ? (
@@ -679,6 +711,8 @@ function PresetSettings({ language }: { language: Language }) {
           </>
         )}
       </section>
+      {creating && <PresetIdDialog language={language} existingIds={presets.map((item) => item.preset_id)} onCancel={() => setCreating(false)} onCreate={createPreset} />}
+      {deleting && preset && <ConfirmDialog language={language} title={translate("common.delete", language)} text={translate("preset.deleteConfirm", language, { id: preset.preset_id })} confirmLabel={translate("common.delete", language)} confirming={false} onCancel={() => setDeleting(false)} onConfirm={() => void removePreset()} />}
     </div>
   );
 }

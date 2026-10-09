@@ -666,7 +666,7 @@ Preset 仍只记录一个 credential 引用；其环境变量或钥匙串值按�
 保存 Key 原文、摘要或跨执行健康状态。
 
 
-## 5. Decision Preset 与校验服务（实验）
+## 5. Decision Preset 与服务（实验）
 
 全局 `decision_presets/<preset_id>.json` 保存 `preset_id`、`protocol`、`url`、`model`、
 `credential`、`proxy_url`、`request_timeout_seconds`、`requests_per_minute`、`max_parallel`。
@@ -674,6 +674,9 @@ Preset 仍只记录一个 credential 引用；其环境变量或钥匙串值按�
 宿主原样 POST，不推断或拼接路径。URL 不允许凭据、查询参数或 fragment。
 凭据使用现有 environment/keychain 引用，密钥由宿主在请求时读取。
 `proxy_url` 支持无凭据的 HTTP/HTTPS 代理；留空使用默认代理设置。
+仓库附带 TypeSafe 和 OpenAI Decisions Example Preset，分别使用
+[TypeSafe 官方接口](https://api.typesafe.ai/redoc)和
+[OpenAI 官方接口](https://developers.openai.com/api/docs/guides/decisions)。
 
 TypeSafe 将共享证据写入 `state`，问题写入 `questions` 映射，读取 `answers` 映射。
 OpenAI Decisions 将共享证据编码为 JSON 字符串写入 `input`，问题写入带唯一 `name` 的

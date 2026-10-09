@@ -1,4 +1,4 @@
-"""Host-managed HTTP Choice decisions for translation validators."""
+"""Host-managed HTTP Choice decisions."""
 from __future__ import annotations
 
 import asyncio

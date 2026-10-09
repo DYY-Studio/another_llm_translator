@@ -62,6 +62,10 @@ llm_adapters = [
   "llm_adapters/openai-responses.json",
   "llm_adapters/chatgpt-plan.json",
 ]
+decision_presets = [
+  "decision_presets/typesafe-example.json",
+  "decision_presets/openai-example.json",
+]
 llm_presets = [
   "llm_presets/anthropic-claude.json",
   "llm_presets/default.json",
