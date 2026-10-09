@@ -25,7 +25,7 @@ from app.sqlite_storage import (
     record_header,
     write_json,
 )
-from app.term_library import build_term_library_rows, term_normalization
+from app.term_library import build_term_library_rows, term_normalization, load_terms
 from app.term_decision import (
     CHECKPOINT_FILE,
     DRAFT_FILE,
@@ -4520,7 +4520,7 @@ def test_alias_transfer_requires_a_complete_relationship() -> None:
     assert decisions["bob"]["action"] == "needs_review"
 
 
-def test_alias_transfer_and_source_grouping_are_valid_combinations() -> None:
+def test_alias_transfer_requires_releasing_or_disabling_the_owner() -> None:
     spec = term_normalization(
         {
             "terminology": {
@@ -4543,7 +4543,10 @@ def test_alias_transfer_and_source_grouping_are_valid_combinations() -> None:
         "alice": {**original["alice"], "aliases": ["Ally", "Bob"]},
         "bob": {**original["bob"], "group_primary": "alice"},
     }
-    assert _alias_violations(original, source_group, spec) == []
+    assert _alias_violations(original, source_group, spec)
+    disabled_owner = deepcopy(source_group)
+    disabled_owner["bob"]["disabled"] = True
+    assert _alias_violations(original, disabled_owner, spec) == []
 
 
 @pytest.mark.asyncio
@@ -4983,3 +4986,75 @@ def test_atomic_apply_failure_preserves_terms(
     with pytest.raises(StorageError, match="injected"):
         apply_decision_draft(project, confirm_all=True)
     assert read_json(project, project / "terminology" / "terms.json") == before
+
+
+@pytest.mark.parametrize("change", ["root_alias", "member_alias", "grouping", "reenable"])
+def test_decision_rejects_new_group_alias_overlap_and_recovers_component(change):
+    spec = term_normalization({"terminology": {"unicode_normalization": "NFKC", "case_insensitive": True}})
+    original = {"alice": _batch_state("alice", "Alice"),
+                "bob": {**_batch_state("bob", "Bob"), "group_primary": "alice"}}
+    if change == "member_alias":
+        original["alice"]["aliases"] = ["Ally"]
+    if change == "grouping":
+        original["alice"]["aliases"] = ["Bob"]
+        original["bob"]["group_primary"] = None
+    if change == "reenable":
+        original["alice"]["aliases"] = ["Bob"]
+        original["bob"]["disabled"] = True
+    final = deepcopy(original)
+    if change == "root_alias":
+        final["alice"]["aliases"] = ["ＢＯＢ"]
+    elif change == "member_alias":
+        final["bob"]["aliases"] = ["Ally"]
+    elif change == "grouping":
+        final["bob"]["group_primary"] = "alice"
+    else:
+        final["bob"]["disabled"] = False
+    violations = _alias_violations(original, final, spec)
+    assert any(kind == "group_alias_overlap" for kind, _ in violations)
+    decisions = {key: {"action": "update", "reason": "adjust", "after": deepcopy(value)} for key, value in final.items()}
+    _recover_invalid_relationship_components(original=original, final=final, decisions=decisions, language="zh-CN", spec=spec)
+    assert final == original
+    assert all(value["action"] == "needs_review" for value in decisions.values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("solution", ["remove_alias", "disable_member", "unresolved"])
+async def test_automatic_decision_resolves_existing_group_alias_overlap(tmp_path, solution):
+    project = create_decision_project(tmp_path)
+    library = load_terms(project)
+    library["terms"][0]["aliases"] = ["Bob"]
+    library["terms"][1]["group_primary"] = "alice"
+    write_json(project, project / "terminology" / "terms.json", library)
+    calls = []
+    def respond(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = []
+        for item in payload["terms"]:
+            key = item["normalized"]
+            if solution == "remove_alias" and key == "alice" and item["aliases"]:
+                record = dict(type="decision", normalized=key, action="update", reason="保留成员", changes={"aliases": []})
+            elif solution == "disable_member" and key == "bob":
+                record = dict(type="decision", normalized=key, action="disable", reason="保留别名")
+            else:
+                record = dict(type="decision", normalized=key, action="keep", reason="保持")
+            records.append(record)
+        calls.append(payload)
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        await run_terminology_decision(project, http_client=http)
+    draft = current_decision_draft(project)
+    assert draft is not None
+    if solution == "unresolved":
+        assert draft["proposals"] == []
+        assert draft["needs_review"]
+        assert load_terms(project) == library
+    else:
+        apply_decision_draft(project, confirm_all=True)
+        rows = {item["normalized"]: item for item in load_terms(project)["terms"]}
+        if solution == "remove_alias":
+            assert rows["alice"]["aliases"] == []
+            assert rows["bob"]["group_primary"] == "alice"
+        else:
+            assert set(rows) == {"alice"}
+            assert rows["alice"]["aliases"] == ["Bob"]

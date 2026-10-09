@@ -10,6 +10,7 @@ from .llm_response import parse_jsonl_document
 from .term_library import (
     build_term_library_rows,
     normalize_term,
+    group_alias_overlaps,
 )
 from .term_decision_protocol import (
     DECISION_ACTIONS,
@@ -40,6 +41,9 @@ _TOKEN_SPLIT = re.compile(r"[\s・·･._—–\-]+")
 
 def _alias_violation_message(violation: _GroupViolation, language: str) -> str:
     kind, values = violation
+    if kind == "group_alias_overlap":
+        root, member, alias = values
+        return (f"root {root} alias {alias} overlaps active member {member}" if language == "en" else f"术语组主 {root} 的 Alias {alias} 与启用成员 {member} 重叠")
     if kind == "alias_transfer":
         receiver, owner, alias = values
         return (f"alias {alias} remains owned by {owner} while added to {receiver}" if language == "en" else f"alias {alias} 已由 {owner} 保留却被新增到 {receiver}")
@@ -319,7 +323,13 @@ def _alias_violations(
             if form:
                 owners.setdefault(form, set()).add(normalized)
 
-    violations: list[_GroupViolation] = []
+    existing_overlaps = {(root, member, normalize_term(alias, spec))
+                         for root, member, alias in group_alias_overlaps(original.values(), spec)}
+    violations: list[_GroupViolation] = [
+        ("group_alias_overlap", (root, member, normalize_term(alias, spec)))
+        for root, member, alias in group_alias_overlaps(final.values(), spec)
+        if (root, member, normalize_term(alias, spec)) not in existing_overlaps
+    ]
     for normalized, state in final.items():
         alias_forms = [
             normalize_term(str(value), spec) for value in state.get("aliases", [])
@@ -381,16 +391,11 @@ def _alias_violations(
                         ("unknown_owner", (normalized, owner, alias_form))
                     )
                     continue
-                owner_primary = owner_state.get("group_primary")
-                same_root = (
-                    owner_primary is not None and str(owner_primary) == normalized
-                )
                 released = alias_form not in _normalized_aliases(owner_state, spec)
                 owner_source = normalize_term(str(owner_state.get("source", "")), spec)
                 source_transfer = alias_form == owner_source
                 if (
                     owner_state.get("disabled")
-                    or (source_transfer and same_root)
                     or (not source_transfer and released)
                 ):
                     continue
@@ -832,7 +837,7 @@ def _relationship_violation_nodes(
         "unknown_alias",
     }:
         return {values[0]}
-    if kind in {"non_root_receiver", "alias_transfer", "unknown_owner"}:
+    if kind in {"non_root_receiver", "alias_transfer", "unknown_owner", "group_alias_overlap"}:
         return set(values[:2])
     return set(values)
 
