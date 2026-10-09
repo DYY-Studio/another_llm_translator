@@ -50,7 +50,7 @@ def decision_preset_path(root: Path, preset_id: str) -> Path:
 def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
     required = {"preset_id", "protocol", "url", "model", "credential", "proxy_url",
                 "request_timeout_seconds", "requests_per_minute", "max_parallel",
-                "context_window_tokens", "context_safety_margin_tokens"}
+                "context_window_tokens", "context_safety_margin_tokens", "token_safety_factor"}
     if set(value) != required:
         raise ConfigError("Decision Preset 字段不完整或包含未知字段")
     decision_preset_path(Path(), value["preset_id"])
@@ -92,6 +92,9 @@ def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError(f"Decision {key} 无效")
     if value["context_safety_margin_tokens"] >= value["context_window_tokens"]:
         raise ConfigError("Decision 安全余量必须小于上下文窗口")
+    factor = value["token_safety_factor"]
+    if type(factor) not in {int, float} or not math.isfinite(factor) or factor <= 0:
+        raise ConfigError("Decision token_safety_factor 必须是有限正数")
     timeout = value["request_timeout_seconds"]
     if type(timeout) not in {int, float} or not math.isfinite(timeout) or timeout <= 0:
         raise ConfigError("Decision 超时必须是有限正数")
@@ -143,7 +146,8 @@ class DecisionClient:
                 request_body=json.dumps(body, ensure_ascii=False, indent=2),
             )
         try:
-            estimated = estimate_tokens(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
+            estimated = math.ceil(estimate_tokens(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
+                                  * self.preset["token_safety_factor"])
             available = self.preset["context_window_tokens"] - self.preset["context_safety_margin_tokens"]
             if estimated > available:
                 segment = f"（Segment {segment_id}）" if segment_id else ""

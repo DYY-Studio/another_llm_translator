@@ -669,14 +669,15 @@ Preset 仍只记录一个 credential 引用；其环境变量或钥匙串值按�
 ## 5. Decision Preset 与服务（实验）
 
 全局 `decision_presets/<preset_id>.json` 保存 `preset_id`、`protocol`、`url`、`model`、
-`credential`、`proxy_url`、`context_window_tokens`、`context_safety_margin_tokens`、
+`credential`、`proxy_url`、`context_window_tokens`、`context_safety_margin_tokens`、`token_safety_factor`、
 `request_timeout_seconds`、`requests_per_minute`、`max_parallel`。
 `protocol` 为 `typesafe` 或 `openai-decisions`；`url` 是含最终 Path 的完整 HTTP(S) URL，
 宿主原样 POST，不推断或拼接路径。URL 不允许凭据、查询参数或 fragment。
 凭据使用现有 environment/keychain 引用，密钥由宿主在请求时读取。
 `proxy_url` 支持无凭据的 HTTP/HTTPS 代理；留空使用默认代理设置。
 `context_window_tokens` 为正整数，`context_safety_margin_tokens` 为非负整数且小于窗口。
-宿主用现有 Token 估算算法计算完整请求（证据、问题及选项）的输入量；
+`token_safety_factor` 为有限正数，Example Preset 默认 1.25。
+宿主用现有 Token 估算算法计算完整请求（证据、问题及选项）的输入量，乘以安全系数后向上取整；
 超过窗口减去安全余量时，在发送前明确失败，错误包含估算量、可用容量及传入的 Segment ID。
 仓库附带 TypeSafe 和 OpenAI Decisions Example Preset，分别使用
 [TypeSafe 官方接口](https://api.typesafe.ai/redoc)和

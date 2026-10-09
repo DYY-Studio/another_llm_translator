@@ -1030,6 +1030,7 @@ export interface DecisionPreset {
   credential: { kind: "environment" | "keychain"; name: string };
   context_window_tokens: number;
   context_safety_margin_tokens: number;
+  token_safety_factor: number;
   request_timeout_seconds: number;
   requests_per_minute: number;
   max_parallel: number;

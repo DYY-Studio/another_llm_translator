@@ -69,18 +69,20 @@ def preset(protocol: str = "typesafe") -> dict:
     return dict(preset_id="local", protocol=protocol,
                 url="http://localhost:9876/custom/path", model="test-model", proxy_url="",
                 credential={"kind": "environment", "name": "DECISION_TEST_KEY"},
-                context_window_tokens=32000, context_safety_margin_tokens=512,
+                context_window_tokens=32000, context_safety_margin_tokens=512, token_safety_factor=1.25,
                 request_timeout_seconds=10, requests_per_minute=0, max_parallel=2)
 
 
 @pytest.mark.parametrize("protocol", ["typesafe", "openai-decisions"])
-@pytest.mark.parametrize("part", ["state", "instructions", "choices", "margin"])
+@pytest.mark.parametrize("part", ["state", "instructions", "choices", "margin", "factor"])
 def test_oversized_decision_fails_before_http(protocol, part, monkeypatch):
     monkeypatch.setenv("DECISION_TEST_KEY", "secret")
     value = preset(protocol)
     value.update(context_window_tokens=1000, context_safety_margin_tokens=100)
     if part == "margin":
         value.update(context_window_tokens=4000, context_safety_margin_tokens=3999)
+    if part == "factor":
+        value["token_safety_factor"] = 100
     state = "正文" * 1000 if part == "state" else "short"
     question = DecisionQuestion("term", "说明" * 1000 if part == "instructions" else "Question",
                                 {"a": "选项" * 1000 if part == "choices" else "A", "b": "B"})
@@ -100,6 +102,14 @@ def test_preset_rejects_invalid_context_budget(window, margin):
     value = preset()
     value.update(context_window_tokens=window, context_safety_margin_tokens=margin)
     with pytest.raises(ConfigError):
+        validate_decision_preset(value)
+
+
+@pytest.mark.parametrize("factor", [0, -1, True, "1.25", float("inf"), float("nan")])
+def test_preset_rejects_invalid_token_safety_factor(factor):
+    value = preset()
+    value["token_safety_factor"] = factor
+    with pytest.raises(ConfigError, match="token_safety_factor"):
         validate_decision_preset(value)
 
 
