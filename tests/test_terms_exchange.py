@@ -353,7 +353,11 @@ def test_alias_primary_merge_preserves_group_members(
     project = make_project(tmp_path)
     source = tmp_path / "terms.json"
     write_exchange(source, terms)
-    import_terms(project, source, dry_run=False)
+    from app.diagnostics import Diagnostics
+    diagnostics = Diagnostics(tmp_path / "app.log")
+    with diagnostics.activate("terms", "terminology"):
+        import_terms(project, source, dry_run=False)
+    assert any("移除重复主术语 Alias" in log["message"] for log in diagnostics.snapshot()["logs"])
     library = load_terms(project)
     assert library is not None
     assert [item["source"] for item in library["terms"]] == [
@@ -363,7 +367,7 @@ def test_alias_primary_merge_preserves_group_members(
     assert rows["Alpha"]["group_primary"] is None
     for source in expected_aliases:
         assert rows[source]["group_primary"] == "alpha"
-    assert set(rows["Alpha"]["aliases"]) == {"Beta"}
+    assert rows["Alpha"]["aliases"] == []
 
 
 @pytest.mark.parametrize(
@@ -448,3 +452,75 @@ async def test_forced_rescan_merges_with_published_library(tmp_path: Path) -> No
     library = read_json(project, project / "terminology" / "terms.json")
     assert library["terms_revision"] == 2
     assert [item["source"] for item in library["terms"]] == ["Alpha", "Beta"]
+
+
+@pytest.mark.parametrize("alias,member_aliases", [("Beta", []), ("Short", ["Short"]), ("ＢＥＴＡ", [])])
+def test_explicit_group_alias_overlap_is_reported_and_import_is_atomic(tmp_path, alias, member_aliases):
+    from app.term_library import build_term_library_rows
+    project = make_project(tmp_path)
+    rows = [term("Alpha", aliases=[alias]), {**term("Beta", aliases=member_aliases), "group_primary": "alpha"}]
+    built = build_term_library_rows(project, rows, {})
+    assert all(any(claim["reason"] == "group_alias_overlap" for claim in row["conflicts"]["group_claims"]) for row in built)
+    before = read_json(project, project / "terminology" / "overrides.json")
+    source = tmp_path / "explicit.json"
+    source.write_text(json.dumps({"schema_version": 2, "record_type": "terminology_exchange", "terms": rows}), encoding="utf-8")
+    with pytest.raises(UsageError, match="组.*Alias"):
+        import_terms(project, source, dry_run=False)
+    assert load_terms(project) is None
+    assert read_json(project, project / "terminology" / "overrides.json") == before
+
+
+def test_group_alias_matching_is_exact_and_ignores_disabled_members(tmp_path):
+    from app.term_library import build_term_library_rows
+    project = make_project(tmp_path)
+    rows = [term("Alpha", aliases=["Beta Academy"]), {**term("Beta"), "group_primary": "alpha"}]
+    assert all(not row["conflicts"]["group_claims"] for row in build_term_library_rows(project, rows, {}))
+    rows[0]["aliases"] = ["Beta"]
+    built = build_term_library_rows(project, rows, {"beta": {"normalized": "beta", "disabled": True}})
+    assert len(built) == 1
+    assert built[0]["aliases"] == ["Beta"]
+    assert not built[0]["conflicts"]["group_claims"]
+
+
+def test_manual_term_edit_and_grouping_reject_overlapping_aliases_atomically(tmp_path):
+    from app.web_store import WebStore
+    project = make_project(tmp_path)
+    source = tmp_path / "explicit.json"
+    source.write_text(json.dumps({"schema_version": 2, "record_type": "terminology_exchange", "terms": [
+        term("Alpha"), {**term("Beta"), "group_primary": "alpha"}]}), encoding="utf-8")
+    import_terms(project, source, dry_run=False)
+    library = load_terms(project)
+    overrides = read_json(project, project / "terminology" / "overrides.json")
+    with pytest.raises(UsageError, match="组.*Alias"):
+        WebStore(project).save_term({**term("Alpha", aliases=["Beta"]), "old_normalized": "alpha"})
+    assert load_terms(project) == library
+    assert read_json(project, project / "terminology" / "overrides.json") == overrides
+
+
+def test_changing_group_primary_cannot_introduce_alias_overlap(tmp_path):
+    from app.web_store import WebStore
+    project = make_project(tmp_path)
+    source = tmp_path / "groups.json"
+    source.write_text(json.dumps({"schema_version": 2, "record_type": "terminology_exchange", "terms": [
+        term("Alpha"), {**term("Beta", aliases=["Alpha"]), "group_primary": "alpha"}]}), encoding="utf-8")
+    import_terms(project, source, dry_run=False)
+    library = load_terms(project)
+    overrides = read_json(project, project / "terminology" / "overrides.json")
+    with pytest.raises(UsageError, match="组.*Alias"):
+        WebStore(project).set_term_primary({"normalized": "beta", "confirm": True})
+    assert load_terms(project) == library
+    assert read_json(project, project / "terminology" / "overrides.json") == overrides
+
+
+def test_automatic_group_alias_removal_survives_later_manual_edits(tmp_path):
+    from app.web_store import WebStore
+    project = make_project(tmp_path)
+    store = WebStore(project)
+    store.save_term(term("Alpha", aliases=["Beta"]))
+    store.save_term(term("Beta"))
+    store.save_term(term("Gamma"))
+    rows = {item["source"]: item for item in load_terms(project)["terms"]}
+    assert rows["Alpha"]["aliases"] == []
+    assert rows["Beta"]["group_primary"] == "alpha"
+    overrides = read_json(project, project / "terminology" / "overrides.json")
+    assert next(item for item in overrides["overrides"] if item["normalized"] == "alpha")["aliases"] == []

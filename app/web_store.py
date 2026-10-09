@@ -49,6 +49,8 @@ from .term_library import (
     load_terms,
     normalize_term,
     term_normalization,
+    validate_group_alias_overlaps,
+    apply_group_alias_removals,
 )
 from .term_matching import match_term_validation, match_terms
 from .stage_runtime import prompt_middle_digests
@@ -1440,18 +1442,28 @@ class WebStore:
         *,
         origin: str,
     ) -> dict[str, Any]:
+        revision = int(library["terms_revision"]) + 1 if library else 1
+        removals: dict[str, set[str]] = {}
+        terms = build_term_library_rows(
+            self.project,
+            [current[key] for key in sorted(current)],
+            overrides, alias_removals=removals,
+        )
+        previous = {str(term["normalized"]): term for term in (library or {}).get("terms", [])}
+        final = {str(term["normalized"]): term for term in terms}
+        fields = ("source", "aliases", "group_primary", "category", "description", "preferred_translation")
+        affected = {key for key in previous.keys() | final.keys()
+                    if any(previous.get(key, {}).get(field) != final.get(key, {}).get(field) for field in fields)}
+        affected.update(str(previous[key]["group_primary"]) for key in list(affected)
+                        if key in previous and previous[key].get("group_primary"))
+        validate_group_alias_overlaps(terms, term_normalization(self.config), affected=affected)
+        apply_group_alias_removals(overrides, removals)
         override_record = record_header(
             "terminology_overrides",
             self.project_id,
             record_id="TERMINOLOGY-OVERRIDES",
             overrides=[overrides[key] for key in sorted(overrides)],
             origin=origin,
-        )
-        revision = int(library["terms_revision"]) + 1 if library else 1
-        terms = build_term_library_rows(
-            self.project,
-            [current[key] for key in sorted(current)],
-            overrides,
         )
         term_record = record_header(
             "terminology_library",
