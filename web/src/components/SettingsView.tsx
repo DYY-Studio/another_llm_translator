@@ -336,6 +336,10 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
                     {decisionPresets.filter((item) => item.valid).map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id}</option>)}
                   </select></Field>
                   <NumberField label={translate("decision.threshold", language)} value={config.validation.translation.decision_confidence_threshold} min={0} max={1} step={0.05} onChange={(value) => update((draft) => { draft.validation.translation.decision_confidence_threshold = value; })} />
+                  <div className="context-config-row grid-span">
+                    <ToggleField label={translate("settings.contextEnabled", language, { stage: "Decision" })} checked={config.validation.translation.decision_context_enabled} help={translate("decision.contextHint", language)} onChange={(value) => update((draft) => { draft.validation.translation.decision_context_enabled = value; })} />
+                    <NumberField label={translate("settings.previousSegments", language)} value={config.validation.translation.decision_previous_segments} min={0} step={1} onChange={(value) => update((draft) => { draft.validation.translation.decision_previous_segments = value; })} />
+                  </div>
                 </>}
               </div>}
             </div>;

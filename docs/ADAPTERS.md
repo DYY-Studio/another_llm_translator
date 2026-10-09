@@ -702,7 +702,8 @@ OpenAI Decisions 将共享证据编码为 JSON 字符串写入 `input`，问题�
 启用需要安装并选择 `preferred_term_usage` 和有效的
 Decision Preset。Run 保存 `decision_preset.json`；启用的连接配置、置信度门槛及上文设置参与翻译指纹。
 
-术语插件将同一 Segment 的推荐译名缺失项合并请求，输出 required、ordinary 或 uncertain；
+术语插件将同一 Segment 的推荐译名缺失项合并请求，输出 required（需要术语修复）、ordinary（日常用法）、
+acceptable（译法已正确，包括合理简称）或 uncertain；
 处理语义见 [翻译阶段](MINIMAL.md#53-翻译)。Run 的 `decision_validation` 保存判断、
 Segment ID、证据摘要、耗时和用量；生成与校验用量合并汇总。人工保存译文只校验、不自动修复，
 判断记录随结果保存。

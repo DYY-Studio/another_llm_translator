@@ -21,6 +21,7 @@ from tests.test_terminology_translation import create_project
 @pytest.mark.parametrize("choice,confidence,repairs,status", [
     ("required", 0.9, 1, "passed"),
     ("ordinary", 0.9, 0, "passed"),
+    ("acceptable", 0.9, 0, "passed"),
     ("required", 0.5, 0, "warning"),
     ("uncertain", 0.9, 0, "warning"),
     ("still_missing", 0.9, 1, "warning"),
@@ -55,7 +56,7 @@ async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypa
             assert body["state"]["terms"]["term_0"]["description"] == "A character"
             return httpx.Response(200, json=dict(model="decision-test", usage=dict(input_tokens=10, output_tokens=0),
                 answers={name: dict(type="choice", choice=selected, confidence=confidence,
-                    probabilities={key: 0.9 if key == selected else 0.05 for key in ("required", "ordinary", "uncertain")}) for name in body["questions"]}))
+                    probabilities={key: 0.9 if key == selected else 0.1 / 3 for key in ("required", "ordinary", "acceptable", "uncertain")}) for name in body["questions"]}))
         payload = json.loads(body["messages"][1]["content"])
         text = "爱丽丝到了。" if "validation_repair" in payload and choice != "still_missing" else "她到了。"
         return httpx.Response(200, json=dict(choices=[dict(message=dict(content=llm_jsonl([

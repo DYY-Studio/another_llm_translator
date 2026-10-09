@@ -988,6 +988,8 @@ export interface ProjectConfig {
       decision_enabled: boolean;
       decision_preset: string;
       decision_confidence_threshold: number;
+      decision_context_enabled: boolean;
+      decision_previous_segments: number;
       max_retry_attempts: number;
       exhausted_mode: "fail" | "warning";
     };

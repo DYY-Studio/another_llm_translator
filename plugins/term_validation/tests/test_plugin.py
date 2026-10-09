@@ -76,6 +76,8 @@ def test_descriptor_uses_fixed_protocol_version() -> None:
 @pytest.mark.parametrize("choice,confidence,count,repairable", [
     ("required", 0.9, 1, True),
     ("ordinary", 0.9, 0, False),
+    ("acceptable", 0.9, 0, False),
+    ("acceptable", 0.5, 1, False),
     ("required", 0.5, 1, False),
     ("uncertain", 0.9, 1, False),
 ])

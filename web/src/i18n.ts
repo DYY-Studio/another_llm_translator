@@ -5,7 +5,8 @@ export type Language = "zh-CN" | "en";
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
     "decision.review": "Decision 语义复核（实验）",
-    "decision.reviewHint": "复核推荐译名缺失项；确认术语用法后修复，无法判断时保留警告。",
+    "decision.reviewHint": "复核推荐译名缺失项；确认需要修复时触发修复，正确简称可放行，无法判断时保留警告。",
+    "decision.contextHint": "携带同一文件、同一分区的上文原文；超出窗口时逐个移除最远 Segment，并记录缩减情况。",
     "decision.select": "选择 Decision Preset",
     "decision.threshold": "自动判断置信度门槛",
     "decision.url": "请求 URL",
@@ -33,7 +34,7 @@ const messages: Record<Language, Record<string, string>> = {
     "diagnostics.decisionLatency": "最近尝试耗时",
     "diagnostics.decisionResponse": "响应",
     "diagnostics.decisionPreflight": "发送前失败，未发送 HTTP 请求。",
-    "decision.contextWindowHint": "模型上下文容量；按完整请求估算 Token，扣除安全余量后超限则失败。",
+    "decision.contextWindowHint": "模型上下文容量；按完整请求估算 Token，超限时先缩减上文，不携带上文仍超限则失败。",
     "preset.exists": "该 Preset ID 已存在。",
 
     "runDialog.summaryToggle": "同时生成概括（实验）",
@@ -1301,7 +1302,8 @@ const messages: Record<Language, Record<string, string>> = {
   },
   en: {
     "decision.review": "Decision semantic review (experimental)",
-    "decision.reviewHint": "Review missing preferred translations; repair confirmed term usage and keep uncertain cases as warnings.",
+    "decision.reviewHint": "Review missing preferred translations; repair confirmed errors, accept valid short forms, and keep uncertain cases as warnings.",
+    "decision.contextHint": "Include preceding source Segments from the same file and part. Remove the oldest Segments when capacity is exceeded and log the reduction.",
     "decision.select": "Select a Decision Preset",
     "decision.threshold": "Automatic decision confidence threshold",
     "decision.url": "Request URL",
@@ -1329,7 +1331,7 @@ const messages: Record<Language, Record<string, string>> = {
     "diagnostics.decisionLatency": "Latest attempt latency",
     "diagnostics.decisionResponse": "Response",
     "diagnostics.decisionPreflight": "Failed before sending; no HTTP request was sent.",
-    "decision.contextWindowHint": "Model context capacity. Estimate tokens for the complete request; fail if it exceeds capacity after the safety margin.",
+    "decision.contextWindowHint": "Model context capacity. Estimate the complete request and reduce preceding context if needed; fail if it still exceeds capacity without context.",
     "preset.exists": "This Preset ID already exists.",
 
     "runDialog.summaryToggle": "Generate summaries while scanning (experimental)",

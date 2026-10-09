@@ -91,13 +91,15 @@ _VALIDATION_REPAIR = {
         "以 failed_candidate 为基准，仅修复 validation_matches 所列问题，"
         "返回完整且格式合规的译文。对于 advisory 术语建议，先判断推荐译名"
         "是否适合当前语境；适用时采用，不适用时可以保留候选。"
+        "简称或部分名称应按对应部分修正，保留原文的简称形式。"
     ),
     "en": (
         "Use failed_candidate as the base, fix only the issues in "
         "validation_matches, and return a complete, format-compliant translation. "
         "For advisory terminology suggestions, first decide whether the "
         "recommended translation fits this context; use it when it does, but "
-        "you may keep the candidate when it does not."
+        "you may keep the candidate when it does not. For a short form or partial "
+        "name, correct the corresponding part while preserving the source abbreviation."
     ),
 }
 
