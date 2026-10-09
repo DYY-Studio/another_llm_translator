@@ -689,12 +689,18 @@ OpenAI Decisions 将共享证据编码为 JSON 字符串写入 `input`，问题�
 `DecisionQuestion(name, instructions, choices)` 和
 `DecisionAnswer(choice, probabilities, confidence, refused)`。
 插件通过 `await context.decision.choose(state, questions, segment_id=context.segment_id)` 调用，
+可传入按时间排列的 `reference_context` 原文列表；此时 `state` 必须为对象，
+宿主将上文写入证据的 `reference_context`。完整请求超限时从最远上文逐个移除并重新估算，
+直至可发送或上文为空。缩减情况写入日志及 Run 判断记录，请求详情显示实际发送内容。
 不得自行实例化客户端、管理凭据或发送 HTTP 请求。宿主负责限速、重试、取消、诊断和用量。
 回答缺失、重复、选项错误或非法概率直接失败；明确拒答返回 `refused=True`。
 
 `validation.translation` 的 `decision_enabled` 默认 false，`decision_preset` 默认空字符串，
-`decision_confidence_threshold` 默认 0.8。启用需要安装并选择 `preferred_term_usage` 和有效的
-Decision Preset。Run 保存 `decision_preset.json`；启用的连接配置和置信度门槛参与翻译指纹。
+`decision_confidence_threshold` 默认 0.8；`decision_context_enabled` 默认 false，
+`decision_previous_segments` 默认 1，为非负整数。启用上文时，
+`TranslationValidationContext.previous_source` 提供同一 File、同一分区内前序非空 Segment 的原文。
+启用需要安装并选择 `preferred_term_usage` 和有效的
+Decision Preset。Run 保存 `decision_preset.json`；启用的连接配置、置信度门槛及上文设置参与翻译指纹。
 
 术语插件将同一 Segment 的推荐译名缺失项合并请求，输出 required、ordinary 或 uncertain；
 处理语义见 [翻译阶段](MINIMAL.md#53-翻译)。Run 的 `decision_validation` 保存判断、

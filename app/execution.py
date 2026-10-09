@@ -712,6 +712,8 @@ def stage_fingerprint(
                 "exhausted_mode": config["validation"]["translation"]["exhausted_mode"],
                 "decision_preset": config.get("_decision_preset_definition"),
                 "decision_confidence_threshold": config["validation"]["translation"].get("decision_confidence_threshold", 0.8),
+                "decision_context_enabled": config["validation"]["translation"]["decision_context_enabled"],
+                "decision_previous_segments": config["validation"]["translation"]["decision_previous_segments"],
             }
     encoded = json.dumps(
         data, ensure_ascii=False, sort_keys=True, separators=(",", ":")

@@ -19,6 +19,7 @@ from .diagnostics import current_diagnostics
 from .credentials import resolve_api_keys
 from .errors import ConfigError, ExternalError, FatalExternalError
 from .llm_keys import KeyPool
+from .logging_utils import get_logger
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,8 @@ class DecisionAnswer:
 
 class DecisionService(Protocol):
     async def choose(self, state: Any, questions: list[DecisionQuestion], *,
-                     segment_id: str | None = None) -> dict[str, DecisionAnswer]: ...
+                     segment_id: str | None = None,
+                     reference_context: list[str] | None = None) -> dict[str, DecisionAnswer]: ...
 
 
 def decision_preset_path(root: Path, preset_id: str) -> Path:
@@ -121,23 +123,41 @@ class DecisionClient:
         self.pool = KeyPool(preset["requests_per_minute"], 0,
                             preset["max_parallel"], preset["max_parallel"])
 
-    async def choose(self, state: Any, questions: list[DecisionQuestion], *, segment_id: str | None = None) -> dict[str, DecisionAnswer]:
+    async def choose(self, state: Any, questions: list[DecisionQuestion], *, segment_id: str | None = None,
+                     reference_context: list[str] | None = None) -> dict[str, DecisionAnswer]:
         if not questions:
             return {}
         if len({q.name for q in questions}) != len(questions):
             raise ConfigError("Decision 问题名称重复")
         if any(not q.name or not q.instructions or not 2 <= len(q.choices) <= 255 for q in questions):
             raise ConfigError("Decision Choice 问题无效")
-        if self.preset["protocol"] == "typesafe":
-            body = dict(model=self.preset["model"], state=state,
-                        questions={q.name: dict(type="choice", instructions=q.instructions, criteria=q.choices) for q in questions})
-        else:
-            body = dict(model=self.preset["model"], input=json.dumps(state, ensure_ascii=False),
-                        questions=[dict(type="choice", name=q.name, instructions=q.instructions,
-                                        choices=[dict(value=k, description=v) for k, v in q.choices.items()]) for q in questions])
         from .execution import estimate_tokens
-        request_id = f"decision-{uuid.uuid4().hex}"
         diagnostics = current_diagnostics()
+        context = list(reference_context or [])
+        if reference_context is not None and not isinstance(state, dict):
+            raise ConfigError("Decision 携带上文时 state 必须是对象")
+        requested = len(context)
+        available = self.preset["context_window_tokens"] - self.preset["context_safety_margin_tokens"]
+        while True:
+            evidence = {**state, "reference_context": context} if reference_context is not None else state
+            if self.preset["protocol"] == "typesafe":
+                body = dict(model=self.preset["model"], state=evidence,
+                            questions={q.name: dict(type="choice", instructions=q.instructions, criteria=q.choices) for q in questions})
+            else:
+                body = dict(model=self.preset["model"], input=json.dumps(evidence, ensure_ascii=False),
+                            questions=[dict(type="choice", name=q.name, instructions=q.instructions,
+                                            choices=[dict(value=k, description=v) for k, v in q.choices.items()]) for q in questions])
+            estimated = math.ceil(estimate_tokens(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
+                                  * self.preset["token_safety_factor"])
+            if estimated <= available or not context:
+                break
+            context = context[1:]
+        if len(context) < requested:
+            get_logger(diagnostics.stage if diagnostics and diagnostics.stage else "decision").warning(
+                "Decision 上文因上下文窗口限制缩减（Segment %s）：%d → %d",
+                segment_id, requested, len(context),
+            )
+        request_id = f"decision-{uuid.uuid4().hex}"
         if diagnostics is not None:
             diagnostics.begin_request(
                 request_id=request_id, model=self.preset["model"], messages=[],
@@ -146,16 +166,13 @@ class DecisionClient:
                 request_body=json.dumps(body, ensure_ascii=False, indent=2),
             )
         try:
-            estimated = math.ceil(estimate_tokens(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
-                                  * self.preset["token_safety_factor"])
-            available = self.preset["context_window_tokens"] - self.preset["context_safety_margin_tokens"]
             if estimated > available:
                 segment = f"（Segment {segment_id}）" if segment_id else ""
                 raise FatalExternalError(f"Decision 请求{segment}估算 {estimated} Token，超过可用上下文 {available} Token")
             if self.http_client is not None:
-                return await self._request(self.http_client, body, questions, segment_id, request_id)
+                return await self._request(self.http_client, body, questions, segment_id, request_id, requested, len(context))
             async with httpx.AsyncClient(proxy=self.preset["proxy_url"] or None) as http:
-                return await self._request(http, body, questions, segment_id, request_id)
+                return await self._request(http, body, questions, segment_id, request_id, requested, len(context))
         except asyncio.CancelledError:
             if diagnostics is not None:
                 diagnostics.fail_request(request_id, "cancelled", interrupted=True)
@@ -166,7 +183,8 @@ class DecisionClient:
             raise
 
     async def _request(self, http: httpx.AsyncClient, body: dict[str, Any],
-                       questions: list[DecisionQuestion], segment_id: str | None, request_id: str) -> dict[str, DecisionAnswer]:
+                       questions: list[DecisionQuestion], segment_id: str | None, request_id: str,
+                       context_segments_requested: int, context_segments_used: int) -> dict[str, DecisionAnswer]:
         diagnostics = current_diagnostics()
         try:
             keys = resolve_api_keys(self.preset["credential"])
@@ -181,6 +199,8 @@ class DecisionClient:
                 diagnostics.request_started(request_id)
             started = time.monotonic()
             record: dict[str, Any] = {"attempt": attempt + 1, "segment_id": segment_id,
+                                    "context_segments_requested": context_segments_requested,
+                                    "context_segments_used": context_segments_used,
                                     "questions": [q.name for q in questions],
                                     "evidence_digest": hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True).encode()).hexdigest()}
             outcome = "succeeded"

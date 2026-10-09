@@ -194,7 +194,7 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 ### `app/decision.py`
 
 宿主 Decision Preset 校验与加载、两种 HTTP Choice 协议转换、限速、重试和用量记录，
-向实时诊断报告请求生命周期。
+按上下文预算缩减调用方提供的上文，向实时诊断报告请求生命周期。
 通过公共 DecisionService 提供结构化决策调用，不拥有业务规则或结果提交。
 
 ## 8. 术语

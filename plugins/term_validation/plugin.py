@@ -72,7 +72,8 @@ class PreferredTermUsageValidator:
                  "uncertain": "The available evidence does not establish whether this defined term applies."}))
         answers = await context.decision.choose(
             {"source": context.source, "translation": context.translation, "terms": terms}, questions,
-            segment_id=context.segment_id)
+            segment_id=context.segment_id,
+            reference_context=list(context.previous_source) if context.previous_source else None)
         result = []
         for question, finding in zip(questions, findings, strict=True):
             answer = answers[question.name]

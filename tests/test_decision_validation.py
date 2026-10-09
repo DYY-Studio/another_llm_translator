@@ -88,3 +88,46 @@ async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypa
     diagnostic = read_json(project, run_dir / "manifest.json")["decision_validation"]
     assert diagnostic[0]["segment_id"] == record["segment_id"]
     assert result["usage"]["input_tokens"] == 20 * (1 + repairs) + 10 * len(diagnostic)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled,count,expected", [(False, 2, []), (True, 0, []), (True, 1, ["前文二"]), (True, 2, ["前文一", "前文二"])])
+async def test_translation_decision_context_toggle_and_count(tmp_path, monkeypatch, enabled, count, expected):
+    from app.sqlite_storage import read_segment_sources
+    project = await create_project(tmp_path, "前文一\n前文二\nAlice arrived.")
+    metadata = read_json(project, project / "project.json")
+    write_json(project, project / "terminology" / "terms.json", record_header(
+        "terminology_library", metadata["project_id"], terms_revision=1,
+        terms=[dict(record_id="TERM-A", source="Alice", normalized="alice", category="人名",
+                    description="A character", preferred_translation="爱丽丝", aliases=[],
+                    group_primary=None, conflicts={})]))
+    value = preset()
+    write_user("decision_presets/local.json").write_text(json.dumps(value), encoding="utf-8")
+    config = load_config(project / "config.toml")
+    config["validation"]["translation"].update(validators=["preferred_term_usage"], decision_enabled=True,
+        decision_preset="local", decision_context_enabled=enabled, decision_previous_segments=count)
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+    monkeypatch.setenv("DECISION_TEST_KEY", "test")
+    calls = []
+    def respond(request):
+        body = json.loads(request.content)
+        if str(request.url) == value["url"]:
+            calls.append(body)
+            assert body["state"].get("reference_context", []) == expected
+            return httpx.Response(200, json=dict(model="decision-test", answers={name: dict(type="choice",
+                choice="ordinary", confidence=0.9,
+                probabilities={key: 1 if key == "ordinary" else 0 for key in body["questions"][name]["criteria"]})
+                for name in body["questions"]}))
+        payload = json.loads(body["messages"][1]["content"])
+        return httpx.Response(200, json=dict(choices=[dict(message=dict(content=llm_jsonl([
+            dict(type="segment", id=item["id"], translation="她到了。") for item in payload["segments"]])))],
+            usage=dict(prompt_tokens=20, completion_tokens=5, total_tokens=25)))
+    segment = read_segment_sources(project)[-1]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        result = await run_translation(project, Scope(only_segment=segment["segment_id"]), http_client=http)
+    assert result["completed"] == 1
+    assert len(calls) == 1
+    from app.web_store import WebStore
+    store = WebStore(project)
+    manual_context = store._translation_validation_context(segment, "她到了。")
+    assert list(manual_context.previous_source) == expected

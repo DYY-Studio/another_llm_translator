@@ -653,6 +653,9 @@ async def run_translation(
             decision=decision_client if segment_id not in part_original else None,
             decision_confidence_threshold=config["validation"]["translation"]["decision_confidence_threshold"],
             segment_id=original_id or segment_id,
+            previous_source=tuple(entry["source"] for entry in context_index.previous(
+                item, config["validation"]["translation"]["decision_previous_segments"],
+            )) if config["validation"]["translation"]["decision_context_enabled"] else (),
         )
 
     def report_progress() -> None:

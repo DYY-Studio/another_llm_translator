@@ -70,6 +70,8 @@ SCHEMA: dict[str, Any] = {
             "decision_enabled": None,
             "decision_preset": None,
             "decision_confidence_threshold": None,
+            "decision_context_enabled": None,
+            "decision_previous_segments": None,
             "max_retry_attempts": None,
             "exhausted_mode": None,
         }
@@ -265,6 +267,10 @@ def validate_config(config: dict[str, Any]) -> None:
     decision = config["validation"]["translation"]
     if type(decision["decision_enabled"]) is not bool or not isinstance(decision["decision_preset"], str):
         raise ConfigError("Decision 校验配置无效")
+    if type(decision["decision_context_enabled"]) is not bool:
+        raise ConfigError("Decision 上文开关必须是布尔值")
+    if type(decision["decision_previous_segments"]) is not int or decision["decision_previous_segments"] < 0:
+        raise ConfigError("Decision 上文 Segment 数必须是非负整数")
     threshold = decision["decision_confidence_threshold"]
     if type(threshold) not in {int, float} or not 0 <= threshold <= 1:
         raise ConfigError("Decision 置信度门槛必须在 0 到 1 之间")
@@ -499,6 +505,8 @@ def load_config(path: Path) -> dict[str, Any]:
         translation_validation.setdefault("decision_enabled", False)
         translation_validation.setdefault("decision_preset", "")
         translation_validation.setdefault("decision_confidence_threshold", 0.8)
+        translation_validation.setdefault("decision_context_enabled", False)
+        translation_validation.setdefault("decision_previous_segments", 1)
     validate_config(config)
     return config
 

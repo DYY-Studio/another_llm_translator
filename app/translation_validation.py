@@ -37,6 +37,7 @@ class TranslationValidationContext:
     decision: DecisionService | None = None
     decision_confidence_threshold: float = 0.8
     segment_id: str | None = None
+    previous_source: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

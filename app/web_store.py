@@ -184,6 +184,13 @@ class WebStore:
             int(self.config["terminology"]["max_terms_per_segment"]),
             term_normalization(self.config),
         )
+        options = self.config["validation"]["translation"]
+        previous = []
+        if options["decision_context_enabled"] and options["decision_previous_segments"]:
+            previous, _ = query_segment_neighbors(
+                self.project, file_id=str(segment["file_id"]), part_id=str(segment["part_id"]),
+                line_index=int(segment["line_index"]), before_limit=options["decision_previous_segments"],
+            )
         return TranslationValidationContext(
             source=str(segment["source"]),
             translation=text,
@@ -191,6 +198,7 @@ class WebStore:
             decision=DecisionClient(self.config["_decision_preset_definition"], retry=self.config["retry"]) if self.config.get("_decision_preset_definition") else None,
             decision_confidence_threshold=self.config["validation"]["translation"]["decision_confidence_threshold"],
             segment_id=str(segment["segment_id"]),
+            previous_source=tuple(str(entry["source"]) for entry in previous),
         )
 
     def _fingerprint(self, stage: str) -> str:

@@ -97,6 +97,37 @@ def test_oversized_decision_fails_before_http(protocol, part, monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("protocol", ["typesafe", "openai-decisions"])
+@pytest.mark.parametrize("recent,expected", [("near", ["near"]), ("近" * 1000, [])])
+def test_decision_removes_oldest_context_until_request_fits(protocol, recent, expected, monkeypatch, tmp_path):
+    import json
+    monkeypatch.setenv("DECISION_TEST_KEY", "secret")
+    value = preset(protocol)
+    value.update(context_window_tokens=300, context_safety_margin_tokens=0)
+    state = {"source": "current"}
+    diagnostics = Diagnostics(tmp_path / "app.log")
+    context = ["遠" * 1000, recent]
+    question = DecisionQuestion("term", "Question", {"a": "A", "b": "B"})
+    def respond(request):
+        body = json.loads(request.content)
+        evidence = body["state"] if protocol == "typesafe" else json.loads(body["input"])
+        assert evidence["source"] == "current"
+        assert evidence["reference_context"] == expected
+        answers = {"term": {"type": "refusal"}} if protocol == "typesafe" else [{"name": "term", "type": "refusal"}]
+        return httpx.Response(200, json={"model": "test-model", "answers": answers})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            client = DecisionClient(value, http_client=http)
+            with diagnostics.activate("project", "translation"):
+                await client.choose(state, [question], reference_context=context, segment_id="SEG")
+            assert client.records[0]["context_segments_requested"] == 2
+            assert client.records[0]["context_segments_used"] == len(expected)
+    asyncio.run(run())
+    assert state == {"source": "current"}
+    assert context == ["遠" * 1000, recent]
+    assert any("SEG" in log["message"] for log in diagnostics.snapshot()["logs"])
+
+
 @pytest.mark.parametrize("window,margin", [(0, 0), (1000, -1), (1000, 1000), (1000, True)])
 def test_preset_rejects_invalid_context_budget(window, margin):
     value = preset()

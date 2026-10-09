@@ -2543,6 +2543,7 @@ def query_segment_neighbors(
     file_id: str,
     part_id: str,
     line_index: int,
+    before_limit: int = 2,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     connection = _with_db(project)
     try:
@@ -2556,9 +2557,9 @@ def query_segment_neighbors(
               AND is_empty = 0
               AND line_index < ?
             ORDER BY line_index DESC
-            LIMIT 2
+            LIMIT ?
             """,
-            (file_id, part_id, line_index),
+            (file_id, part_id, line_index, before_limit),
         ).fetchall()
         after_rows = connection.execute(
             """
