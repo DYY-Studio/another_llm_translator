@@ -185,3 +185,11 @@
 .danger-button { min-height: 38px; padding: 0 16px; border: 1px solid var(--danger-border); border-radius: 6px; background: var(--surface); color: var(--danger); font-size: 13px; font-weight: 650; }
 .danger-button:disabled { opacity: .5; cursor: not-allowed; }
 .settings-layout { height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(560px, 1fr) 350px; background: var(--surface-soft); }
+
+.summary-file-group-heading { display: flex; align-items: center; gap: 10px; padding: 0 16px; background: var(--sidebar); border-bottom: 1px solid var(--border); }
+.summary-file-group-heading button { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; padding: 10px 0; border: 0; background: transparent; color: var(--text); text-align: left; }
+.summary-file-group-heading button > span:last-child { display: grid; gap: 3px; min-width: 0; }
+.summary-file-group-heading strong { overflow-wrap: anywhere; }
+.summary-file-group-heading small { color: var(--muted); }
+.summary-file-group .summary-boundary-row { padding-left: 30px; }
+.summary-focused-boundary { margin: 0 0 14px; color: var(--muted); overflow-wrap: anywhere; font-size: 13px; }
