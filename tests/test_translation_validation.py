@@ -97,7 +97,11 @@ def test_source_text_residual_respects_both_partial_match_thresholds() -> None:
     )
 
 
-def test_translation_validation_rejects_invalid_plugin_match() -> None:
+@pytest.mark.parametrize("match", [
+    TranslationValidationMatch("invalid", "missing", 0, 7),
+    TranslationValidationMatch("invalid", "", 0, 0),
+])
+def test_translation_validation_rejects_invalid_plugin_match(match) -> None:
     class InvalidValidator:
         phase = "mechanical"
         scope = "segment"
@@ -107,14 +111,7 @@ def test_translation_validation_rejects_invalid_plugin_match() -> None:
 
         def validate(self, context: TranslationValidationContext) -> list[object]:
             del context
-            return [
-                TranslationValidationMatch(
-                    match_type="invalid",
-                    text="missing",
-                    start=0,
-                    end=7,
-                )
-            ]
+            return [match]
 
     with pytest.raises(ProjectError, match="越界或不一致"):
         asyncio.run(validate_translation_text(

@@ -12,11 +12,34 @@ from app.execution import Scope
 from app.errors import FatalExternalError
 from app.sqlite_storage import read_json, read_jsonl, record_header, write_json
 from app.stage_translation import run_translation
-from app.translation_validation import SegmentAlignmentValidator, TranslationValidationContext
+from app.translation_validation import (
+    SegmentAlignmentValidator,
+    TranslationValidationContext,
+    validate_translation_response,
+)
 from app.user_config import write_user
 from tests.helpers import llm_jsonl
 from tests.test_decision import preset
 from tests.test_terminology_translation import create_project
+
+
+@pytest.mark.asyncio
+async def test_alignment_can_repair_a_batch_containing_an_empty_translation():
+    class Decision:
+        async def choose(self, state, questions, *, segment_id):
+            return {question.name: DecisionAnswer("misaligned", {"misaligned": 1}, 1)
+                    for question in questions}
+
+    findings = await validate_translation_response((
+        TranslationValidationContext("First source.", "", segment_id="S1"),
+        TranslationValidationContext("Second source.", "错位译文", segment_id="S2"),
+    ), (SegmentAlignmentValidator(Decision()),))
+    assert set(findings) == {"S1", "S2"}
+    finding = findings["S1"][0]
+    assert finding["match_type"] == "segment_misaligned"
+    assert finding["severity"] == "error"
+    assert finding["matched_text"] == ""
+    assert (finding["start"], finding["end"]) == (0, 0)
 
 
 @pytest.mark.asyncio
@@ -209,6 +232,7 @@ def test_decision_presets_inherit_and_override_independently(tmp_path, monkeypat
 @pytest.mark.parametrize("choice,confidence,expected_status,repairs", [
     ("aligned", 0.9, "passed", 0), ("misaligned", 0.9, "passed", 1),
     ("uncertain", 0.9, "warning", 0), ("aligned", 0.5, "warning", 0),
+    ("empty_translation", 0.9, "passed", 1),
 ])
 async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monkeypatch, choice, confidence, expected_status, repairs):
     project = await create_project(tmp_path, "One.\nTwo.\nThree.\nFour.")
@@ -225,14 +249,16 @@ async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monke
         if str(request.url) == value["url"]:
             decisions.append(body)
             assert [item["source"] for item in body["state"]["segments"]] == ["Two.", "Three.", "Four."]
-            selected = "aligned" if len(decisions) > 1 else choice
+            selected = "aligned" if len(decisions) > 1 else "misaligned" if choice == "empty_translation" else choice
             return httpx.Response(200, json={"model": "decision-test", "answers": {name: {"type": "choice", "choice": selected,
                 "confidence": confidence, "probabilities": {key: int(key == selected) for key in question["criteria"]}}
                 for name, question in body["questions"].items()}})
         payload = json.loads(body["messages"][1]["content"])
         requests.append(payload)
         return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
-            {"type": "segment", "id": item["id"], "translation": "译文" + item["id"]} for item in payload["segments"]])}}]})
+            {"type": "segment", "id": item["id"],
+             "translation": "" if choice == "empty_translation" and len(requests) == 1 and index == 0
+             else "译文" + item["id"]} for index, item in enumerate(payload["segments"])])}}]})
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         result = await run_translation(project, Scope(), http_client=http)
     assert result["completed"] == 4

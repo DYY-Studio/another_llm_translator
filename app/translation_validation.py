@@ -45,7 +45,7 @@ class TranslationValidationContext:
 class TranslationValidationMatch:
     """A single finding reported by a validator.
 
-    Error findings point at a span in ``context.translation``. Advisory
+    Error findings point at a span in ``context.translation`` (0:0 when empty). Advisory
     findings may omit that span, for example when a recommended terminology
     translation is absent rather than incorrectly present.
     """
@@ -240,10 +240,10 @@ def _serialize_matches(context: TranslationValidationContext, validator_id: str,
         if has_span:
             if (
                 not isinstance(match.text, str)
-                or not match.text
                 or type(match.start) is not int
                 or type(match.end) is not int
-                or not 0 <= match.start < match.end <= len(context.translation)
+                or not 0 <= match.start <= match.end <= len(context.translation)
+                or (match.start == match.end and context.translation != "")
                 or context.translation[match.start : match.end] != match.text
             ):
                 raise ProjectError(

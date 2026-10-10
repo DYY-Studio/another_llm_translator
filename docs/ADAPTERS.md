@@ -596,7 +596,7 @@ def descriptor() -> PluginDescriptor:
 
 `TranslationValidationMatch.severity` 为 `error` 或 `advisory`。
 
-`error` 必须指向候选译文中的非空范围，使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为 warning。advisory 的 `repairable` 默认 `true`，设为 `false` 时只保存 warning，不进入修复请求；error 必须可修复。
+`error` 必须指向候选译文中的非空范围；候选译文为空时使用空文本和 `start=end=0`。硬错误使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为 warning。advisory 的 `repairable` 默认 `true`，设为 `false` 时只保存 warning，不进入修复请求；error 必须可修复。
 
 首个真实外部示例是可选的 `plugins/term_validation/` 目录插件，提供
 `preferred_term_usage`；它先检查实际命中的推荐译名是否缺失，可显式启用 Decision 语义复核。
