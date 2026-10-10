@@ -625,9 +625,15 @@ async def run_translation(
         }
 
     assert run_id is not None and run_dir is not None
-    decision_client = DecisionClient(config["_decision_preset_definition"], http_client=http_client, retry=config["retry"],
-        debug_directory=run_dir if config["debug"]["enabled"] else None,
-        project_id=metadata["project_id"], run_id=run_id, stage=run_stage) if config.get("_decision_preset_definition") else None
+    decision_clients = {
+        preset_id: DecisionClient(definition, http_client=http_client, retry=config["retry"],
+            debug_directory=run_dir if config["debug"]["enabled"] else None,
+            project_id=metadata["project_id"], run_id=run_id, stage=run_stage)
+        for preset_id, definition in config.get("_decision_preset_definitions", {}).items()
+    }
+    decision_bindings = config.get("_decision_validator_presets", {})
+    decision_client = decision_clients.get(decision_bindings.get("preferred_term_usage"))
+
     result_path = stage_result_path(project, "translation")
     write_lock = asyncio.Lock()
     validation_pending: dict[str, dict[str, Any]] = {}
@@ -822,7 +828,7 @@ async def run_translation(
         warnings=warnings,
         run_id=run_id,
         run_dir=run_dir,
-        decision=decision_client,
+        decisions=tuple(decision_clients.values()),
         continuation_index=continuation_index,
         on_usage=on_usage,
         preparation_started_at=preparation_started_at,
@@ -1242,11 +1248,11 @@ async def run_translation(
             runtime_parts_kwargs={"by_id": by_id},
         )
     finally:
-        if decision_client is not None:
+        if decision_clients:
             from .sqlite_storage import read_json, write_json
             path = run_dir / "manifest.json"
             manifest = read_json(project, path)
-            manifest["decision_validation"] = [*manifest.get("decision_validation", []), *decision_client.records]
+            manifest["decision_validation"] = [*manifest.get("decision_validation", []), *(record for client in decision_clients.values() for record in client.records)]
             write_json(project, path, manifest)
         if draft_scan is not None:
             draft_scan.finish_summary_run(run_id)

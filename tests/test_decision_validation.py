@@ -85,7 +85,7 @@ async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypa
     if status == "warning" and choice != "still_missing":
         assert record["validation_findings"][0]["repairable"] is False
     run_dir = project / "runs" / result["run_id"]
-    assert load_run_config(run_dir)["_decision_preset_definition"]["url"] == value["url"]
+    assert load_run_config(run_dir)["_decision_preset_definitions"]["local"]["url"] == value["url"]
     diagnostic = read_json(project, run_dir / "manifest.json")["decision_validation"]
     assert diagnostic[0]["segment_id"] == record["segment_id"]
     assert result["usage"]["input_tokens"] == 20 * (1 + repairs) + 10 * len(diagnostic)
@@ -159,3 +159,24 @@ async def test_decision_receives_matching_long_term_without_questioning_it():
     assert len(findings) == 1
     assert findings[0].expected_translation == '妮娅·里斯顿'
     assert findings[0].repairable
+
+
+def test_decision_presets_inherit_and_override_independently(tmp_path, monkeypatch):
+    from app.config import _resolve_decision_config
+    from tests.test_foundation import make_app_root
+    root = make_app_root(tmp_path)
+    common = preset()
+    override = {**common, "preset_id": "other", "model": "other-model"}
+    write_user("decision_presets/local.json").write_text(json.dumps(common), encoding="utf-8")
+    write_user("decision_presets/other.json").write_text(json.dumps(override), encoding="utf-8")
+    config = load_config(root / "config" / "config.toml")
+    config["decision"] = {"preset": "local"}
+    options = config["validation"]["translation"]
+    options.update(validators=["preferred_term_usage", "segment_alignment"], decision_enabled=True, decision_preset="")
+    options["alignment"] = {"decision_preset": "other", "confidence_threshold": 0.8, "tail_segments": 3}
+    _resolve_decision_config(config, root)
+    assert config["_decision_validator_presets"] == {"preferred_term_usage": "local", "segment_alignment": "other"}
+    assert set(config["_decision_preset_definitions"]) == {"local", "other"}
+    options["alignment"]["decision_preset"] = ""
+    _resolve_decision_config(config, root)
+    assert set(config["_decision_preset_definitions"]) == {"local"}

@@ -277,6 +277,13 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <NumberField label={translate("settings.tempProofreading", language)} value={config.llm.temperature_proofreading} min={0} step={0.1} disabled={!supportsTemperature("proofreading")} help={translate(supportsTemperature("proofreading") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_proofreading = value; })} />
           <NumberField label={translate("settings.tempPolishing", language)} value={config.llm.temperature_polishing} min={0} step={0.1} disabled={!supportsTemperature("polishing")} help={translate(supportsTemperature("polishing") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_polishing = value; })} />
         </ConfigSection>
+        <ConfigSection title={translate("settings.decisionConnection", language)} description={translate("settings.decisionConnectionHint", language)}>
+          <Field label="Decision Preset"><select value={config.decision.preset} onChange={(event) => update((draft) => { draft.decision.preset = event.target.value; })}>
+            <option value="">{translate("decision.select", language)}</option>
+            {config.decision.preset && !decisionPresets.some((item) => item.preset_id === config.decision.preset && item.valid) && <option value={config.decision.preset}>{config.decision.preset} {translate("preset.credentialCurrent", language)}</option>}
+            {decisionPresets.filter((item) => item.valid).map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}
+          </select></Field>
+        </ConfigSection>
         <ConfigSection title={translate("settings.execution", language)} description={translate("settings.executionHint", language)}>
           <Field label={translate("settings.schedulingMode", language)} help={translate("settings.schedulingModeHint", language)}><select value={config.execution.scheduling_mode} onChange={(event) => update((draft) => { draft.execution.scheduling_mode = event.target.value as ProjectConfig["execution"]["scheduling_mode"]; })}><option value="ordered_by_file">{translate("settings.orderedByFile", language)}</option><option value="parallel">{translate("settings.parallel", language)}</option></select></Field>
           <ToggleField label={translate("settings.splitOversized", language)} checked={config.chunking.allow_split_oversized_segment} help={translate("settings.splitOversizedHint", language)} onChange={(value) => update((draft) => { draft.chunking.allow_split_oversized_segment = value; })} />
@@ -331,7 +338,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
                 <ToggleField className="grid-span" label={translate("decision.review", language)} checked={config.validation.translation.decision_enabled} onChange={(value) => update((draft) => { draft.validation.translation.decision_enabled = value; })} help={translate("decision.reviewHint", language)} />
                 {config.validation.translation.decision_enabled && <>
                   <Field label="Decision Preset"><select value={config.validation.translation.decision_preset} onChange={(event) => update((draft) => { draft.validation.translation.decision_preset = event.target.value; })}>
-                    <option value="">{translate("decision.select", language)}</option>
+                    <option value="">{translate("settings.useGlobalPreset", language)}</option>
                     {config.validation.translation.decision_preset && !decisionPresets.some((item) => item.preset_id === config.validation.translation.decision_preset && item.valid) && <option value={config.validation.translation.decision_preset}>{config.validation.translation.decision_preset} {translate("preset.credentialCurrent", language)}</option>}
                     {decisionPresets.filter((item) => item.valid).map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id}</option>)}
                   </select></Field>

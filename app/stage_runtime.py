@@ -593,7 +593,7 @@ class StageRunState:
     on_usage: Callable[[dict[str, Any] | None], None] | None = None
     preparation_started_at: float | None = None
     llm: LLMClient | None = None
-    decision: DecisionClient | None = None
+    decisions: tuple[DecisionClient, ...] = ()
 
 
 async def _execute_stage_run(
@@ -626,8 +626,9 @@ async def _execute_stage_run(
 ) -> dict[str, Any] | None:
     def usage_summary() -> dict[str, Any] | None:
         generation = state.llm.usage_summary() if state.llm is not None else None
-        validation = state.decision.usage_summary() if state.decision is not None else None
-        return combine_usage(generation, validation) if validation is not None else generation
+        for client in state.decisions:
+            generation = combine_usage(generation, client.usage_summary())
+        return generation
 
     logger = get_logger(state.stage)
     logger.info("run start run=%s", state.run_id)

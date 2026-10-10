@@ -948,6 +948,7 @@ export interface ProjectConfig {
     encoding_confidence_threshold: number;
     fallback_encoding: string;
   };
+  decision: { preset: string };
   llm: {
     preset: string;
     preset_terminology: string;
@@ -993,6 +994,7 @@ export interface ProjectConfig {
   validation: {
     translation: {
       validators: string[];
+      alignment: { decision_preset: string; confidence_threshold: number; tail_segments: number };
       decision_enabled: boolean;
       decision_preset: string;
       decision_confidence_threshold: number;

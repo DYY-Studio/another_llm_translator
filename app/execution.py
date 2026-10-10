@@ -730,7 +730,9 @@ def stage_fingerprint(
                     for summary in config.get("_translation_validators", [])
                 ],
                 "exhausted_mode": config["validation"]["translation"]["exhausted_mode"],
-                "decision_preset": config.get("_decision_preset_definition"),
+                "decision_presets": config.get("_decision_preset_definitions", {}),
+                "decision_validator_presets": config.get("_decision_validator_presets", {}),
+                "alignment": config["validation"]["translation"]["alignment"],
                 "decision_confidence_threshold": config["validation"]["translation"].get("decision_confidence_threshold", 0.8),
                 "decision_context_enabled": config["validation"]["translation"]["decision_context_enabled"],
                 "decision_previous_segments": config["validation"]["translation"]["decision_previous_segments"],
@@ -1523,8 +1525,8 @@ def continue_run(
     return run_id, run_dir, index
 
 def _write_llm_snapshots(path: Path, config: dict[str, Any]) -> None:
-    if config.get("_decision_preset_definition") is not None:
-        atomic_write_json(path / "decision_preset.json", config["_decision_preset_definition"])
+    for preset_id, definition in config.get("_decision_preset_definitions", {}).items():
+        atomic_write_json(path / "decision_presets" / f"{preset_id}.json", definition)
     adapter = config.get("_llm_adapter")
     if not isinstance(adapter, JSONLLMAdapter):
         raise ConfigError("项目配置缺少已加载的 LLM Adapter")

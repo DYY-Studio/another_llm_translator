@@ -101,6 +101,9 @@ allow_soft_target_overflow = true
 # compact 保留 Anchors 与命中计数但移除上下文样本。
 anchor_overflow_mode = "error"
 
+[decision]
+preset = ""
+
 [validation.translation]
 decision_enabled = false
 decision_preset = ""
@@ -115,6 +118,11 @@ max_retry_attempts = 2
 # 文字修复耗尽后的处理方式：fail 将 Segment 标记为失败；
 # warning 接受候选为 completed，但在 inspect 和导出摘要中报告警告。
 exhausted_mode = "fail"
+
+[validation.translation.alignment]
+decision_preset = ""
+confidence_threshold = 0.8
+tail_segments = 3
 
 [retry]
 # 一次 LLM 请求遇到 408、429、5xx、网络错误或超时时的 HTTP 总尝试上限。

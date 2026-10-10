@@ -197,7 +197,7 @@ class WebStore:
             source=str(segment["source"]),
             translation=text,
             terms=terms,
-            decision=DecisionClient(self.config["_decision_preset_definition"], retry=self.config["retry"]) if self.config.get("_decision_preset_definition") else None,
+            decision=DecisionClient(self.config["_decision_preset_definitions"][self.config["_decision_validator_presets"]["preferred_term_usage"]], retry=self.config["retry"]) if "preferred_term_usage" in self.config.get("_decision_validator_presets", {}) else None,
             decision_confidence_threshold=self.config["validation"]["translation"]["decision_confidence_threshold"],
             segment_id=str(segment["segment_id"]),
             previous_source=tuple(str(entry["source"]) for entry in previous),
