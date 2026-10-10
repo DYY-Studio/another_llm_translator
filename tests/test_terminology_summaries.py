@@ -185,13 +185,14 @@ async def test_summary_opt_in_uses_joint_request_and_persists_fragment(
     assert full[0]["refs"] == ["F0001-S000001", "F0001-S000002"]
     assert full[0]["provenance"]["origin"] == "adopted_fragment"
     assert full[0]["provenance"]["artifact_ids"] == [summaries[0]["record_id"]]
-    assert full[0]["provenance"]["source_ranges"] == [summaries[0]["source_range"]]
+    assert full[0]["provenance"]["dependencies"][0]["source_range_digest"] == _digest(summaries[0]["source_range"])
     assert full[0]["provenance"]["dependencies"] == [
         {
             "record_id": summaries[0]["record_id"],
             "kind": "fragment",
             "text_digest": _digest(summaries[0]["text"]),
             "source_digest": summaries[0]["source_digest"],
+                "source_range_digest": _digest(summaries[0]["source_range"]),
         }
     ]
     assert full[0]["input_digest"] == _digest(full[0]["provenance"]["dependencies"])
@@ -2200,7 +2201,7 @@ async def test_summary_run_tracks_only_missing_summary_requests(
         if item["run_id"] == result["run_id"]
     )
     assert [item["file_id"] for item in run["source_ranges"]] == ["F0002"]
-    assert [item["segment_id"] for item in run["source_ranges"][0]["segments"]] == [
+    assert run["source_ranges"][0]["segment_ids"] == [
         "F0002-S000001"
     ]
 
@@ -2276,15 +2277,10 @@ async def test_summary_runtime_split_persists_stable_slice_provenance_and_reuses
     run = next(
         item for item in read_summary_runs(project) if item["run_id"] == first["run_id"]
     )
-    run_slices = [
-        item
-        for source_range in run["source_ranges"]
-        for item in source_range["segments"]
-    ]
-    assert {item["slice_id"] for item in run_slices} == {
-        item["slice_id"] for item in slices
-    }
-    assert all(item["source"] != "ABCDEFGH" for item in run_slices)
+    assert run["source_ranges"] == [{
+        "file_id": "F0001", "part_id": "document",
+        "segment_ids": ["F0001-S000001"],
+    }]
 
     def fail_if_called(_request: httpx.Request) -> httpx.Response:
         raise AssertionError("稳定摘要切片应被复用")
