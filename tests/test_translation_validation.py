@@ -120,6 +120,28 @@ def test_translation_validation_rejects_invalid_plugin_match(match) -> None:
         ))
 
 
+@pytest.mark.parametrize("field", ["phase", "scope"])
+def test_plugin_host_rejects_non_string_validator_contract(monkeypatch, field):
+    class Validator:
+        phase = "mechanical"
+        scope = "segment"
+        validator_id = "invalid-contract"
+        version = "1"
+        label = "Invalid contract"
+
+        def validate(self, context):
+            return ()
+
+    validator = Validator()
+    setattr(validator, field, [])
+    descriptor = PluginDescriptor("invalid-contract-plugin", "1", PLUGIN_PROTOCOL_VERSION,
+                                  translation_validators=(validator,))
+    monkeypatch.setattr("app.plugins._load_external_descriptors", lambda: [(descriptor, Path("<fixture-plugin>"))])
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
+    with pytest.raises(ConfigError, match="翻译校验器描述不完整"):
+        load_plugins()
+
+
 def test_plugin_host_rejects_duplicate_translation_validator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

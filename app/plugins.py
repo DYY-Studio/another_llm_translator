@@ -498,7 +498,9 @@ def _validate_plugins(
                 or not version.strip()
                 or not isinstance(label, str)
                 or not label.strip()
+                or not isinstance(phase, str)
                 or phase not in {"mechanical", "alignment", "terminology"}
+                or not isinstance(scope, str)
                 or scope not in {"segment", "response"}
                 or not callable(validate)
             ):
