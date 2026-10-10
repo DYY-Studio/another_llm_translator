@@ -681,6 +681,7 @@ class WebStore:
                 "reason",
                 "base_result_id",
                 "validation_status",
+                "validation_findings",
                 "generation_origin",
                 "created_at",
                 "origin",

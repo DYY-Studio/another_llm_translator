@@ -91,6 +91,7 @@ export interface ResultView {
   suggested_text?: string | null;
   reason?: string | null;
   validation_status?: "passed" | "warning";
+  validation_findings?: Array<{ match_type: string }>;
   generation_origin?: "terminology_draft" | null;
 }
 

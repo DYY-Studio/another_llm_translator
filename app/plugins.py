@@ -20,6 +20,7 @@ from .translation_validation import (
     JapaneseKanaValidator,
     KoreanHangulValidator,
     SourceTextResidualValidator,
+    SegmentAlignmentValidator,
 )
 from .user_config import BUILTIN_ROOT, user_root
 
@@ -268,6 +269,7 @@ def _builtin_plugins() -> tuple[plugin_api.PluginDescriptor, ...]:
                 JapaneseKanaValidator(),
                 KoreanHangulValidator(),
                 SourceTextResidualValidator(),
+                SegmentAlignmentValidator(),
             ),
         ),
     )

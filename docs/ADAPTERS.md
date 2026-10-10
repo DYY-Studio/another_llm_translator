@@ -716,6 +716,8 @@ OpenAI Decisions 将共享证据编码为 JSON 字符串写入 `input`，问题�
 `TranslationValidationContext.previous_source` 提供同一 File、同一分区内前序非空 Segment 的原文。
 推荐译名复核需要安装并选择 `preferred_term_usage`。`decision.preset` 提供通用连接；校验器的 `decision_preset` 为空时继承通用连接，非空时独立覆盖。置信度及上下文设置按校验器独立配置。Run 在 `decision_presets/<preset_id>.json` 保存所有实际使用的连接；同一 Preset 共用客户端与限流。实际连接、校验器绑定、置信度门槛及上文设置参与翻译指纹。
 
+错位校验器 `segment_alignment` 为内置响应级校验器，通过 `validation.translation.validators` 显式启用。`validation.translation.alignment` 的 `decision_preset` 默认空字符串、`confidence_threshold` 默认 0.8、`tail_segments` 默认 3 且必须为正整数。宿主将拆分片段重组后，按请求顺序抽取尾部完整 Segment；证据为 `segments` 配对列表，问题按配对顺序命名，选项为 `aligned`、`misaligned`、`uncertain`。不携带历史上文，也不在超限时缩减抽查数量。错位 findings 为 `segment_misaligned`，不确定为不可修复的 advisory `segment_alignment_uncertain`；`matched_source` 记录抽查 Segment ID。两者都覆盖整批，具体保存和修复语义见 [翻译阶段](MINIMAL.md#53-翻译)。
+
 术语插件将同一 Segment 的推荐译名缺失项合并请求，输出 required（需要术语修复）、ordinary（日常用法）、
 acceptable（推荐写法已满足，包括写法一致的合理简称）或 uncertain。请求同时携带本句全部命中术语作为只读参照，
 只为缺失项提问；不同音译或近义名称不能仅凭语义相同判为 acceptable。无法可靠裁定的术语冲突使用 uncertain；

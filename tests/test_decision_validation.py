@@ -180,3 +180,42 @@ def test_decision_presets_inherit_and_override_independently(tmp_path, monkeypat
     options["alignment"]["decision_preset"] = ""
     _resolve_decision_config(config, root)
     assert set(config["_decision_preset_definitions"]) == {"local"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice,confidence,expected_status,repairs", [
+    ("aligned", 0.9, "passed", 0), ("misaligned", 0.9, "passed", 1),
+    ("uncertain", 0.9, "warning", 0), ("aligned", 0.5, "warning", 0),
+])
+async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monkeypatch, choice, confidence, expected_status, repairs):
+    project = await create_project(tmp_path, "One.\nTwo.\nThree.\nFour.")
+    value = preset()
+    write_user("decision_presets/local.json").write_text(json.dumps(value), encoding="utf-8")
+    config = load_config(project / "config.toml")
+    config["decision"]["preset"] = "local"
+    config["validation"]["translation"]["validators"] = ["segment_alignment"]
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+    monkeypatch.setenv("DECISION_TEST_KEY", "test")
+    requests, decisions = [], []
+    def respond(request):
+        body = json.loads(request.content)
+        if str(request.url) == value["url"]:
+            decisions.append(body)
+            assert [item["source"] for item in body["state"]["segments"]] == ["Two.", "Three.", "Four."]
+            selected = "aligned" if len(decisions) > 1 else choice
+            return httpx.Response(200, json={"model": "decision-test", "answers": {name: {"type": "choice", "choice": selected,
+                "confidence": confidence, "probabilities": {key: int(key == selected) for key in question["criteria"]}}
+                for name, question in body["questions"].items()}})
+        payload = json.loads(body["messages"][1]["content"])
+        requests.append(payload)
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+            {"type": "segment", "id": item["id"], "translation": "译文" + item["id"]} for item in payload["segments"]])}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        result = await run_translation(project, Scope(), http_client=http)
+    assert result["completed"] == 4
+    assert len(requests) == 1 + repairs
+    assert len(decisions) == 1 + repairs
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
+    assert {record["validation_status"] for record in records} == {expected_status}
+    if repairs:
+        assert len(requests[-1]["segments"]) == 4

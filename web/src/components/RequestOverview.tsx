@@ -17,19 +17,22 @@ function termState(item: OverviewRecord): TermDecisionState {
 function DecisionOverview({ snapshot, language }: {snapshot: RequestOverviewSnapshot; language: Language}) {
   const input = object(snapshot.input);
   const terms = object(input.terms);
+  const segments = records(input.segments);
   return <div className="decision-request-overview">
-    <div className="overview-pair">
+    {segments.length === 0 && <div className="overview-pair">
       <SourceBlock values={[text(input.source)]} />
       <SourceBlock values={[text(input.translation)]} />
-    </div>
-    <div className="overview-decision-questions">{snapshot.questions?.map((question) => {
+    </div>}
+    <div className="overview-decision-questions">{snapshot.questions?.map((question, index) => {
       const term = object(terms[question.name]);
+      const segment = segments[index];
       const answer = snapshot.answers?.[question.name];
       const choiceKey = `overview.choice.${answer?.choice}`;
       const translatedChoice = answer?.choice ? translate(choiceKey, language) : translate("overview.noResult", language);
       const choiceLabel = translatedChoice === choiceKey ? answer?.choice : translatedChoice;
       return <article key={question.name}>
-        <div className="overview-question-heading"><strong>{text(term.source) || question.name}</strong>
+        {segment && <div className="overview-pair"><SourceBlock values={[text(segment.source)]} /><SourceBlock values={[text(segment.translation)]} /></div>}
+        <div className="overview-question-heading"><strong>{text(term.source) || text(segment?.id) || question.name}</strong>
           {text(term.matched_text) && <span>{translate("overview.matched", language)}: {text(term.matched_text)}</span>}
           {text(term.preferred_translation) && <span>→ {text(term.preferred_translation)}</span>}
         </div>

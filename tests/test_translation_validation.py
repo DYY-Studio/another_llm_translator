@@ -188,13 +188,14 @@ def test_builtin_translation_validator_summaries_are_complete() -> None:
         "japanese_kana",
         "korean_hangul",
         "source_text_residual",
+        "segment_alignment",
         "preferred_term_usage",
     ]
     assert all(
         item["plugin_id"] == "builtin-translation-validation"
         for item in summaries[:2]
     )
-    assert summaries[3]["plugin_id"] == "term-validation"
+    assert summaries[4]["plugin_id"] == "term-validation"
 
 
 def test_external_translation_validator_is_discoverable(

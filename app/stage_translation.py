@@ -45,6 +45,8 @@ from .summary_provenance import digest, full_summary_context_usable
 from .translation_validation import (
     TranslationValidationContext,
     validate_translation_text,
+    validate_translation_response,
+    SegmentAlignmentValidator,
 )
 
 from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _frozen_run_options, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _replace_with_runtime_parts, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _segment_model_payload_value, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests, _FORMAT_CORRECTION)
@@ -633,6 +635,14 @@ async def run_translation(
     }
     decision_bindings = config.get("_decision_validator_presets", {})
     decision_client = decision_clients.get(decision_bindings.get("preferred_term_usage"))
+    alignment_options = config["validation"]["translation"]["alignment"]
+    translation_validators = tuple(
+        SegmentAlignmentValidator(decision_clients[decision_bindings["segment_alignment"]],
+            confidence_threshold=alignment_options["confidence_threshold"],
+            tail_segments=alignment_options["tail_segments"])
+        if validator.validator_id == "segment_alignment" else validator
+        for validator in translation_validators
+    )
 
     result_path = stage_result_path(project, "translation")
     write_lock = asyncio.Lock()
@@ -776,45 +786,66 @@ async def run_translation(
             len(failed_ids),
         )
 
-    async def accept_candidate(
-        segment_id: str, text: str, request_id: str
+    def prepare_candidate(segment_id: str, text: Any) -> str:
+        return normalize_model_text(files, by_id[segment_id], str(text), "translation")
+
+    response_candidates: dict[str, tuple[str, str]] = {}
+    response_groups: list[set[str]] = []
+
+    async def accept_response(
+        group: list[dict[str, Any]], candidates: dict[str, tuple[str, Any]], *, complete: bool = True,
     ) -> None:
-        text = normalize_model_text(
-            files, by_id[segment_id], str(text), "translation"
-        )
-        original_id = part_original.get(segment_id)
-        if original_id is None:
-            findings = await validate_translation_text(
-                validation_context(segment_id, text), translation_validators
-            )
-            if findings:
-                validation_pending[segment_id] = {
-                    "segment": by_id[segment_id],
-                    "candidate": text,
-                    "findings": findings,
-                    "request_id": request_id,
-                }
+        owners = {part_original.get(str(item["segment_id"]), str(item["segment_id"])) for item in group}
+        # A split Segment connects candidate groups until its complete text is available.
+        retained = []
+        for existing in response_groups:
+            if existing & owners:
+                owners |= existing
             else:
+                retained.append(existing)
+        response_groups[:] = retained
+        for item in group:
+            segment_id = str(item["segment_id"])
+            if segment_id not in candidates:
+                continue
+            request_id, text = candidates[segment_id]
+            original_id = part_original.get(segment_id)
+            if original_id is None:
+                response_candidates[segment_id] = (text, request_id)
+            else:
+                part_results.setdefault(original_id, {})[segment_id] = (text, request_id)
+                expected = original_parts[original_id]
+                if all(part_id in part_results[original_id] for part_id in expected):
+                    response_candidates[original_id] = (
+                        "".join(part_results[original_id][part_id][0] for part_id in expected),
+                        part_results[original_id][expected[-1]][1],
+                    )
+        if not complete or not owners <= response_candidates.keys():
+            response_groups.append(owners)
+            return
+        ordered = sorted(owners, key=lambda segment_id: segment_order[segment_id])
+        contexts = tuple(validation_context(segment_id, response_candidates[segment_id][0]) for segment_id in ordered)
+        findings = await validate_translation_response(contexts, translation_validators)
+        all_findings = [finding for values in findings.values() for finding in values]
+        hard = _has_hard_validation_findings(all_findings)
+        repairable = any(finding.get("repairable", True) for finding in all_findings)
+        for segment_id in ordered:
+            text, request_id = response_candidates.pop(segment_id)
+            if findings:
+                own = findings.get(segment_id)
+                if not own:
+                    own = [{"validator": "response_gate", "match_type": "validation_blocked",
+                            "severity": "error" if hard else "advisory",
+                            "start": 0 if hard else None, "end": len(text) if hard else None,
+                            **({"matched_text": text} if hard else {}),
+                            **({"repairable": False} if not repairable else {})}]
+                validation_pending[segment_id] = {"segment": by_id[segment_id], "candidate": text,
+                                                  "findings": own, "request_id": request_id}
+            else:
+                validation_pending.pop(segment_id, None)
                 await save_completed(segment_id, text, request_id)
-            return
-        part_results.setdefault(original_id, {})[segment_id] = (text, request_id)
-        expected_parts = original_parts[original_id]
-        if not all(part_id in part_results[original_id] for part_id in expected_parts):
-            return
-        combined = "".join(part_results[original_id][part_id][0] for part_id in expected_parts)
-        combined_request_id = part_results[original_id][expected_parts[-1]][1]
-        findings = await validate_translation_text(
-            validation_context(original_id, combined), translation_validators
-        )
-        if findings:
-            validation_pending[original_id] = {
-                "segment": by_id[original_id],
-                "candidate": combined,
-                "findings": findings,
-                "request_id": combined_request_id,
-            }
-        else:
-            await save_completed(original_id, combined, combined_request_id)
+
+    segment_order = {str(item["segment_id"]): index for index, item in enumerate(segments)}
 
     state = StageRunState(
         project=project,
@@ -833,11 +864,6 @@ async def run_translation(
         on_usage=on_usage,
         preparation_started_at=preparation_started_at,
     )
-
-    async def accept_translation(
-        segment_id: str, request_id: str, text: Any
-    ) -> None:
-        await accept_candidate(segment_id, str(text), request_id)
 
     async def save_external_error(
         expected: list[str], request_id: str, message: str
@@ -861,7 +887,8 @@ async def run_translation(
                 state=state,
                 payload_builder=payload_builder,
                 prompt_builder=prompt_for_items,
-                accept=accept_translation,
+                accept=accept_response,
+                prepare_candidate=prepare_candidate,
                 save_failed=save_failed,
                 part_original=part_original,
                 original_parts=original_parts,
@@ -878,7 +905,9 @@ async def run_translation(
             config=config,
             llm=state.llm,
             stage="translation",
-            accept=accept_translation,
+            accept=None,
+            accept_response=accept_response,
+            prepare_candidate=prepare_candidate,
             save_error=save_external_error,
             parse=_map_local_translation_response,
             format_correction=_FORMAT_CORRECTION[language],
@@ -934,7 +963,9 @@ async def run_translation(
                 config=config,
                 llm=state.llm,
                 stage=run_stage,
-                accept=accept_translation,
+                accept=None,
+                accept_response=accept_response,
+                prepare_candidate=prepare_candidate,
                 save_error=save_external_error,
                 parse=_map_local_translation_response,
                 format_correction=_FORMAT_CORRECTION[language],
@@ -1075,6 +1106,12 @@ async def run_translation(
         )
 
     async def before_finalize() -> None:
+        for owners in response_groups:
+            for segment_id in owners:
+                candidate = response_candidates.pop(segment_id, None)
+                await save_failed(segment_id, candidate[1] if candidate else "REQ-NONE", "format_error",
+                                  "整批译文未完整通过格式校验", candidate=candidate[0] if candidate else None)
+        response_groups.clear()
         max_repairs = config["validation"]["translation"]["max_retry_attempts"]
         hard_repairs = 0
         while validation_pending:

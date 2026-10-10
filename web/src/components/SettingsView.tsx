@@ -222,8 +222,17 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
         label: validatorId,
         plugin_id: "",
         plugin_version: "",
+        phase: "unavailable",
       })),
-  ].sort((left, right) => left.validator_id.localeCompare(right.validator_id));
+  ];
+  const validatorPhases = ["mechanical", "alignment", "terminology", "unavailable"] as const;
+  function decisionPresetField(value: string, onChange: (value: string) => void, inherit = true) {
+    return <Field label="Decision Preset"><select value={value} onChange={(event) => onChange(event.target.value)}>
+      <option value="">{translate(inherit ? "settings.useGlobalPreset" : "decision.select", language)}</option>
+      {value && !decisionPresets.some((item) => item.preset_id === value && item.valid) && <option value={value}>{value} {translate("preset.credentialCurrent", language)}</option>}
+      {decisionPresets.filter((item) => item.valid).map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}
+    </select></Field>;
+  }
   const contextLabels: Array<[ContextStage, string]> = [
     ["terminology", translate("stage.terminology", language)],
     ["translation", translate("stage.translation", language)],
@@ -278,11 +287,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <NumberField label={translate("settings.tempPolishing", language)} value={config.llm.temperature_polishing} min={0} step={0.1} disabled={!supportsTemperature("polishing")} help={translate(supportsTemperature("polishing") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_polishing = value; })} />
         </ConfigSection>
         <ConfigSection title={translate("settings.decisionConnection", language)} description={translate("settings.decisionConnectionHint", language)}>
-          <Field label="Decision Preset"><select value={config.decision.preset} onChange={(event) => update((draft) => { draft.decision.preset = event.target.value; })}>
-            <option value="">{translate("decision.select", language)}</option>
-            {config.decision.preset && !decisionPresets.some((item) => item.preset_id === config.decision.preset && item.valid) && <option value={config.decision.preset}>{config.decision.preset} {translate("preset.credentialCurrent", language)}</option>}
-            {decisionPresets.filter((item) => item.valid).map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}
-          </select></Field>
+          {decisionPresetField(config.decision.preset, (value) => update((draft) => { draft.decision.preset = value; }), false)}
         </ConfigSection>
         <ConfigSection title={translate("settings.execution", language)} description={translate("settings.executionHint", language)}>
           <Field label={translate("settings.schedulingMode", language)} help={translate("settings.schedulingModeHint", language)}><select value={config.execution.scheduling_mode} onChange={(event) => update((draft) => { draft.execution.scheduling_mode = event.target.value as ProjectConfig["execution"]["scheduling_mode"]; })}><option value="ordered_by_file">{translate("settings.orderedByFile", language)}</option><option value="parallel">{translate("settings.parallel", language)}</option></select></Field>
@@ -304,7 +309,9 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <Field label={translate("settings.anchorOverflowMode", language)} help={translate("settings.anchorOverflowModeHint", language)}><select value={config.terminology_decision.anchor_overflow_mode} onChange={(event) => update((draft) => { draft.terminology_decision.anchor_overflow_mode = event.target.value as ProjectConfig["terminology_decision"]["anchor_overflow_mode"]; })}><option value="error">{translate("settings.anchorOverflowError", language)}</option><option value="trim">{translate("settings.anchorOverflowTrim", language)}</option><option value="compact">{translate("settings.anchorOverflowCompact", language)}</option></select></Field>
         </ConfigSection>
         <ConfigSection title={translate("settings.validation", language)} description={translate("settings.validationHint", language)}>
-          {validatorRows.map((validator) => {
+          {validatorPhases.filter((phase) => validatorRows.some((item) => item.phase === phase)).map((phase) => <div className="validator-settings-group" key={phase}>
+            <h3>{translate(`settings.validationPhase.${phase}`, language)}</h3>
+            <div className="config-grid">{validatorRows.filter((item) => item.phase === phase).map((validator) => {
             const installed = Boolean(validator.plugin_id);
             const label = validator.validator_id === "japanese_kana"
               ? translate("settings.japaneseKana", language)
@@ -314,7 +321,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
                   ? translate("settings.sourceTextResidual", language)
                   : validator.validator_id === "preferred_term_usage"
                     ? translate("settings.preferredTermUsage", language)
-                    : validator.label;
+                    : validator.validator_id === "segment_alignment" ? translate("settings.segmentAlignment", language) : validator.label;
             const help = installed
               ? `${validator.validator_id} · ${validator.plugin_id} ${validator.plugin_version}`
               : translate("settings.validatorUnavailable", language);
@@ -331,17 +338,21 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
                 if (validator.validator_id === "preferred_term_usage" && !value) draft.validation.translation.decision_enabled = false;
               })}
             />;
+            if (validator.validator_id === "segment_alignment") return <div key={validator.validator_id} className="validator-settings-group">
+              {toggle}
+              {configuredValidatorIds.has(validator.validator_id) && <div className="config-grid validator-settings-options">
+                {decisionPresetField(config.validation.translation.alignment.decision_preset, (value) => update((draft) => { draft.validation.translation.alignment.decision_preset = value; }))}
+                <NumberField label={translate("decision.threshold", language)} value={config.validation.translation.alignment.confidence_threshold} min={0} max={1} step={0.05} onChange={(value) => update((draft) => { draft.validation.translation.alignment.confidence_threshold = value; })} />
+                <NumberField label={translate("settings.alignmentTailSegments", language)} help={translate("settings.alignmentTailSegmentsHint", language)} value={config.validation.translation.alignment.tail_segments} min={1} step={1} onChange={(value) => update((draft) => { draft.validation.translation.alignment.tail_segments = value; })} />
+              </div>}
+            </div>;
             if (validator.validator_id !== "preferred_term_usage") return toggle;
             return <div key={validator.validator_id} className="validator-settings-group">
               {toggle}
               {installed && configuredValidatorIds.has(validator.validator_id) && <div className="config-grid validator-settings-options">
                 <ToggleField className="grid-span" label={translate("decision.review", language)} checked={config.validation.translation.decision_enabled} onChange={(value) => update((draft) => { draft.validation.translation.decision_enabled = value; })} help={translate("decision.reviewHint", language)} />
                 {config.validation.translation.decision_enabled && <>
-                  <Field label="Decision Preset"><select value={config.validation.translation.decision_preset} onChange={(event) => update((draft) => { draft.validation.translation.decision_preset = event.target.value; })}>
-                    <option value="">{translate("settings.useGlobalPreset", language)}</option>
-                    {config.validation.translation.decision_preset && !decisionPresets.some((item) => item.preset_id === config.validation.translation.decision_preset && item.valid) && <option value={config.validation.translation.decision_preset}>{config.validation.translation.decision_preset} {translate("preset.credentialCurrent", language)}</option>}
-                    {decisionPresets.filter((item) => item.valid).map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id}</option>)}
-                  </select></Field>
+                  {decisionPresetField(config.validation.translation.decision_preset, (value) => update((draft) => { draft.validation.translation.decision_preset = value; }))}
                   <NumberField label={translate("decision.threshold", language)} value={config.validation.translation.decision_confidence_threshold} min={0} max={1} step={0.05} onChange={(value) => update((draft) => { draft.validation.translation.decision_confidence_threshold = value; })} />
                   <div className="context-config-row grid-span">
                     <ToggleField label={translate("settings.contextEnabled", language, { stage: "Decision" })} checked={config.validation.translation.decision_context_enabled} help={translate("decision.contextHint", language)} onChange={(value) => update((draft) => { draft.validation.translation.decision_context_enabled = value; })} />
@@ -350,7 +361,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
                 </>}
               </div>}
             </div>;
-          })}
+          })}</div></div>)}
           <NumberField label={translate("settings.repairAttempts", language)} value={config.validation.translation.max_retry_attempts} min={0} step={1} help={translate("settings.repairAttemptsHint", language)} onChange={(value) => update((draft) => { draft.validation.translation.max_retry_attempts = value; })} />
           <Field label={translate("settings.exhaustedMode", language)} help={translate("settings.exhaustedModeHint", language)}><select value={config.validation.translation.exhausted_mode} onChange={(event) => update((draft) => { draft.validation.translation.exhausted_mode = event.target.value as ProjectConfig["validation"]["translation"]["exhausted_mode"]; })}><option value="fail">{translate("settings.markFailed", language)}</option><option value="warning">{translate("settings.acceptWarning", language)}</option></select></Field>
           <NumberField label={translate("settings.httpMaxAttempts", language)} value={config.retry.http_max_attempts} min={1} step={1} help={translate("settings.httpMaxAttemptsHint", language)} onChange={(value) => update((draft) => { draft.retry.http_max_attempts = value; })} />
