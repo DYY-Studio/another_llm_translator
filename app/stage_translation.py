@@ -44,7 +44,6 @@ from .sqlite_storage import (
 from .summary_provenance import digest, full_summary_context_usable
 from .translation_validation import (
     TranslationValidationContext,
-    validate_translation_text,
     validate_translation_response,
     SegmentAlignmentValidator,
 )
@@ -827,11 +826,13 @@ async def run_translation(
         contexts = tuple(validation_context(segment_id, response_candidates[segment_id][0]) for segment_id in ordered)
         findings = await validate_translation_response(contexts, translation_validators)
         all_findings = [finding for values in findings.values() for finding in values]
+        blocking_ids = {validator.validator_id for validator in translation_validators if validator.phase != "terminology"}
+        blocks_response = any(finding["validator"] in blocking_ids for finding in all_findings)
         hard = _has_hard_validation_findings(all_findings)
         repairable = any(finding.get("repairable", True) for finding in all_findings)
         for segment_id in ordered:
             text, request_id = response_candidates.pop(segment_id)
-            if findings:
+            if segment_id in findings or blocks_response:
                 own = findings.get(segment_id)
                 if not own:
                     own = [{"validator": "response_gate", "match_type": "validation_blocked",
@@ -1016,10 +1017,11 @@ async def run_translation(
                         part_id: {
                             "segment": part,
                             "candidate": candidate_part,
-                            "findings": await validate_translation_text(
-                                validation_context(part_id, candidate_part),
-                                translation_validators,
-                            ),
+                            "findings": [
+                                {**finding, **({"start": 0, "end": len(candidate_part), "matched_text": candidate_part}
+                                  if finding["severity"] == "error" else {})}
+                                for finding in subset[segment_id]["findings"]
+                            ],
                             "request_id": subset[segment_id]["request_id"],
                         }
                     }
@@ -1105,13 +1107,17 @@ async def run_translation(
             message,
         )
 
-    async def before_finalize() -> None:
+    async def fail_incomplete_responses() -> None:
         for owners in response_groups:
             for segment_id in owners:
                 candidate = response_candidates.pop(segment_id, None)
-                await save_failed(segment_id, candidate[1] if candidate else "REQ-NONE", "format_error",
-                                  "整批译文未完整通过格式校验", candidate=candidate[0] if candidate else None)
+                if segment_id not in completed_ids and segment_id not in failed_ids:
+                    await save_failed(segment_id, candidate[1] if candidate else "REQ-NONE", "format_error",
+                                      "整批译文未完整通过格式校验", candidate=candidate[0] if candidate else None)
         response_groups.clear()
+
+    async def before_finalize() -> None:
+        await fail_incomplete_responses()
         max_repairs = config["validation"]["translation"]["max_retry_attempts"]
         hard_repairs = 0
         while validation_pending:
@@ -1181,40 +1187,38 @@ async def run_translation(
                 }
                 await repair_group(group, subset)
         exhausted_mode = config["validation"]["translation"]["exhausted_mode"]
-        if exhausted_mode == "warning":
-            pending_part_originals = {
-                part_original[segment_id]
-                for segment_id in validation_pending
-                if segment_id in part_original
-            }
-            for original_id in pending_part_originals:
-                expected = original_parts[original_id]
-                combined_parts: list[str] = []
-                request_id = "REQ-NONE"
-                for part_id in expected:
-                    if part_id in validation_pending:
-                        item = validation_pending[part_id]
-                        combined_parts.append(str(item["candidate"]))
-                        request_id = str(item["request_id"])
-                    elif part_id in part_results.get(original_id, {}):
-                        text, request_id = part_results[original_id][part_id]
-                        combined_parts.append(text)
-                    else:
-                        break
+        pending_part_originals = {
+            part_original[segment_id]
+            for segment_id in validation_pending
+            if segment_id in part_original
+        }
+        for original_id in pending_part_originals:
+            expected = original_parts[original_id]
+            combined_parts: list[str] = []
+            request_id = "REQ-NONE"
+            for part_id in expected:
+                if part_id in validation_pending:
+                    item = validation_pending[part_id]
+                    combined_parts.append(str(item["candidate"]))
+                    request_id = str(item["request_id"])
+                elif part_id in part_results.get(original_id, {}):
+                    text, request_id = part_results[original_id][part_id]
+                    combined_parts.append(text)
                 else:
-                    combined = "".join(combined_parts)
-                    await save_completed(
-                        original_id,
-                        combined,
-                        request_id,
-                        validation_status="warning",
-                        findings=await validate_translation_text(
-                            validation_context(original_id, combined),
-                            translation_validators,
-                        ),
-                    )
-                    for part_id in expected:
-                        validation_pending.pop(part_id, None)
+                    break
+            else:
+                combined = "".join(combined_parts)
+                inherited = [finding for part_id in expected for finding in validation_pending.get(part_id, {}).get("findings", [])]
+                for part_id in expected:
+                    validation_pending.pop(part_id, None)
+                if exhausted_mode == "warning":
+                    await accept_response([by_id[original_id]], {original_id: (request_id, combined)})
+                else:
+                    validation_pending[original_id] = {
+                        "segment": by_id[original_id], "candidate": combined, "request_id": request_id,
+                        "findings": [{**finding, **({"start": 0, "end": len(combined), "matched_text": combined}
+                                      if finding["severity"] == "error" else {})} for finding in inherited],
+                    }
         for segment_id, item in validation_pending.items():
             if (
                 not _has_hard_validation_findings(item["findings"])
@@ -1236,6 +1240,8 @@ async def run_translation(
                     candidate=item["candidate"],
                     findings=item["findings"],
                 )
+
+        await fail_incomplete_responses()
 
         if draft_scan is not None:
             draft_scan.publish(run_id, segments)

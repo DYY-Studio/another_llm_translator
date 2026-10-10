@@ -95,9 +95,10 @@ _VALIDATION_REPAIR = {
         "简称或部分名称应按对应部分修正，保留原文的简称形式。"
     ),
     "en": (
-        "If validation_matches contains segment_misaligned, retranslate the whole batch from each ID’s own source; "
-        "do not swap IDs, fix only the tail, or retain shifted content. Otherwise use failed_candidate as the base, fix only the issues in "
+        "Use failed_candidate as the base for ordinary findings; fix only the issues in "
         "validation_matches, and return a complete, format-compliant translation. "
+        "If validation_matches contains segment_misaligned, instead retranslate the whole batch from each ID’s own source; "
+        "do not swap IDs, fix only the tail, or retain shifted content. "
         "For advisory terminology suggestions, first decide whether the "
         "recommended translation fits this context; use it when it does, but "
         "you may keep the candidate when it does not. For a short form or partial "

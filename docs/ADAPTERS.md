@@ -558,7 +558,7 @@ schema = 1
 [plugin]
 id = "my-documents"
 version = "1.0.0"
-protocol = 13
+protocol = 14
 entrypoint = "plugin:descriptor"
 ```
 
@@ -579,7 +579,7 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=13,
+        protocol_version=14,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```
@@ -588,7 +588,7 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `14`；每个校验器声明唯一的 `validator_id`、`version`、`label`、`phase`、`scope`，并实现接收 `TranslationValidationContext` 的 `validate(context)`，可返回普通结果或可等待结果。
+翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `14`；每个校验器声明唯一的 `validator_id`、`version`、`label`、`phase`、`scope`，并按执行粒度实现同步或异步校验。
 
 上下文包含当前 Segment 的 ID、源文、候选译文、逐 Segment 术语命中，以及可选的宿主 `DecisionService` 和置信度门槛。术语命中包含分类和说明；上下文不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
 

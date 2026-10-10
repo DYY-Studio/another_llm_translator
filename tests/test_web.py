@@ -1748,8 +1748,9 @@ def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
     assert [item["validator_id"] for item in validators] == [
         "japanese_kana",
         "korean_hangul",
-        "preferred_term_usage",
         "source_text_residual",
+        "segment_alignment",
+        "preferred_term_usage",
     ]
 
 

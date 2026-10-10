@@ -270,6 +270,16 @@ def validate_config(config: dict[str, Any]) -> None:
         "warning",
     }:
         raise ConfigError("validation.translation.exhausted_mode 必须是 fail 或 warning")
+    validators = config["validation"]["translation"]["validators"]
+    if not isinstance(validators, list) or any(
+        not isinstance(validator_id, str) or not validator_id.strip()
+        for validator_id in validators
+    ):
+        raise ConfigError(
+            "validation.translation.validators 必须是非空字符串数组"
+        )
+    if len(validators) != len(set(validators)):
+        raise ConfigError("validation.translation.validators 不能包含重复校验器")
     decision = config["validation"]["translation"]
     if type(decision["decision_enabled"]) is not bool or not isinstance(decision["decision_preset"], str):
         raise ConfigError("Decision 校验配置无效")
@@ -294,16 +304,6 @@ def validate_config(config: dict[str, Any]) -> None:
     for validator_id, override in decision_validator_overrides(config).items():
         if not (override or config["decision"]["preset"]):
             raise ConfigError(f"{validator_id} 需要选择 Decision Preset 或通用 Decision Preset")
-    validators = config["validation"]["translation"]["validators"]
-    if not isinstance(validators, list) or any(
-        not isinstance(validator_id, str) or not validator_id.strip()
-        for validator_id in validators
-    ):
-        raise ConfigError(
-            "validation.translation.validators 必须是非空字符串数组"
-        )
-    if len(validators) != len(set(validators)):
-        raise ConfigError("validation.translation.validators 不能包含重复校验器")
     validation_attempts = config["validation"]["translation"]["max_retry_attempts"]
     if (
         not isinstance(validation_attempts, int)
@@ -634,7 +634,7 @@ def _resolve_decision_config(config: dict[str, Any], root: Path, *, snapshot: bo
         bindings[validator_id] = preset_id
         if preset_id in definitions:
             continue
-        path = root / "decision_presets" / f"{preset_id}.json" if snapshot else effective_path(
+        path = decision_preset_path(root, preset_id) if snapshot else effective_path(
             str(decision_preset_path(Path(), preset_id)), builtin_root=root)
         definition = load_decision_preset(path)
         if definition["preset_id"] != preset_id:

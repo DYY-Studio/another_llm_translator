@@ -707,6 +707,7 @@ class DraftTerminologyScan:
         buffered_translations: dict[str, tuple[str, Any]] = {}
         delegated: set[str] = set()
         translation_format_failed = False
+        translation_end_received = False
         queue = [(list(group), 0, parent_request_id)]
         while queue:
             pending, attempt, parent_request_id = queue.pop(0)
@@ -771,10 +772,12 @@ class DraftTerminologyScan:
                 else:
                     await record_context_failure(pending, exc)
                     continue
-                if buffered_translations:
-                    await accept(translation_group, buffered_translations, complete=False)
+                if any(item["_draft_translation"] for item in pending):
+                    delegated.update(str(item["segment_id"]) for item in pending if item["_draft_translation"])
+                    if buffered_translations:
+                        await accept(translation_group, buffered_translations, complete=False)
+                        delegated.update(buffered_translations)
                 for child in groups:
-                    delegated.update(str(item["segment_id"]) for item in child)
                     with empty_response_split_scope(exc):
                         await self.process(
                             child,
@@ -826,6 +829,7 @@ class DraftTerminologyScan:
                 response.content,
                 record_type=response_record_types(mode),
             )
+            translation_end_received |= document.has_valid_end
             terms: list[dict[str, Any]] = []
             term_errors: list[str] = []
             declaration_error = (
@@ -915,7 +919,7 @@ class DraftTerminologyScan:
                 ):
                     valid = {}
                     translation_unresolved = set(id_map.values())
-                if not parsed.complete:
+                if not parsed.complete and not translation_unresolved and mode == TerminologyResponseMode.TRANSLATION_ONLY:
                     translation_unresolved.update(str(item["segment_id"]) for item in pending if item["_draft_translation"])
                 for segment_id, text in valid.items():
                     try:
@@ -986,7 +990,7 @@ class DraftTerminologyScan:
 
         remaining = [item for item in translation_group if str(item["segment_id"]) not in delegated]
         if remaining:
-            if not translation_format_failed and all(str(item["segment_id"]) in buffered_translations for item in remaining):
+            if translation_end_received and not translation_format_failed and all(str(item["segment_id"]) in buffered_translations for item in remaining):
                 await accept(remaining, buffered_translations)
             else:
                 for item in remaining:

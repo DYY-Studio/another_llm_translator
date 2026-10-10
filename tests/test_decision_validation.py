@@ -219,3 +219,212 @@ async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monke
     assert {record["validation_status"] for record in records} == {expected_status}
     if repairs:
         assert len(requests[-1]["segments"]) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate,term_requests,status", [
+    ("mechanical", 0, "failed"), ("uncertain", 0, "warning"),
+    ("refused", 0, "warning"), ("aligned", 4, "passed"), ("misaligned", 4, "passed"),
+])
+async def test_alignment_phase_prevents_invalid_terminology_requests(tmp_path, monkeypatch, gate, term_requests, status):
+    project = await create_project(tmp_path, "Alice one.\nAlice two.\nAlice three.\nAlice four.")
+    metadata = read_json(project, project / "project.json")
+    write_json(project, project / "terminology" / "terms.json", record_header(
+        "terminology_library", metadata["project_id"], terms_revision=1,
+        terms=[dict(record_id="TERM-A", source="Alice", normalized="alice", category="人名",
+                    description="Character", preferred_translation="爱丽丝", aliases=[], group_primary=None, conflicts={})]))
+    common = preset()
+    other = {**common, "preset_id": "other", "url": common["url"] + "/other"}
+    for value in (common, other):
+        write_user(f"decision_presets/{value['preset_id']}.json").write_text(json.dumps(value), encoding="utf-8")
+    config = load_config(project / "config.toml")
+    config["decision"]["preset"] = "local"
+    options = config["validation"]["translation"]
+    options.update(validators=["japanese_kana", "segment_alignment", "preferred_term_usage"], decision_enabled=True,
+                   decision_preset="other", max_retry_attempts=0 if gate == "mechanical" else 2)
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+    monkeypatch.setenv("DECISION_TEST_KEY", "test")
+    alignment_calls, terminology_calls = [], []
+    def respond(request):
+        body = json.loads(request.content)
+        if "questions" in body:
+            assert not read_jsonl(project, project / "stages" / "translation.jsonl"), "Candidates must not be saved before whole-batch validation"
+            if "segments" in body["state"]:
+                alignment_calls.append(body)
+                assert str(request.url) == common["url"]
+                selected = "aligned" if len(alignment_calls) > 1 else gate
+            else:
+                terminology_calls.append(body)
+                assert str(request.url) == other["url"]
+                selected = "ordinary"
+            answers = {name: ({"type": "refusal"} if selected == "refused" else {
+                "type": "choice", "choice": selected, "confidence": 0.99,
+                "probabilities": {key: int(key == selected) for key in question["criteria"]}})
+                for name, question in body["questions"].items()}
+            return httpx.Response(200, json={"model": "test", "answers": answers})
+        payload = json.loads(body["messages"][1]["content"])
+        records = [{"type": "segment", "id": item["id"], "translation": "あ" if gate == "mechanical" and index == 0 else "她来了。"}
+                   for index, item in enumerate(payload["segments"])]
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        result = await run_translation(project, Scope(), http_client=http)
+    assert len(terminology_calls) == term_requests
+    assert len(alignment_calls) == (0 if gate == "mechanical" else 2 if gate == "misaligned" else 1)
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
+    assert len(records) == 4
+    assert {record.get("validation_status", record["status"]) for record in records} == {status}
+    frozen = load_run_config(project / "runs" / result["run_id"])
+    assert set(frozen["_decision_preset_definitions"]) == {"local", "other"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exhausted", [False, True])
+async def test_partial_response_is_buffered_before_alignment(tmp_path, monkeypatch, exhausted):
+    project = await create_project(tmp_path, "One.\nTwo.")
+    value = preset()
+    write_user("decision_presets/local.json").write_text(json.dumps(value), encoding="utf-8")
+    config = load_config(project / "config.toml")
+    config["decision"]["preset"] = "local"
+    config["validation"]["translation"]["validators"] = ["segment_alignment"]
+    if exhausted:
+        config["retry"]["format_max_attempts"] = 0
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+    monkeypatch.setenv("DECISION_TEST_KEY", "test")
+    translations, decisions = [], []
+    def respond(request):
+        body = json.loads(request.content)
+        assert not read_jsonl(project, project / "stages" / "translation.jsonl")
+        if "questions" in body:
+            decisions.append(body)
+            assert [item["source"] for item in body["state"]["segments"]] == ["One.", "Two."]
+            return httpx.Response(200, json={"model": "test", "answers": {name: {
+                "type": "choice", "choice": "aligned", "confidence": 0.99,
+                "probabilities": {key: int(key == "aligned") for key in question["criteria"]}}
+                for name, question in body["questions"].items()}})
+        payload = json.loads(body["messages"][1]["content"])
+        translations.append(payload)
+        records = [{"type": "segment", "id": item["id"], "translation": "译文"} for item in payload["segments"]]
+        content = json.dumps(records[0]) if len(translations) == 1 else llm_jsonl(records)
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        result = await run_translation(project, Scope(), http_client=http)
+    assert result["completed"] == (0 if exhausted else 2)
+    assert len(decisions) == (0 if exhausted else 1)
+    assert {record["status"] for record in read_jsonl(project, project / "stages" / "translation.jsonl")} == ({"failed"} if exhausted else {"completed"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["split", "joint", "joint_runtime_split"])
+async def test_alignment_uses_complete_segments_in_split_and_joint_requests(tmp_path, monkeypatch, mode):
+    from tests.helpers import use_llm_preset
+    from app.stage_terminology import run_terminology
+    source = "A" * 5000 if mode == "split" else "A" * 20 if mode == "joint_runtime_split" else "One.\nTwo."
+    project = await create_project(tmp_path, source)
+    value = {**preset(), "context_window_tokens": 16000}
+    write_user("decision_presets/local.json").write_text(json.dumps(value), encoding="utf-8")
+    config = load_config(project / "config.toml")
+    config["decision"]["preset"] = "local"
+    config["validation"]["translation"]["validators"] = ["segment_alignment"]
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+    if mode == "split":
+        use_llm_preset(tmp_path, context_window_tokens=1200, max_output_tokens=300,
+                       context_safety_margin_tokens=100, target_chunk_input_tokens=700)
+    monkeypatch.setenv("DECISION_TEST_KEY", "test")
+    decision_calls, llm_calls = [], []
+    def respond(request):
+        body = json.loads(request.content)
+        if "questions" in body:
+            decision_calls.append(body)
+            assert [item["source"] for item in body["state"]["segments"]] == source.splitlines()
+            return httpx.Response(200, json={"model": "test", "answers": {name: {
+                "type": "choice", "choice": "aligned", "confidence": 0.99,
+                "probabilities": {key: int(key == "aligned") for key in question["criteria"]}}
+                for name, question in body["questions"].items()}})
+        payload = json.loads(body["messages"][1]["content"])
+        llm_calls.append(payload)
+        if mode == "joint_runtime_split" and any(len(item["source"]) > 10 for item in payload["segments"]):
+            return httpx.Response(400, text="context_length_exceeded: maximum context tokens")
+        records = [{"type": "no_terms"}] if mode.startswith("joint") else []
+        for item in payload["segments"]:
+            records.append({"type": "segment", "id": item["id"], "translation": item["source"].lower()})
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        if mode.startswith("joint"):
+            await run_terminology(project, Scope(), http_client=http, include_draft_translation=True)
+        else:
+            await run_translation(project, Scope(), http_client=http)
+    assert len(decision_calls) == 1
+    assert (len(llm_calls) == 1) if mode == "joint" else (len(llm_calls) > 1)
+    assert len(read_jsonl(project, project / "stages" / "translation.jsonl")) == len(source.splitlines())
+
+
+@pytest.mark.asyncio
+async def test_final_terminology_phase_repairs_only_affected_segments(tmp_path):
+    project = await create_project(tmp_path, "One.\nAlice.")
+    metadata = read_json(project, project / "project.json")
+    write_json(project, project / "terminology" / "terms.json", record_header(
+        "terminology_library", metadata["project_id"], terms_revision=1,
+        terms=[dict(record_id="TERM-A", source="Alice", normalized="alice", category="人名",
+                    description=None, preferred_translation="爱丽丝", aliases=[], group_primary=None, conflicts={})]))
+    config = load_config(project / "config.toml")
+    config["validation"]["translation"]["validators"] = ["preferred_term_usage"]
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+    repairs = []
+    def respond(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if "validation_repair" in payload:
+            repairs.append(payload)
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+            {"type": "segment", "id": item["id"], "translation": "她。"} for item in payload["segments"]])}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        await run_translation(project, Scope(), http_client=http)
+    assert len(repairs) == 1
+    assert [item["source"] for item in repairs[0]["segments"]] == ["Alice."]
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
+    assert records[0]["validation_status"] == "passed"
+    assert records[1]["validation_status"] == "warning"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exhausted_mode", ["fail", "warning"])
+async def test_alignment_repair_split_does_not_accept_unchecked_partial_candidate(tmp_path, monkeypatch, exhausted_mode):
+    project = await create_project(tmp_path, "A" * 20)
+    value = preset()
+    write_user("decision_presets/local.json").write_text(json.dumps(value), encoding="utf-8")
+    config = load_config(project / "config.toml")
+    config["decision"]["preset"] = "local"
+    config["validation"]["translation"].update(validators=["segment_alignment"], max_retry_attempts=1, exhausted_mode=exhausted_mode)
+    config["retry"]["format_max_attempts"] = 0
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+    monkeypatch.setenv("DECISION_TEST_KEY", "test")
+    decisions, repair_parts = [], []
+    def respond(request):
+        body = json.loads(request.content)
+        if "questions" in body:
+            decisions.append(body)
+            assert len(body["state"]["segments"][0]["source"]) == 20
+            return httpx.Response(200, json={"model": "test", "answers": {name: {
+                "type": "choice", "choice": "misaligned", "confidence": 0.99,
+                "probabilities": {key: int(key == "misaligned") for key in question["criteria"]}}
+                for name, question in body["questions"].items()}})
+        payload = json.loads(body["messages"][1]["content"])
+        if "validation_repair" in payload:
+            if len(payload["segments"][0]["source"]) > 10:
+                return httpx.Response(400, text="context_length_exceeded: maximum context tokens")
+            repair_parts.append(payload)
+            if len(repair_parts) == 1:
+                return httpx.Response(200, json={"choices": [{"message": {"content": '{"type":"end"}'}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+            {"type": "segment", "id": item["id"], "translation": "错" * len(item["source"])} for item in payload["segments"]])}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        result = await run_translation(project, Scope(), http_client=http)
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
+    assert len(records) == 1
+    if exhausted_mode == "fail":
+        assert result["failed"] == 1
+        assert records[0]["status"] == "failed"
+    else:
+        assert len(decisions) == 2
+        assert result["completed"] == 1
+        assert records[0]["validation_status"] == "warning"
+        assert records[0]["validation_findings"][0]["match_type"] == "segment_misaligned"
