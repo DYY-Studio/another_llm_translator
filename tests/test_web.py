@@ -698,7 +698,7 @@ def test_web_project_list_reports_repair_for_missing_prompt(
     assert listed.json()["projects"][0]["repair_needed"] is True
 
 
-@pytest.mark.parametrize("schema_version", ["3", "4", None])
+@pytest.mark.parametrize("schema_version", ["3", "4", "5", None])
 def test_web_project_list_checks_schema_read_only_while_project_is_locked(
     tmp_path: Path, schema_version: str | None
 ) -> None:
@@ -1530,6 +1530,38 @@ def test_web_open_project_rejects_unsupported_storage_schema(
     opened = client.post("/api/v1/projects/open", json={"path": str(target)})
     assert opened.status_code == 400
     assert "schema_version" in opened.json()["error"]
+
+
+def test_web_lists_and_opens_v5_project_with_silent_upgrade(tmp_path: Path) -> None:
+    from tests.test_sqlite_storage import _seed_v5_summary
+
+    projects_root, project = make_project(tmp_path)
+    _seed_v5_summary(project)
+    client = TestClient(create_app(projects_root=projects_root))
+    backups = project / "snapshots" / "storage_migrations"
+
+    listed = client.get("/api/v1/projects")
+    assert listed.status_code == 200
+    assert listed.json()["projects"][0]["repair_needed"] is True
+    assert not backups.exists()
+
+    opened = client.post("/api/v1/projects/open", json={"path": str(project)})
+    assert opened.status_code == 200
+    assert opened.json()["warnings"] == []
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == str(sqlite_storage.SCHEMA_VERSION)
+    initial_backups = list(backups.glob("*.sqlite"))
+    assert len(initial_backups) == 1
+
+    listed = client.get("/api/v1/projects")
+    assert listed.status_code == 200
+    assert listed.json()["projects"][0]["repair_needed"] is False
+    reopened = client.post("/api/v1/projects/open", json={"path": str(project)})
+    assert reopened.status_code == 200
+    assert reopened.json()["warnings"] == []
+    assert list(backups.glob("*.sqlite")) == initial_backups
 
 
 def test_web_open_project_reports_backup_after_read_triggered_upgrade(
