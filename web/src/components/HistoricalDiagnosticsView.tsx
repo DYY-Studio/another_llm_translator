@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { errorMessage, translate, type Language } from "../i18n";
+import { RequestOverview } from "./RequestOverview";
+import type { RequestOverviewSnapshot } from "../requestOverview";
 import { JsonPayloadViewer } from "./JsonPayloadViewer";
 import {
   fetchHistoricalRequest,
@@ -43,7 +45,7 @@ const HISTORY_STATUSES = [
 ];
 type DetailTab = "summary" | "execution" | "requests";
 type SnapshotTab = keyof HistoricalExecutionSnapshots;
-type RequestTab = "request" | "response" | "attempts" | "error";
+type RequestTab = "overview" | "request" | "response" | "attempts" | "error";
 
 function stageLabel(stage: string, language: Language): string {
   const key = stage === "terminology_decision"
@@ -349,7 +351,7 @@ function HistoricalRequestDiagnostics({
 }) {
   const index: HistoricalRequestIndex = detail.requests;
   const [requestId, setRequestId] = useState<string | null>(null);
-  const [requestTab, setRequestTab] = useState<RequestTab>("request");
+  const [requestTab, setRequestTab] = useState<RequestTab>("overview");
   const [attemptIndex, setAttemptIndex] = useState(0);
   const selectedRequest = index.items.find((item) => item.request_id === requestId) ?? null;
   const requestQuery = useQuery({
@@ -372,7 +374,7 @@ function HistoricalRequestDiagnostics({
     if (requestId && !selectedRequest) setRequestId(null);
   }, [requestId, selectedRequest]);
   useEffect(() => {
-    setRequestTab("request");
+    setRequestTab("overview");
     setAttemptIndex(0);
   }, [requestId]);
   const expanded = requestQuery.data;
@@ -425,13 +427,14 @@ function HistoricalRequestDiagnostics({
             </div>
             <nav className="history-request-tabs" role="tablist" aria-label={translate("diagnostics.history.requestTabs", language)}>
               {([
+                ["overview", translate("overview.title", language)],
                 ["request", translate("diagnostics.history.requestTab", language)],
                 ["response", translate("diagnostics.history.responseTab", language)],
                 ["attempts", translate("diagnostics.history.attemptsTab", language)],
                 ["error", translate("diagnostics.history.errorTab", language)],
               ] as const).map(([tab, label]) => <button key={tab} role="tab" aria-selected={requestTab === tab} className={requestTab === tab ? "active" : ""} onClick={() => setRequestTab(tab)}>{label}</button>)}
             </nav>
-            {requestTab === "attempts" ? (
+            {requestTab === "overview" ? <RequestOverview snapshot={activeAttempt?.overview?.status === "available" ? activeAttempt.overview.value as RequestOverviewSnapshot : null} language={language} /> : requestTab === "attempts" ? (
               <div className="history-attempt-list">
                 {expanded.attempts.map((attempt) => (
                   <article key={attempt.attempt}>

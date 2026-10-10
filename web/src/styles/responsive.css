@@ -298,7 +298,6 @@
   .summary-heading-actions button:first-child { grid-column: 1 / -1; }
   .summary-layout, .summary-source-open .summary-layout { display: block; min-height: 0; }
   .summary-boundary-list { max-height: none; border-right: 0; border-bottom: 1px solid var(--border); }
-  .summary-list-collapsed .summary-boundary-list { display: none; }
   .summary-boundary-list-rows { max-height: 44svh; min-height: 220px; }
   .summary-content { min-height: 520px; overflow: visible; padding: 22px 14px 60px; }
   .summary-source-panel { min-height: 420px; border-top: 1px solid var(--border); border-left: 0; }

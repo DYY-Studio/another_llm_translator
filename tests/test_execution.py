@@ -1562,6 +1562,9 @@ async def test_llm_client_extracts_embedded_reasoning(tmp_path: Path) -> None:
     assert response.reasoning_content == "reasoning"
     saved_response = next((tmp_path / "payloads").glob("*.response.json"))
     assert "<thought>reasoning</thought>" in saved_response.read_text("utf-8")
+    overview = json.loads(next((tmp_path / "payloads").glob("*.overview.json")).read_text("utf-8"))
+    assert overview["input"] == {"segments": []}
+    assert overview["response_content"] == response.content
     assert not list(tmp_path.rglob("*reasoning*"))
 
 

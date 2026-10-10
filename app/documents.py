@@ -119,6 +119,12 @@ def parse_aozora_text(
     return fragments, found_ruby
 
 
+def strip_aozora_ruby(value: str) -> str:
+    """Retain Ruby base text while removing its notation and reading."""
+    fragments, _ = parse_aozora_text(value)
+    return "".join(text for _, text, _ in fragments)
+
+
 def aozora_match_views(value: str) -> tuple[str, ...]:
     """Return independent base and adjacent-reading views for term matching."""
     fragments, found_ruby = parse_aozora_text(value)

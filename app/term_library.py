@@ -1,9 +1,11 @@
 from __future__ import annotations
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from .config import load_project_config
+from .logging_utils import get_logger
 from .errors import (
     UsageError,
 )
@@ -21,13 +23,60 @@ class TermNormalization:
     form: str | None
     casefold: bool
 
+def group_alias_overlaps(
+    terms: Iterable[dict[str, Any]], spec: TermNormalization,
+) -> list[tuple[str, str, str]]:
+    """Find root aliases also owned by an active member of that group."""
+    active = {str(term["normalized"]): term for term in terms if not term.get("disabled")}
+    overlaps = []
+    for member_key, member in sorted(active.items()):
+        root_key = member.get("group_primary")
+        root = active.get(root_key)
+        if root is None or root.get("group_primary") is not None:
+            continue
+        forms = {normalize_term(str(value), spec) for value in
+                 [member["source"], *member.get("aliases", [])]}
+        for alias in sorted(set(root.get("aliases", []))):
+            if normalize_term(alias, spec) in forms:
+                overlaps.append((str(root_key), member_key, alias))
+    return overlaps
+
+
+def validate_group_alias_overlaps(
+    terms: list[dict[str, Any]], spec: TermNormalization, *, affected: set[str],
+) -> None:
+    roots = affected | {str(term["group_primary"]) for term in terms
+                        if term["normalized"] in affected and term.get("group_primary")}
+    overlaps = [item for item in group_alias_overlaps(terms, spec) if item[0] in roots]
+    if overlaps:
+        raise UsageError("术语组主 Alias 与启用成员名称重叠：" + "；".join(
+            f"{root} -> {member} ({alias})" for root, member, alias in overlaps))
+
+
+def apply_group_alias_removals(
+    overrides: dict[str, dict[str, Any]], removals: dict[str, set[str]],
+) -> bool:
+    changed = False
+    for key, removed in removals.items():
+        override = overrides.get(key)
+        if override is not None and "aliases" in override:
+            retained = [alias for alias in override["aliases"] if alias not in removed]
+            if retained != override["aliases"]:
+                overrides[key] = {**override, "aliases": retained}
+                changed = True
+    return changed
+
+
 def _build_term_rows(
     merged: dict[str, dict[str, Any]],
     *,
     alias_policy: str,
     spec: TermNormalization,
+    alias_removals: dict[str, set[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    _alias_primary_collisions(merged, policy=alias_policy, spec=spec)
+    removed = _alias_primary_collisions(merged, policy=alias_policy, spec=spec)
+    if alias_removals is not None:
+        alias_removals.update(removed)
     terms: list[dict[str, Any]] = []
     for index, (normalized, item) in enumerate(sorted(merged.items()), start=1):
         categories = sorted(set(item["categories"]))
@@ -79,6 +128,13 @@ def _build_term_rows(
                 },
             }
         )
+    by_key = {term["normalized"]: term for term in terms}
+    for root, member, alias in group_alias_overlaps(terms, spec):
+        claim = {"entry": member, "claimed_by": root, "alias": alias, "reason": "group_alias_overlap"}
+        for key in (root, member):
+            by_key[key]["conflicts"]["group_claims"].append(dict(claim))
+        by_key[root]["conflicts"]["alias_primaries"].append(
+            {"alias": alias, "primary_source": by_key[member]["source"], "reason": "group_alias_overlap"})
     return terms
 
 def _alias_primary_collisions(
@@ -86,7 +142,7 @@ def _alias_primary_collisions(
     *,
     policy: str,
     spec: TermNormalization,
-) -> None:
+) -> dict[str, set[str]]:
     def add_claim(
         entry: str, claimed_by: str, alias: str, reason: str
     ) -> None:
@@ -123,7 +179,7 @@ def _alias_primary_collisions(
             if target in merged and target != owner:
                 claims.setdefault(target, []).append((owner, alias))
     if not claims:
-        return
+        return {}
 
     parent = {
         target: owners[0][0]
@@ -144,11 +200,13 @@ def _alias_primary_collisions(
     unsafe_targets = {
         target for target, owners in claims.items() if len({o for o, _ in owners}) > 1
     } | cycle_nodes
+    removed_aliases: dict[str, set[str]] = {}
     for target, owners in claims.items():
         for owner, alias in owners:
             owner_root = merged[owner]["group_primary"] or owner
             target_root = merged[target]["group_primary"] or target
             if owner_root == target_root:
+                # Root/member overlaps are reported by group_alias_overlaps.
                 continue
             reason = (
                 "multiple_owners"
@@ -168,6 +226,14 @@ def _alias_primary_collisions(
             )
             if not reason and target not in unsafe_targets:
                 merged[target]["group_primary"] = owner_root
+                member_forms = {normalize_term(str(value), spec) for value in
+                                [*merged[target]["sources"], *merged[target]["aliases"]]}
+                root_aliases = merged[owner_root]["aliases"]
+                retained = [value for value in root_aliases if normalize_term(value, spec) not in member_forms]
+                removed = set(root_aliases) - set(retained)
+                if removed:
+                    removed_aliases.setdefault(owner_root, set()).update(removed)
+                merged[owner_root]["aliases"] = retained
                 continue
             reason = reason or "group_collision"
             add_claim(target, owner, alias, reason)
@@ -179,12 +245,16 @@ def _alias_primary_collisions(
                 }
             )
 
+    if removed_aliases:
+        get_logger("terminology").info("自动归组移除重复主术语 Alias：%d", sum(map(len, removed_aliases.values())))
+
     for normalized, item in merged.items():
         primary = item["group_primary"]
         if primary is not None and (
             primary not in merged or merged[primary]["group_primary"] is not None
         ):
             raise UsageError(f"术语组关系无法规范化：{normalized} -> {primary}")
+    return removed_aliases
 
 def _term_bucket() -> dict[str, Any]:
     return {
@@ -220,6 +290,7 @@ def build_term_library_rows(
     project: Path,
     base_terms: list[dict[str, Any]],
     overrides: dict[str, dict[str, Any]],
+    *, alias_removals: dict[str, set[str]] | None = None,
 ) -> list[dict[str, Any]]:
     config = load_project_config(project)
     spec = term_normalization(config)
@@ -230,6 +301,7 @@ def build_term_library_rows(
         merged,
         alias_policy=str(config["terminology"]["alias_primary_collision"]),
         spec=spec,
+        alias_removals=alias_removals,
     )
 
 def _apply_term_overrides(
@@ -299,7 +371,11 @@ def _merge_and_publish_terms(
     }
     _apply_term_overrides(merged, overrides)
     alias_policy = str(config["terminology"]["alias_primary_collision"])
-    terms = _build_term_rows(merged, alias_policy=alias_policy, spec=spec)
+    removals: dict[str, set[str]] = {}
+    terms = _build_term_rows(merged, alias_policy=alias_policy, spec=spec, alias_removals=removals)
+    if apply_group_alias_removals(overrides, removals):
+        overrides_data["overrides"] = [overrides[key] for key in sorted(overrides)]
+        write_json(project, project / "terminology" / "overrides.json", overrides_data)
     revision = int(previous["terms_revision"]) + 1 if previous else 1
     library = record_header(
         "terminology_library",

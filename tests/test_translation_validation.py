@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
 
 import pytest
 
@@ -44,6 +45,18 @@ def test_source_text_residual_reports_complete_and_long_partial_matches() -> Non
     assert partial[0].end == 3 + len(partial[0].text)
 
 
+def test_async_validator_preserves_nonrepairable_advisory() -> None:
+    class Validator:
+        phase = "mechanical"
+        scope = "segment"
+        validator_id = "async"
+        async def validate(self, context):
+            return [TranslationValidationMatch("uncertain", None, None, None,
+                                              severity="advisory", repairable=False)]
+    findings = asyncio.run(validate_translation_text(TranslationValidationContext("source", "target"), (Validator(),)))
+    assert findings[0]["repairable"] is False
+
+
 def test_source_text_residual_handles_whitespace_and_nfkc_without_numeric_noise() -> None:
     validator = SourceTextResidualValidator()
     source = "ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴ"
@@ -84,34 +97,57 @@ def test_source_text_residual_respects_both_partial_match_thresholds() -> None:
     )
 
 
-def test_translation_validation_rejects_invalid_plugin_match() -> None:
+@pytest.mark.parametrize("match", [
+    TranslationValidationMatch("invalid", "missing", 0, 7),
+    TranslationValidationMatch("invalid", "", 0, 0),
+])
+def test_translation_validation_rejects_invalid_plugin_match(match) -> None:
     class InvalidValidator:
+        phase = "mechanical"
+        scope = "segment"
         validator_id = "invalid"
         version = "1"
         label = "Invalid"
 
         def validate(self, context: TranslationValidationContext) -> list[object]:
             del context
-            return [
-                TranslationValidationMatch(
-                    match_type="invalid",
-                    text="missing",
-                    start=0,
-                    end=7,
-                )
-            ]
+            return [match]
 
     with pytest.raises(ProjectError, match="越界或不一致"):
-        validate_translation_text(
+        asyncio.run(validate_translation_text(
             TranslationValidationContext("source", "translation"),
             (InvalidValidator(),),
-        )
+        ))
+
+
+@pytest.mark.parametrize("field", ["phase", "scope"])
+def test_plugin_host_rejects_non_string_validator_contract(monkeypatch, field):
+    class Validator:
+        phase = "mechanical"
+        scope = "segment"
+        validator_id = "invalid-contract"
+        version = "1"
+        label = "Invalid contract"
+
+        def validate(self, context):
+            return ()
+
+    validator = Validator()
+    setattr(validator, field, [])
+    descriptor = PluginDescriptor("invalid-contract-plugin", "1", PLUGIN_PROTOCOL_VERSION,
+                                  translation_validators=(validator,))
+    monkeypatch.setattr("app.plugins._load_external_descriptors", lambda: [(descriptor, Path("<fixture-plugin>"))])
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
+    with pytest.raises(ConfigError, match="翻译校验器描述不完整"):
+        load_plugins()
 
 
 def test_plugin_host_rejects_duplicate_translation_validator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Validator:
+        phase = "mechanical"
+        scope = "segment"
         validator_id = "duplicate-validator"
         version = "1"
         label = "Duplicate"
@@ -170,20 +206,23 @@ def test_builtin_translation_validator_summaries_are_complete() -> None:
     assert [item["validator_id"] for item in summaries] == [
         "japanese_kana",
         "korean_hangul",
-        "preferred_term_usage",
         "source_text_residual",
+        "segment_alignment",
+        "preferred_term_usage",
     ]
     assert all(
         item["plugin_id"] == "builtin-translation-validation"
         for item in summaries[:2]
     )
-    assert summaries[2]["plugin_id"] == "term-validation"
+    assert summaries[4]["plugin_id"] == "term-validation"
 
 
 def test_external_translation_validator_is_discoverable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class ExternalValidator:
+        phase = "mechanical"
+        scope = "segment"
         validator_id = "external_example"
         version = "2"
         label = "External example"
@@ -213,6 +252,8 @@ def test_external_translation_validator_is_discoverable(
         "validator_id": "external_example",
         "version": "2",
         "label": "External example",
+            "phase": "mechanical",
+            "scope": "segment",
         "plugin_id": "external-validator-plugin",
         "plugin_version": "3",
     }
@@ -222,6 +263,8 @@ def test_translation_validator_resolution_reuses_loaded_instance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class ExternalValidator:
+        phase = "mechanical"
+        scope = "segment"
         validator_id = "external_example"
         version = "2"
         label = "External example"
@@ -274,6 +317,8 @@ def test_project_config_and_web_store_reuse_one_validator_resolution(
     )
 
     class ExternalValidator:
+        phase = "mechanical"
+        scope = "segment"
         validator_id = "external_example"
         version = "2"
         label = "External example"
@@ -302,6 +347,8 @@ def test_project_config_and_web_store_reuse_one_validator_resolution(
             "validator_id": "external_example",
             "version": "2",
             "label": "External example",
+            "phase": "mechanical",
+            "scope": "segment",
             "plugin_id": "external-validator-plugin",
             "plugin_version": "3",
         }
@@ -311,3 +358,34 @@ def test_project_config_and_web_store_reuse_one_validator_resolution(
 
     store = WebStore(project)
     assert store.config["_translation_validator_instances"][0] is validator
+
+
+@pytest.mark.asyncio
+async def test_response_validation_orders_phases_and_blocks_whole_response():
+    from app.translation_validation import validate_translation_response
+    calls = []
+    class SegmentValidator:
+        scope = "segment"
+        version = "1"
+        label = "test"
+        def __init__(self, validator_id, phase, finding=False):
+            self.validator_id, self.phase, self.finding = validator_id, phase, finding
+        def validate(self, context):
+            calls.append((self.phase, context.segment_id))
+            return (TranslationValidationMatch("test", None, None, None, severity="advisory"),) if self.finding and context.segment_id == "S1" else ()
+    class ResponseValidator:
+        validator_id = "alignment"
+        phase = "alignment"
+        scope = "response"
+        def validate_response(self, contexts):
+            calls.append(("alignment", tuple(c.segment_id for c in contexts)))
+            return {}
+    contexts = tuple(TranslationValidationContext("source", "target", segment_id=s) for s in ("S1", "S2"))
+    validators = (SegmentValidator("term", "terminology"), ResponseValidator(), SegmentValidator("mechanical", "mechanical", True))
+    findings = await validate_translation_response(contexts, validators)
+    assert findings["S1"][0]["validator"] == "mechanical"
+    assert calls == [("mechanical", "S1"), ("mechanical", "S2")]
+    calls.clear()
+    validators[-1].finding = False
+    assert await validate_translation_response(contexts, validators) == {}
+    assert calls == [("mechanical", "S1"), ("mechanical", "S2"), ("alignment", ("S1", "S2")), ("terminology", "S1"), ("terminology", "S2")]

@@ -1,0 +1,17 @@
+{
+  "preset_id": "openai-example",
+  "protocol": "openai-decisions",
+  "url": "https://api.openai.com/v1/decisions",
+  "model": "gpt-6-luna",
+  "credential": {
+    "kind": "environment",
+    "name": "OPENAI_API_KEY"
+  },
+  "proxy_url": "",
+  "context_window_tokens": 1050000,
+  "context_safety_margin_tokens": 512,
+  "token_safety_factor": 1.25,
+  "request_timeout_seconds": 60,
+  "requests_per_minute": 0,
+  "max_parallel": 1
+}

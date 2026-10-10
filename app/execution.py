@@ -493,6 +493,24 @@ _TERMINOLOGY_DECISION_PHASE_PREFIX: dict[str, dict[str, str]] = {
             "output a decision for anchors."
         ),
     },
+    "containment": {
+        "zh-CN": (
+            "当前是最终状态的包含关系复核。terms 和 anchors 均来自此前阶段完成后的状态，anchors 只读。"
+            "本批术语的原文存在长短包含关系，但长术语译名未包含短术语的推荐译名。"
+            "这只是可疑线索，不是必须逐字包含的规则。确认其中姓名、家名、地名等是否应使用一致写法；"
+            "不能仅凭含义相同保留不同音译。联合修改相关术语以保证一致；确有独立译法时 keep 并说明理由，"
+            "无法确定或受保护参照互相矛盾时 needs_review。不得机械替换译名或修改 anchors。"
+        ),
+        "en": (
+            "This is containment review of the final states from the preceding phases; anchors are read-only. "
+            "Source names overlap by containment, but a longer translation lacks the shorter preferred spelling. "
+            "This is a suspicion, not a mandatory substring rule. Check whether embedded people, families or places "
+            "require consistent spelling; semantic equivalence alone does not justify different transliterations. "
+            "Update related terms together, or keep with a reason when an independent translation is justified. "
+            "Use needs_review for insufficient evidence or contradictory protected references. "
+            "Do not mechanically replace translations or modify anchors."
+        ),
+    },
     "final_review": {
         "zh-CN": (
             "当前是第三阶段“术语自动终审”。terms 是本批唯一决策目标；anchors 只读，"
@@ -703,6 +721,8 @@ def stage_fingerprint(
                         for key in (
                             "validator_id",
                             "version",
+                            "phase",
+                            "scope",
                             "plugin_id",
                             "plugin_version",
                         )
@@ -710,6 +730,12 @@ def stage_fingerprint(
                     for summary in config.get("_translation_validators", [])
                 ],
                 "exhausted_mode": config["validation"]["translation"]["exhausted_mode"],
+                "decision_presets": config.get("_decision_preset_definitions", {}),
+                "decision_validator_presets": config.get("_decision_validator_presets", {}),
+                "alignment": config["validation"]["translation"]["alignment"],
+                "decision_confidence_threshold": config["validation"]["translation"].get("decision_confidence_threshold", 0.8),
+                "decision_context_enabled": config["validation"]["translation"]["decision_context_enabled"],
+                "decision_previous_segments": config["validation"]["translation"]["decision_previous_segments"],
             }
     encoded = json.dumps(
         data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -1499,6 +1525,8 @@ def continue_run(
     return run_id, run_dir, index
 
 def _write_llm_snapshots(path: Path, config: dict[str, Any]) -> None:
+    for preset_id, definition in config.get("_decision_preset_definitions", {}).items():
+        atomic_write_json(path / "decision_presets" / f"{preset_id}.json", definition)
     adapter = config.get("_llm_adapter")
     if not isinstance(adapter, JSONLLMAdapter):
         raise ConfigError("项目配置缺少已加载的 LLM Adapter")

@@ -336,7 +336,7 @@ async def test_translation_accepts_embedded_thought_content_without_retry(
 
 
 @pytest.mark.asyncio
-async def test_partial_truncated_translation_is_saved_before_format_retry(
+async def test_partial_truncated_translation_is_buffered_before_format_retry(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "one\ntwo")
@@ -353,7 +353,7 @@ async def test_partial_truncated_translation_is_saved_before_format_retry(
             )
         else:
             saved = read_jsonl(project, project / "stages" / "translation.jsonl")
-            assert any(item.get("segment_id") == "F0001-S000001" for item in saved)
+            assert saved == []
             assert [item["id"] for item in payload["segments"]] == ["1"]
             content = llm_jsonl(
                 [

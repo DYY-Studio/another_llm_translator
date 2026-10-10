@@ -686,6 +686,7 @@ class DraftTerminologyScan:
         payload_builder: Any,
         prompt_builder: Any,
         accept: Any,
+        prepare_candidate: Any,
         save_failed: Any,
         part_original: dict[str, str],
         original_parts: dict[str, list[str]],
@@ -702,6 +703,11 @@ class DraftTerminologyScan:
             parts = original_parts.get(owner, [part_id])
             self.term_parts.setdefault(owner, list(parts))
             self.summary_parts.setdefault(owner, list(parts))
+        translation_group = [item for item in group if item["_draft_translation"]]
+        buffered_translations: dict[str, tuple[str, Any]] = {}
+        delegated: set[str] = set()
+        translation_format_failed = False
+        translation_end_received = False
         queue = [(list(group), 0, parent_request_id)]
         while queue:
             pending, attempt, parent_request_id = queue.pop(0)
@@ -766,6 +772,11 @@ class DraftTerminologyScan:
                 else:
                     await record_context_failure(pending, exc)
                     continue
+                if any(item["_draft_translation"] for item in pending):
+                    delegated.update(str(item["segment_id"]) for item in pending if item["_draft_translation"])
+                    if buffered_translations:
+                        await accept(translation_group, buffered_translations, complete=False)
+                        delegated.update(buffered_translations)
                 for child in groups:
                     with empty_response_split_scope(exc):
                         await self.process(
@@ -774,6 +785,7 @@ class DraftTerminologyScan:
                             payload_builder=payload_builder,
                             prompt_builder=prompt_builder,
                             accept=accept,
+                            prepare_candidate=prepare_candidate,
                             save_failed=save_failed,
                             part_original=part_original,
                             original_parts=original_parts,
@@ -817,6 +829,7 @@ class DraftTerminologyScan:
                 response.content,
                 record_type=response_record_types(mode),
             )
+            translation_end_received |= document.has_valid_end
             terms: list[dict[str, Any]] = []
             term_errors: list[str] = []
             declaration_error = (
@@ -906,9 +919,11 @@ class DraftTerminologyScan:
                 ):
                     valid = {}
                     translation_unresolved = set(id_map.values())
+                if not parsed.complete and not translation_unresolved and mode == TerminologyResponseMode.TRANSLATION_ONLY:
+                    translation_unresolved.update(str(item["segment_id"]) for item in pending if item["_draft_translation"])
                 for segment_id, text in valid.items():
                     try:
-                        await accept(segment_id, request_id, text)
+                        buffered_translations[segment_id] = (request_id, prepare_candidate(segment_id, text))
                     except IncompleteError as exc:
                         translation_unresolved.add(segment_id)
                         term_errors.append(str(exc))
@@ -931,6 +946,7 @@ class DraftTerminologyScan:
             if not pending:
                 continue
             if attempt == self.config["retry"]["format_max_attempts"]:
+                translation_format_failed |= any(item["_draft_translation"] for item in pending)
                 message = (
                     "; ".join([*document.errors, *term_errors, *summary_errors])
                     or "粗翻响应的 Segment ID 缺失、重复或字段错误"
@@ -971,6 +987,15 @@ class DraftTerminologyScan:
                     [],
                 ).append(item)
             queue.extend((items, attempt + 1, request_id) for items in groups.values())
+
+        remaining = [item for item in translation_group if str(item["segment_id"]) not in delegated]
+        if remaining:
+            if translation_end_received and not translation_format_failed and all(str(item["segment_id"]) in buffered_translations for item in remaining):
+                await accept(remaining, buffered_translations)
+            else:
+                for item in remaining:
+                    await save_failed(str(item["segment_id"]), parent_request_id or "REQ-NONE",
+                                      "format_error", "整批译文未完整通过格式校验")
 
     def publish(self, run_id: str, segments: list[dict[str, Any]]) -> None:
         if self.active.get("status") != "active":

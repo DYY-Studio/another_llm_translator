@@ -1748,8 +1748,9 @@ def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
     assert [item["validator_id"] for item in validators] == [
         "japanese_kana",
         "korean_hangul",
-        "preferred_term_usage",
         "source_text_residual",
+        "segment_alignment",
+        "preferred_term_usage",
     ]
 
 
@@ -2855,16 +2856,9 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
 ) -> None:
     projects_root, _ = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
-    for payload in (
-        {
-            "source": "Alice",
-            "preferred_translation": "爱丽丝",
-            "category": "人物",
-            "description": "主角",
-            "aliases": ["Alicia"],
-            "disabled": False,
-        },
-        {
+    assert client.post(
+        "/api/v1/projects/sample/terms",
+        json={
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
             "category": "别名条目",
@@ -2872,13 +2866,23 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
             "aliases": ["Alicia Jr"],
             "disabled": False,
         },
-    ):
-        assert client.post("/api/v1/projects/sample/terms", json=payload).status_code == 200
+    ).status_code == 200
     removed = client.post(
         "/api/v1/projects/sample/terms/remove",
         json={"normalized": ["alicia"]},
     )
     assert removed.status_code == 200
+    assert client.post(
+        "/api/v1/projects/sample/terms",
+        json={
+            "source": "Alice",
+            "preferred_translation": "爱丽丝",
+            "category": "人物",
+            "description": "主角",
+            "aliases": ["Alicia"],
+            "disabled": False,
+        },
+    ).status_code == 200
     restored = client.post(
         "/api/v1/projects/sample/terms/materialize",
         json={"normalized": "alice", "alias": "Alicia"},
@@ -3879,7 +3883,7 @@ async def test_web_task_manager_forwards_force_and_fingerprint_reuse(
     _, project = make_project(tmp_path)
     store = WebStore(project)
     segment_id = store.overview()["segments"][0]["segment_id"]
-    store.save_translation({"segment_id": segment_id, "text": "一"})
+    await asyncio.to_thread(store.save_translation, {"segment_id": segment_id, "text": "一"})
     prompt_path = project / "prompts" / "translation.zh-CN.middle.txt"
     prompt_path.write_text(
         prompt_path.read_text(encoding="utf-8") + "\nchanged",

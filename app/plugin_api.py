@@ -13,6 +13,7 @@ from .documents import (
     decode_plaintext,
 )
 from .errors import IncompleteError, ProjectError, UsageError
+from .decision import DecisionAnswer, DecisionQuestion, DecisionService
 from .translation_validation import (
     TranslationTermMatch,
     TranslationValidationContext,
@@ -20,7 +21,7 @@ from .translation_validation import (
     TranslationValidator,
 )
 
-PLUGIN_PROTOCOL_VERSION = 12
+PLUGIN_PROTOCOL_VERSION = 14
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,9 @@ class PluginDescriptor:
 
 
 __all__ = [
+    "DecisionAnswer",
+    "DecisionService",
+    "DecisionQuestion",
     "DecodedPlaintext",
     "DocumentAdapter",
     "DocumentChoiceOption",

@@ -254,6 +254,10 @@ checkout 位于外部 APFS 卷且 app 启动停在 Python 初始化，可将 `.a
 
 ## 6. 调试与诊断
 
+启用 Debug 时，每次 LLM / Decision 请求尝试的原始数据及规范化概览保存在 Run 的
+`payloads/`，概览使用 `<request_id>-A<attempt>.overview.json`；`attempts.jsonl` 提供请求索引。
+概览只用于诊断，不参与阶段结果采纳。
+
 普通日志用于查看启动、请求摘要、重试和失败原因。Debug 模式会额外保存完整请求、响应和
 执行诊断，可能包含 Prompt、源文或模型输出；只能在明确的本地诊断场景启用，完成后应关闭，
 不得提交生成的数据。

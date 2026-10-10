@@ -39,6 +39,7 @@ SCHEMA: dict[str, Any] = {
         "temperature_proofreading": None,
         "temperature_polishing": None,
     },
+    "decision": {"preset": None},
     "execution": {"scheduling_mode": None},
     "chunking": {
         "allow_split_oversized_segment": None,
@@ -67,6 +68,16 @@ SCHEMA: dict[str, Any] = {
     "validation": {
         "translation": {
             "validators": None,
+            "decision_enabled": None,
+            "decision_preset": None,
+            "decision_confidence_threshold": None,
+            "decision_context_enabled": None,
+            "decision_previous_segments": None,
+            "alignment": {
+                "decision_preset": None,
+                "confidence_threshold": None,
+                "tail_segments": None,
+            },
             "max_retry_attempts": None,
             "exhausted_mode": None,
         }
@@ -269,6 +280,30 @@ def validate_config(config: dict[str, Any]) -> None:
         )
     if len(validators) != len(set(validators)):
         raise ConfigError("validation.translation.validators 不能包含重复校验器")
+    decision = config["validation"]["translation"]
+    if type(decision["decision_enabled"]) is not bool or not isinstance(decision["decision_preset"], str):
+        raise ConfigError("Decision 校验配置无效")
+    if type(decision["decision_context_enabled"]) is not bool:
+        raise ConfigError("Decision 上文开关必须是布尔值")
+    if type(decision["decision_previous_segments"]) is not int or decision["decision_previous_segments"] < 0:
+        raise ConfigError("Decision 上文 Segment 数必须是非负整数")
+    threshold = decision["decision_confidence_threshold"]
+    if type(threshold) not in {int, float} or not 0 <= threshold <= 1:
+        raise ConfigError("Decision 置信度门槛必须在 0 到 1 之间")
+    if not isinstance(config["decision"]["preset"], str):
+        raise ConfigError("通用 Decision Preset 必须是字符串")
+    if decision["decision_enabled"] and "preferred_term_usage" not in decision["validators"]:
+        raise ConfigError("Decision 复核需要启用 preferred_term_usage")
+    alignment = decision["alignment"]
+    if not isinstance(alignment["decision_preset"], str):
+        raise ConfigError("错位校验 Decision Preset 必须是字符串")
+    if type(alignment["confidence_threshold"]) not in {int, float} or not 0 <= alignment["confidence_threshold"] <= 1:
+        raise ConfigError("错位校验置信度门槛必须在 0 到 1 之间")
+    if type(alignment["tail_segments"]) is not int or alignment["tail_segments"] < 1:
+        raise ConfigError("错位校验尾部 Segment 数必须是正整数")
+    for validator_id, override in decision_validator_overrides(config).items():
+        if not (override or config["decision"]["preset"]):
+            raise ConfigError(f"{validator_id} 需要选择 Decision Preset 或通用 Decision Preset")
     validation_attempts = config["validation"]["translation"]["max_retry_attempts"]
     if (
         not isinstance(validation_attempts, int)
@@ -483,6 +518,15 @@ def load_config(path: Path) -> dict[str, Any]:
             ]
             for key in legacy_keys:
                 del translation_validation[key]
+    config.setdefault("decision", {"preset": ""})
+    translation_validation = config.get("validation", {}).get("translation")
+    if isinstance(translation_validation, dict):
+        translation_validation.setdefault("decision_enabled", False)
+        translation_validation.setdefault("decision_preset", "")
+        translation_validation.setdefault("decision_confidence_threshold", 0.8)
+        translation_validation.setdefault("decision_context_enabled", False)
+        translation_validation.setdefault("decision_previous_segments", 1)
+        translation_validation.setdefault("alignment", {"decision_preset": "", "confidence_threshold": 0.8, "tail_segments": 3})
     validate_config(config)
     return config
 
@@ -519,6 +563,7 @@ def _resolve_config(
     config["_translation_validator_instances"] = tuple(
         validator for validator, _ in validator_bindings
     )
+    _resolve_decision_config(config, root)
     configured_preset_id = _preset_id_for_stage(config, stage)
     preset_path(root, configured_preset_id)
     preset = load_llm_preset(
@@ -570,8 +615,38 @@ def _preset_id_for_stage(config: dict[str, Any], stage: str | None) -> str:
     return str(override or config["llm"]["preset"])
 
 
+def decision_validator_overrides(config: dict[str, Any]) -> dict[str, str]:
+    options = config["validation"]["translation"]
+    result = {}
+    if options["decision_enabled"]:
+        result["preferred_term_usage"] = options["decision_preset"]
+    if "segment_alignment" in options["validators"]:
+        result["segment_alignment"] = options["alignment"]["decision_preset"]
+    return result
+
+
+def _resolve_decision_config(config: dict[str, Any], root: Path, *, snapshot: bool = False) -> None:
+    from .decision import decision_preset_path, load_decision_preset
+    definitions = {}
+    bindings = {}
+    for validator_id, override in decision_validator_overrides(config).items():
+        preset_id = override or config["decision"]["preset"]
+        bindings[validator_id] = preset_id
+        if preset_id in definitions:
+            continue
+        path = decision_preset_path(root, preset_id) if snapshot else effective_path(
+            str(decision_preset_path(Path(), preset_id)), builtin_root=root)
+        definition = load_decision_preset(path)
+        if definition["preset_id"] != preset_id:
+            raise ConfigError("Decision Preset ID 与配置不一致")
+        definitions[preset_id] = definition
+    config["_decision_preset_definitions"] = definitions
+    config["_decision_validator_presets"] = bindings
+
+
 def load_run_config(run_dir: Path) -> dict[str, Any]:
     config = load_config(run_dir / "config.toml")
+    _resolve_decision_config(config, run_dir, snapshot=True)
     preset = load_llm_preset(run_dir / "llm_preset.json")
     return _resolve_llm_config(
         config,

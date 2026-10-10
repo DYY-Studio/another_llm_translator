@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from app.config import dump_config, load_config
 from app.errors import FatalExternalError, RequestSizeError
 from app.execution import (
     Scope,
@@ -2271,13 +2272,9 @@ async def test_model_context_error_triggers_runtime_segment_split(
 ) -> None:
     project = await create_project(tmp_path, "ABCDEFGH")
     config_path = project / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            "enabled = false",
-            "enabled = true",
-        ),
-        encoding="utf-8",
-    )
+    config = load_config(config_path)
+    config["debug"]["enabled"] = True
+    config_path.write_text(dump_config(config), encoding="utf-8")
     requested: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

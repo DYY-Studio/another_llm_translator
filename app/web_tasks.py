@@ -149,9 +149,10 @@ def _running_run(
         )
     if stage == TERMINOLOGY_DECISION_STAGE and "final_review" in manifest:
         result["final_review"] = manifest["final_review"]
-        target_count = manifest.get("final_review_target_count")
-        if type(target_count) is int and target_count >= 0:
-            result["final_review_target_count"] = target_count
+        for field in ("final_review_target_count", "containment_target_count"):
+            target_count = manifest.get(field)
+            if type(target_count) is int and target_count >= 0:
+                result[field] = target_count
     if isinstance(manifest.get("last_interruption"), dict):
         result["last_interruption"] = manifest["last_interruption"]
     return result
@@ -234,7 +235,7 @@ def task_options(
             )
             running_run["total_steps"] = selected * 2 + int(
                 running_run.get("final_review_target_count", 0)
-            )
+            ) + int(running_run.get("containment_target_count", 0))
             running_run["resume_compatible"] = compatible
             running_run["resume_incompatibility_reason"] = reason
         return {

@@ -1,3 +1,4 @@
+import { compactSegmentReferences } from "../segmentReferences";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, apiErrorFromResponse } from "../api";
@@ -201,7 +202,7 @@ function SelectionControls({
         <span>{translate("terms.summarySelectedCount", language, { selected: summary.selectedCount, total: boundaries.length })}</span>
         {summary.hiddenSelectedCount > 0 && <span>{translate("terms.summaryHiddenSelected", language, { count: summary.hiddenSelectedCount })}</span>}
       </div>
-      <div className="summary-file-selection">
+      {showBoundaryRows && <div className="summary-file-selection">
         {fileIds.map((fileId) => {
           const state = fileSelectionState(selectionBoundaries, selected, fileId);
           return (
@@ -211,7 +212,7 @@ function SelectionControls({
             </label>
           );
         })}
-      </div>
+      </div>}
       {showBoundaryRows && <div className="summary-boundary-selection-list">
           {visible.map((boundary) => {
             const key = boundaryKey(boundary.file_id, boundary.part_id);
@@ -395,7 +396,7 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
   const [exportPath, setExportPath] = useState("summary.md");
   const [message, setMessage] = useState<{ text: string; type: "error" | "success" } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [listOpen, setListOpen] = useState(true);
+  const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(new Set());
   const contentRef = useRef<HTMLDivElement>(null);
   const workspaceProjectRef = useRef(projectId);
   const participationStateRef = useRef(createSummaryParticipationState());
@@ -450,6 +451,15 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
     || item.file_id.toLocaleLowerCase().includes(normalized)
     || item.part_id.toLocaleLowerCase().includes(normalized)
   )), [boundaries, language, names, normalized]);
+  const visibleFiles = useMemo(() => {
+    const groups = new Map<string, SummaryBoundary[]>();
+    for (const boundary of visible) {
+      const parts = groups.get(boundary.file_id) ?? [];
+      parts.push(boundary);
+      groups.set(boundary.file_id, parts);
+    }
+    return Array.from(groups);
+  }, [visible]);
   const visibleBoundaryKeys = visible.map((item) => boundaryKey(item.file_id, item.part_id));
   const focused = boundaries.find((item) => boundaryKey(item.file_id, item.part_id) === focusedBoundary) ?? visible[0] ?? boundaries[0] ?? null;
   const full = artifactFor(data?.artifacts ?? [], focused, "full");
@@ -676,7 +686,7 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
   }
 
   return (
-    <section className={`summary-workspace${listOpen ? "" : " summary-list-collapsed"}${sourceOpen ? " summary-source-open" : ""}`}>
+    <section className={`summary-workspace${sourceOpen ? " summary-source-open" : ""}`}>
       <header className="page-heading summary-action-heading">
         <div>
           <p className="summary-back"><button className="link-button" type="button" onClick={onClose}>← {translate("terms.summaryBack", language)}</button></p>
@@ -684,7 +694,6 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
           <p>{translate("terms.summaryHint", language)}</p>
         </div>
         <div className="button-group summary-heading-actions">
-          <button className="quiet-button" type="button" onClick={() => setListOpen((value) => !value)}>{listOpen ? "←" : "→"} {translate(listOpen ? "terms.summaryHideList" : "terms.summaryShowList", language)}</button>
           <button className="quiet-button" type="button" disabled={busy || activeSummaryTask || participationSaving || !participation.size} onClick={() => void openSummaryRun("fragment")}>{translate("terms.summaryGenerate", language)}</button>
           <button className="quiet-button" type="button" disabled={busy || activeSummaryTask || participationSaving || !participation.size} onClick={() => void openSummaryRun("full")}>{translate("terms.summaryAggregate", language)}</button>
           <button className="quiet-button" type="button" disabled={busy} onClick={() => { setDialogSelection(new Set()); setDialog("export"); }}>{translate("terms.summaryExport", language)}</button>
@@ -709,24 +718,43 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
             disabled={participationSaving}
           />
           <div className="summary-boundary-list-rows">
-            {visible.map((boundary) => {
-              const key = boundaryKey(boundary.file_id, boundary.part_id);
-              const fullArtifact = artifactFor(data?.artifacts ?? [], boundary, "full");
-              const fragmentArtifact = artifactFor(data?.artifacts ?? [], boundary, "fragment");
-              const latestArtifact = fullArtifact ?? fragmentArtifact;
-              const done = hasUsableArtifact(data?.artifacts ?? [], boundary, "full");
-              const failed = latestArtifact?.status === "failed";
-              const stale = Boolean(latestArtifact && summaryArtifactIsExpired(latestArtifact));
-              const rowSelected = partSelection.selectedKeys.has(key);
-              return (
-                <div className={`summary-boundary-row${rowSelected ? " selected" : ""}${key === focusedBoundary ? " focused" : ""}`} key={key}>
-                  <button type="button" className="summary-boundary-row-main" aria-current={key === focusedBoundary ? "true" : undefined} onClick={(event) => { partSelection.select(key, visibleBoundaryKeys, event); focusBoundary(boundary); }}>
-                    <span className={`summary-boundary-status${done ? " done" : failed ? " failed" : ""}${stale ? " stale" : ""}`} />
-                    <span><strong>{boundary.part_id}</strong><small>{translate("terms.summaryBoundaryStats", language, { file: names.get(boundary.file_id) ?? boundary.file_id, count: boundary.segment_count })}</small></span>
+            {visibleFiles.map(([fileId, parts]) => {
+              const expanded = Boolean(normalized) || !collapsedFiles.has(fileId);
+              const state = fileSelectionState(selectionBoundaries, participation, fileId);
+              const fileName = names.get(fileId) ?? fileId;
+              const fileBoundaries = selectionBoundaries.filter((item) => item.fileId === fileId);
+              return <section key={fileId} className="summary-file-group">
+                <div className="summary-file-group-heading">
+                  <button type="button" aria-expanded={expanded} disabled={Boolean(normalized)} onClick={() => setCollapsedFiles((current) => {
+                    const next = new Set(current);
+                    if (next.has(fileId)) next.delete(fileId); else next.add(fileId);
+                    return next;
+                  })}>
+                    <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+                    <span><strong>{fileName}</strong><small>{fileId} · {translate("terms.summarySelectedCount", language, { selected: fileBoundaries.filter((item) => participation.has(item.key)).length, total: fileBoundaries.length })}</small></span>
                   </button>
-                  <input type="checkbox" aria-label={boundaryText(boundary, names, language)} checked={participation.has(key)} disabled={participationSaving} onChange={(event) => saveParticipation(toggleFilteredSelection(selectionBoundaries, participationStateRef.current.displayed, participationTargets(key), event.target.checked))} />
+                  <BoundaryCheckbox state={state} label={fileName} disabled={participationSaving} onChange={(checked) => void saveParticipation(toggleFilteredSelection(selectionBoundaries, participationStateRef.current.displayed, fileBoundaries, checked))} />
                 </div>
-              );
+                {expanded && parts.map((boundary) => {
+                  const key = boundaryKey(boundary.file_id, boundary.part_id);
+                  const fullArtifact = artifactFor(data?.artifacts ?? [], boundary, "full");
+                  const fragmentArtifact = artifactFor(data?.artifacts ?? [], boundary, "fragment");
+                  const latestArtifact = fullArtifact ?? fragmentArtifact;
+                  const done = hasUsableArtifact(data?.artifacts ?? [], boundary, "full");
+                  const failed = latestArtifact?.status === "failed";
+                  const stale = Boolean(latestArtifact && summaryArtifactIsExpired(latestArtifact));
+                  const rowSelected = partSelection.selectedKeys.has(key);
+                  return (
+                    <div className={`summary-boundary-row${rowSelected ? " selected" : ""}${key === focusedBoundary ? " focused" : ""}`} key={key}>
+                      <button type="button" className="summary-boundary-row-main" aria-current={key === focusedBoundary ? "true" : undefined} onClick={(event) => { partSelection.select(key, visibleBoundaryKeys, event); focusBoundary(boundary); }}>
+                        <span className={`summary-boundary-status${done ? " done" : failed ? " failed" : ""}${stale ? " stale" : ""}`} />
+                        <span><strong>{boundary.part_id}</strong><small>{translate("terms.summarySegmentCount", language, { count: boundary.segment_count })}</small></span>
+                      </button>
+                      <input type="checkbox" aria-label={boundaryText(boundary, names, language)} checked={participation.has(key)} disabled={participationSaving} onChange={(event) => saveParticipation(toggleFilteredSelection(selectionBoundaries, participationStateRef.current.displayed, participationTargets(key), event.target.checked))} />
+                    </div>
+                  );
+                })}
+              </section>;
             })}
             {!visible.length && <p className="summary-empty">{translate("terms.summaryNoMatch", language)}</p>}
           </div>
@@ -735,6 +763,7 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
           {activeSummaryTask && <div className="summary-progress"><strong>{translate("terms.summaryTaskRunning", language)}</strong><span>{task?.summary_selection_progress ? translate("terms.summaryTaskBoundaryProgress", language, { done: task.summary_selection_progress.completed, total: task.summary_selection_progress.total }) : translate("terms.summaryProgress", language, summaryProgressValue)}</span></div>}
           {displayedMessage && <p className={`inline-message ${displayedMessage.type === "success" ? "success-text" : "error-text"}`}><span>{displayedMessage.text}</span>{summariesQuery.error && <button className="quiet-button" type="button" onClick={() => { void summariesQuery.refetch(); }}>{translate("common.retry", language)}</button>}</p>}
           {loading ? <p className="summary-empty">{translate("common.loading", language)}</p> : !focused ? <p className="summary-empty">{translate("terms.summaryNoMatch", language)}</p> : <>
+            <p className="summary-focused-boundary">{boundaryText(focused, names, language)}</p>
             <div className="summary-tabs" role="tablist" aria-label={translate("terms.summaryTabs", language)}><button type="button" role="tab" id="summary-full-tab" aria-selected={tab === "full"} aria-controls="summary-full-panel" className={tab === "full" ? "active" : ""} onClick={() => setTab("full")}>{translate("terms.summaryFullTab", language)}</button><button type="button" role="tab" id="summary-fragment-tab" aria-selected={tab === "fragment"} aria-controls="summary-fragment-panel" className={tab === "fragment" ? "active" : ""} onClick={() => setTab("fragment")}>{translate("terms.summaryFragmentTab", language)} {fragments.length}</button></div>
             <div id={tab === "full" ? "summary-full-panel" : "summary-fragment-panel"} role="tabpanel" aria-labelledby={tab === "full" ? "summary-full-tab" : "summary-fragment-tab"}>
               {tab === "full" ? <SummaryArtifactCard artifact={full} boundary={focused} language={language} empty={translate("terms.summaryNoFull", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void openSummaryRun("full")} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} /> : <div className="summary-fragment-list">{fragments.map((artifact) => <SummaryArtifactCard artifact={artifact} boundary={focused} language={language} key={artifact.record_id} empty={translate("terms.summaryNoFragments", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void openSummaryRun("fragment")} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} />)}{!fragments.length && <p className="summary-empty">{translate("terms.summaryNoFragments", language)}</p>}</div>}
@@ -799,8 +828,8 @@ function SummaryArtifactCard({ artifact, boundary, language, empty, onSource, on
           : translate("terms.summaryArtifactExpired", language);
   const refs = summaryArtifactSegmentIds(artifact);
   const labels = refs.length
-    ? refs.map((segmentId) => translate("terms.summaryReferenceLabel", language, { segment: segmentId }))
-    : (artifact.refs ?? []).map((ref) => translate("terms.summaryReferenceLabel", language, { segment: ref }));
+    ? compactSegmentReferences(refs).map((segmentId) => translate("terms.summaryReferenceLabel", language, { segment: segmentId }))
+    : compactSegmentReferences(artifact.refs ?? []).map((ref) => translate("terms.summaryReferenceLabel", language, { segment: ref }));
   return <article className={`summary-artifact-card${expired ? " summary-artifact-warning" : ""}`}>
     {expired && <p className="summary-artifact-warning-message">{warning}</p>}
     <div className="summary-artifact-meta"><span>{translate(origin, language)}</span><small>{artifact.model}</small></div>
