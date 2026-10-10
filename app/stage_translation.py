@@ -829,7 +829,17 @@ async def run_translation(
         blocking_ids = {validator.validator_id for validator in translation_validators if validator.phase != "terminology"}
         blocks_response = any(finding["validator"] in blocking_ids for finding in all_findings)
         hard = _has_hard_validation_findings(all_findings)
-        repairable = any(finding.get("repairable", True) for finding in all_findings)
+        repairable_findings = [finding for finding in all_findings if finding.get("repairable", True)]
+        repairable = bool(repairable_findings)
+        if repairable:
+            logger.warning(
+                "validation findings request=%s validators=%s findings=%s segments=%d repairable=%s",
+                ",".join(sorted({response_candidates[segment_id][1] for segment_id in ordered})),
+                ",".join(sorted({finding["validator"] for finding in repairable_findings})),
+                ",".join(sorted({finding["match_type"] for finding in repairable_findings})),
+                len(ordered) if blocks_response else len(findings),
+                repairable,
+            )
         for segment_id in ordered:
             text, request_id = response_candidates.pop(segment_id)
             if segment_id in findings or blocks_response:
@@ -1140,10 +1150,13 @@ async def run_translation(
                     partition_key=prompt_partition_key,
                 )
                 logger.warning(
-                    "validation repair attempt=%d segments=%d chunks=%d",
+                    "validation repair attempt=%d/%d segments=%d chunks=%d validators=%s findings=%s",
                     hard_repairs,
+                    max_repairs,
                     len(hard_pending),
                     len(groups),
+                    ",".join(sorted({finding["validator"] for item in hard_pending.values() for finding in item["findings"] if finding.get("repairable", True)})),
+                    ",".join(sorted({finding["match_type"] for item in hard_pending.values() for finding in item["findings"] if finding.get("repairable", True)})),
                 )
                 for group in groups:
                     subset = {
@@ -1174,9 +1187,11 @@ async def run_translation(
                 partition_key=prompt_partition_key,
             )
             logger.warning(
-                "advisory validation repair segments=%d chunks=%d",
+                "advisory validation repair attempt=1/1 segments=%d chunks=%d validators=%s findings=%s",
                 len(advisory_pending),
                 len(groups),
+                ",".join(sorted({finding["validator"] for item in advisory_pending.values() for finding in item["findings"] if finding.get("repairable", True)})),
+                ",".join(sorted({finding["match_type"] for item in advisory_pending.values() for finding in item["findings"] if finding.get("repairable", True)})),
             )
             for group in groups:
                 subset = {

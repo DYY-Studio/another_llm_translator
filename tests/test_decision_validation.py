@@ -8,6 +8,7 @@ import pytest
 
 from app.config import dump_config, load_config, load_run_config
 from app.decision import DecisionAnswer
+from app.diagnostics import Diagnostics
 from app.execution import Scope
 from app.errors import FatalExternalError
 from app.sqlite_storage import read_json, read_jsonl, record_header, write_json
@@ -235,6 +236,7 @@ def test_decision_presets_inherit_and_override_independently(tmp_path, monkeypat
     ("empty_translation", 0.9, "passed", 1),
 ])
 async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monkeypatch, choice, confidence, expected_status, repairs):
+    diagnostics = Diagnostics(tmp_path / "global.log")
     project = await create_project(tmp_path, "One.\nTwo.\nThree.\nFour.")
     value = preset()
     write_user("decision_presets/local.json").write_text(json.dumps(value), encoding="utf-8")
@@ -268,6 +270,15 @@ async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monke
     assert {record["validation_status"] for record in records} == {expected_status}
     if repairs:
         assert len(requests[-1]["segments"]) == 4
+    repair_logs = [item["message"] for item in diagnostics.logs if item["message"].startswith("validation repair ")]
+    assert len(repair_logs) == repairs
+    if repairs:
+        assert "validators=segment_alignment" in repair_logs[0]
+        assert "findings=segment_misaligned" in repair_logs[0]
+        assert "attempt=1/" in repair_logs[0]
+        assert repair_logs[0] in (tmp_path / "global.log").read_text()
+    finding_logs = [item["message"] for item in diagnostics.logs if item["message"].startswith("validation findings ")]
+    assert len(finding_logs) == repairs
 
 
 @pytest.mark.asyncio
