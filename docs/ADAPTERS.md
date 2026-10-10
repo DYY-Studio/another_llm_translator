@@ -708,7 +708,7 @@ OpenAI Decisions 将共享证据编码为 JSON 字符串写入 `input`，问题�
 宿主将上文写入证据的 `reference_context`。完整请求超限时从最远上文逐个移除并重新估算，
 直至可发送或上文为空。缩减情况写入日志及 Run 判断记录，请求详情显示实际发送内容。
 不得自行实例化客户端、管理凭据或发送 HTTP 请求。宿主负责限速、重试、取消、诊断和用量。
-回答缺失、重复、选项错误或非法概率直接失败；明确拒答返回 `refused=True`。
+空响应、JSON 解析失败、回答缺失或重复、选项错误及非法概率，与网络异常、HTTP 429 和 5xx 共用 `retry.http_max_attempts` 及指数退避；预算耗尽后明确失败。每次尝试记录到诊断及已启用的 Debug 保存中。明确拒答返回 `refused=True`。
 
 `validation.translation` 的 `decision_enabled` 默认 false，`decision_preset` 默认空字符串，
 `decision_confidence_threshold` 默认 0.8；`decision_context_enabled` 默认 false，

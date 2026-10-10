@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -189,6 +190,52 @@ def test_invalid_answer_fails_without_fallback(monkeypatch):
             client = DecisionClient(validate_decision_preset(preset()), http_client=http)
             with pytest.raises(ExternalError):
                 await client.choose("source", [DecisionQuestion("term", "Question", {"a": "A", "b": "B"})])
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("protocol,invalid", [
+    ("typesafe", "empty"), ("typesafe", "json"),
+    ("openai-decisions", "missing"), ("openai-decisions", "fields"),
+])
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_invalid_decision_response_uses_retry_budget(tmp_path, monkeypatch, protocol, invalid, exhausted):
+    monkeypatch.setenv("DECISION_TEST_KEY", "secret")
+    diagnostics = Diagnostics(tmp_path / "app.log")
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1 or exhausted:
+            if invalid in {"empty", "json"}:
+                return httpx.Response(200, content=b"" if invalid == "empty" else b"not JSON")
+            answers = [] if invalid == "missing" else [{"name": "term", "type": "choice"}]
+            return httpx.Response(200, json={"model": "test-model", "answers": answers})
+        answers = {"term": {"type": "refusal"}} if protocol == "typesafe" else [{"name": "term", "type": "refusal"}]
+        return httpx.Response(200, json={"model": "test-model", "answers": answers})
+
+    async def run():
+        with diagnostics.activate("project", "translation"):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+                client = DecisionClient(preset(protocol), http_client=http, debug_directory=tmp_path / "debug",
+                                        retry={"http_max_attempts": 2, "base_delay_seconds": 0})
+                question = DecisionQuestion("term", "Question", {"a": "A", "b": "B"})
+                if exhausted:
+                    with pytest.raises(ExternalError, match="响应无效.*重试预算耗尽"):
+                        await client.choose("source", [question])
+                else:
+                    assert (await client.choose("source", [question]))["term"].refused
+                assert len(calls) == len(client.records) == 2
+                assert client.pool.active == 0
+            snapshot = diagnostics.snapshot()
+            assert snapshot["decision"]["metrics"]["retry_count"] == 1
+            item = snapshot["requests"]["items"][0]
+            assert item["attempt_count"] == 2
+            detail = diagnostics.request_detail(item["request_id"])
+            assert detail["attempts"][0]["outcome"] == "response_parse_error"
+            attempts = [json.loads(line) for line in (tmp_path / "debug" / "attempts.jsonl").read_text().splitlines()]
+            assert [attempt["outcome"] for attempt in attempts] == [
+                "response_parse_error", "response_parse_error" if exhausted else "succeeded",
+            ]
     asyncio.run(run())
 
 

@@ -227,9 +227,9 @@ class DecisionClient:
                 try:
                     data = response.json()
                     answers = self._parse(data, questions)
-                except (ValueError, TypeError, KeyError) as exc:
+                except (ValueError, TypeError, KeyError):
                     outcome = "response_parse_error"
-                    raise FatalExternalError("Decision 响应无效") from exc
+                    raise
                 overview["answers"] = {k: asdict(v) for k, v in answers.items()}
                 record.update(model=data["model"], answers={k: asdict(v) for k, v in answers.items()}, usage=data.get("usage"))
                 if diagnostics is not None:
@@ -239,13 +239,16 @@ class DecisionClient:
                 outcome = "cancelled"
                 record["error"] = "cancelled"
                 raise
-            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            except (httpx.TransportError, httpx.HTTPStatusError, ValueError, TypeError, KeyError) as exc:
+                if isinstance(exc, (ValueError, TypeError, KeyError)) and outcome != "response_parse_error":
+                    raise
                 if isinstance(exc, httpx.TransportError):
                     outcome = "network_error"
                 retrying = attempt + 1 < self.retry["http_max_attempts"]
                 record["error"] = type(exc).__name__
                 if attempt + 1 >= self.retry["http_max_attempts"]:
-                    raise FatalExternalError("Decision 请求失败，重试预算耗尽") from exc
+                    message = "Decision 响应无效" if outcome == "response_parse_error" else "Decision 请求失败"
+                    raise FatalExternalError(f"{message}，重试预算耗尽") from exc
             except ExternalError:
                 record["error"] = "decision_error"
                 raise
