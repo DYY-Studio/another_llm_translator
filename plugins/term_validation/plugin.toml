@@ -3,5 +3,5 @@ schema = 1
 [plugin]
 id = "term-validation"
 version = "0.4.0"
-protocol = 13
+protocol = 14
 entrypoint = "plugin:descriptor"

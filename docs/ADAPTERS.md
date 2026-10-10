@@ -588,9 +588,11 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `13`；每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收 `TranslationValidationContext` 的 `validate(context)`，可返回普通结果或可等待结果。
+翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `14`；每个校验器声明唯一的 `validator_id`、`version`、`label`、`phase`、`scope`，并实现接收 `TranslationValidationContext` 的 `validate(context)`，可返回普通结果或可等待结果。
 
 上下文包含当前 Segment 的 ID、源文、候选译文、逐 Segment 术语命中，以及可选的宿主 `DecisionService` 和置信度门槛。术语命中包含分类和说明；上下文不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
+
+`phase` 为 `mechanical`、`alignment` 或 `terminology`，宿主按此顺序执行；同层按 ID 排序，完成整层后存在任何 finding 就阻挡后续层。`scope=segment` 使用 `validate(context)`；`scope=response` 使用 `validate_response(contexts)`，输入为按请求顺序排列的完整 Segment 上下文元组，返回以输入 Segment ID 为键、finding 元组为值的字典。手动编辑只执行逐 Segment 校验。
 
 `TranslationValidationMatch.severity` 为 `error` 或 `advisory`。
 
@@ -609,6 +611,8 @@ class MyValidator:
     validator_id = "my_validator"
     version = "1.0.0"
     label = "My validator"
+    phase = "mechanical"
+    scope = "segment"
 
     def validate(self, context: TranslationValidationContext):
         return ()

@@ -302,6 +302,8 @@ export interface PromptLibraryEntry {
 }
 
 export interface TranslationValidatorSummary {
+  phase: "mechanical" | "alignment" | "terminology";
+  scope: "segment" | "response";
   validator_id: string;
   version: string;
   label: string;

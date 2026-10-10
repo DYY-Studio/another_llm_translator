@@ -721,6 +721,8 @@ def stage_fingerprint(
                         for key in (
                             "validator_id",
                             "version",
+                            "phase",
+                            "scope",
                             "plugin_id",
                             "plugin_version",
                         )

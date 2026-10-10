@@ -156,7 +156,7 @@ def _safe_requirements(value: Any) -> dict[str, dict[str, str]]:
 
 
 def _safe_validators(value: Any) -> list[dict[str, str]]:
-    allowed = ("validator_id", "version", "plugin_id", "plugin_version")
+    allowed = ("validator_id", "version", "phase", "scope", "plugin_id", "plugin_version")
     if not isinstance(value, list):
         return []
     result: list[dict[str, str]] = []

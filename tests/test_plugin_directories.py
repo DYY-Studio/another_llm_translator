@@ -65,6 +65,8 @@ def _validator_body(
         "\n"
         "class Validator:\n"
         "    validator_id = 'fixture_' + " + repr(descriptor_id) + "\n"
+        "    phase = 'mechanical'\n"
+        "    scope = 'segment'\n"
         "    version = '1'\n"
         "    label = 'Fixture'\n"
         "    def validate(self, context):\n"

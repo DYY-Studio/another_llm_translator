@@ -64,6 +64,8 @@ class TranslationValidator(Protocol):
     validator_id: str
     version: str
     label: str
+    phase: str
+    scope: str
 
     def validate(
         self, context: TranslationValidationContext
@@ -72,6 +74,10 @@ class TranslationValidator(Protocol):
         | tuple[TranslationValidationMatch, ...]
         | Awaitable[list[TranslationValidationMatch] | tuple[TranslationValidationMatch, ...]]
     ): ...
+
+    def validate_response(
+        self, contexts: tuple[TranslationValidationContext, ...],
+    ) -> dict[str, tuple[TranslationValidationMatch, ...]] | Awaitable[dict[str, tuple[TranslationValidationMatch, ...]]]: ...
 
 
 JAPANESE_RE = re.compile(
@@ -88,6 +94,8 @@ class JapaneseKanaValidator:
     validator_id = "japanese_kana"
     version = "1"
     label = "Japanese Kana residual"
+    phase = "mechanical"
+    scope = "segment"
 
     def validate(
         self, context: TranslationValidationContext
@@ -107,6 +115,8 @@ class KoreanHangulValidator:
     validator_id = "korean_hangul"
     version = "1"
     label = "Korean Hangul residual"
+    phase = "mechanical"
+    scope = "segment"
 
     def validate(
         self, context: TranslationValidationContext
@@ -139,6 +149,8 @@ class SourceTextResidualValidator:
     validator_id = "source_text_residual"
     version = "1"
     label = "Source text residual"
+    phase = "mechanical"
+    scope = "segment"
 
     def validate(
         self, context: TranslationValidationContext
@@ -195,92 +207,133 @@ class SourceTextResidualValidator:
         )
 
 
+VALIDATION_PHASES = ("mechanical", "alignment", "terminology")
+
+
+def _serialize_matches(context: TranslationValidationContext, validator_id: str,
+                       matches: object) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for match in matches:
+        if not isinstance(match, TranslationValidationMatch):
+            raise ProjectError(
+                f"翻译校验器返回了无效匹配：{validator_id}"
+            )
+        if (
+            not isinstance(match.match_type, str)
+            or not match.match_type.strip()
+        ):
+            raise ProjectError(
+                f"翻译校验器返回了无效匹配：{validator_id}"
+            )
+        if match.severity not in {"error", "advisory"}:
+            raise ProjectError(
+                f"翻译校验器返回了无效严重性：{validator_id}"
+            )
+        if type(match.repairable) is not bool or (match.severity == "error" and not match.repairable):
+            raise ProjectError(f"翻译校验器返回了无效修复标记：{validator_id}")
+        has_span = (
+            match.text is not None
+            or match.start is not None
+            or match.end is not None
+        )
+        if has_span:
+            if (
+                not isinstance(match.text, str)
+                or not match.text
+                or type(match.start) is not int
+                or type(match.end) is not int
+                or not 0 <= match.start < match.end <= len(context.translation)
+                or context.translation[match.start : match.end] != match.text
+            ):
+                raise ProjectError(
+                    f"翻译校验器返回了越界或不一致匹配：{validator_id}"
+                )
+        elif match.severity == "error":
+            raise ProjectError(
+                f"硬校验必须返回译文位置：{validator_id}"
+            )
+        for field_name in (
+            "term_source",
+            "matched_source",
+            "expected_translation",
+        ):
+            value = getattr(match, field_name)
+            if value is not None and (
+                not isinstance(value, str) or not value
+            ):
+                raise ProjectError(
+                    f"翻译校验器返回了无效术语字段：{validator_id}"
+                )
+        finding: dict[str, object] = {
+            "validator": validator_id,
+            "match_type": match.match_type,
+            "severity": match.severity,
+            "start": match.start,
+            "end": match.end,
+        }
+        if not match.repairable:
+            finding["repairable"] = False
+        if match.text is not None:
+            finding["matched_text"] = match.text
+        if match.term_source is not None:
+            finding["term_source"] = match.term_source
+        if match.matched_source is not None:
+            finding["matched_source"] = match.matched_source
+        if match.expected_translation is not None:
+            finding["expected_translation"] = match.expected_translation
+        if match.text is not None and len(match.text) == 1:
+            finding["character"] = match.text
+            finding["code_point"] = f"U+{ord(match.text):04X}"
+        findings.append(finding)
+    return findings
+
+
+async def validate_translation_response(
+    contexts: tuple[TranslationValidationContext, ...],
+    validators: tuple[TranslationValidator, ...],
+) -> dict[str, list[dict[str, object]]]:
+    by_id = {context.segment_id: context for context in contexts}
+    findings: dict[str, list[dict[str, object]]] = {}
+    for phase in VALIDATION_PHASES:
+        for validator in sorted(validators, key=lambda item: item.validator_id):
+            if validator.phase != phase:
+                continue
+            validator_id = validator.validator_id
+            try:
+                if validator.scope == "response":
+                    result = validator.validate_response(contexts)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    if not isinstance(result, dict) or any(key not in by_id for key in result):
+                        raise ProjectError(f"翻译校验器返回了无效 Segment ID：{validator_id}")
+                else:
+                    result = {}
+                    for context in contexts:
+                        matches = validator.validate(context)
+                        if inspect.isawaitable(matches):
+                            matches = await matches
+                        result[context.segment_id] = matches
+                for segment_id, matches in result.items():
+                    serialized = _serialize_matches(by_id[segment_id], validator_id, matches)
+                    if serialized:
+                        findings.setdefault(segment_id, []).extend(serialized)
+            except ExternalError:
+                raise
+            except ProjectError:
+                raise
+            except Exception as exc:
+                raise ProjectError(f"翻译校验器执行失败：{validator_id}") from exc
+        if findings:
+            break
+    return findings
+
+
 async def validate_translation_text(
     context: TranslationValidationContext,
     validators: tuple[TranslationValidator, ...],
 ) -> list[dict[str, object]]:
-    findings: list[dict[str, object]] = []
-    for validator in validators:
-        validator_id = str(validator.validator_id)
-        try:
-            matches = validator.validate(context)
-            if inspect.isawaitable(matches):
-                matches = await matches
-            matches = list(matches)
-        except ExternalError:
-            raise
-        except Exception as exc:
-            raise ProjectError(f"翻译校验器执行失败：{validator_id}") from exc
-        for match in matches:
-            if not isinstance(match, TranslationValidationMatch):
-                raise ProjectError(
-                    f"翻译校验器返回了无效匹配：{validator_id}"
-                )
-            if (
-                not isinstance(match.match_type, str)
-                or not match.match_type.strip()
-            ):
-                raise ProjectError(
-                    f"翻译校验器返回了无效匹配：{validator_id}"
-                )
-            if match.severity not in {"error", "advisory"}:
-                raise ProjectError(
-                    f"翻译校验器返回了无效严重性：{validator_id}"
-                )
-            if type(match.repairable) is not bool or (match.severity == "error" and not match.repairable):
-                raise ProjectError(f"翻译校验器返回了无效修复标记：{validator_id}")
-            has_span = (
-                match.text is not None
-                or match.start is not None
-                or match.end is not None
-            )
-            if has_span:
-                if (
-                    not isinstance(match.text, str)
-                    or not match.text
-                    or type(match.start) is not int
-                    or type(match.end) is not int
-                    or not 0 <= match.start < match.end <= len(context.translation)
-                    or context.translation[match.start : match.end] != match.text
-                ):
-                    raise ProjectError(
-                        f"翻译校验器返回了越界或不一致匹配：{validator_id}"
-                    )
-            elif match.severity == "error":
-                raise ProjectError(
-                    f"硬校验必须返回译文位置：{validator_id}"
-                )
-            for field_name in (
-                "term_source",
-                "matched_source",
-                "expected_translation",
-            ):
-                value = getattr(match, field_name)
-                if value is not None and (
-                    not isinstance(value, str) or not value
-                ):
-                    raise ProjectError(
-                        f"翻译校验器返回了无效术语字段：{validator_id}"
-                    )
-            finding: dict[str, object] = {
-                "validator": validator_id,
-                "match_type": match.match_type,
-                "severity": match.severity,
-                "start": match.start,
-                "end": match.end,
-            }
-            if not match.repairable:
-                finding["repairable"] = False
-            if match.text is not None:
-                finding["matched_text"] = match.text
-            if match.term_source is not None:
-                finding["term_source"] = match.term_source
-            if match.matched_source is not None:
-                finding["matched_source"] = match.matched_source
-            if match.expected_translation is not None:
-                finding["expected_translation"] = match.expected_translation
-            if match.text is not None and len(match.text) == 1:
-                finding["character"] = match.text
-                finding["code_point"] = f"U+{ord(match.text):04X}"
-            findings.append(finding)
-    return findings
+    # Response validators require the complete candidate group, not a manual edit.
+    findings = await validate_translation_response(
+        (context,), tuple(validator for validator in validators if validator.scope == "segment"),
+    )
+    return findings.get(context.segment_id, [])
