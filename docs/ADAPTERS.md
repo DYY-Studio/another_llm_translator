@@ -714,6 +714,7 @@ OpenAI Decisions 将共享证据编码为 JSON 字符串写入 `input`，问题�
 `decision_confidence_threshold` 默认 0.8；`decision_context_enabled` 默认 false，
 `decision_previous_segments` 默认 1，为非负整数。启用上文时，
 `TranslationValidationContext.previous_source` 提供同一 File、同一分区内前序非空 Segment 的原文。
+推荐译名复核的 `terms` 列出本次提问的术语，`matched_terms` 只保留未提问的其他命中术语，供重叠关系判断。
 推荐译名复核需要安装并选择 `preferred_term_usage`。`decision.preset` 提供通用连接；校验器的 `decision_preset` 为空时继承通用连接，非空时独立覆盖。置信度及上下文设置按校验器独立配置。Run 在 `decision_presets/<preset_id>.json` 保存所有实际使用的连接；同一 Preset 共用客户端与限流。实际连接、校验器绑定、置信度门槛及上文设置参与翻译指纹。
 
 错位校验器 `segment_alignment` 为内置响应级校验器，通过 `validation.translation.validators` 显式启用。`validation.translation.alignment` 的 `decision_preset` 默认空字符串、`confidence_threshold` 默认 0.8、`tail_segments` 默认 3 且必须为正整数。宿主将拆分片段重组后，按请求顺序抽取尾部完整 Segment；证据为 `segments` 配对列表；其中原文和译文均去除 Ruby 标记及注音、保留正文，持久化文本和 finding 定位保持原样。问题按配对顺序命名，选项为 `aligned`、`misaligned`、`uncertain`。不携带历史上文，也不在超限时缩减抽查数量。错位 findings 为 `segment_misaligned`，不确定为不可修复的 advisory `segment_alignment_uncertain`；`matched_source` 记录抽查 Segment ID。两者都覆盖整批，具体保存和修复语义见 [翻译阶段](MINIMAL.md#53-翻译)。

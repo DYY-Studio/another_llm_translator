@@ -20,7 +20,7 @@ def _normalize(value: str) -> str:
 
 class PreferredTermUsageValidator:
     validator_id = "preferred_term_usage"
-    version = "4"
+    version = "5"
     label = "Preferred terminology usage"
     phase = "terminology"
     scope = "segment"
@@ -71,7 +71,7 @@ class PreferredTermUsageValidator:
                 "and references, but judge only the current source and translation. The matched_text may be "
                 "an alias or only part of the full term. preferred_translation is the required spelling, not a "
                 "semantic hint: a different transliteration, spelling, or synonymous name requires repair even "
-                "if it refers to the same entity. Use matched_terms as read-only context for longer or overlapping "
+                "if it refers to the same entity. Use other entries in terms and matched_terms as read-only context for longer or overlapping "
                 "terms; obeying a conflicting longer term does not make the shorter term acceptable. "
                 "A correctly translated short form or partial name "
                 "consistent with the preferred translation needs no repair, even when the full preferred "
@@ -82,9 +82,11 @@ class PreferredTermUsageValidator:
                  "ordinary": "All current occurrences use an ordinary meaning unrelated to the defined term; no terminology repair is needed.",
                  "acceptable": "The translation uses the required spelling, or a valid short form or partial name with exactly the corresponding preferred spelling; semantic equivalence alone is insufficient.",
                  "uncertain": "The available evidence does not establish whether the current translation needs a terminology repair."}))
+        questioned = {(finding.term_source, finding.expected_translation) for finding in findings}
         answers = await context.decision.choose(
             {"source": context.source, "translation": context.translation, "terms": terms,
-             "matched_terms": [asdict(term) for term in context.terms]}, questions,
+             "matched_terms": [asdict(term) for term in context.terms
+                               if (term.source, term.preferred_translation) not in questioned]}, questions,
             segment_id=context.segment_id,
             reference_context=list(context.previous_source) if context.previous_source else None)
         result = []
@@ -103,7 +105,7 @@ class PreferredTermUsageValidator:
 def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="term-validation",
-        version="0.4.0",
+        version="0.4.1",
         protocol_version=14,
         translation_validators=(PreferredTermUsageValidator(),),
     )

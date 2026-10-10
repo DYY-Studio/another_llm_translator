@@ -101,6 +101,7 @@ async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypa
                 return httpx.Response(401)
             selected = "required" if choice == "still_missing" else choice
             assert body["state"]["terms"]["term_0"]["description"] == "A character"
+            assert body["state"]["matched_terms"] == []
             return httpx.Response(200, json=dict(model="decision-test", usage=dict(input_tokens=10, output_tokens=0),
                 answers={name: dict(type="choice", choice=selected, confidence=confidence,
                     probabilities={key: 0.9 if key == selected else 0.1 / 3 for key in ("required", "ordinary", "acceptable", "uncertain")}) for name in body["questions"]}))
@@ -192,8 +193,8 @@ async def test_decision_receives_matching_long_term_without_questioning_it():
             assert len(questions) == 1
             assert state['terms']['term_0']['source'] == 'ニア・リストン'
             assert [term['source'] for term in state['matched_terms']] == [
-                'ニア・リストン', 'ニア・リストンの職業訪問']
-            assert state['matched_terms'][1]['preferred_translation'] == '妮娅·利斯顿的职业探访'
+                'ニア・リストンの職業訪問']
+            assert state['matched_terms'][0]['preferred_translation'] == '妮娅·利斯顿的职业探访'
             return {'term_0': DecisionAnswer('required', {'required': 1, 'ordinary': 0,
                                                         'acceptable': 0, 'uncertain': 0}, 0.99)}
 
