@@ -20,7 +20,7 @@ def _normalize(value: str) -> str:
 
 class PreferredTermUsageValidator:
     validator_id = "preferred_term_usage"
-    version = "5"
+    version = "6"
     label = "Preferred terminology usage"
     phase = "terminology"
     scope = "segment"
@@ -136,7 +136,7 @@ class PreferredTermUsageValidator:
 def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="term-validation",
-        version="0.4.1",
+        version="0.4.2",
         protocol_version=14,
         translation_validators=(PreferredTermUsageValidator(),),
     )

@@ -75,7 +75,6 @@ def test_descriptor_uses_fixed_protocol_version() -> None:
 
 @pytest.mark.parametrize("choice,confidence,count,repairable", [
     ("required", 0.9, 1, True),
-    ("ordinary", 0.9, 0, False),
     ("acceptable", 0.9, 0, False),
     ("acceptable", 0.5, 1, False),
     ("required", 0.5, 1, False),
@@ -87,6 +86,8 @@ def test_decision_reviews_only_missing_terms(choice, confidence, count, repairab
             assert state["source"] == "Alice"
             assert state["translation"] == "其他"
             assert len(questions) == 1
+            assert set(questions[0].choices) == {"required", "acceptable", "uncertain"}
+            assert set(questions[0].choices) == {"required", "acceptable", "uncertain"}
             assert state["terms"][questions[0].name]["matched_text"] == "Ally"
             return {questions[0].name: DecisionAnswer(choice, {}, confidence)}
     validator = PreferredTermUsageValidator()

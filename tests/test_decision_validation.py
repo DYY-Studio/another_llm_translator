@@ -67,7 +67,6 @@ async def test_alignment_uses_plain_ruby_evidence_and_preserves_finding_offsets(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("choice,confidence,repairs,status", [
     ("required", 0.9, 1, "passed"),
-    ("ordinary", 0.9, 0, "passed"),
     ("acceptable", 0.9, 0, "passed"),
     ("required", 0.5, 0, "warning"),
     ("uncertain", 0.9, 0, "warning"),
@@ -104,7 +103,8 @@ async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypa
             assert body["state"]["matched_terms"] == []
             return httpx.Response(200, json=dict(model="decision-test", usage=dict(input_tokens=10, output_tokens=0),
                 answers={name: dict(type="choice", choice=selected, confidence=confidence,
-                    probabilities={key: 0.9 if key == selected else 0.1 / 3 for key in ("required", "ordinary", "acceptable", "uncertain")}) for name in body["questions"]}))
+                    probabilities={key: 0.9 if key == selected else 0.1 / (len(question["criteria"]) - 1)
+                                   for key in question["criteria"]}) for name, question in body["questions"].items()}))
         payload = json.loads(body["messages"][1]["content"])
         text = "爱丽丝到了。" if "validation_repair" in payload and choice != "still_missing" else "她到了。"
         return httpx.Response(200, json=dict(choices=[dict(message=dict(content=llm_jsonl([
@@ -164,8 +164,8 @@ async def test_translation_decision_context_toggle_and_count(tmp_path, monkeypat
             calls.append(body)
             assert body["state"].get("reference_context", []) == expected
             return httpx.Response(200, json=dict(model="decision-test", answers={name: dict(type="choice",
-                choice="ordinary", confidence=0.9,
-                probabilities={key: 1 if key == "ordinary" else 0 for key in body["questions"][name]["criteria"]})
+                choice="acceptable", confidence=0.9,
+                probabilities={key: 1 if key == "acceptable" else 0 for key in body["questions"][name]["criteria"]})
                 for name in body["questions"]}))
         payload = json.loads(body["messages"][1]["content"])
         return httpx.Response(200, json=dict(choices=[dict(message=dict(content=llm_jsonl([
@@ -195,7 +195,7 @@ async def test_decision_receives_matching_long_term_without_questioning_it():
             assert [term['source'] for term in state['matched_terms']] == [
                 'ニア・リストンの職業訪問']
             assert state['matched_terms'][0]['preferred_translation'] == '妮娅·利斯顿的职业探访'
-            return {'term_0': DecisionAnswer('required', {'required': 1, 'ordinary': 0,
+            return {'term_0': DecisionAnswer('required', {'required': 1,
                                                         'acceptable': 0, 'uncertain': 0}, 0.99)}
 
     findings = await PreferredTermUsageValidator().validate(TranslationValidationContext(
@@ -317,7 +317,7 @@ async def test_alignment_phase_prevents_invalid_terminology_requests(tmp_path, m
             else:
                 terminology_calls.append(body)
                 assert str(request.url) == other["url"]
-                selected = "ordinary"
+                selected = "acceptable"
             answers = {name: ({"type": "refusal"} if selected == "refused" else {
                 "type": "choice", "choice": selected, "confidence": 0.99,
                 "probabilities": {key: int(key == selected) for key in question["criteria"]}})
