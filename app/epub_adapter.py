@@ -23,6 +23,7 @@ from .documents import (
     compact_emphasis_aozora,
     escape_model_ruby_literal,
     parse_aozora_text,
+    strip_aozora_ruby,
 )
 from .errors import (
     ConfigError,
@@ -342,7 +343,7 @@ class EPUBDocumentAdapter:
                 "".join(str(item["text"]) for item in tokens[start:end])
             )
             if ruby_mode == "base_only":
-                output.append(_strip_aozora_ruby(canonical))
+                output.append(strip_aozora_ruby(canonical))
             else:
                 output.append(aozora_to_model_ruby(canonical, ruby_mode))
             for item in sorted(
@@ -1545,7 +1546,7 @@ def _text_slots(
         source = compact_emphasis_aozora(raw_source)
         canonical_source = raw_source
         if ruby_retention == "strip":
-            source = _strip_aozora_ruby(source)
+            source = strip_aozora_ruby(source)
             locator["adapter_source"] = canonical_source
         model_source, formats = model_run()
         if ruby_retention not in {"preserve", "strip"}:
@@ -1653,13 +1654,6 @@ def _plain_ruby_text(element: ElementTree.Element, location: str) -> str:
 
     collect(element)
     return "".join(parts).strip()
-
-
-def _strip_aozora_ruby(value: str) -> str:
-    fragments, found_ruby = parse_aozora_text(value)
-    if not found_ruby:
-        return value
-    return "".join(text for _, text, _ in fragments)
 
 
 def _render_ruby(

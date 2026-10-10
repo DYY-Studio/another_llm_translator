@@ -7,14 +7,37 @@ import httpx
 import pytest
 
 from app.config import dump_config, load_config, load_run_config
+from app.decision import DecisionAnswer
 from app.execution import Scope
 from app.errors import FatalExternalError
 from app.sqlite_storage import read_json, read_jsonl, record_header, write_json
 from app.stage_translation import run_translation
+from app.translation_validation import SegmentAlignmentValidator, TranslationValidationContext
 from app.user_config import write_user
 from tests.helpers import llm_jsonl
 from tests.test_decision import preset
 from tests.test_terminology_translation import create_project
+
+
+@pytest.mark.asyncio
+async def test_alignment_uses_plain_ruby_evidence_and_preserves_finding_offsets():
+    source = "｜撮影《さつえい》と｜稽古《けいこ》。普通の《括弧》。"
+    translation = "｜排练《páil iàn》和拍摄。普通的《括号》。"
+
+    class Decision:
+        async def choose(self, state, questions, *, segment_id):
+            assert state == {"segments": [{"id": "S1", "source": "撮影と稽古。普通の《括弧》。",
+                                            "translation": "排练和拍摄。普通的《括号》。"}]}
+            assert segment_id == "S1"
+            return {question.name: DecisionAnswer("misaligned", {"misaligned": 1}, 1)
+                    for question in questions}
+
+    findings = await SegmentAlignmentValidator(Decision()).validate_response((
+        TranslationValidationContext(source, translation, segment_id="S1"),
+    ))
+    finding = findings["S1"][0]
+    assert finding.text == translation
+    assert (finding.start, finding.end) == (0, len(translation))
 
 
 @pytest.mark.asyncio

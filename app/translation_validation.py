@@ -9,6 +9,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Protocol
 
+from .documents import strip_aozora_ruby
 from .errors import ExternalError, ProjectError
 
 if TYPE_CHECKING:
@@ -341,7 +342,7 @@ async def validate_translation_text(
 
 class SegmentAlignmentValidator:
     validator_id = "segment_alignment"
-    version = "1"
+    version = "2"
     label = "Segment alignment"
     phase = "alignment"
     scope = "response"
@@ -371,8 +372,8 @@ class SegmentAlignmentValidator:
              "uncertain": "The evidence does not establish source-to-translation alignment."})
             for index, _ in enumerate(sample)]
         answers = await self.decision.choose(
-            {"segments": [{"id": context.segment_id, "source": context.source,
-                           "translation": context.translation} for context in sample]},
+            {"segments": [{"id": context.segment_id, "source": strip_aozora_ruby(context.source),
+                           "translation": strip_aozora_ruby(context.translation)} for context in sample]},
             questions, segment_id=sample[-1].segment_id,
         )
         misaligned = False
