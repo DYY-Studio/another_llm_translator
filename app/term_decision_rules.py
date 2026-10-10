@@ -86,7 +86,7 @@ def _relation_keys(state: dict[str, Any], spec: Any) -> tuple[str, ...]:
         keys.add(f"group:{primary}")
     return tuple(sorted(keys))
 
-__all__ = ['_alias_violations', '_analyze_decisions', '_conflicts_by_term', '_decision_dependency_graph', '_dependency_components', '_effective_conflicts', '_empty_conflicts', '_group_violation_message', '_group_violations', '_hard_components', '_has_conflicts', '_normalized_aliases', '_normalized_forms', '_nullable_string', '_ordered_states', '_payload_term', '_proposal_after_states', '_recover_invalid_relationship_components', '_relationship_violation_message', '_relationship_violation_nodes', '_term_conflicts', '_term_state', '_validate_accepted_relationship_conflicts', '_validate_accepted_scalar_conflicts', '_validate_final_states']
+__all__ = ['_containment_pairs', '_alias_violations', '_analyze_decisions', '_conflicts_by_term', '_decision_dependency_graph', '_dependency_components', '_effective_conflicts', '_empty_conflicts', '_group_violation_message', '_group_violations', '_hard_components', '_has_conflicts', '_normalized_aliases', '_normalized_forms', '_nullable_string', '_ordered_states', '_payload_term', '_proposal_after_states', '_recover_invalid_relationship_components', '_relationship_violation_message', '_relationship_violation_nodes', '_term_conflicts', '_term_state', '_validate_accepted_relationship_conflicts', '_validate_accepted_scalar_conflicts', '_validate_final_states']
 
 def _term_state(
     term: dict[str, Any], *, disabled: bool | None = None
@@ -149,14 +149,34 @@ def _ordered_states(
         ),
     )
 
+def _containment_pairs(states: dict[str, dict[str, Any]], spec: Any) -> list[tuple[str, str]]:
+    """Find source containment with inconsistent translations, for semantic review only."""
+    names = {
+        key: (normalize_term(str(state["source"]), spec),
+              normalize_term(str(state["preferred_translation"]), spec))
+        for key, state in states.items()
+        if not state.get("disabled") and state.get("preferred_translation")
+    }
+    return [
+        (short, long)
+        for short, (source, preferred) in names.items()
+        for long, (long_source, long_preferred) in names.items()
+        if len(source) >= 2 and len(source) < len(long_source)
+        and source in long_source and preferred not in long_preferred
+    ]
+
 def _hard_components(
     states: list[dict[str, Any]], spec: Any
 ) -> list[list[dict[str, Any]]]:
-    """Return indivisible groups formed by durable group and form ownership edges."""
+    """Return indivisible relationship groups and explicit containment review bundles."""
     by_normalized = {str(state["normalized"]): state for state in states}
     edges = {normalized: set() for normalized in by_normalized}
     owners: dict[str, set[str]] = {}
     for normalized, state in by_normalized.items():
+        for peer in state.get("_containment_peers", []):
+            if peer in by_normalized and peer != normalized:
+                edges[normalized].add(peer)
+                edges[peer].add(normalized)
         primary = state.get("group_primary")
         if primary is not None and str(primary) in by_normalized:
             edges[normalized].add(str(primary))

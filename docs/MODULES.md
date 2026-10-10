@@ -205,7 +205,7 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 - `term_decision.py`：自动术语决策执行入口和阶段编排。
 - `term_decision_batches.py`：批次规划与关联项分组。
 - `term_decision_protocol.py`：模型输入输出的解析与严格校验。
-- `term_decision_rules.py`：确定性决策、冲突和保护规则。
+- `term_decision_rules.py`：确定性决策、冲突和保护规则，以及供模型复核的包含关系候选。
 - `term_decision_drafts.py`：审查草案、应用、回滚和失效条件。
 
 这些模块共享同一个已发布术语库。自动决策只能生成草案，不能绕过 `term_library.py` 的人工

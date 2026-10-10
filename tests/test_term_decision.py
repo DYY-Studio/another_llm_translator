@@ -345,6 +345,7 @@ def create_complete_legacy_group_run(
             source_terms_revision=1,
             decision_rules_version=DECISION_RULES_VERSION,
             phases={
+                "containment": {},
                 "adjudication": {
                     key: checkpoint_record({"action": "keep", "reason": "保持"})
                     for key in ("alice", "bob")
@@ -1313,6 +1314,7 @@ def test_dry_run_plans_second_phase_instead_of_doubling_first(
         "adjudication",
         "consistency",
         "final_review",
+        "containment",
     }
 
 
@@ -3902,6 +3904,7 @@ def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
             source_terms_revision=1,
             decision_rules_version=DECISION_RULES_VERSION,
             phases={
+                "containment": {},
                 "adjudication": {
                     "alice": {
                         "decision": {"action": "keep", "reason": "保持"},
@@ -5119,3 +5122,128 @@ async def test_group_alias_conflict_does_not_modify_protected_root(tmp_path):
     assert any(item["normalized"] == "bob" for item in draft["needs_review"])
     assert load_terms(project) == library
     assert read_json(project, project / "terminology" / "overrides.json") == overrides
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['repair', 'independent', 'review'])
+@pytest.mark.parametrize('final_review', [False, True])
+async def test_containment_review_uses_final_spelling_and_keeps_changes_atomic(tmp_path, outcome, final_review):
+    project = create_decision_project(tmp_path, 'Alice\nAlice Show')
+    library = load_terms(project)
+    library['terms'][0].update(source='Alice', normalized='alice', preferred_translation='爱丽丝', aliases=[])
+    library['terms'][1].update(source='Alice Show', normalized='alice show', preferred_translation='爱丽丝节目')
+    write_json(project, project / 'terminology' / 'terms.json', library)
+    phases = []
+
+    def handler(request):
+        payload = json.loads(json.loads(request.content)['messages'][1]['content'])
+        phase = payload['phase']
+        phases.append(phase)
+        records = []
+        if phase == 'containment':
+            assert {t['normalized'] for t in payload['terms']} == {'alice', 'alice show'}
+            assert next(t for t in payload['terms'] if t['normalized'] == 'alice')['preferred_translation'] == '艾丽丝'
+        for term in payload['terms']:
+            record = dict(type='decision', normalized=term['normalized'], action='keep', reason='保持')
+            if phase == 'consistency' and term['normalized'] == 'alice':
+                record.update(action='update', changes={'preferred_translation': '艾丽丝'})
+            if phase == 'containment':
+                if outcome == 'repair' and term['normalized'] == 'alice show':
+                    record.update(action='update', changes={'preferred_translation': '艾丽丝节目'})
+                elif outcome == 'review':
+                    record.update(action='needs_review', reason='缺乏可靠证据')
+                elif outcome == 'independent':
+                    record['reason'] = '节目使用独立的正式译名'
+            records.append(record)
+        return httpx.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}],
+                                         'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology_decision(project, http_client=client, final_review=final_review)
+    assert phases == ['adjudication', 'consistency', 'containment']
+    draft = current_decision_draft(project)
+    if outcome == 'review':
+        assert result['needs_review'] == 2
+        assert draft['proposals'] == []
+    elif outcome == 'repair':
+        assert result['needs_review'] == 0
+        assert len(draft['proposals']) == 1
+        assert draft['proposals'][0]['normalized'] == ['alice', 'alice show']
+        assert [t['preferred_translation'] for t in draft['proposals'][0]['after']] == ['艾丽丝', '艾丽丝节目']
+        checkpoint = json.loads((project / 'runs' / result['run_id'] / CHECKPOINT_FILE).read_text())
+        assert set(checkpoint['phases']['containment']) == {'alice', 'alice show'}
+    else:
+        assert result['needs_review'] == 0
+        assert draft['proposals'][0]['after'][0]['preferred_translation'] == '艾丽丝'
+
+
+def test_containment_candidates_ignore_disabled_equivalent_and_short_noise():
+    from app.term_decision_rules import _containment_pairs
+    from app.term_library import TermNormalization
+    spec = TermNormalization("NFKC", True)
+    states = {
+        'alice': dict(source='Ａｌｉｃｅ', preferred_translation='艾丽丝'),
+        'show': dict(source='Alice Show', preferred_translation='爱丽丝节目'),
+        'correct': dict(source='Alice Book', preferred_translation='艾丽丝书'),
+        'disabled': dict(source='Alice Land', preferred_translation='爱丽丝领地', disabled=True),
+        'noise': dict(source='A', preferred_translation='诶'),
+    }
+    assert _containment_pairs(states, spec) == [('alice', 'show')]
+
+
+@pytest.mark.asyncio
+async def test_containment_review_keeps_protected_spelling_read_only(tmp_path):
+    project = create_decision_project(tmp_path, 'Alice\nAlice Show')
+    library = load_terms(project)
+    library['terms'][0].update(preferred_translation='艾丽丝', aliases=[])
+    library['terms'][1].update(source='Alice Show', normalized='alice show', preferred_translation='爱丽丝节目')
+    write_json(project, project / 'terminology' / 'terms.json', library)
+    overrides = read_json(project, project / 'terminology' / 'overrides.json')
+    overrides['overrides'] = [dict(normalized='alice', preferred_translation='艾丽丝')]
+    write_json(project, project / 'terminology' / 'overrides.json', overrides)
+    before_overrides = read_json(project, project / 'terminology' / 'overrides.json')
+
+    def handler(request):
+        payload = json.loads(json.loads(request.content)['messages'][1]['content'])
+        assert [t['normalized'] for t in payload['terms']] == ['alice show']
+        assert next(t for t in payload['anchors'] if t['normalized'] == 'alice')['preferred_translation'] == '艾丽丝'
+        record = dict(type='decision', normalized='alice show', action='keep', reason='保持')
+        if payload['phase'] == 'containment':
+            record.update(action='update', changes={'preferred_translation': '艾丽丝节目'})
+        return httpx.Response(200, json={'choices': [{'message': {'content': llm_jsonl([record])}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await run_terminology_decision(project, http_client=client)
+    apply_decision_draft(project, confirm_all=True)
+    after_overrides = read_json(project, project / 'terminology' / 'overrides.json')
+    assert next(t for t in after_overrides['overrides'] if t['normalized'] == 'alice') == before_overrides['overrides'][0]
+    assert {t['source']: t['preferred_translation'] for t in load_terms(project)['terms']} == {
+        'Alice': '艾丽丝', 'Alice Show': '艾丽丝节目'}
+
+
+@pytest.mark.asyncio
+async def test_containment_repair_cannot_create_new_unreviewed_conflict(tmp_path):
+    project = create_decision_project(tmp_path, 'Alice\nAlice Show\nAlice Land')
+    library = load_terms(project)
+    library['terms'][0].update(preferred_translation='艾丽丝', aliases=[])
+    library['terms'][1].update(source='Alice Show', normalized='alice show', preferred_translation='爱丽丝节目')
+    land = deepcopy(library['terms'][1])
+    land.update(record_id='TERM-000003', source='Alice Land', normalized='alice land', preferred_translation='艾丽丝领地')
+    library['terms'].append(land)
+    write_json(project, project / 'terminology' / 'terms.json', library)
+
+    def handler(request):
+        payload = json.loads(json.loads(request.content)['messages'][1]['content'])
+        records = []
+        for term in payload['terms']:
+            record = dict(type='decision', normalized=term['normalized'], action='keep', reason='保持')
+            if payload['phase'] == 'containment' and term['normalized'] == 'alice':
+                record.update(action='update', changes={'preferred_translation': '爱丽丝'})
+            records.append(record)
+        return httpx.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology_decision(project, http_client=client)
+    assert result['needs_review'] == 3
+    assert current_decision_draft(project)['proposals'] == []
+    assert load_terms(project)['terms'] == library['terms']

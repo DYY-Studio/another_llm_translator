@@ -493,6 +493,24 @@ _TERMINOLOGY_DECISION_PHASE_PREFIX: dict[str, dict[str, str]] = {
             "output a decision for anchors."
         ),
     },
+    "containment": {
+        "zh-CN": (
+            "当前是最终状态的包含关系复核。terms 和 anchors 均来自此前阶段完成后的状态，anchors 只读。"
+            "本批术语的原文存在长短包含关系，但长术语译名未包含短术语的推荐译名。"
+            "这只是可疑线索，不是必须逐字包含的规则。确认其中姓名、家名、地名等是否应使用一致写法；"
+            "不能仅凭含义相同保留不同音译。联合修改相关术语以保证一致；确有独立译法时 keep 并说明理由，"
+            "无法确定或受保护参照互相矛盾时 needs_review。不得机械替换译名或修改 anchors。"
+        ),
+        "en": (
+            "This is containment review of the final states from the preceding phases; anchors are read-only. "
+            "Source names overlap by containment, but a longer translation lacks the shorter preferred spelling. "
+            "This is a suspicion, not a mandatory substring rule. Check whether embedded people, families or places "
+            "require consistent spelling; semantic equivalence alone does not justify different transliterations. "
+            "Update related terms together, or keep with a reason when an independent translation is justified. "
+            "Use needs_review for insufficient evidence or contradictory protected references. "
+            "Do not mechanically replace translations or modify anchors."
+        ),
+    },
     "final_review": {
         "zh-CN": (
             "当前是第三阶段“术语自动终审”。terms 是本批唯一决策目标；anchors 只读，"

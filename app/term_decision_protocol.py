@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-DECISION_RULES_VERSION = 8
+DECISION_RULES_VERSION = 9
 DECISION_ACTIONS = frozenset({"keep", "update", "disable", "needs_review"})
 SIMPLE_ACTION_KEYS = frozenset({"type", "normalized", "action", "reason"})
 PATCH_FIELDS = frozenset(

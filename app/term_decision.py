@@ -57,7 +57,7 @@ from .term_library import (
 )
 
 from .term_decision_rules import (
-    _conflicts_by_term,
+    _conflicts_by_term, _containment_pairs,
     _decision_dependency_graph, _dependency_components, _effective_conflicts,
     _empty_conflicts, _group_violations,
     _has_conflicts, _recover_invalid_relationship_components, _term_state,
@@ -105,7 +105,7 @@ _FINAL_REVIEW_PHASE = "final_review"
 
 
 def _phase_names(final_review: bool = False) -> tuple[str, ...]:
-    return (*_PHASES, _FINAL_REVIEW_PHASE) if final_review else _PHASES
+    return (*_PHASES, _FINAL_REVIEW_PHASE, "containment") if final_review else (*_PHASES, "containment")
 
 _GroupViolation = tuple[str, tuple[str, ...]]
 
@@ -745,9 +745,11 @@ async def run_terminology_decision(
     )
     if consistency_decisions and len(decisions) != len(eligible):
         raise StorageError("术语决策检查点在第一阶段完成前包含第二阶段结果")
-    completed = len(decisions) + len(consistency_decisions) + len(review_decisions)
-    total = len(eligible) * 2
+    containment_decisions = _checkpoint_decisions(checkpoint, "containment")
+    completed = len(decisions) + len(consistency_decisions) + len(review_decisions) + len(containment_decisions)
+    total = len(eligible) * 2 + len(containment_decisions)
     final_review_target_count = 0
+    containment_components: list[set[str]] = []
     usage_invoked = completed < total
     usage: dict[str, Any] | None = None
     active_llm: LLMClient | None = None
@@ -1034,7 +1036,7 @@ async def run_terminology_decision(
                         project, review_focus, config
                     )
                     evidence.update(review_evidence)
-                total = len(eligible) * 2 + final_review_target_count
+                total = len(eligible) * 2 + final_review_target_count + len(containment_decisions)
                 usage_invoked = completed < total
                 manifest = read_json(project, run_dir / "manifest.json")
                 manifest.update(
@@ -1113,6 +1115,95 @@ async def run_terminology_decision(
                 decisions = _merge_final_review_decisions(
                     decisions, review_decisions
                 )
+            # Review only suspect combinations, using the completed states rather than phase-one anchors.
+            containment_base = deepcopy(final)
+            pairs = _containment_pairs(containment_base, spec)
+            graph = _decision_dependency_graph(states, containment_base, spec)
+            for left, right in pairs:
+                graph[left].add(right)
+                graph[right].add(left)
+            containment_components = _dependency_components(graph, {key for pair in pairs for key in pair})
+            containment_focus = [
+                {**deepcopy(containment_base[key]), "_containment_peers": sorted(component)}
+                for component in containment_components for key in sorted(component)
+                if key not in protected and key in eligible_terms
+                and decisions[key]["action"] != "needs_review" and not containment_base[key].get("disabled")
+            ]
+            target_ids = {str(item["normalized"]) for item in containment_focus}
+            if set(containment_decisions) - target_ids:
+                raise StorageError("包含关系复核检查点包含非当前目标术语")
+            total = len(eligible) * 2 + final_review_target_count + len(containment_focus)
+            usage_invoked = usage_invoked or completed < total
+            remaining = [item for item in containment_focus if item["normalized"] not in containment_decisions]
+            if containment_focus:
+                manifest = read_json(project, run_dir / "manifest.json")
+                manifest.update(containment_target_count=len(containment_focus), total_steps=total)
+                write_json(project, run_dir / "manifest.json", manifest)
+                if on_progress:
+                    on_progress(completed, 0, total)
+            containment_anchors = [state for key, state in containment_base.items()
+                                   if key not in target_ids and not state.get("disabled")]
+            containment_conflicts = _effective_conflicts(project, containment_base, source_conflicts)
+            batches = _batches._pack_batches(
+                remaining, phase="containment", target_language=str(config["project"]["target_language"]),
+                anchors=containment_anchors, evidence=evidence, prompt=prompts["containment"],
+                config=config, spec=spec, conflicts=containment_conflicts,
+            )[0] if remaining else []
+
+            async def review_containment(batch: tuple[list[dict[str, Any]], list[dict[str, Any]]]) -> None:
+                focus, anchors = batch
+                nonlocal completed
+                result = await _batches._request_batch(
+                    llm, focus=focus, anchors=anchors, phase="containment", prompt=prompts["containment"],
+                    config=config, evidence=evidence, known_states=containment_base,
+                    read_only_terms={str(item["normalized"]) for item in anchors},
+                    prompt_language=language, review_states=states, spec=spec, conflicts=containment_conflicts,
+                )
+                containment_decisions.update(result)
+                for normalized, decision in result.items():
+                    checkpoint["phases"]["containment"][normalized] = {
+                        "decision": deepcopy(decision), "decision_fingerprint": fingerprint,
+                        "model_fingerprint": model_fingerprint,
+                        "prompt_fingerprint": prompt_fingerprints["containment"],
+                    }
+                atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
+                completed += len(focus)
+                if on_progress:
+                    on_progress(completed, 0, total)
+
+            await run_bounded(batches, review_containment, max_parallel=int(config["execution"]["max_parallel"]))
+            _apply_tentative(final, containment_decisions)
+            for key, decision in containment_decisions.items():
+                if decision["action"] != "keep":
+                    decisions[key] = deepcopy(decision)
+                else:
+                    decisions[key]["reason"] += "; " + decision["reason"]
+            # A repair must not create a fresh inconsistency elsewhere. Existing pairs may be
+            # explicitly kept as independent translations; containment is not a hard invariant.
+            unresolved_pairs = [
+                pair for pair in _containment_pairs(final, spec)
+                if pair not in pairs or (
+                    pair[1] in containment_decisions
+                    and containment_decisions[pair[1]]["action"] == "update"
+                )
+            ]
+            for left, right in unresolved_pairs:
+                graph[left].add(right)
+                graph[right].add(left)
+                for key in (left, right):
+                    if key in eligible_terms:
+                        decisions[key] = {"action": "needs_review", "reason": (
+                            "Final terminology still has an unconfirmed containment spelling conflict."
+                            if language == "en" else "最终术语仍存在未确认的长短术语译名冲突。"
+                        )}
+            containment_components = _dependency_components(graph, {key for pair in [*pairs, *unresolved_pairs] for key in pair})
+            for component in containment_components:
+                unresolved = [key for key in component if decisions.get(key, {}).get("action") == "needs_review"]
+                if unresolved:
+                    reason = "；".join(dict.fromkeys(decisions[key]["reason"] for key in unresolved))
+                    for key in component & eligible_terms:
+                        final[key] = deepcopy(states[key])
+                        decisions[key] = {"action": "needs_review", "reason": reason}
             usage = llm.usage_summary()
         if not final_review:
             _recover_invalid_relationship_components(
@@ -1135,8 +1226,8 @@ async def run_terminology_decision(
                     + ", ".join(unresolved[:10])
                 )
             if any(
-                decision.get("action") == "needs_review"
-                for decision in decisions.values()
+                decision.get("action") == "needs_review" and not any(normalized in component for component in containment_components)
+                for normalized, decision in decisions.items()
             ):
                 raise UsageError("术语自动终审后仍存在 needs_review 决策")
         else:
@@ -1170,6 +1261,7 @@ async def run_terminology_decision(
             model_fingerprint=_composite_fingerprint(checkpoint, "model_fingerprint"),
             prompt_fingerprint=_composite_fingerprint(checkpoint, "prompt_fingerprint"),
             spec=spec,
+            reviewed_components=containment_components,
         )
         atomic_write_json(_drafts._draft_path(project, run_id), draft)
         manifest = read_json(project, run_dir / "manifest.json")
