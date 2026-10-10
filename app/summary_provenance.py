@@ -52,6 +52,7 @@ def _dependency_for_artifact(artifact: dict[str, Any]) -> dict[str, str]:
         "kind": str(kind),
         "text_digest": digest(text),
         "source_digest": source_digest,
+        "source_range_digest": digest(artifact["source_range"]),
     }
 
 
@@ -69,7 +70,6 @@ def build_provenance(
     provenance = {
         "origin": origin,
         "artifact_ids": [item["record_id"] for item in dependencies],
-        "source_ranges": [item["source_range"] for item in values],
         "dependencies": dependencies,
     }
     return provenance, digest(dependencies)
@@ -181,45 +181,6 @@ def _artifact_map(
     return by_id, duplicates
 
 
-def _legacy_adopted_fragment(
-    artifact: dict[str, Any],
-    provenance: dict[str, Any],
-    by_id: dict[str, dict[str, Any]],
-    duplicates: set[str],
-    active_fragment_ids: set[str],
-) -> SummaryExpiryAssessment | None:
-    raw_ids = provenance.get("artifact_ids")
-    source_ranges = provenance.get("source_ranges")
-    if (
-        not isinstance(raw_ids, list)
-        or len(raw_ids) != 1
-        or not isinstance(raw_ids[0], str)
-        or not raw_ids[0]
-        or not isinstance(source_ranges, list)
-        or len(source_ranges) != 1
-        or not isinstance(source_ranges[0], dict)
-    ):
-        return _expired(PROVENANCE_UNAVAILABLE)
-    child_id = raw_ids[0]
-    child = by_id.get(child_id)
-    if child is None or child_id in duplicates:
-        return _expired(PROVENANCE_UNAVAILABLE)
-    if child.get("kind") != "fragment" or _boundary(child) != _boundary(artifact):
-        return _expired(PROVENANCE_UNAVAILABLE)
-    if child.get("status") != "completed" or bool(child.get("source_changed")):
-        return _expired(DEPENDENCY_CHANGED)
-    if child.get("text") is None or not isinstance(child.get("source_range"), dict):
-        return _expired(PROVENANCE_UNAVAILABLE)
-    if (
-        artifact.get("text") != child.get("text")
-        or artifact.get("source_range") != child.get("source_range")
-        or source_ranges[0] != child.get("source_range")
-        or active_fragment_ids != {child_id}
-    ):
-        return _expired(DEPENDENCY_CHANGED)
-    return None
-
-
 def _modern_provenance(
     artifact: dict[str, Any],
     provenance: dict[str, Any],
@@ -245,16 +206,12 @@ def _modern_provenance(
         ]:
             return None, PROVENANCE_UNAVAILABLE
         raw_ids = node_provenance.get("artifact_ids")
-        source_ranges = node_provenance.get("source_ranges")
         dependencies = node_provenance.get("dependencies")
         if (
             not isinstance(raw_ids, list)
             or not raw_ids
             or any(not isinstance(value, str) or not value for value in raw_ids)
             or len(set(raw_ids)) != len(raw_ids)
-            or not isinstance(source_ranges, list)
-            or len(source_ranges) != len(raw_ids)
-            or any(not isinstance(value, dict) for value in source_ranges)
             or not isinstance(dependencies, list)
             or len(dependencies) != len(raw_ids)
             or any(not isinstance(value, dict) for value in dependencies)
@@ -266,8 +223,8 @@ def _modern_provenance(
             return None, PROVENANCE_UNAVAILABLE
 
         children: list[dict[str, Any]] = []
-        for child_id, source_range, dependency in zip(
-            raw_ids, source_ranges, dependencies, strict=True
+        for child_id, dependency in zip(
+            raw_ids, dependencies, strict=True
         ):
             if child_id in duplicates:
                 return None, PROVENANCE_UNAVAILABLE
@@ -287,7 +244,7 @@ def _modern_provenance(
                 return None, PROVENANCE_UNAVAILABLE
             if _boundary(child) != root_boundary:
                 return None, PROVENANCE_UNAVAILABLE
-            if source_range != child.get("source_range"):
+            if dependency.get("source_range_digest") != digest(child.get("source_range")):
                 return None, DEPENDENCY_CHANGED
             if child.get("text") is None or not isinstance(
                 child.get("source_digest"), str
@@ -349,12 +306,6 @@ def assess_full_summary(
         and not bool(item.get("source_changed"))
         and isinstance(item.get("record_id"), str)
     }
-    if provenance.get("origin") == "adopted_fragment" and "dependencies" not in provenance:
-        legacy = _legacy_adopted_fragment(
-            artifact, provenance, by_id, duplicates, active_fragment_ids
-        )
-        return legacy or SummaryExpiryAssessment(expired=False)
-
     leaf_ids, reason = _modern_provenance(artifact, provenance, by_id, duplicates)
     if reason is not None or leaf_ids is None:
         return _expired(reason or PROVENANCE_UNAVAILABLE)

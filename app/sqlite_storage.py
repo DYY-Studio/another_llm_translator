@@ -15,7 +15,7 @@ from typing import Any, Iterable
 from .errors import ProjectError, StorageError, UsageError
 from .stage_result_retention import prune_stage_results
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 STAGES = frozenset(
     {
@@ -284,6 +284,10 @@ def _create_tables(connection: sqlite3.Connection) -> None:
             ON content_summaries(file_id, part_id, kind, status);
         CREATE INDEX IF NOT EXISTS content_summaries_run
             ON content_summaries(run_id, updated_at);
+        CREATE TABLE IF NOT EXISTS summary_source_texts (
+            digest TEXT PRIMARY KEY,
+            text TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS summary_runs (
             run_id TEXT PRIMARY KEY,
             mode TEXT NOT NULL,
@@ -648,7 +652,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             (str(version),),
         )
         return None
-    elif version not in {3, 4, SCHEMA_VERSION}:
+    elif version not in {3, 4, 5, SCHEMA_VERSION}:
         raise ProjectError(
             f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
         )
@@ -665,7 +669,9 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         connection.execute("BEGIN IMMEDIATE")
         backup_path = _backup_before_schema_upgrade(project, version)
         _create_tables(connection)
-        _migrate_to_v5(connection, project)
+        if version < 5:
+            _migrate_to_v5(connection, project)
+        _migrate_summary_storage_to_v6(connection, project)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -675,6 +681,21 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
     except Exception:
         connection.rollback()
         raise
+    try:
+        project_id = _project_id(connection)
+        for row in connection.execute(
+            "SELECT * FROM runs WHERE json_type(payload_json, '$.summary_boundaries') = 'array'"
+        ):
+            manifest = project / "runs" / str(row["run_id"]) / "manifest.json"
+            if manifest.is_file():
+                atomic_write_json(manifest, _hydrate_run(row, project_id))
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        connection.execute("VACUUM")
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except (OSError, sqlite3.Error) as exc:
+        raise StorageError(
+            f"SQLite 已迁移，但快照整理或压缩失败：{project}；升级前备份位于 {backup_path}: {exc}"
+        ) from exc
     return backup_path
 
 
@@ -695,7 +716,8 @@ def ensure_supported(project: Path) -> Path | None:
         try:
             connection = _connect(path)
             with connection:
-                if _schema_version(connection) is None:
+                previous_version = _schema_version(connection)
+                if previous_version is None:
                     raise ProjectError(
                         "不支持的项目 SQLite schema_version：缺失；请重新创建项目"
                     )
@@ -708,7 +730,7 @@ def ensure_supported(project: Path) -> Path | None:
             except UnboundLocalError:
                 pass
         _SUPPORTED_CACHE.add(path)
-        if backup_path is not None:
+        if backup_path is not None and previous_version < 5:
             _MIGRATION_BACKUP_NOTICES[path] = backup_path
         return backup_path
 
@@ -955,10 +977,154 @@ def _validate_summary_run(value: dict[str, Any], location: str) -> dict[str, Any
     return value
 
 
-def _summary_record_payload(value: dict[str, Any]) -> tuple[Any, ...]:
+def _summary_slice_id(value: dict[str, Any]) -> str:
+    return (
+        f"{value['segment_id']}#slice-{value['slice_index']:04d}-"
+        f"{value['source_digest'][7:15]}-{value['model_text_digest'][7:15]}"
+    )
+
+
+def _pack_summary_range(connection: sqlite3.Connection, source_range: dict[str, Any]) -> dict[str, Any]:
+    packed = dict(source_range)
+    if not source_range.get("segments"):
+        return packed
+    values = []
+    for raw in source_range["segments"]:
+        value = dict(raw)
+        for key, digest_key in (("source", "source_digest"), ("model_text", "model_text_digest")):
+            if key not in value:
+                continue
+            text = value.pop(key)
+            text_digest = _summary_provenance_digest(text)
+            if not isinstance(text, str) or value.get(digest_key) != text_digest:
+                raise StorageError(f"概括源文本与 {digest_key} 不一致")
+            connection.execute(
+                "INSERT INTO summary_source_texts(digest, text) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                (text_digest, text),
+            )
+        if value.get("original_segment_id") == value.get("segment_id"):
+            value.pop("original_segment_id", None)
+        if all(key in value for key in ("slice_index", "source_digest", "model_text_digest")):
+            if value.get("slice_id") == _summary_slice_id(value):
+                value.pop("slice_id")
+        values.append(value)
+    packed["segments"] = values
+    if packed.get("segment_ids") == list(dict.fromkeys(
+        value.get("original_segment_id") or value["segment_id"] for value in values
+    )):
+        packed.pop("segment_ids")
+    return packed
+
+
+def _unpack_summary_range(source_range: dict[str, Any], texts: dict[str, str]) -> dict[str, Any]:
+    result = dict(source_range)
+    if not source_range.get("segments"):
+        return result
+    values = []
+    for raw in source_range["segments"]:
+        value = dict(raw)
+        for key, digest_key in (("source", "source_digest"), ("model_text", "model_text_digest")):
+            if digest_key in value:
+                text_digest = value[digest_key]
+                if text_digest not in texts:
+                    raise StorageError(f"概括源文本快照缺失：{text_digest}")
+                value[key] = texts[text_digest]
+        value.setdefault("original_segment_id", value["segment_id"])
+        if all(key in value for key in ("slice_index", "source_digest", "model_text_digest")):
+            value.setdefault("slice_id", _summary_slice_id(value))
+        values.append(value)
+    result["segments"] = values
+    result.setdefault("segment_ids", list(dict.fromkeys(
+        value["original_segment_id"] for value in values
+    )))
+    return result
+
+
+def _summary_source_texts(connection: sqlite3.Connection) -> dict[str, str]:
+    return dict(connection.execute("SELECT digest, text FROM summary_source_texts"))
+
+
+def _migrate_summary_storage_to_v6(connection: sqlite3.Connection, project: Path) -> None:
+    """Replace source copies with snapshots and digest-only dependencies."""
+    try:
+        rows = connection.execute("SELECT * FROM content_summaries").fetchall()
+        for row in rows:
+            source_range = json.loads(row["source_range_json"])
+            payload = json.loads(row["payload_json"])
+            provenance = payload.get("provenance")
+            input_digest = row["input_digest"]
+            if isinstance(provenance, dict):
+                ranges = provenance.pop("source_ranges", None)
+                dependencies = provenance.get("dependencies")
+                if isinstance(dependencies, list):
+                    if _summary_provenance_digest(dependencies) != input_digest:
+                        raise StorageError("概括历史依赖与 input_digest 不一致")
+                    if not isinstance(ranges, list) or len(ranges) != len(dependencies):
+                        raise StorageError("概括历史依赖与源范围数量不一致")
+                    dependencies = [
+                        {**dependency, "source_range_digest": _summary_provenance_digest(source)}
+                        for dependency, source in zip(dependencies, ranges, strict=True)
+                    ]
+                    provenance["dependencies"] = dependencies
+                    input_digest = _summary_provenance_digest(dependencies)
+                elif provenance.get("origin") == "adopted_fragment":
+                    ids = provenance.get("artifact_ids")
+                    if not isinstance(ids, list) or len(ids) != 1 or not isinstance(ranges, list) or len(ranges) != 1:
+                        raise StorageError("直接采用的概括历史依赖不完整")
+                    dependencies = [{
+                        "record_id": ids[0], "kind": "fragment",
+                        "text_digest": _summary_provenance_digest(row["text"]),
+                        "source_digest": row["source_digest"],
+                        "source_range_digest": _summary_provenance_digest(ranges[0]),
+                    }]
+                    provenance["dependencies"] = dependencies
+                    input_digest = _summary_provenance_digest(dependencies)
+            packed = _pack_summary_range(connection, source_range)
+            texts = _summary_source_texts(connection)
+            if _unpack_summary_range(packed, texts) != source_range:
+                raise StorageError(f"概括源范围无法无损转换：{row['summary_id']}")
+            connection.execute(
+                "UPDATE content_summaries SET source_range_json = ?, input_digest = ?, payload_json = ? WHERE summary_id = ?",
+                (_json(packed), input_digest, _json(payload), row["summary_id"]),
+            )
+        for row in connection.execute("SELECT run_id, source_ranges_json FROM summary_runs").fetchall():
+            connection.execute(
+                "UPDATE summary_runs SET source_ranges_json = ? WHERE run_id = ?",
+                (_json(_summary_run_ranges(json.loads(row["source_ranges_json"]))), row["run_id"]),
+            )
+        for row in connection.execute("SELECT run_id, payload_json FROM runs").fetchall():
+            payload = json.loads(row["payload_json"])
+            if "summary_boundaries" in payload:
+                payload["summary_boundaries"] = [
+                    {"file_id": item["file_id"], "part_id": item["part_id"]}
+                    for item in payload["summary_boundaries"]
+                ]
+                connection.execute("UPDATE runs SET payload_json = ? WHERE run_id = ?", (_json(payload), row["run_id"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StorageError(f"无法转换概括存储：{project}: {exc}") from exc
+
+
+def _prune_summary_source_texts(connection: sqlite3.Connection) -> None:
+    connection.execute("""
+        DELETE FROM summary_source_texts WHERE digest NOT IN (
+            SELECT json_extract(piece.value, '$.source_digest')
+            FROM content_summaries, json_each(source_range_json, '$.segments') AS piece
+            WHERE json_extract(piece.value, '$.source_digest') IS NOT NULL
+            UNION
+            SELECT json_extract(piece.value, '$.model_text_digest')
+            FROM content_summaries, json_each(source_range_json, '$.segments') AS piece
+            WHERE json_extract(piece.value, '$.model_text_digest') IS NOT NULL
+        )
+    """)
+
+
+def _summary_record_payload(connection: sqlite3.Connection, value: dict[str, Any]) -> tuple[Any, ...]:
     now = str(value.get("updated_at") or value.get("created_at") or utc_now())
     created_at = str(value.get("created_at") or now)
     source_changed = bool(value.get("source_changed", False))
+    payload = dict(value)
+    if isinstance(payload.get("provenance"), dict):
+        payload["provenance"] = {key: item for key, item in payload["provenance"].items() if key != "source_ranges"}
     return (
         str(value["record_id"]),
         str(value["kind"]),
@@ -966,7 +1132,7 @@ def _summary_record_payload(value: dict[str, Any]) -> tuple[Any, ...]:
         str(value["part_id"]),
         str(value["status"]),
         value.get("text"),
-        _json(value["source_range"]),
+        _json(_pack_summary_range(connection, value["source_range"])),
         str(value["source_digest"]),
         str(value["input_digest"]),
         str(value["prompt_digest"]),
@@ -975,7 +1141,7 @@ def _summary_record_payload(value: dict[str, Any]) -> tuple[Any, ...]:
         int(source_changed),
         created_at,
         now,
-        _residual(value, _SUMMARY_RESIDUAL_FIELDS),
+        _residual(payload, _SUMMARY_RESIDUAL_FIELDS),
     )
 
 
@@ -1003,8 +1169,9 @@ def write_content_summary(project: Path, value: dict[str, Any]) -> None:
                     run_id=excluded.run_id, source_changed=excluded.source_changed,
                     updated_at=excluded.updated_at, payload_json=excluded.payload_json
                 """,
-                _summary_record_payload(checked),
+                _summary_record_payload(connection, checked),
             )
+            _prune_summary_source_texts(connection)
     except sqlite3.Error as exc:
         raise StorageError(f"无法写入内容概括：{project}: {exc}") from exc
     finally:
@@ -1051,11 +1218,11 @@ def _summary_provenance_digest(value: Any) -> str:
 
 
 def _prunable_summary(
-    row: sqlite3.Row,
+    row: sqlite3.Row, texts: dict[str, str],
 ) -> dict[str, Any] | None:
     try:
         payload = json.loads(str(row["payload_json"]))
-        source_range = json.loads(str(row["source_range_json"]))
+        source_range = _unpack_summary_range(json.loads(str(row["source_range_json"])), texts)
     except (TypeError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict) or not isinstance(source_range, dict):
@@ -1082,6 +1249,7 @@ def _prune_published_summary_history(
     boundaries: Iterable[tuple[str, str]],
 ) -> dict[str, Any]:
     report: dict[str, Any] = {"deleted": 0, "skipped": []}
+    texts = _summary_source_texts(connection)
     boundary_values = list(dict.fromkeys((str(file_id), str(part_id)) for file_id, part_id in boundaries))
     for file_id, part_id in boundary_values:
         rows = connection.execute(
@@ -1097,7 +1265,7 @@ def _prune_published_summary_history(
         artifacts: dict[str, dict[str, Any]] = {}
         unavailable = False
         for row in rows:
-            artifact = _prunable_summary(row)
+            artifact = _prunable_summary(row, texts)
             if artifact is None:
                 unavailable = True
                 break
@@ -1174,7 +1342,6 @@ def _prune_published_summary_history(
                 return
             origin = provenance.get("origin")
             raw_ids = provenance.get("artifact_ids")
-            source_ranges = provenance.get("source_ranges")
             if (
                 not isinstance(origin, str)
                 or not origin
@@ -1182,30 +1349,11 @@ def _prune_published_summary_history(
                 or not raw_ids
                 or any(not isinstance(value, str) or not value for value in raw_ids)
                 or len(set(raw_ids)) != len(raw_ids)
-                or not isinstance(source_ranges, list)
-                or len(source_ranges) != len(raw_ids)
-                or any(not isinstance(value, dict) for value in source_ranges)
             ):
                 _state["unavailable"] = True
                 return
 
             dependencies = provenance.get("dependencies")
-            if origin == "adopted_fragment" and dependencies is None:
-                if (
-                    kind != "full"
-                    or len(raw_ids) != 1
-                    or len(source_ranges) != 1
-                    or raw_ids[0] not in _artifacts
-                    or _artifacts[raw_ids[0]]["kind"] != "fragment"
-                    or _artifacts[raw_ids[0]]["source_range"] != source_ranges[0]
-                ):
-                    _state["unavailable"] = True
-                    return
-                _visiting.add(record_id)
-                visit(raw_ids[0])
-                _visiting.remove(record_id)
-                return
-
             if (
                 not isinstance(dependencies, list)
                 or len(dependencies) != len(raw_ids)
@@ -1216,8 +1364,8 @@ def _prune_published_summary_history(
                 return
 
             _visiting.add(record_id)
-            for child_id, source_range, dependency in zip(
-                raw_ids, source_ranges, dependencies, strict=True
+            for child_id, dependency in zip(
+                raw_ids, dependencies, strict=True
             ):
                 child = _artifacts.get(child_id)
                 if child is None or child["kind"] not in {"fragment", "reduction", "full"}:
@@ -1233,7 +1381,7 @@ def _prune_published_summary_history(
                     or not dependency["text_digest"]
                     or not isinstance(dependency.get("source_digest"), str)
                     or not dependency["source_digest"]
-                    or source_range != child["source_range"]
+                    or dependency.get("source_range_digest") != _summary_provenance_digest(child["source_range"])
                     or child.get("text") is None
                     or dependency["text_digest"]
                     != _summary_provenance_digest(str(child["text"]))
@@ -1326,7 +1474,7 @@ def publish_content_summary_fulls(
                         run_id=excluded.run_id, source_changed=excluded.source_changed,
                         updated_at=excluded.updated_at, payload_json=excluded.payload_json
                     """,
-                    _summary_record_payload(value),
+                    _summary_record_payload(connection, value),
                 )
             full_ids = {
                 (str(item["file_id"]), str(item["part_id"])): str(item["record_id"])
@@ -1344,6 +1492,7 @@ def publish_content_summary_fulls(
                     [utc_now(), file_id, part_id, full_ids[(file_id, part_id)]],
                 )
             report = _prune_published_summary_history(connection, boundaries)
+            _prune_summary_source_texts(connection)
     except sqlite3.Error as exc:
         raise StorageError(f"无法原子发布内容概括：{project}: {exc}") from exc
     finally:
@@ -1351,7 +1500,7 @@ def publish_content_summary_fulls(
     return report
 
 
-def _hydrate_summary(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
+def _hydrate_summary(row: sqlite3.Row, project_id: str | None, texts: dict[str, str]) -> dict[str, Any]:
     value = _load(str(row["payload_json"]))
     value = _with_common_header(
         value,
@@ -1364,7 +1513,7 @@ def _hydrate_summary(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]
             "part_id": str(row["part_id"]),
             "status": str(row["status"]),
             "text": row["text"],
-            "source_range": json.loads(str(row["source_range_json"])),
+            "source_range": _unpack_summary_range(json.loads(str(row["source_range_json"])), texts),
             "source_digest": str(row["source_digest"]),
             "input_digest": str(row["input_digest"]),
             "prompt_digest": str(row["prompt_digest"]),
@@ -1417,7 +1566,8 @@ def read_content_summaries(
             params,
         ).fetchall()
         project_id = _project_id(connection)
-        return [_hydrate_summary(row, project_id) for row in rows]
+        texts = _summary_source_texts(connection)
+        return [_hydrate_summary(row, project_id, texts) for row in rows]
     except (sqlite3.Error, json.JSONDecodeError) as exc:
         raise StorageError(f"无法读取内容概括：{project}: {exc}") from exc
     finally:

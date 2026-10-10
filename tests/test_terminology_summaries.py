@@ -185,13 +185,14 @@ async def test_summary_opt_in_uses_joint_request_and_persists_fragment(
     assert full[0]["refs"] == ["F0001-S000001", "F0001-S000002"]
     assert full[0]["provenance"]["origin"] == "adopted_fragment"
     assert full[0]["provenance"]["artifact_ids"] == [summaries[0]["record_id"]]
-    assert full[0]["provenance"]["source_ranges"] == [summaries[0]["source_range"]]
+    assert full[0]["provenance"]["dependencies"][0]["source_range_digest"] == _digest(summaries[0]["source_range"])
     assert full[0]["provenance"]["dependencies"] == [
         {
             "record_id": summaries[0]["record_id"],
             "kind": "fragment",
             "text_digest": _digest(summaries[0]["text"]),
             "source_digest": summaries[0]["source_digest"],
+                "source_range_digest": _digest(summaries[0]["source_range"]),
         }
     ]
     assert full[0]["input_digest"] == _digest(full[0]["provenance"]["dependencies"])

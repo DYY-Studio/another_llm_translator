@@ -12,6 +12,7 @@ from app.errors import ProjectError, StorageError
 from app.execution import stage_result_path
 from app.project import init_project
 from app.sqlite_storage import (
+    SCHEMA_VERSION,
     append_jsonl,
     compact_project_database,
     ensure_supported,
@@ -39,6 +40,166 @@ from app.sqlite_storage import (
 )
 from app.summary_provenance import build_provenance, digest
 from tests.test_foundation import make_app_root
+
+
+def _text_summary(project: Path, summary_id: str = "TEXT-FRAGMENT", *, same_model_text: bool = False) -> dict:
+    project_id = read_json(project, project / "project.json")["project_id"]
+    source = "生成时原文"
+    model_text = source if same_model_text else "模型输入"
+    values = [{
+        "segment_id": "F0001-S000001", "original_segment_id": "F0001-S000001",
+        "slice_index": 0, "source": source, "source_digest": digest(source),
+        "original_source_digest": digest(source), "model_text": model_text,
+        "model_text_digest": digest(model_text),
+        "original_model_text_digest": digest(model_text),
+        "slice_id": f"F0001-S000001#slice-0000-{digest(source)[7:15]}-{digest(model_text)[7:15]}",
+    }]
+    return record_header(
+        "content_summary", project_id, record_id=summary_id, kind="fragment",
+        file_id="F0001", part_id="document", status="completed", text="摘要",
+        source_range={"file_id": "F0001", "part_id": "document",
+                      "segment_ids": ["F0001-S000001"], "segments": values},
+        source_digest=digest(values), input_digest=digest(model_text),
+        prompt_digest="sha256:prompt", model="test-model",
+    )
+
+
+@pytest.mark.parametrize("same_model_text", [False, True])
+def test_summary_source_snapshots_deduplicate_and_restore_historical_text(tmp_path: Path, same_model_text: bool) -> None:
+    project = create_project(tmp_path)
+    summary = _text_summary(project, same_model_text=same_model_text)
+    write_content_summary(project, summary)
+    full = {**summary, "record_id": "TEXT-FULL", "kind": "full"}
+    _attach_provenance(full, "adopted_fragment", [summary])
+    publish_content_summary_fulls(project, [full])
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT COUNT(*) FROM summary_source_texts").fetchone()[0] == (1 if same_model_text else 2)
+        packed = json.loads(database.execute(
+            "SELECT source_range_json FROM content_summaries LIMIT 1"
+        ).fetchone()[0])
+        assert set(packed["segments"][0]) == {
+            "segment_id", "slice_index", "source_digest", "model_text_digest",
+            "original_source_digest", "original_model_text_digest",
+        }
+        assert "segment_ids" not in packed
+    segments = read_segments(project)
+    segments[0]["source"] = "变更后的原文"
+    replace_source(project, read_files(project), segments, read_json(project, project / "project.json"))
+    assert read_content_summaries(project, kind="fragment")[0]["source_range"] == summary["source_range"]
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("DELETE FROM summary_source_texts WHERE digest = ?", (summary["source_range"]["segments"][0]["model_text_digest"],))
+    with pytest.raises(StorageError, match="概括源文本快照缺失"):
+        read_content_summaries(project)
+
+
+def _seed_v5_summary(project: Path, *, corrupt: bool = False, legacy: bool = False) -> dict:
+    summary = _text_summary(project)
+    value = dict(summary)
+    full = {**summary, "record_id": "TEXT-FULL", "kind": "full"}
+    # Build the old payload explicitly; new producers no longer duplicate ranges.
+    _attach_provenance(full, "adopted_fragment", [summary])
+    full["provenance"]["source_ranges"] = [summary["source_range"]]
+    for dependency in full["provenance"]["dependencies"]:
+        dependency.pop("source_range_digest")
+    full["input_digest"] = digest(full["provenance"]["dependencies"])
+    if legacy:
+        full["provenance"].pop("dependencies")
+        full["input_digest"] = "sha256:historical-input"
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("UPDATE schema_meta SET value = '5' WHERE key = 'schema_version'")
+        database.execute("DROP TABLE IF EXISTS summary_source_texts")
+        for record in (value, full):
+            residual = {"provenance": record["provenance"]} if "provenance" in record else {}
+            database.execute(
+                "INSERT INTO content_summaries(summary_id, kind, file_id, part_id, status, text, "
+                "source_range_json, source_digest, input_digest, prompt_digest, model, run_id, "
+                "source_changed, created_at, updated_at, payload_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (record["record_id"], record["kind"], "F0001", "document", "completed", "摘要",
+                 "bad json" if corrupt else json.dumps(record["source_range"], ensure_ascii=False),
+                 record["source_digest"], record["input_digest"], "sha256:prompt", "test-model",
+                 None, 0, record["created_at"], record["created_at"], json.dumps(residual, ensure_ascii=False)),
+            )
+        database.execute(
+            "INSERT INTO runs VALUES (?,?,?,?,?)",
+            ("RUN-HISTORY", "content_summary", "interrupted", None,
+             json.dumps({"summary_boundaries": [summary["source_range"]], "usage": {"total_tokens": 123}})),
+        )
+        database.execute(
+            "INSERT INTO summary_runs VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("RUN-HISTORY", "aggregation", "interrupted", json.dumps([summary["source_range"]]),
+             "sha256:input", "sha256:prompt", "test-model", None, summary["created_at"], "{}"),
+        )
+    from app.sqlite_storage import _SUPPORTED_CACHE
+    _SUPPORTED_CACHE.discard(project / "project.sqlite")
+    manifest = project / "runs" / "RUN-HISTORY" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"summary_boundaries": [summary["source_range"]]}))
+    return summary
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_v5_summary_upgrade_preserves_history_and_compacts_once(tmp_path: Path, legacy: bool) -> None:
+    project = create_project(tmp_path)
+    summary = _seed_v5_summary(project, legacy=legacy)
+    backup = ensure_supported(project)
+    assert backup is not None
+    with sqlite3.connect(backup) as database:
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "5"
+    assert read_content_summaries(project, kind="fragment")[0]["source_range"] == summary["source_range"]
+    full = read_content_summaries(project, kind="full")[0]
+    assert "source_ranges" not in full["provenance"]
+    assert full["input_digest"] == digest(full["provenance"]["dependencies"])
+    run = read_json(project, project / "runs" / "RUN-HISTORY" / "manifest.json")
+    assert run["summary_boundaries"] == [{"file_id": "F0001", "part_id": "document"}]
+    assert run["usage"] == {"total_tokens": 123}
+    manifest = json.loads((project / "runs" / "RUN-HISTORY" / "manifest.json").read_text())
+    assert manifest["summary_boundaries"] == run["summary_boundaries"]
+    from app.sqlite_storage import _take_migration_backup_notice
+    assert _take_migration_backup_notice(project) is None
+    assert read_summary_runs(project)[0]["source_ranges"] == [{
+        "file_id": "F0001", "part_id": "document", "segment_ids": ["F0001-S000001"],
+    }]
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
+        assert database.execute("PRAGMA freelist_count").fetchone()[0] == 0
+    assert ensure_supported(project) is None
+
+
+def test_v5_summary_upgrade_rolls_back_and_keeps_backup_on_corrupt_range(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    _seed_v5_summary(project, corrupt=True)
+    with pytest.raises(StorageError):
+        ensure_supported(project)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "5"
+        assert database.execute("SELECT COUNT(*) FROM content_summaries").fetchone()[0] == 2
+    assert len(list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))) == 1
+
+
+def test_summary_write_reclaims_only_unreferenced_source_snapshots(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    summary = _text_summary(project)
+    write_content_summary(project, summary)
+    changed = json.loads(json.dumps(summary))
+    value = changed["source_range"]["segments"][0]
+    value["source"] = "替换的源文"
+    value["source_digest"] = digest(value["source"])
+    value["original_source_digest"] = value["source_digest"]
+    changed["source_digest"] = digest(changed["source_range"]["segments"])
+    write_content_summary(project, changed)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert {row[0] for row in database.execute("SELECT text FROM summary_source_texts")} == {"替换的源文", "模型输入"}
+
+
+def test_summary_write_rolls_back_source_snapshots_when_digest_is_invalid(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    summary = _text_summary(project)
+    summary["source_range"]["segments"][0]["model_text_digest"] = "sha256:wrong"
+    with pytest.raises(StorageError, match="model_text_digest"):
+        write_content_summary(project, summary)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT COUNT(*) FROM summary_source_texts").fetchone()[0] == 0
+        assert database.execute("SELECT COUNT(*) FROM content_summaries").fetchone()[0] == 0
 
 
 def create_project(tmp_path: Path, text: str = "one\n\ntwo") -> Path:
@@ -741,7 +902,7 @@ def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
         database.row_factory = sqlite3.Row
         assert database.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "5"
+        ).fetchone()[0] == str(SCHEMA_VERSION)
         file_payload = json.loads(
             database.execute("SELECT payload_json FROM files").fetchone()[0]
         )
@@ -1036,7 +1197,7 @@ def test_epub_v4_migration_keeps_legacy_parts_when_new_nav_is_present(
     with sqlite3.connect(project / "project.sqlite") as database:
         assert database.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-        ).fetchone()[0] == "5"
+        ).fetchone()[0] == str(SCHEMA_VERSION)
     segments = read_segments(project)
     assert [item["segment_id"] for item in segments] == [
         "F0001-S000001",
@@ -1113,7 +1274,7 @@ def test_epub_v4_migration_accepts_emphasis_compaction_and_preserves_history(
     with sqlite3.connect(project / "project.sqlite") as database:
         assert database.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-        ).fetchone()[0] == "5"
+        ).fetchone()[0] == str(SCHEMA_VERSION)
     segments = read_segments(project)
     assert [item["segment_id"] for item in segments] == ["F0001-S000001"]
     assert [item["source"] for item in segments] == ["｜强调《・》"]

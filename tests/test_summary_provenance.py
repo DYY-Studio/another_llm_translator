@@ -116,13 +116,13 @@ def test_build_provenance_uses_ordered_dependency_digests_for_adopted_full() -> 
     assert provenance == {
         "origin": "adopted_fragment",
         "artifact_ids": ["FRAGMENT-1"],
-        "source_ranges": [child["source_range"]],
         "dependencies": [
             {
                 "record_id": "FRAGMENT-1",
                 "kind": "fragment",
                 "text_digest": digest("片段"),
                 "source_digest": child["source_digest"],
+                "source_range_digest": digest(child["source_range"]),
             }
         ],
     }
@@ -292,7 +292,7 @@ def test_unverifiable_provenance_fails_closed(case: str) -> None:
     assert assessment.expiry_reason == PROVENANCE_UNAVAILABLE
 
 
-def test_legacy_adopted_fragment_skips_only_its_historical_input_digest() -> None:
+def test_unmigrated_adopted_fragment_is_unverifiable() -> None:
     segment = _segment("F0001-S-1", "Alice")
     fragment = _fragment(_source_range(segment), record_id="FRAGMENT-1", text="片段")
     full = {
@@ -308,7 +308,8 @@ def test_legacy_adopted_fragment_skips_only_its_historical_input_digest() -> Non
 
     assessment = _assessment(full, [segment], [full, fragment])
 
-    assert assessment.expired is False
+    assert assessment.expired is True
+    assert assessment.expiry_reason == PROVENANCE_UNAVAILABLE
 
 
 def test_legacy_adopted_fragment_without_child_is_unverifiable() -> None:
