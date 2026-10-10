@@ -257,3 +257,30 @@ def test_http_proxy_carries_decision_request(monkeypatch):
             assert answers["term"].refused
             assert requests[0].startswith("POST http://decision.invalid/v1/choose HTTP/1.1\r\n")
     asyncio.run(run())
+
+@pytest.mark.parametrize("protocol", ["typesafe", "openai-decisions"])
+@pytest.mark.parametrize("debug_enabled", [False, True])
+def test_decision_history_records_actual_input_and_refusal(tmp_path, monkeypatch, protocol, debug_enabled):
+    import json
+    from app.web_task_routes import _debug_request_index, _debug_request_detail
+    monkeypatch.setenv("DECISION_TEST_KEY", "secret")
+    answers = {"term": {"type": "refusal"}} if protocol == "typesafe" else [{"name": "term", "type": "refusal"}]
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"model": "judge", "answers": answers}))) as http:
+            client = DecisionClient(preset(protocol), http_client=http, debug_directory=tmp_path if debug_enabled else None,
+                                    project_id="PROJECT", run_id="RUN", stage="translation")
+            await client.choose({"source": "Alice came", "translation": "她来了", "terms": {"term": {"source": "Alice"}}},
+                                [DecisionQuestion("term", "Question", {"a": "A", "b": "B"})], segment_id="SEG")
+    asyncio.run(run())
+    if not debug_enabled:
+        assert not (tmp_path / "payloads").exists()
+        return
+    index = _debug_request_index(tmp_path, "RUN")
+    assert len(index["items"]) == 1
+    detail = _debug_request_detail(tmp_path, "RUN", index["items"][0]["request_id"], full=True)
+    attempt = detail["attempts"][0]
+    overview = attempt["overview"]["value"]
+    assert overview["request_kind"] == "decision"
+    assert overview["input"]["source"] == "Alice came"
+    assert overview["answers"]["term"]["refused"] is True
+    assert "secret" not in json.dumps(detail)

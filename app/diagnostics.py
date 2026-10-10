@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextvars
 import copy
 import logging
+import json
 import math
 import time
 import uuid
@@ -12,6 +13,8 @@ from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
+
+from .request_overview import llm_overview
 
 from .logging_utils import (
     _HANDLER_MARKER,
@@ -174,6 +177,7 @@ class Diagnostics:
         segment_id: str | None = None,
         question_count: int = 0,
         request_body: str | None = None,
+        overview: dict[str, Any] | None = None,
     ) -> None:
         if request_kind == "decision":
             activity = self._decision_activities.setdefault(model, {
@@ -199,7 +203,11 @@ class Diagnostics:
                     "truncated": truncated,
                 }
             )
+        overview = overview if overview is not None else llm_overview(messages, segment_id_map)
+        overview_truncated = len(json.dumps(overview, ensure_ascii=False)) > _MESSAGE_LIMIT
         request = {
+            "overview": None if overview_truncated else copy.deepcopy(overview),
+            "overview_truncated": overview_truncated,
             "timestamp": _now(),
             "finished_at": None,
             "project": self.project,
@@ -421,12 +429,18 @@ class Diagnostics:
         )
 
     def complete_request(
-        self, request_id: str, *, content: str, reasoning_content: str | None
+        self, request_id: str, *, content: str, reasoning_content: str | None,
+        overview_answers: dict[str, Any] | None = None,
     ) -> None:
         request = self._request(request_id)
         if request is None:
             return
         response_content, content_truncated = _bounded(content, _CONTENT_LIMIT)
+        if request["overview"] is not None:
+            if request["request_kind"] == "llm":
+                request["overview"]["response_content"] = response_content
+            elif overview_answers is not None:
+                request["overview"]["answers"] = copy.deepcopy(overview_answers)
         request["response_content"] = response_content
         request["response_content_truncated"] = content_truncated
         request["has_content"] = True
@@ -498,6 +512,9 @@ class Diagnostics:
             ],
             "provider_error_status": request["provider_error_status"],
         }
+        if request["request_kind"] == "decision":
+            summary["overview"] = request["overview"]
+            summary["overview_truncated"] = request["overview_truncated"]
         if self.task_id is not None:
             summary["task_id"] = self.task_id
         return summary
@@ -771,7 +788,8 @@ class DiagnosticsHub(Diagnostics):
         super().rate_limit_wait_finished(request_id)
 
     def complete_request(
-        self, request_id: str, *, content: str, reasoning_content: str | None
+        self, request_id: str, *, content: str, reasoning_content: str | None,
+        overview_answers: dict[str, Any] | None = None,
     ) -> None:
         target = self._active_session()
         if target is not None:

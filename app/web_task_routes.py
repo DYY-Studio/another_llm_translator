@@ -567,6 +567,7 @@ def _debug_request_detail(
         entry = _debug_attempt_summary(directory, record)
         if full:
             attempt = int(record["attempt"])
+            entry["overview"] = _read_debug_payload(directory, request_id, attempt, "overview", full=True)
             entry["request"] = _read_debug_payload(
                 directory, request_id, attempt, "request", full=True
             )

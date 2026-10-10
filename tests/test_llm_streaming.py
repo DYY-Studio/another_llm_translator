@@ -573,6 +573,9 @@ async def test_stream_retry_discards_partial_output_and_saves_failed_events(
     assert response.content == "完成"
     assert "半成品" not in response.content
     assert calls == 2
+    overview_files = sorted((tmp_path / "run" / "payloads").glob("*.overview.json"))
+    assert len(overview_files) == 2
+    assert json.loads(overview_files[1].read_text("utf-8"))["response_content"] == "完成"
     failed_responses = sorted((tmp_path / "run" / "payloads").glob("*-A001.response.json"))
     failed_errors = sorted((tmp_path / "run" / "payloads").glob("*-A001.error.json"))
     assert failed_responses and failed_errors

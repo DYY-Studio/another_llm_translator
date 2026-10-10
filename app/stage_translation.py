@@ -625,7 +625,9 @@ async def run_translation(
         }
 
     assert run_id is not None and run_dir is not None
-    decision_client = DecisionClient(config["_decision_preset_definition"], http_client=http_client, retry=config["retry"]) if config.get("_decision_preset_definition") else None
+    decision_client = DecisionClient(config["_decision_preset_definition"], http_client=http_client, retry=config["retry"],
+        debug_directory=run_dir if config["debug"]["enabled"] else None,
+        project_id=metadata["project_id"], run_id=run_id, stage=run_stage) if config.get("_decision_preset_definition") else None
     result_path = stage_result_path(project, "translation")
     write_lock = asyncio.Lock()
     validation_pending: dict[str, dict[str, Any]] = {}

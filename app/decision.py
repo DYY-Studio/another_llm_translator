@@ -20,6 +20,7 @@ from .credentials import resolve_api_keys
 from .errors import ConfigError, ExternalError, FatalExternalError
 from .llm_keys import KeyPool
 from .logging_utils import get_logger
+from .sqlite_storage import atomic_write_json, append_jsonl_file, record_header
 
 
 @dataclass(frozen=True)
@@ -115,7 +116,10 @@ def load_decision_preset(path: Path) -> dict[str, Any]:
 
 class DecisionClient:
     def __init__(self, preset: dict[str, Any], *, http_client: httpx.AsyncClient | None = None,
-                 retry: dict[str, Any] | None = None) -> None:
+                 retry: dict[str, Any] | None = None, debug_directory: Path | None = None,
+                 project_id: str = "", run_id: str = "", stage: str = "") -> None:
+        self.debug_directory = debug_directory
+        self.project_id, self.run_id, self.stage = project_id, run_id, stage
         self.preset = preset
         self.http_client = http_client
         self.retry = retry or {"http_max_attempts": 1, "base_delay_seconds": 0}
@@ -157,22 +161,24 @@ class DecisionClient:
                 "Decision 上文因上下文窗口限制缩减（Segment %s）：%d → %d",
                 segment_id, requested, len(context),
             )
+        overview = {"request_kind": "decision", "input": evidence, "segment_id": segment_id,
+                    "questions": [asdict(q) for q in questions], "answers": {}}
         request_id = f"decision-{uuid.uuid4().hex}"
         if diagnostics is not None:
             diagnostics.begin_request(
                 request_id=request_id, model=self.preset["model"], messages=[],
                 max_attempts=self.retry["http_max_attempts"], request_kind="decision",
                 segment_id=segment_id, question_count=len(questions),
-                request_body=json.dumps(body, ensure_ascii=False, indent=2),
+                request_body=json.dumps(body, ensure_ascii=False, indent=2), overview=overview,
             )
         try:
             if estimated > available:
                 segment = f"（Segment {segment_id}）" if segment_id else ""
                 raise FatalExternalError(f"Decision 请求{segment}估算 {estimated} Token，超过可用上下文 {available} Token")
             if self.http_client is not None:
-                return await self._request(self.http_client, body, questions, segment_id, request_id, requested, len(context))
+                return await self._request(self.http_client, body, questions, segment_id, request_id, requested, len(context), overview)
             async with httpx.AsyncClient(proxy=self.preset["proxy_url"] or None) as http:
-                return await self._request(http, body, questions, segment_id, request_id, requested, len(context))
+                return await self._request(http, body, questions, segment_id, request_id, requested, len(context), overview)
         except asyncio.CancelledError:
             if diagnostics is not None:
                 diagnostics.fail_request(request_id, "cancelled", interrupted=True)
@@ -184,7 +190,8 @@ class DecisionClient:
 
     async def _request(self, http: httpx.AsyncClient, body: dict[str, Any],
                        questions: list[DecisionQuestion], segment_id: str | None, request_id: str,
-                       context_segments_requested: int, context_segments_used: int) -> dict[str, DecisionAnswer]:
+                       context_segments_requested: int, context_segments_used: int,
+                       overview: dict[str, Any]) -> dict[str, DecisionAnswer]:
         diagnostics = current_diagnostics()
         try:
             keys = resolve_api_keys(self.preset["credential"])
@@ -203,6 +210,7 @@ class DecisionClient:
                                     "context_segments_used": context_segments_used,
                                     "questions": [q.name for q in questions],
                                     "evidence_digest": hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True).encode()).hexdigest()}
+            data = None
             outcome = "succeeded"
             retrying = False
             try:
@@ -222,9 +230,10 @@ class DecisionClient:
                 except (ValueError, TypeError, KeyError) as exc:
                     outcome = "response_parse_error"
                     raise FatalExternalError("Decision 响应无效") from exc
+                overview["answers"] = {k: asdict(v) for k, v in answers.items()}
                 record.update(model=data["model"], answers={k: asdict(v) for k, v in answers.items()}, usage=data.get("usage"))
                 if diagnostics is not None:
-                    diagnostics.complete_request(request_id, content=json.dumps(data, ensure_ascii=False, indent=2), reasoning_content=None)
+                    diagnostics.complete_request(request_id, content=json.dumps(data, ensure_ascii=False, indent=2), reasoning_content=None, overview_answers=overview["answers"])
                 return answers
             except asyncio.CancelledError:
                 outcome = "cancelled"
@@ -243,6 +252,21 @@ class DecisionClient:
             finally:
                 record["elapsed_seconds"] = time.monotonic() - started
                 self.records.append(record)
+                if self.debug_directory is not None:
+                    base = f"{request_id}-A{attempt + 1:03d}"
+                    directory = self.debug_directory / "payloads"
+                    directory.mkdir(parents=True, exist_ok=True)
+                    atomic_write_json(directory / f"{base}.request.json", body)
+                    atomic_write_json(directory / f"{base}.overview.json", overview)
+                    if data is not None:
+                        atomic_write_json(directory / f"{base}.response.json", data)
+                    if outcome != "succeeded":
+                        atomic_write_json(directory / f"{base}.error.json", {"error": record.get("error", outcome)})
+                    append_jsonl_file(self.debug_directory / "attempts.jsonl", record_header(
+                        "request_attempt", self.project_id, record_id=base, run_id=self.run_id,
+                        request_id=request_id, stage=self.stage, attempt=attempt + 1,
+                        http_status=record.get("http_status"), outcome=outcome,
+                        status="completed" if outcome == "succeeded" else "failed", error=record.get("error")))
                 if diagnostics is not None:
                     diagnostics.request_finished(request_id=request_id, attempt=attempt + 1,
                         key_index=lease.key_index + 1, latency_seconds=record["elapsed_seconds"],
