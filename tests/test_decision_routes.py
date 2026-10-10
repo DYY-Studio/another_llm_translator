@@ -2,10 +2,44 @@ from pathlib import Path
 from shutil import copytree
 
 from fastapi.testclient import TestClient
+import pytest
 
+from app.config import dump_config, load_config
+from app.project import init_project
 from app.web import create_app
 from tests.test_decision import preset
 from tests.test_foundation import make_app_root
+
+
+@pytest.mark.parametrize("scope,reference", [
+    ("global", "common"), ("project", "alignment"), ("external", "terminology"),
+])
+def test_cannot_delete_referenced_decision_preset(tmp_path, scope, reference):
+    root = make_app_root(tmp_path)
+    projects = tmp_path / "projects"
+    app = create_app(app_root=root, projects_root=projects, log_path=tmp_path / "app.log")
+    config_path = root / "config" / "config.toml"
+    if scope != "global":
+        source = tmp_path / "source.txt"
+        source.write_text("Source.")
+        project, _ = init_project([str(source)], name="example", app_root=root,
+                                 projects_root=projects if scope == "project" else tmp_path / "external")
+        config_path = project / "config.toml"
+        if scope == "external":
+            app.state.external_projects.add(project)
+    config = load_config(config_path)
+    if reference == "common":
+        config["decision"]["preset"] = "local"
+    elif reference == "alignment":
+        config["validation"]["translation"]["alignment"]["decision_preset"] = "local"
+    else:
+        config["validation"]["translation"]["decision_preset"] = "local"
+    config_path.write_text(dump_config(config))
+    with TestClient(app) as client:
+        path = "/api/v1/global/decision-presets/local"
+        assert client.put(path, json=preset()).status_code == 200
+        assert client.delete(path).status_code == 400
+        assert client.get(path).json() == preset()
 
 
 def test_decision_preset_round_trip_and_invalid_url(tmp_path):

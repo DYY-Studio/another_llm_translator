@@ -787,10 +787,14 @@ def register_resource_routes(
     async def delete_decision_preset(preset_id: str) -> dict[str, bool]:
         relative = str(decision_preset_path(Path(), preset_id))
         configs = [effective_path("config/config.toml", builtin_root=app_root)]
-        configs.extend(item / "config.toml" for item in projects_root.iterdir() if database_path(item).is_file())
+        configs.extend(item / "config.toml" for item in (projects_root.iterdir() if projects_root.exists() else ())
+                       if database_path(item).is_file())
         configs.extend(item / "config.toml" for item in app.state.external_projects)
         for path in configs:
-            if load_config(path)["validation"]["translation"]["decision_preset"] == preset_id:
+            config = load_config(path)
+            options = config["validation"]["translation"]
+            if preset_id in {config["decision"]["preset"], options["decision_preset"],
+                             options["alignment"]["decision_preset"]}:
                 raise UsageError("不能删除配置正在引用的 Decision Preset")
         path = user_root() / relative
         if not path.is_file():
