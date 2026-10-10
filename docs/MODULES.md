@@ -219,6 +219,7 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 - `prompt_library.py`：用户级 Prompt 条目及项目载入边界。
 - `credentials.py`：环境变量和系统钥匙串访问，不向持久化层暴露密钥正文。
 - `server_config.py`：监听、局域网共享与认证设置。
+- `request_overview.py`：从宿主消息提取本次 LLM 请求的业务输入、局部 ID 映射与规范化正文，供实时诊断和 Debug 快照使用。
 - `diagnostics.py`：本次运行的结构化诊断事件与摘要，分别统计 LLM 与 Decision 请求并保留有界详情。
 - `logging_utils.py`：普通日志上下文和敏感字段边界。
 - `i18n.py`：CLI/后端可见文案与语言选择。
