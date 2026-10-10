@@ -132,3 +132,30 @@ async def test_translation_decision_context_toggle_and_count(tmp_path, monkeypat
     store = WebStore(project)
     manual_context = store._translation_validation_context(segment, "她到了。")
     assert list(manual_context.previous_source) == expected
+
+
+@pytest.mark.asyncio
+async def test_decision_receives_matching_long_term_without_questioning_it():
+    from app.decision import DecisionAnswer
+    from app.translation_validation import TranslationTermMatch, TranslationValidationContext
+    from plugins.term_validation.plugin import PreferredTermUsageValidator
+
+    class Decision:
+        async def choose(self, state, questions, **kwargs):
+            assert len(questions) == 1
+            assert state['terms']['term_0']['source'] == 'ニア・リストン'
+            assert [term['source'] for term in state['matched_terms']] == [
+                'ニア・リストン', 'ニア・リストンの職業訪問']
+            assert state['matched_terms'][1]['preferred_translation'] == '妮娅·利斯顿的职业探访'
+            return {'term_0': DecisionAnswer('required', {'required': 1, 'ordinary': 0,
+                                                        'acceptable': 0, 'uncertain': 0}, 0.99)}
+
+    findings = await PreferredTermUsageValidator().validate(TranslationValidationContext(
+        'ニア・リストンの職業訪問', '妮娅·利斯顿的职业探访',
+        terms=(TranslationTermMatch('ニア・リストン', 'ニア・リストン', 'source', '妮娅·里斯顿'),
+               TranslationTermMatch('ニア・リストンの職業訪問', 'ニア・リストンの職業訪問',
+                                    'source', '妮娅·利斯顿的职业探访')),
+        decision=Decision()))
+    assert len(findings) == 1
+    assert findings[0].expected_translation == '妮娅·里斯顿'
+    assert findings[0].repairable
