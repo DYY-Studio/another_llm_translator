@@ -284,3 +284,13 @@ def test_decision_history_records_actual_input_and_refusal(tmp_path, monkeypatch
     assert overview["input"]["source"] == "Alice came"
     assert overview["answers"]["term"]["refused"] is True
     assert "secret" not in json.dumps(detail)
+
+@pytest.mark.parametrize("task_id", [None, "TASK"])
+def test_decision_hub_publishes_answers_in_incremental_summary(tmp_path, task_id):
+    diagnostics = DiagnosticsHub(tmp_path / "app.log")
+    answer = {"term": {"choice": "a", "confidence": .9, "probabilities": {"a": .9, "b": .1}, "refused": False}}
+    with diagnostics.activate("project", "translation", task_id=task_id):
+        diagnostics.begin_request(request_id="DEC", model="judge", messages=[], max_attempts=1,
+            request_kind="decision", overview={"request_kind": "decision", "input": {"source": "Alice"}, "answers": {}})
+        diagnostics.complete_request("DEC", content="response", reasoning_content=None, overview_answers=answer)
+        assert diagnostics.snapshot()["requests"]["items"][0]["overview"]["answers"] == answer

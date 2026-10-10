@@ -441,6 +441,9 @@ class Diagnostics:
                 request["overview"]["response_content"] = response_content
             elif overview_answers is not None:
                 request["overview"]["answers"] = copy.deepcopy(overview_answers)
+            if len(json.dumps(request["overview"], ensure_ascii=False)) > _CONTENT_LIMIT:
+                request["overview"] = None
+                request["overview_truncated"] = True
         request["response_content"] = response_content
         request["response_content_truncated"] = content_truncated
         request["has_content"] = True
@@ -794,11 +797,11 @@ class DiagnosticsHub(Diagnostics):
         target = self._active_session()
         if target is not None:
             target.complete_request(
-                request_id, content=content, reasoning_content=reasoning_content
+                request_id, content=content, reasoning_content=reasoning_content, overview_answers=overview_answers
             )
             return
         super().complete_request(
-            request_id, content=content, reasoning_content=reasoning_content
+            request_id, content=content, reasoning_content=reasoning_content, overview_answers=overview_answers
         )
 
     def fail_request(self, request_id: str, error: str, *, interrupted: bool = False) -> None:

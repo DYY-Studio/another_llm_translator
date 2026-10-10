@@ -1,3 +1,4 @@
+import { compactSegmentReferences } from "../segmentReferences";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, apiErrorFromResponse } from "../api";
@@ -799,8 +800,8 @@ function SummaryArtifactCard({ artifact, boundary, language, empty, onSource, on
           : translate("terms.summaryArtifactExpired", language);
   const refs = summaryArtifactSegmentIds(artifact);
   const labels = refs.length
-    ? refs.map((segmentId) => translate("terms.summaryReferenceLabel", language, { segment: segmentId }))
-    : (artifact.refs ?? []).map((ref) => translate("terms.summaryReferenceLabel", language, { segment: ref }));
+    ? compactSegmentReferences(refs).map((segmentId) => translate("terms.summaryReferenceLabel", language, { segment: segmentId }))
+    : compactSegmentReferences(artifact.refs ?? []).map((ref) => translate("terms.summaryReferenceLabel", language, { segment: ref }));
   return <article className={`summary-artifact-card${expired ? " summary-artifact-warning" : ""}`}>
     {expired && <p className="summary-artifact-warning-message">{warning}</p>}
     <div className="summary-artifact-meta"><span>{translate(origin, language)}</span><small>{artifact.model}</small></div>

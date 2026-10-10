@@ -1,3 +1,4 @@
+import type { RequestOverviewSnapshot } from "./requestOverview";
 export type Stage =
   | "overview"
   | "diagnostics"
@@ -362,6 +363,8 @@ export type DiagnosticsRequestStatus =
   | "interrupted";
 
 export interface DiagnosticsRequestSummary {
+  overview?: RequestOverviewSnapshot | null;
+  overview_truncated?: boolean;
   request_kind: "llm" | "decision";
   segment_id: string | null;
   question_count: number;
@@ -452,6 +455,8 @@ export interface DiagnosticsResponse {
 }
 
 export interface DiagnosticsRequestDetail {
+  overview: RequestOverviewSnapshot | null;
+  overview_truncated: boolean;
   request_kind: "llm" | "decision";
   segment_id: string | null;
   question_count: number;
@@ -569,6 +574,7 @@ export interface HistoricalDebugAttempt {
   error_payload: HistoricalPayloadStatus | HistoricalDebugPayload;
   request?: HistoricalDebugPayload;
   response?: HistoricalDebugPayload;
+  overview?: HistoricalDebugPayload;
 }
 
 export interface HistoricalRunRequest {

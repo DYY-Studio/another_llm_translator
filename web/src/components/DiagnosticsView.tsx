@@ -1,6 +1,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
+import { RequestOverview } from "./RequestOverview";
 import { HistoricalDiagnosticsView } from "./HistoricalDiagnosticsView";
 import type {
   DecisionActivity,
@@ -13,7 +14,7 @@ import type { ProjectSummary } from "../types";
 import { errorMessage, translate, type Language } from "../i18n";
 import { STORAGE_KEYS } from "../storageKeys";
 
-type DetailTab = "request" | "content" | "reasoning" | "attempts";
+type DetailTab = "overview" | "request" | "content" | "reasoning" | "attempts";
 type ThroughputMetric = "input" | "output" | "total";
 
 const THROUGHPUT_STORAGE_KEY = STORAGE_KEYS.throughput;
@@ -174,7 +175,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
   const [selectedRequest, setSelectedRequest] = useState<string | null>(null);
   const [detail, setDetail] = useState<DiagnosticsRequestDetail | null>(null);
   const [detailError, setDetailError] = useState("");
-  const [detailTab, setDetailTab] = useState<DetailTab>("request");
+  const [detailTab, setDetailTab] = useState<DetailTab>("overview");
   const logRef = useRef<HTMLDivElement>(null);
   const detailsRef = useRef<HTMLDivElement>(null);
   const requestFeedRef = useRef({ sessionId: "", cursor: 0 });
@@ -317,7 +318,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
     setSelectedRequest(requestId);
     setDetail(null);
     setDetailError("");
-    setDetailTab("request");
+    setDetailTab("overview");
   }, []);
 
   const closeDetail = () => {
@@ -504,15 +505,10 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
             <button className={decisionErrorsOnly ? "active" : ""} onClick={() => { setDecisionErrorsOnly(true); setDecisionPage(0); }}>{translate("diagnostics.decisionFailed", language)}</button>
           </nav>
           <div className="exchange-detail">
-            {decisionRequests.length ? <table className="decision-request-table">
-              <thead><tr>{["diagnostics.decisionSegment", "diagnostics.decisionQuestions", "diagnostics.status", "diagnostics.decisionLatency", "diagnostics.tabAttempts", "diagnostics.decisionAction"].map((key) => <th key={key}>{translate(key, language)}</th>)}</tr></thead>
-              <tbody>{decisionRequests.slice(currentDecisionPage * 20, (currentDecisionPage + 1) * 20).map((item) => <tr key={item.request_id}>
-                <td><code>{item.segment_id ?? "—"}</code><small>{clock(item.timestamp, language)}</small></td>
-                <td>{item.question_count}</td><td><span className={`request-status status-${item.status}`}>{statusLabels[item.status]}</span></td>
-                <td>{number(item.latest_latency_ms, language, " ms")}</td><td>{item.attempt_count}</td>
-                <td><button className="quiet-button" onClick={() => openDetail(item.request_id)}>{translate("diagnostics.view", language)}</button></td>
-              </tr>)}</tbody>
-            </table> : <div className="diagnostics-empty">{translate("diagnostics.decisionNoRecent", language)}</div>}
+            {decisionRequests.length ? <div className="decision-request-cards">{decisionRequests.slice(currentDecisionPage * 20, (currentDecisionPage + 1) * 20).map((item) => <article key={item.request_id}>
+              <header className="overview-request-heading"><code>{item.segment_id ?? "—"}</code><time>{clock(item.timestamp, language)}</time><span className={`request-status status-${item.status}`}>{statusLabels[item.status]}</span><span>{number(item.latest_latency_ms, language, " ms")} · {translate("diagnostics.tabAttempts", language)} {item.attempt_count}</span><button className="quiet-button" onClick={() => openDetail(item.request_id)}>{translate("diagnostics.view", language)}</button></header>
+              <RequestOverview snapshot={item.overview} truncated={item.overview_truncated} language={language} />
+            </article>)}</div> : <div className="diagnostics-empty">{translate("diagnostics.decisionNoRecent", language)}</div>}
           </div>
           <div className="history-pagination">
             <button className="quiet-button" disabled={currentDecisionPage === 0} onClick={() => setDecisionPage(currentDecisionPage - 1)}>{translate("diagnostics.history.previous", language)}</button>
@@ -529,7 +525,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
             if (event.target === event.currentTarget) closeDetail();
           }}
         >
-          <section className="modal exchange-dialog" role="dialog" aria-modal="true" aria-labelledby="exchange-dialog-title">
+          <section className="modal exchange-dialog request-overview-dialog" role="dialog" aria-modal="true" aria-labelledby="exchange-dialog-title">
             <header className="exchange-dialog-heading">
               <div>
                 <h2 id="exchange-dialog-title">{translate("diagnostics.detailsTitle", language)}</h2>
@@ -539,6 +535,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
             </header>
             <nav className="exchange-tabs" aria-label={translate("diagnostics.detailTabs", language)}>
               {([
+                ["overview", translate("overview.title", language)],
                 ["request", translate("diagnostics.tabRequest", language)],
                 ["content", isDecisionDetail ? translate("diagnostics.decisionResponse", language) : "Content"],
                 ["reasoning", "Reasoning"],
@@ -565,6 +562,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
                   <span>{translate("diagnostics.status", language)} <strong>{statusLabels[detail.status]}</strong></span>
                   {detail.transport === "sse" && <span>{translate("diagnostics.streamProgress", language)} <strong>{detail.stream_event_count} events · {bytes(detail.stream_received_bytes, language)}{detail.stream_first_event_latency_ms === null ? "" : ` · ${detail.stream_first_event_latency_ms} ms first`}</strong></span>}
                 </div>
+                {detailTab === "overview" && <RequestOverview snapshot={detail.overview} truncated={detail.overview_truncated || detail.response_content_truncated} language={language} />}
                 {detailTab === "request" && (
                   <div className="exchange-request-detail">
                     {Object.keys(detail.segment_id_map).length > 0 && (
