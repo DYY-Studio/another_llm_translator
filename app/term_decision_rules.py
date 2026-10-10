@@ -10,6 +10,7 @@ from .llm_response import parse_jsonl_document
 from .term_library import (
     build_term_library_rows,
     normalize_term,
+    group_alias_overlaps,
 )
 from .term_decision_protocol import (
     DECISION_ACTIONS,
@@ -40,6 +41,9 @@ _TOKEN_SPLIT = re.compile(r"[\s・·･._—–\-]+")
 
 def _alias_violation_message(violation: _GroupViolation, language: str) -> str:
     kind, values = violation
+    if kind == "group_alias_overlap":
+        root, member, alias = values
+        return (f"root {root} alias {alias} overlaps active member {member}" if language == "en" else f"术语组主 {root} 的 Alias {alias} 与启用成员 {member} 重叠")
     if kind == "alias_transfer":
         receiver, owner, alias = values
         return (f"alias {alias} remains owned by {owner} while added to {receiver}" if language == "en" else f"alias {alias} 已由 {owner} 保留却被新增到 {receiver}")
@@ -82,7 +86,7 @@ def _relation_keys(state: dict[str, Any], spec: Any) -> tuple[str, ...]:
         keys.add(f"group:{primary}")
     return tuple(sorted(keys))
 
-__all__ = ['_alias_violations', '_analyze_decisions', '_conflicts_by_term', '_decision_dependency_graph', '_dependency_components', '_effective_conflicts', '_empty_conflicts', '_group_violation_message', '_group_violations', '_hard_components', '_has_conflicts', '_normalized_aliases', '_normalized_forms', '_nullable_string', '_ordered_states', '_payload_term', '_proposal_after_states', '_recover_invalid_relationship_components', '_relationship_violation_message', '_relationship_violation_nodes', '_term_conflicts', '_term_state', '_validate_accepted_relationship_conflicts', '_validate_accepted_scalar_conflicts', '_validate_final_states']
+__all__ = ['_containment_pairs', '_alias_violations', '_analyze_decisions', '_conflicts_by_term', '_decision_dependency_graph', '_dependency_components', '_effective_conflicts', '_empty_conflicts', '_group_violation_message', '_group_violations', '_hard_components', '_has_conflicts', '_normalized_aliases', '_normalized_forms', '_nullable_string', '_ordered_states', '_payload_term', '_proposal_after_states', '_recover_invalid_relationship_components', '_relationship_violation_message', '_relationship_violation_nodes', '_term_conflicts', '_term_state', '_validate_accepted_relationship_conflicts', '_validate_accepted_scalar_conflicts', '_validate_final_states']
 
 def _term_state(
     term: dict[str, Any], *, disabled: bool | None = None
@@ -145,14 +149,34 @@ def _ordered_states(
         ),
     )
 
+def _containment_pairs(states: dict[str, dict[str, Any]], spec: Any) -> list[tuple[str, str]]:
+    """Find source containment with inconsistent translations, for semantic review only."""
+    names = {
+        key: (normalize_term(str(state["source"]), spec),
+              normalize_term(str(state["preferred_translation"]), spec))
+        for key, state in states.items()
+        if not state.get("disabled") and state.get("preferred_translation")
+    }
+    return [
+        (short, long)
+        for short, (source, preferred) in names.items()
+        for long, (long_source, long_preferred) in names.items()
+        if len(source) >= 2 and len(source) < len(long_source)
+        and source in long_source and preferred not in long_preferred
+    ]
+
 def _hard_components(
     states: list[dict[str, Any]], spec: Any
 ) -> list[list[dict[str, Any]]]:
-    """Return indivisible groups formed by durable group and form ownership edges."""
+    """Return indivisible relationship groups and explicit containment review bundles."""
     by_normalized = {str(state["normalized"]): state for state in states}
     edges = {normalized: set() for normalized in by_normalized}
     owners: dict[str, set[str]] = {}
     for normalized, state in by_normalized.items():
+        for peer in state.get("_containment_peers", []):
+            if peer in by_normalized and peer != normalized:
+                edges[normalized].add(peer)
+                edges[peer].add(normalized)
         primary = state.get("group_primary")
         if primary is not None and str(primary) in by_normalized:
             edges[normalized].add(str(primary))
@@ -319,7 +343,13 @@ def _alias_violations(
             if form:
                 owners.setdefault(form, set()).add(normalized)
 
-    violations: list[_GroupViolation] = []
+    existing_overlaps = {(root, member, normalize_term(alias, spec))
+                         for root, member, alias in group_alias_overlaps(original.values(), spec)}
+    violations: list[_GroupViolation] = [
+        ("group_alias_overlap", (root, member, normalize_term(alias, spec)))
+        for root, member, alias in group_alias_overlaps(final.values(), spec)
+        if (root, member, normalize_term(alias, spec)) not in existing_overlaps
+    ]
     for normalized, state in final.items():
         alias_forms = [
             normalize_term(str(value), spec) for value in state.get("aliases", [])
@@ -381,16 +411,11 @@ def _alias_violations(
                         ("unknown_owner", (normalized, owner, alias_form))
                     )
                     continue
-                owner_primary = owner_state.get("group_primary")
-                same_root = (
-                    owner_primary is not None and str(owner_primary) == normalized
-                )
                 released = alias_form not in _normalized_aliases(owner_state, spec)
                 owner_source = normalize_term(str(owner_state.get("source", "")), spec)
                 source_transfer = alias_form == owner_source
                 if (
                     owner_state.get("disabled")
-                    or (source_transfer and same_root)
                     or (not source_transfer and released)
                 ):
                     continue
@@ -832,7 +857,7 @@ def _relationship_violation_nodes(
         "unknown_alias",
     }:
         return {values[0]}
-    if kind in {"non_root_receiver", "alias_transfer", "unknown_owner"}:
+    if kind in {"non_root_receiver", "alias_transfer", "unknown_owner", "group_alias_overlap"}:
         return set(values[:2])
     return set(values)
 

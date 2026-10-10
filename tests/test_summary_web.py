@@ -260,6 +260,7 @@ def test_summary_task_options_keep_source_changed_full_usable(tmp_path: Path):
             "segment_id": item["segment_id"],
             "original_segment_id": item["segment_id"],
             "source": item["source"],
+            "source_digest": _digest(item["source"]),
             "original_source_digest": _digest(item["source"]),
             "original_model_text_digest": _digest(segment_model_source(item)),
         }

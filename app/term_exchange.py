@@ -17,7 +17,7 @@ from .sqlite_storage import (
     write_json,
 )
 from .term_library import (_add_term_candidate, _apply_term_overrides, _build_term_rows, _seed_published_terms, _term_bucket, load_terms, normalize_term, term_normalization)
-from .term_library import TermNormalization
+from .term_library import TermNormalization, validate_group_alias_overlaps, apply_group_alias_removals
 
 TERM_CSV_FIELDS = (
     "source",
@@ -202,11 +202,17 @@ def import_terms(
             "disabled": True,
         }
     _apply_term_overrides(merged, overrides)
+    removals: dict[str, set[str]] = {}
     terms = _build_term_rows(
         merged,
         alias_policy=str(config["terminology"]["alias_primary_collision"]),
-        spec=spec,
+        spec=spec, alias_removals=removals,
     )
+    affected = {normalize_term(item["source"], spec) for item in imported}
+    affected.update(str(item["group_primary"]) for item in (library or {}).get("terms", [])
+                    if item["normalized"] in affected and item.get("group_primary"))
+    validate_group_alias_overlaps(terms, spec, affected=affected)
+    apply_group_alias_removals(overrides, removals)
     overrides_list = [overrides[key] for key in sorted(overrides)]
     existing_terms = list((library or {}).get("terms", []))
     changed = terms != existing_terms or overrides_list != original_overrides

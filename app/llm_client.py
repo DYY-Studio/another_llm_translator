@@ -27,6 +27,7 @@ from .errors import (
 from .llm_adapter import JSONLLMAdapter, LLMResponse, Usage
 from .llm_keys import KeyPool, NoAvailableKey
 from .llm_preset import endpoint_url
+from .request_overview import llm_overview
 from .logging_utils import get_logger
 from .sqlite_storage import (
     append_jsonl_file,
@@ -720,6 +721,7 @@ class LLMClient:
         stream_received_bytes: int | None = None,
         stream_first_event_latency_ms: float | None = None,
         parent_request_id: str | None = None,
+        overview: dict[str, Any] | None = None,
     ) -> None:
         if not self.config["debug"]["enabled"]:
             return
@@ -727,6 +729,8 @@ class LLMClient:
         payload_dir.mkdir(parents=True, exist_ok=True)
         base = f"{request_id}-A{attempt:03d}"
         atomic_write_json(payload_dir / f"{base}.request.json", payload)
+        if overview is not None:
+            atomic_write_json(payload_dir / f"{base}.overview.json", overview)
         if response is not None:
             atomic_write_json(payload_dir / f"{base}.response.json", response)
         if error is not None:
@@ -882,6 +886,20 @@ class LLMClient:
             endpoint,
             model=self.config["llm"]["model"],
         )
+        async def debug_attempt(*args: Any, overview_content: str | None = None, **kwargs: Any) -> None:
+            if not self.config["debug"]["enabled"]:
+                return
+            response_data = kwargs.get("response")
+            overview_error = None
+            if overview_content is None and response_data is not None and "events" not in response_data:
+                try:
+                    overview_content = normalize_llm_response(self.adapter.parse_response(response_data)).content
+                except ExternalError as exc:
+                    overview_error = str(exc)
+            overview = llm_overview(messages, segment_id_map, overview_content)
+            overview["error"] = overview_error
+            await self._debug_attempt(*args, overview=overview, **kwargs)
+
         attempts = int(self.config["retry"]["http_max_attempts"])
         diagnostics = current_diagnostics()
         if diagnostics is not None:
@@ -1103,7 +1121,7 @@ class LLMClient:
                 attempt_outcome = "chatgpt_plan_error"
                 if diagnostics is not None:
                     diagnostics.fail_request(request_id, "chatgpt_plan_error")
-                await self._debug_attempt(request_id, send_attempt, payload, retry_round=attempt, key_index=key_index, error=str(exc), status=exc.params.get("http_status"), outcome=attempt_outcome, parent_request_id=parent_request_id)
+                await debug_attempt(request_id, send_attempt, payload, retry_round=attempt, key_index=key_index, error=str(exc), status=exc.params.get("http_status"), outcome=attempt_outcome, parent_request_id=parent_request_id)
                 raise
             except _StreamRetryable as exc:
                 attempt_error = True
@@ -1127,7 +1145,7 @@ class LLMClient:
                         affects_global=True,
                     )
                 elapsed = time.monotonic() - started
-                await self._debug_attempt(
+                await debug_attempt(
                     request_id,
                     send_attempt,
                     payload,
@@ -1254,7 +1272,7 @@ class LLMClient:
                         key_index,
                         affects_global=True,
                     )
-                await self._debug_attempt(
+                await debug_attempt(
                     request_id,
                     send_attempt,
                     payload,
@@ -1275,7 +1293,7 @@ class LLMClient:
             except httpx.DecodingError as exc:
                 attempt_error = True
                 attempt_outcome = "response_parse_error"
-                await self._debug_attempt(
+                await debug_attempt(
                     request_id,
                     send_attempt,
                     payload,
@@ -1312,7 +1330,7 @@ class LLMClient:
                     elapsed,
                     type(exc).__name__,
                 )
-                await self._debug_attempt(
+                await debug_attempt(
                     request_id,
                     send_attempt,
                     payload,
@@ -1395,13 +1413,14 @@ class LLMClient:
                 response_status = stream_status
                 if 200 <= stream_status < 300:
                     if self.config["debug"]["enabled"]:
-                        await self._debug_attempt(
+                        await debug_attempt(
                             request_id,
                             send_attempt,
                             payload,
                             retry_round=attempt,
                             key_index=key_index,
                             response={"events": raw_events},
+                            overview_content=normalized.content,
                             status=stream_status,
                             outcome="succeeded",
                             parent_request_id=parent_request_id,
@@ -1474,7 +1493,7 @@ class LLMClient:
                         json.JSONDecodeError,
                     ):
                         pass
-                await self._debug_attempt(
+                await debug_attempt(
                     request_id,
                     send_attempt,
                     payload,
@@ -1506,7 +1525,7 @@ class LLMClient:
             retryable = (
                 response.status_code in {408, 429} or response.status_code >= 500
             )
-            await self._debug_attempt(
+            await debug_attempt(
                 request_id,
                 send_attempt,
                 payload,

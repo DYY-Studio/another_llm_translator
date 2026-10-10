@@ -5,7 +5,7 @@ from app import documents, errors, plugin_api, translation_validation
 
 
 def test_plugin_api_exposes_shared_contract_without_host_descriptor_alias() -> None:
-    assert plugin_api.PLUGIN_PROTOCOL_VERSION == 12
+    assert plugin_api.PLUGIN_PROTOCOL_VERSION == 14
     assert plugin_api.DocumentAdapter is documents.DocumentAdapter
     assert plugin_api.DocumentChoiceOption is documents.DocumentChoiceOption
     assert plugin_api.DocumentImport is documents.DocumentImport

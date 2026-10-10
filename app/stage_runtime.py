@@ -12,6 +12,7 @@ from typing import Any, NamedTuple
 
 import httpx
 
+from .decision import DecisionClient
 from .config import load_project_config
 from .documents import (
     DocumentAdapter,
@@ -32,6 +33,7 @@ from .execution import (
     ChunkPlan,
     Scope,
     classify_stage,
+    combine_usage,
     contiguous_groups,
     continue_run,
     create_run,
@@ -86,16 +88,21 @@ _FORMAT_CORRECTION = {
 
 _VALIDATION_REPAIR = {
     "zh-CN": (
-        "以 failed_candidate 为基准，仅修复 validation_matches 所列问题，"
+        "若 validation_matches 包含 segment_misaligned，整批按各 ID 的原文重新翻译，"
+        "不得交换 ID、只改尾部或沿用错位内容。否则以 failed_candidate 为基准，仅修复 validation_matches 所列问题，"
         "返回完整且格式合规的译文。对于 advisory 术语建议，先判断推荐译名"
         "是否适合当前语境；适用时采用，不适用时可以保留候选。"
+        "简称或部分名称应按对应部分修正，保留原文的简称形式。"
     ),
     "en": (
-        "Use failed_candidate as the base, fix only the issues in "
+        "Use failed_candidate as the base for ordinary findings; fix only the issues in "
         "validation_matches, and return a complete, format-compliant translation. "
+        "If validation_matches contains segment_misaligned, instead retranslate the whole batch from each ID’s own source; "
+        "do not swap IDs, fix only the tail, or retain shifted content. "
         "For advisory terminology suggestions, first decide whether the "
         "recommended translation fits this context; use it when it does, but "
-        "you may keep the candidate when it does not."
+        "you may keep the candidate when it does not. For a short form or partial "
+        "name, correct the corresponding part while preserving the source abbreviation."
     ),
 }
 
@@ -589,6 +596,7 @@ class StageRunState:
     on_usage: Callable[[dict[str, Any] | None], None] | None = None
     preparation_started_at: float | None = None
     llm: LLMClient | None = None
+    decisions: tuple[DecisionClient, ...] = ()
 
 
 async def _execute_stage_run(
@@ -619,6 +627,12 @@ async def _execute_stage_run(
     ]
     | None = None,
 ) -> dict[str, Any] | None:
+    def usage_summary() -> dict[str, Any] | None:
+        generation = state.llm.usage_summary() if state.llm is not None else None
+        for client in state.decisions:
+            generation = combine_usage(generation, client.usage_summary())
+        return generation
+
     logger = get_logger(state.stage)
     logger.info("run start run=%s", state.run_id)
     planned = iter_chunk_plans(
@@ -774,11 +788,11 @@ async def _execute_stage_run(
             )
             await before_finalize()
         _extend_unique(state.warnings, llm.warnings)
-        usage = llm.usage_summary()
+        usage = usage_summary()
     except asyncio.CancelledError:
         if state.llm is not None:
             _extend_unique(state.warnings, state.llm.warnings)
-        usage = state.llm.usage_summary() if state.llm is not None else None
+        usage = usage_summary()
         finalize_run(
             state.project,
             state.run_dir,
@@ -795,7 +809,7 @@ async def _execute_stage_run(
         if state.llm is not None:
             _extend_unique(state.warnings, state.llm.warnings)
         if isinstance(exc, FatalExternalError) and state.llm is not None:
-            usage = state.llm.usage_summary()
+            usage = usage_summary()
         finalize_run(
             state.project,
             state.run_dir,
@@ -816,7 +830,7 @@ async def _execute_stage_run(
     except StorageError as exc:
         if state.llm is not None:
             _extend_unique(state.warnings, state.llm.warnings)
-            usage = state.llm.usage_summary()
+            usage = usage_summary()
             usage_invoked = state.llm.send_count > 0
         else:
             usage_invoked = False
@@ -860,7 +874,7 @@ async def _localized_request_loop(
     config: dict[str, Any],
     llm: LLMClient,
     stage: str,
-    accept: Callable[[str, str, Any], Awaitable[None]],
+    accept: Callable[[str, str, Any], Awaitable[None]] | None,
     save_error: Callable[[list[str], str, str], Awaitable[None]],
     parse: Callable[
         [str, dict[str, str]],
@@ -874,8 +888,12 @@ async def _localized_request_loop(
     logger: Any,
     initial_parent_request_id: str | None = None,
     repair_candidates: dict[str, dict[str, Any]] | None = None,
+    accept_response: Callable[..., Awaitable[None]] | None = None,
+    prepare_candidate: Callable[[str, Any], Any] | None = None,
 ) -> list[str]:
     exhausted: list[str] = []
+    buffered: dict[str, tuple[str, Any]] = {}
+    response_failed = False
     tasks: list[
         tuple[
             list[dict[str, Any]],
@@ -899,9 +917,8 @@ async def _localized_request_loop(
                         item,
                         str(repair_candidates[str(item["segment_id"])]["candidate"]),
                     ),
-                    "validation_matches": repair_candidates[str(item["segment_id"])][
-                        "findings"
-                    ],
+                    "validation_matches": [finding for finding in repair_candidates[str(item["segment_id"])]["findings"]
+                                           if finding.get("repairable", True)],
                 }
                 for item in items
             ]
@@ -929,24 +946,35 @@ async def _localized_request_loop(
         except FatalExternalError:
             raise
         except ContextLengthError as exc:
+            if accept_response is not None and buffered:
+                await accept_response(group, buffered, complete=False)
             if exc.segment_ids is None:
                 exc.segment_ids = tuple(expected)
             raise
         except ExternalError as exc:
-            await save_error(expected, request_id, str(exc))
+            await save_error([str(item["segment_id"]) for item in group] if accept_response else expected, request_id, str(exc))
+            response_failed = True
             continue
         complete_id_mismatch = parsed.has_valid_end and not parsed.ids_complete
         retry_whole_chunk = (
             config["retry"]["unresolved_retry_scope"] == "chunk" and bool(unresolved)
         )
         if complete_id_mismatch or retry_whole_chunk:
+            for item in items:
+                buffered.pop(str(item["segment_id"]), None)
             valid = {}
             unresolved = expected.copy()
         if complete_id_mismatch:
             parse_errors.append("合法 end 响应的 Segment ID 与请求不一致")
         for segment_id, value in valid.items():
             try:
-                await accept(segment_id, request_id, value)
+                if prepare_candidate is not None:
+                    value = prepare_candidate(segment_id, value)
+                if accept_response is not None:
+                    buffered[segment_id] = (request_id, value)
+                else:
+                    assert accept is not None
+                    await accept(segment_id, request_id, value)
             except IncompleteError as exc:
                 parse_errors.append(str(exc))
                 if segment_id not in unresolved:
@@ -982,6 +1010,13 @@ async def _localized_request_loop(
             )
             for unresolved_group in unresolved_groups
         )
+    if accept_response is not None:
+        expected_ids = [str(item["segment_id"]) for item in group]
+        if not response_failed:
+            if exhausted or any(segment_id not in buffered for segment_id in expected_ids):
+                exhausted = expected_ids
+            else:
+                await accept_response(group, buffered)
     return list(dict.fromkeys(exhausted))
 
 

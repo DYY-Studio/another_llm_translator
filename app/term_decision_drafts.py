@@ -53,6 +53,7 @@ def _build_draft(
     model_fingerprint: str,
     prompt_fingerprint: str,
     spec: Any,
+    reviewed_components: list[set[str]] | None = None,
 ) -> dict[str, Any]:
     changed = {
         key
@@ -61,6 +62,11 @@ def _build_draft(
         and any(original[key][field] != final[key][field] for field in _STATE_FIELDS)
     }
     graph = _decision_dependency_graph(original, final, spec)
+    for reviewed in reviewed_components or []:
+        keys = sorted(reviewed & changed)
+        for left, right in zip(keys, keys[1:]):
+            graph[left].add(right)
+            graph[right].add(left)
     components = _dependency_components(graph, changed, allowed=changed)
     proposals: list[dict[str, Any]] = []
     for component in sorted(components, key=lambda value: sorted(value)):

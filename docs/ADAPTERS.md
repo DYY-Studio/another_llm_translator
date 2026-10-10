@@ -298,6 +298,17 @@ Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。�
 
 合并请求使用规范的 Prefix 和 Suffix 包围当前语言的对应 Prompt。需要返回片段引用时，输入在对应文本对象中携带请求内短 `id`，不另发 ID 数组。仅术语请求不携带片段 ID。粗翻为每个请求 Segment 返回一条完整 `segment` 译文记录；概括返回覆盖 `source_segments` 中 `id` 的 `summary` 记录，且出现在 `term` 或 `no_terms` 之前。三项合并时同时返回这些结果，末行只输出一条 `end`。仅补译与概括时返回 `segment` 和 `summary`，不声明术语结果。响应均遵循严格 JSONL。
 
+### 自动术语决策关系校验
+
+`changes` 按完整最终状态检查 [术语组规则](MINIMAL.md#51-术语)，覆盖新增 Alias、
+组关系变更和成员重新启用。新增非法关系返回 `invalid_relationship`；普通决策无法完整
+解决时使用 `needs_review`，自动终审仍必须给出合法最终状态，否则执行失败。
+受保护条目只作为只读证据。草案应用时对实际接受的组合重新检查，未解决的受影响关系拒绝写入。
+在此前阶段的最终状态上，额外以 `containment` 请求复核原文长短包含而译名疑似不一致的组合。
+子串关系只筛选候选，不构成硬冲突；可明确保留独立译法，无法可靠判断则将关联组件恢复到原状态并进入 `needs_review`。
+同一复核组合中发生的修改作为整体建议接受或拒绝；复核不能修改受保护条目，不能通过修改制造新的未确认包含冲突。
+此复核位于可选自动终审之后，仍可产生待审项。当前决策规则版本为 9；旧规则草案须重新生成，不作转换。
+
 ## 2. Document Adapter（Beta）
 
 Document Adapter 是同一格式的导入与导出边界。当前内置 `txt` 与 `epub`；官方目录插件
@@ -353,7 +364,7 @@ def normalize_model_output(
 
 `export_sources` 还会收到宿主项目配置中的 `target_language: str` 和 `target_language_tag: str`。前者是供模型和人阅读的自由文本名称，后者是可选的 BCP 47 输出语言标签；两者职责分离。Adapter 可以忽略、应用到自己的格式元数据，或在标签为空时明确拒绝导出。
 
-宿主不按 Adapter ID 推断语言行为。Document Adapter 插件协议版本为 `12`；旧协议插件会快速失败，不保留旧调用路径。
+宿主不按 Adapter ID 推断语言行为。Document Adapter 插件协议版本为 `13`；旧协议插件会快速失败，不保留旧调用路径。
 
 `render_model_source` 在每个阶段开始时以同一个 File 的 `opaque_state` 和冻结的 `run_options` 生成模型源文。`model_prompt_requirements` 接收完全相同的快照；宿主可据此把不同要求集合拆分到不同 Chunk。`normalize_model_output` 是可选方法；实现时接收相同快照，未实现时宿主原样使用模型文本。要求不得包含源文、项目路径、凭据或动态用户内容。无专属格式要求时返回 `None`。
 
@@ -442,7 +453,7 @@ File 版本与状态记录版本仍必须一致，未声明可读的版本立即
 提供该 File、Segment、目标文本、模式和不透明状态。Adapter 只能在给定 staging
 目录生成相对路径；全部生成并验证成功后，宿主逐文件移动到正式输出目录。
 
-Document Adapter 插件协议当前为版本 12。统一 TXT 导出由宿主改用内置 `txt`
+Document Adapter 插件协议当前为版本 13。统一 TXT 导出由宿主改用内置 `txt`
 Adapter 处理各 File，不调用来源 Adapter，也不解释来源格式状态。
 
 Adapter 缺失、版本不一致、状态损坏、能力不足或运行异常都会终止当前操作。
@@ -547,7 +558,7 @@ schema = 1
 [plugin]
 id = "my-documents"
 version = "1.0.0"
-protocol = 12
+protocol = 14
 entrypoint = "plugin:descriptor"
 ```
 
@@ -568,7 +579,7 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=12,
+        protocol_version=14,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```
@@ -577,16 +588,18 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `12`；每个校验器声明唯一的 `validator_id`、`version`、`label`，并实现接收 `TranslationValidationContext` 的 `validate(context)`。
+翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `14`；每个校验器声明唯一的 `validator_id`、`version`、`label`、`phase`、`scope`，并按执行粒度实现同步或异步校验。
 
-上下文只包含当前 Segment 的源文、候选译文和宿主确定的逐 Segment 术语命中，不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
+上下文包含当前 Segment 的 ID、源文、候选译文、逐 Segment 术语命中，以及可选的宿主 `DecisionService` 和置信度门槛。术语命中包含分类和说明；上下文不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
+
+`phase` 为 `mechanical`、`alignment` 或 `terminology`，宿主按此顺序执行；同层按 ID 排序，完成整层后存在任何 finding 就阻挡后续层。`scope=segment` 使用 `validate(context)`；`scope=response` 使用 `validate_response(contexts)`，输入为按请求顺序排列的完整 Segment 上下文元组，返回以输入 Segment ID 为键、finding 元组为值的字典。手动编辑只执行逐 Segment 校验。
 
 `TranslationValidationMatch.severity` 为 `error` 或 `advisory`。
 
-`error` 必须指向候选译文中的非空范围，使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为 warning。
+`error` 必须指向候选译文中的非空范围；候选译文为空时使用空文本和 `start=end=0`。硬错误使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为 warning。advisory 的 `repairable` 默认 `true`，设为 `false` 时只保存 warning，不进入修复请求；error 必须可修复。
 
 首个真实外部示例是可选的 `plugins/term_validation/` 目录插件，提供
-`preferred_term_usage`；它只检查实际命中的、带推荐译名的术语是否至少出现一次，不要求强制替换。
+`preferred_term_usage`；它先检查实际命中的推荐译名是否缺失，可显式启用 Decision 语义复核。
 
 ```python
 from app.plugin_api import (
@@ -598,6 +611,8 @@ class MyValidator:
     validator_id = "my_validator"
     version = "1.0.0"
     label = "My validator"
+    phase = "mechanical"
+    scope = "segment"
 
     def validate(self, context: TranslationValidationContext):
         return ()
@@ -664,3 +679,49 @@ Preset 仍只记录一个 credential 引用；其环境变量或钥匙串值按�
 上限约束。401/403 只隔离本次执行中的当前 Key，429 冷却并轮换，400/404 或协议、
 配置错误直接失败，不提供 Provider fallback。Run 收尾会按 Key 追加安全审计，绝不
 保存 Key 原文、摘要或跨执行健康状态。
+
+
+## 5. Decision Preset 与服务（实验）
+
+全局 `decision_presets/<preset_id>.json` 保存 `preset_id`、`protocol`、`url`、`model`、
+`credential`、`proxy_url`、`context_window_tokens`、`context_safety_margin_tokens`、`token_safety_factor`、
+`request_timeout_seconds`、`requests_per_minute`、`max_parallel`。
+`protocol` 为 `typesafe` 或 `openai-decisions`；`url` 是含最终 Path 的完整 HTTP(S) URL，
+宿主原样 POST，不推断或拼接路径。URL 不允许凭据、查询参数或 fragment。
+凭据使用现有 environment/keychain 引用，密钥由宿主在请求时读取。
+`proxy_url` 支持无凭据的 HTTP/HTTPS 代理；留空使用默认代理设置。
+`context_window_tokens` 为正整数，`context_safety_margin_tokens` 为非负整数且小于窗口。
+`token_safety_factor` 为有限正数，Example Preset 默认 1.25。
+宿主用现有 Token 估算算法计算完整请求（证据、问题及选项）的输入量，乘以安全系数后向上取整；
+超过窗口减去安全余量时，在发送前明确失败，错误包含估算量、可用容量及传入的 Segment ID。
+仓库附带 TypeSafe 和 OpenAI Decisions Example Preset，分别使用
+[TypeSafe 官方接口](https://api.typesafe.ai/redoc)和
+[OpenAI 官方接口](https://developers.openai.com/api/docs/guides/decisions)。
+
+TypeSafe 将共享证据写入 `state`，问题写入 `questions` 映射，读取 `answers` 映射。
+OpenAI Decisions 将共享证据编码为 JSON 字符串写入 `input`，问题写入带唯一 `name` 的
+`questions` 数组，按名称读取 `answers` 数组。首版只支持 Choice，统一为
+`DecisionQuestion(name, instructions, choices)` 和
+`DecisionAnswer(choice, probabilities, confidence, refused)`。
+插件通过 `await context.decision.choose(state, questions, segment_id=context.segment_id)` 调用，
+可传入按时间排列的 `reference_context` 原文列表；此时 `state` 必须为对象，
+宿主将上文写入证据的 `reference_context`。完整请求超限时从最远上文逐个移除并重新估算，
+直至可发送或上文为空。缩减情况写入日志及 Run 判断记录，请求详情显示实际发送内容。
+不得自行实例化客户端、管理凭据或发送 HTTP 请求。宿主负责限速、重试、取消、诊断和用量。
+空响应、JSON 解析失败、回答缺失或重复、选项错误及非法概率，与网络异常、HTTP 429 和 5xx 共用 `retry.http_max_attempts` 及指数退避；预算耗尽后明确失败。每次尝试记录到诊断及已启用的 Debug 保存中。明确拒答返回 `refused=True`。
+
+`validation.translation` 的 `decision_enabled` 默认 false，`decision_preset` 默认空字符串，
+`decision_confidence_threshold` 默认 0.8；`decision_context_enabled` 默认 false，
+`decision_previous_segments` 默认 1，为非负整数。启用上文时，
+`TranslationValidationContext.previous_source` 提供同一 File、同一分区内前序非空 Segment 的原文。
+推荐译名复核的 `terms` 列出本次提问的术语，`matched_terms` 只保留未提问的其他命中术语，供重叠关系判断。
+推荐译名复核需要安装并选择 `preferred_term_usage`。`decision.preset` 提供通用连接；校验器的 `decision_preset` 为空时继承通用连接，非空时独立覆盖。置信度及上下文设置按校验器独立配置。Run 在 `decision_presets/<preset_id>.json` 保存所有实际使用的连接；同一 Preset 共用客户端与限流。实际连接、校验器绑定、置信度门槛及上文设置参与翻译指纹。
+
+错位校验器 `segment_alignment` 为内置响应级校验器，通过 `validation.translation.validators` 显式启用。`validation.translation.alignment` 的 `decision_preset` 默认空字符串、`confidence_threshold` 默认 0.8、`tail_segments` 默认 3 且必须为正整数。宿主将拆分片段重组后，按请求顺序抽取尾部完整 Segment；证据为 `segments` 配对列表；其中原文和译文均去除 Ruby 标记及注音、保留正文，持久化文本和 finding 定位保持原样。问题按配对顺序命名，选项为 `aligned`、`misaligned`、`uncertain`。不携带历史上文，也不在超限时缩减抽查数量。错位 findings 为 `segment_misaligned`，不确定为不可修复的 advisory `segment_alignment_uncertain`；`matched_source` 记录抽查 Segment ID。两者都覆盖整批，具体保存和修复语义见 [翻译阶段](MINIMAL.md#53-翻译)。
+
+术语插件将同一 Segment 的推荐译名缺失项合并请求，输出 required（需要术语修复）、
+acceptable（无需修复，包括无关日常含义、正确译名及写法一致的合理简称）或 uncertain。请求同时携带本句全部命中术语作为只读参照，
+只为缺失项提问；不同音译或近义名称不能仅凭语义相同判为 acceptable。无法可靠裁定的术语冲突使用 uncertain；
+处理语义见 [翻译阶段](MINIMAL.md#53-翻译)。Run 的 `decision_validation` 保存判断、
+Segment ID、证据摘要、耗时和用量；生成与校验用量合并汇总。人工保存译文只校验、不自动修复，
+判断记录随结果保存。

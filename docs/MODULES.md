@@ -79,7 +79,8 @@ Route 只校验 HTTP 输入并调用共享后端。请求模型集中在 `web_pa
 ### `app/sqlite_storage.py`
 
 项目数据库的唯一持久化实现，负责 schema 初始化/迁移、事务、File/Segment、术语、阶段结果、
-Run 索引和内容概括记录；批量解析应用正文的精确引用，业务副本与持久化载荷分离。调用者通过明确方法读写，不在 route 或阶段模块中直接拼接 SQL。
+Run 索引和内容概括记录；集中保存按摘要值去重的概括源文本快照，读取时还原生成时原文与切片身份。
+批量解析应用正文的精确引用，业务副本与持久化载荷分离。调用者通过明确方法读写，不在 route 或阶段模块中直接拼接 SQL。
 
 ### `app/file_replacement.py`
 
@@ -121,7 +122,7 @@ Run 索引和内容概括记录；批量解析应用正文的精确引用，业�
 
 ### 具体阶段模块
 
-- `stage_translation.py`：翻译 payload、结果校验、翻译校验与修复。
+- `stage_translation.py`：翻译 payload、完整候选批次验收、拆分 Segment 重组、翻译校验与修复。
 - `stage_review.py`：校对/润色的基准选择、accepted/suggested 结果，以及建议应用。
 - `stage_terminology.py`：术语扫描、候选任务、联合片段概括和发布，分别跟踪术语与概括的切片覆盖。
 - `stage_terminology_draft.py`：实验粗翻及联合概括的扫描状态、合并请求与独立结果恢复，分别跟踪各类结果的切片覆盖，按本次响应模式选择 Document Adapter 要求；复用翻译执行器进行译文校验和保存。
@@ -189,17 +190,23 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 
 ### `app/translation_validation.py`
 
-翻译校验协议、内置校验规则、finding 规范化和修复上下文。校验器不拥有 HTTP 重试或结果提交。
+翻译校验协议、内置机械与错位校验、分层门控和 finding 规范化。校验器不拥有 HTTP 重试或结果提交。
+
+### `app/decision.py`
+
+宿主 Decision Preset 校验与加载、两种 HTTP Choice 协议转换、限速、重试和用量记录，
+按上下文预算缩减调用方提供的上文，向实时诊断报告请求生命周期。
+通过公共 DecisionService 提供结构化决策调用，不拥有业务规则或结果提交。
 
 ## 8. 术语
 
-- `term_library.py`：术语规范化、候选合并、发布库、override 和组关系。
+- `term_library.py`：术语规范化、候选合并、发布库、override 和组关系；统一检测组主 Alias 重叠，并记录归组移除的 Alias 供发布边界同步。
 - `term_exchange.py`：JSON/CSV 交换格式的完整校验、导入与导出。
 - `term_matching.py`：运行时逐 Segment 匹配和注入选择，不持久化 occurrence。
 - `term_decision.py`：自动术语决策执行入口和阶段编排。
 - `term_decision_batches.py`：批次规划与关联项分组。
 - `term_decision_protocol.py`：模型输入输出的解析与严格校验。
-- `term_decision_rules.py`：确定性决策、冲突和保护规则。
+- `term_decision_rules.py`：确定性决策、冲突和保护规则，以及供模型复核的包含关系候选。
 - `term_decision_drafts.py`：审查草案、应用、回滚和失效条件。
 
 这些模块共享同一个已发布术语库。自动决策只能生成草案，不能绕过 `term_library.py` 的人工
@@ -213,7 +220,8 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 - `prompt_library.py`：用户级 Prompt 条目及项目载入边界。
 - `credentials.py`：环境变量和系统钥匙串访问，不向持久化层暴露密钥正文。
 - `server_config.py`：监听、局域网共享与认证设置。
-- `diagnostics.py`：本次运行的结构化诊断事件与摘要。
+- `request_overview.py`：从宿主消息提取本次 LLM 请求的业务输入、局部 ID 映射与规范化正文，供实时诊断和 Debug 快照使用。
+- `diagnostics.py`：本次运行的结构化诊断事件与摘要，分别统计 LLM 与 Decision 请求并保留有界详情。
 - `logging_utils.py`：普通日志上下文和敏感字段边界。
 - `i18n.py`：CLI/后端可见文案与语言选择。
 - `errors.py`：可预期应用错误的公共基类。

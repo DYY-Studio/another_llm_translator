@@ -295,6 +295,7 @@ async def test_aggregation_uses_requested_language_adapter_requirements_and_stan
         "content_summary",
         prompt_middle_digests(project, "content_summary"),
     )
+    assert manifest["summary_boundaries"] == [{"file_id": "F0001", "part_id": "a"}]
 
 
 @pytest.mark.asyncio
@@ -1035,7 +1036,8 @@ def test_multiple_fragments_are_aggregated_and_keep_references(tmp_path: Path) -
     full = read_content_summaries(project, kind="full", status="completed")
     assert full[0]["text"] == "整合后的内容概括。"
     assert full[0]["refs"] == ["F0001-S000001", "F0001-S000002"]
-    assert len(full[0]["provenance"]["source_ranges"]) == 2
+    assert len(full[0]["provenance"]["dependencies"]) == 2
+    assert "source_ranges" not in full[0]["provenance"]
     payload = json.loads(requests[0]["messages"][1]["content"])
     assert payload["summaries"] == [
         {"id": "1", "text": "Alice 出现。"},
@@ -1231,6 +1233,7 @@ def test_failed_aggregation_keeps_previous_full_result(tmp_path: Path) -> None:
             {
                 "segment_id": segment["segment_id"],
                 "source": segment["source"],
+                "source_digest": _digest(segment["source"]),
             }
         )
     write_content_summary(

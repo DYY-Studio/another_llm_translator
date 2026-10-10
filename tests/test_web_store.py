@@ -237,15 +237,6 @@ def test_materialize_alias_restores_removed_entry_and_preserves_term_data(
     store = WebStore(project)
     store.save_term(
         {
-            "source": "Alice",
-            "preferred_translation": "爱丽丝",
-            "category": "人物",
-            "description": "主角",
-            "aliases": ["Alicia"],
-        }
-    )
-    store.save_term(
-        {
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
             "category": "别名条目",
@@ -254,7 +245,16 @@ def test_materialize_alias_restores_removed_entry_and_preserves_term_data(
         }
     )
     removed = store.remove_terms({"normalized": ["alicia"]})
-    before = removed["terms_revision"]
+    store.save_term(
+        {
+            "source": "Alice",
+            "preferred_translation": "爱丽丝",
+            "category": "人物",
+            "description": "主角",
+            "aliases": ["Alicia"],
+        }
+    )
+    before = store.terms()["terms_revision"]
     assert next(item for item in removed["terms"] if item["normalized"] == "alicia")[
         "disabled"
     ]
@@ -288,8 +288,9 @@ def test_materialize_alias_restores_removed_entry_into_owner_group(
     project = create_web_store_project(tmp_path, "Alice Prime Alice Alicia")
     store = WebStore(project)
     store.save_term({"source": "Alice Prime"})
-    store.save_term({"source": "Alice", "aliases": ["Alicia"]})
     store.save_term({"source": "Alicia", "preferred_translation": "艾丽西亚"})
+    store.remove_terms({"normalized": ["alicia"]})
+    store.save_term({"source": "Alice", "aliases": ["Alicia"]})
     store.group_related_terms(
         {
             "normalized": "alice prime",
@@ -298,7 +299,6 @@ def test_materialize_alias_restores_removed_entry_into_owner_group(
             "confirm": True,
         }
     )
-    store.remove_terms({"normalized": ["alicia"]})
 
     restored = store.materialize_term({"normalized": "alice", "alias": "Alicia"})
     rows = {item["normalized"]: item for item in restored["terms"]}
@@ -441,7 +441,7 @@ def test_term_group_member_leave_rejects_primary_and_stale_without_writing(
     assert read_json(project, project / "terminology" / "overrides.json") == before_overrides
 
 
-def test_term_group_member_leave_preserves_independence_and_records_alias_claim(
+def test_term_group_member_leave_preserves_independence_after_alias_removal(
     tmp_path: Path,
 ) -> None:
     project = create_web_store_project(tmp_path, "John John Smith")
@@ -454,10 +454,8 @@ def test_term_group_member_leave_preserves_independence_and_records_alias_claim(
     left = store.leave_term_group({"normalized": "john smith", "confirm": True})
     rows = {item["normalized"]: item for item in left["terms"]}
     assert rows["john smith"]["group_primary"] is None
-    assert any(
-        claim["entry"] == "john smith" and claim["alias"] == "John Smith"
-        for claim in rows["john smith"]["conflicts"]["group_claims"]
-    )
+    assert rows["john"]["aliases"] == []
+    assert rows["john smith"]["conflicts"]["group_claims"] == []
 
     saved = store.save_term(
         {

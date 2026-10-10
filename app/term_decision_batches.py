@@ -565,7 +565,7 @@ def _make_payload(
     evidence: dict[str, dict[str, Any]],
     conflicts: dict[str, dict[str, list[Any]]] | None = None,
 ) -> dict[str, Any]:
-    include_disabled = phase in {"consistency", "final_review"}
+    include_disabled = phase in {"consistency", "final_review", "containment"}
     request_evidence = _request_evidence(
         focus,
         anchors,

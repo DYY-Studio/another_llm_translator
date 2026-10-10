@@ -1,0 +1,17 @@
+{
+  "preset_id": "typesafe-example",
+  "protocol": "typesafe",
+  "url": "https://api.typesafe.ai/v1/systemone",
+  "model": "jev-latest",
+  "credential": {
+    "kind": "environment",
+    "name": "TYPESAFE_API_KEY"
+  },
+  "proxy_url": "",
+  "context_window_tokens": 32000,
+  "context_safety_margin_tokens": 512,
+  "token_safety_factor": 1.25,
+  "request_timeout_seconds": 60,
+  "requests_per_minute": 0,
+  "max_parallel": 1
+}

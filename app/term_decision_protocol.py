@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-DECISION_RULES_VERSION = 7
+DECISION_RULES_VERSION = 9
 DECISION_ACTIONS = frozenset({"keep", "update", "disable", "needs_review"})
 SIMPLE_ACTION_KEYS = frozenset({"type", "normalized", "action", "reason"})
 PATCH_FIELDS = frozenset(
@@ -79,7 +79,7 @@ _SEMANTIC_RETRY_GUIDANCE = {
         "invisible_group_primary": "group_primary 只能指向请求中可见且有效的根术语，或使用 null。",
         "self_alias": "aliases 不得包含当前术语自身的 source 或 normalized。",
         "no_op_patch": "changes 必须实际修改术语状态。",
-        "invalid_relationship": "请修正 alias 与 group_primary 关系，避免自指、成员指向、禁用目标、未知目标或循环。",
+        "invalid_relationship": "请修正 alias 与 group_primary 关系，避免自指、成员指向、禁用目标、未知目标、循环或主术语 Alias 与启用成员名称重叠。",
         "needs_review_forbidden": "终审必须明确敲定，action 不得使用 needs_review；请在 keep、update 或 disable 中选择一个最终决定。",
     },
     "en": {
@@ -99,7 +99,7 @@ _SEMANTIC_RETRY_GUIDANCE = {
         "invisible_group_primary": "group_primary may name only a visible valid root term, or be null.",
         "self_alias": "aliases must not contain the current term's source or normalized value.",
         "no_op_patch": "changes must make an actual change to the term state.",
-        "invalid_relationship": "Fix alias and group_primary relationships; avoid self-reference, member targets, disabled or unknown targets, and cycles.",
+        "invalid_relationship": "Fix alias and group_primary relationships; avoid self-reference, member targets, disabled or unknown targets, cycles, and root aliases overlapping active member names.",
         "needs_review_forbidden": "The final review must settle every target; action must not be needs_review. Choose a final keep, update, or disable decision.",
     },
 }
@@ -121,7 +121,9 @@ _PROTOCOL = {
         "证据事实。aliases 只能使用本次 terms[]/anchors[] 中可见的 source/alias 原文，不得虚构"
         "或重复。group_primary "
         "只能为 null 或本次可见、启用且自身 group_primary=null 的根术语 normalized。"
-        "禁止自指、指向 disabled 术语、成员指向成员以及任何链或循环。update 会重新启用术语；"
+        "禁止自指、指向 disabled 术语、成员指向成员以及任何链或循环。"
+        "主术语 aliases 不得与启用组成员的 source 或 aliases 规范化后相同；可保留成员并移除主术语重复 alias，"
+        "或禁用成员并保留主术语 alias。无法完整解决时使用 needs_review。update 会重新启用术语；"
         "空 changes 只用于第二阶段明确解决第一阶段 needs_review，或重新启用"
         "当前 disabled 术语。其他情形至少修改一个字段。keep 保留上一阶段有效裁决；第二阶段"
         "只有显式 update、disable、needs_review 才覆盖第一阶段。无法完整表达同组 alias 或"
@@ -150,7 +152,10 @@ _PROTOCOL = {
         "evidence, or visible anchors and must not add unsupported facts. aliases may use "
         "only source/alias spellings visible in this request. group_primary is null or the normalized "
         "of a visible enabled root whose group_primary is null. It must not self-reference, target a "
-        "disabled term or another member, or form a chain or cycle. update enables the term. Empty changes "
+        "disabled term or another member, or form a chain or cycle. Root aliases must not equal the normalized source "
+        "or aliases of active group members. Keep the member and remove the overlapping root alias, or disable "
+        "the member and keep the root alias; use needs_review when the complete change cannot be expressed. "
+        "update enables the term. Empty changes "
         "is allowed only in phase two to resolve a prior needs_review explicitly, or to re-enable a "
         "currently disabled term. keep preserves the prior-phase disposition; only an explicit phase-two "
         "update, disable, or needs_review overrides it. Use needs_review when a complete related change "
@@ -180,7 +185,9 @@ _FINAL_REVIEW_PROTOCOL = {
         "description 的非空改写必须由当前说明、evidence 中的源文样本或可见 anchors 支持，不得增加无证据事实。"
         "aliases 只能使用本次 terms[]/anchors[] 中可见的 source/alias 原文，不得虚构或重复。"
         "group_primary 只能为 null 或本次可见、启用且自身 group_primary=null 的根术语 normalized；禁止自指、指向 disabled 术语、"
-        "成员指向成员以及任何链或循环。keep 表示确认当前术语状态并清除此前 needs_review，不修改术语状态。"
+        "成员指向成员以及任何链或循环。主术语 aliases 不得与启用组成员的 source 或 aliases 规范化后相同；"
+        "可保留成员并移除主术语重复 alias，或禁用成员并保留主术语 alias。"
+        "keep 表示确认当前术语状态并清除此前 needs_review，不修改术语状态。"
         "update 必须实际修改术语状态，并会重新启用术语；如果当前术语 disabled，空 changes 仅用于重新启用，其他 update 的 changes 不得为空且不得是 no-op。"
         "仍存在 category 或 preferred_translation 冲突时不得 keep；update 必须为每个冲突字段提供非空决议，disable 则通过禁用术语解决冲突。"
         "disable 表示禁用术语。证据不足时也必须在 keep、update、disable 中选择最可靠的最终决定，禁止输出 needs_review。"
@@ -198,7 +205,9 @@ _FINAL_REVIEW_PROTOCOL = {
         "group_primary use strings or JSON null; aliases is a string array. A non-empty description rewrite must be supported by the current "
         "description, source samples in evidence, or visible anchors and must not add unsupported facts. aliases may use only source/alias "
         "spellings visible in this request. group_primary is null or the normalized of a visible enabled root whose group_primary is null; "
-        "it must not self-reference, target a disabled term or another member, or form a chain or cycle. keep confirms the current term state "
+        "it must not self-reference, target a disabled term or another member, or form a chain or cycle. "
+        "Root aliases must not equal the normalized source or aliases of active group members. Keep the member "
+        "and remove the overlapping root alias, or disable the member and keep the root alias. keep confirms the current term state "
         "and clears the prior needs_review status without changing the term. update must make an actual state change and re-enables the term; "
         "if the current term is disabled, empty changes are allowed only to re-enable it. Other update changes must be non-empty and not a no-op. "
         "If category or preferred_translation conflicts remain, keep is invalid; update must provide a non-empty decision for every conflicted field, "

@@ -698,7 +698,7 @@ def test_web_project_list_reports_repair_for_missing_prompt(
     assert listed.json()["projects"][0]["repair_needed"] is True
 
 
-@pytest.mark.parametrize("schema_version", ["3", "4", None])
+@pytest.mark.parametrize("schema_version", ["3", "4", "5", None])
 def test_web_project_list_checks_schema_read_only_while_project_is_locked(
     tmp_path: Path, schema_version: str | None
 ) -> None:
@@ -1532,6 +1532,38 @@ def test_web_open_project_rejects_unsupported_storage_schema(
     assert "schema_version" in opened.json()["error"]
 
 
+def test_web_lists_and_opens_v5_project_with_silent_upgrade(tmp_path: Path) -> None:
+    from tests.test_sqlite_storage import _seed_v5_summary
+
+    projects_root, project = make_project(tmp_path)
+    _seed_v5_summary(project)
+    client = TestClient(create_app(projects_root=projects_root))
+    backups = project / "snapshots" / "storage_migrations"
+
+    listed = client.get("/api/v1/projects")
+    assert listed.status_code == 200
+    assert listed.json()["projects"][0]["repair_needed"] is True
+    assert not backups.exists()
+
+    opened = client.post("/api/v1/projects/open", json={"path": str(project)})
+    assert opened.status_code == 200
+    assert opened.json()["warnings"] == []
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == str(sqlite_storage.SCHEMA_VERSION)
+    initial_backups = list(backups.glob("*.sqlite"))
+    assert len(initial_backups) == 1
+
+    listed = client.get("/api/v1/projects")
+    assert listed.status_code == 200
+    assert listed.json()["projects"][0]["repair_needed"] is False
+    reopened = client.post("/api/v1/projects/open", json={"path": str(project)})
+    assert reopened.status_code == 200
+    assert reopened.json()["warnings"] == []
+    assert list(backups.glob("*.sqlite")) == initial_backups
+
+
 def test_web_open_project_reports_backup_after_read_triggered_upgrade(
     tmp_path: Path,
 ) -> None:
@@ -1748,8 +1780,9 @@ def test_web_creates_project_from_uploaded_files(tmp_path: Path) -> None:
     assert [item["validator_id"] for item in validators] == [
         "japanese_kana",
         "korean_hangul",
-        "preferred_term_usage",
         "source_text_residual",
+        "segment_alignment",
+        "preferred_term_usage",
     ]
 
 
@@ -2855,16 +2888,9 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
 ) -> None:
     projects_root, _ = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
-    for payload in (
-        {
-            "source": "Alice",
-            "preferred_translation": "爱丽丝",
-            "category": "人物",
-            "description": "主角",
-            "aliases": ["Alicia"],
-            "disabled": False,
-        },
-        {
+    assert client.post(
+        "/api/v1/projects/sample/terms",
+        json={
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
             "category": "别名条目",
@@ -2872,13 +2898,23 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
             "aliases": ["Alicia Jr"],
             "disabled": False,
         },
-    ):
-        assert client.post("/api/v1/projects/sample/terms", json=payload).status_code == 200
+    ).status_code == 200
     removed = client.post(
         "/api/v1/projects/sample/terms/remove",
         json={"normalized": ["alicia"]},
     )
     assert removed.status_code == 200
+    assert client.post(
+        "/api/v1/projects/sample/terms",
+        json={
+            "source": "Alice",
+            "preferred_translation": "爱丽丝",
+            "category": "人物",
+            "description": "主角",
+            "aliases": ["Alicia"],
+            "disabled": False,
+        },
+    ).status_code == 200
     restored = client.post(
         "/api/v1/projects/sample/terms/materialize",
         json={"normalized": "alice", "alias": "Alicia"},
@@ -3879,7 +3915,7 @@ async def test_web_task_manager_forwards_force_and_fingerprint_reuse(
     _, project = make_project(tmp_path)
     store = WebStore(project)
     segment_id = store.overview()["segments"][0]["segment_id"]
-    store.save_translation({"segment_id": segment_id, "text": "一"})
+    await asyncio.to_thread(store.save_translation, {"segment_id": segment_id, "text": "一"})
     prompt_path = project / "prompts" / "translation.zh-CN.middle.txt"
     prompt_path.write_text(
         prompt_path.read_text(encoding="utf-8") + "\nchanged",

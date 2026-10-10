@@ -47,7 +47,9 @@ def test_built_distributions_contain_every_project_prompt(tmp_path: Path) -> Non
     )
     assert result.returncode == 0
 
-    expected = {f"prompts/{name}" for name in PROMPT_NAMES}
+    expected = {f"prompts/{name}" for name in PROMPT_NAMES} | {
+        "decision_presets/typesafe-example.json", "decision_presets/openai-example.json",
+    }
     wheel_path = next(tmp_path.glob("*.whl"))
     with zipfile.ZipFile(wheel_path) as archive:
         wheel_names = archive.namelist()

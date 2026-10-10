@@ -254,6 +254,10 @@ checkout 位于外部 APFS 卷且 app 启动停在 Python 初始化，可将 `.a
 
 ## 6. 调试与诊断
 
+启用 Debug 时，每次 LLM / Decision 请求尝试的原始数据及规范化概览保存在 Run 的
+`payloads/`，概览使用 `<request_id>-A<attempt>.overview.json`；`attempts.jsonl` 提供请求索引。
+概览只用于诊断，不参与阶段结果采纳。
+
 普通日志用于查看启动、请求摘要、重试和失败原因。Debug 模式会额外保存完整请求、响应和
 执行诊断，可能包含 Prompt、源文或模型输出；只能在明确的本地诊断场景启用，完成后应关闭，
 不得提交生成的数据。
@@ -308,3 +312,14 @@ pytest 探针不替代真实 PBS 源归档探针或 packaged `.app` 外部插件
 使用只读源连接的 SQLite Backup API 获取一致基线，在同一磁盘的临时工作副本执行写入；不调用真实模型。首次应用与相同结果复用分别计时，写入从同一基线重建，报告首次耗时和三次重复测量的中位数。
 
 整理和导出回归检查当前阶段状态、必要父链、Run 新增/复用计数及输出内容；EPUB 内容比较固定修改时间，并检查传入定位状态未被修改。参数上限回归使用 SQLite 的 999 参数限制。性能测量、剖析和用户项目副本保留在临时分析目录，不提交到仓库。
+
+### 项目数据库升级验证
+
+数据库升级前备份位于项目的 `snapshots/storage_migrations/`。SQLite v5→v6 将概括源文本集中
+去重，精简摘要依赖和 Run 范围副本，并在事务提交后压缩数据库。v5 项目不会重新执行 EPUB
+运行协议升级，也不会改变已有 Run 的状态。
+
+使用项目临时副本验证打开时升级，比较迁移前后的摘要 ID、源范围、历史 Markdown 导出及过期判断，
+检查 `PRAGMA integrity_check`、文件体积与升级前备份；迁移失败应保留旧 schema 和记录。
+若提交后快照整理或压缩失败，错误会说明数据库已升级及备份位置。
+存储回归使用 `python -m pytest -q tests/test_sqlite_storage.py tests/test_summary_provenance.py`。

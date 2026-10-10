@@ -413,7 +413,9 @@ async def aggregate_summaries(
             selected_count=len(checked),
             requested_count=len(checked),
             reused_count=0,
-            details={"prompt_language": language, "summary_boundaries": source_ranges},
+            details={"prompt_language": language, "summary_boundaries": [
+                {"file_id": file_id, "part_id": part_id} for file_id, part_id in boundaries
+            ]},
             prompt_variants=prompt_variants,
             prompt_variant_requirements=prompt_variant_requirements,
         )

@@ -1,3 +1,4 @@
+import type { RequestOverviewSnapshot } from "./requestOverview";
 export type Stage =
   | "overview"
   | "diagnostics"
@@ -90,6 +91,7 @@ export interface ResultView {
   suggested_text?: string | null;
   reason?: string | null;
   validation_status?: "passed" | "warning";
+  validation_findings?: Array<{ match_type: string }>;
   generation_origin?: "terminology_draft" | null;
 }
 
@@ -301,6 +303,8 @@ export interface PromptLibraryEntry {
 }
 
 export interface TranslationValidatorSummary {
+  phase: "mechanical" | "alignment" | "terminology";
+  scope: "segment" | "response";
   validator_id: string;
   version: string;
   label: string;
@@ -362,6 +366,11 @@ export type DiagnosticsRequestStatus =
   | "interrupted";
 
 export interface DiagnosticsRequestSummary {
+  overview?: RequestOverviewSnapshot | null;
+  overview_truncated?: boolean;
+  request_kind: "llm" | "decision";
+  segment_id: string | null;
+  question_count: number;
   timestamp: string;
   finished_at: string | null;
   project: string | null;
@@ -384,7 +393,31 @@ export interface DiagnosticsRequestSummary {
   provider_error_status: number | null;
 }
 
+export interface DecisionActivity {
+  task_id: string | null;
+  project: string | null;
+  stage: string | null;
+  model: string;
+  total_requests: number;
+  active_requests: number;
+  completed: number;
+  failed: number;
+  interrupted: number;
+  questions: number;
+  pending: number;
+  http_errors: number;
+  retry_count: number;
+  rate_limit_waiting_requests: number;
+  requests_per_second: number | null;
+  average_latency_ms: number | null;
+  p95_latency_ms: number | null;
+}
+
 export interface DiagnosticsResponse {
+  decision: {
+    activities: DecisionActivity[];
+    metrics: Pick<DecisionActivity, "total_requests" | "active_requests" | "http_errors" | "retry_count" | "rate_limit_waiting_requests" | "average_latency_ms" | "p95_latency_ms">;
+  };
   metrics: {
     project: string | null;
     stage: string | null;
@@ -425,6 +458,13 @@ export interface DiagnosticsResponse {
 }
 
 export interface DiagnosticsRequestDetail {
+  overview: RequestOverviewSnapshot | null;
+  overview_truncated: boolean;
+  request_kind: "llm" | "decision";
+  segment_id: string | null;
+  question_count: number;
+  request_body: string | null;
+  request_body_truncated: boolean;
   timestamp: string;
   project: string | null;
   stage: string | null;
@@ -537,6 +577,7 @@ export interface HistoricalDebugAttempt {
   error_payload: HistoricalPayloadStatus | HistoricalDebugPayload;
   request?: HistoricalDebugPayload;
   response?: HistoricalDebugPayload;
+  overview?: HistoricalDebugPayload;
 }
 
 export interface HistoricalRunRequest {
@@ -908,6 +949,7 @@ export interface ProjectConfig {
     encoding_confidence_threshold: number;
     fallback_encoding: string;
   };
+  decision: { preset: string };
   llm: {
     preset: string;
     preset_terminology: string;
@@ -953,6 +995,12 @@ export interface ProjectConfig {
   validation: {
     translation: {
       validators: string[];
+      alignment: { decision_preset: string; confidence_threshold: number; tail_segments: number };
+      decision_enabled: boolean;
+      decision_preset: string;
+      decision_confidence_threshold: number;
+      decision_context_enabled: boolean;
+      decision_previous_segments: number;
       max_retry_attempts: number;
       exhausted_mode: "fail" | "warning";
     };
@@ -984,6 +1032,29 @@ export interface AdapterCapabilities {
   max_output_tokens: boolean;
   streaming: "required" | "optional" | "unsupported";
   connection: { base_url: string; credential: LLMPreset["credential"]; proxy_source: "preset" | "connection" } | null;
+}
+
+export interface DecisionPreset {
+  preset_id: string;
+  protocol: "typesafe" | "openai-decisions";
+  url: string;
+  model: string;
+  proxy_url: string;
+  credential: { kind: "environment" | "keychain"; name: string };
+  context_window_tokens: number;
+  context_safety_margin_tokens: number;
+  token_safety_factor: number;
+  request_timeout_seconds: number;
+  requests_per_minute: number;
+  max_parallel: number;
+}
+
+export interface DecisionPresetSummary {
+  preset_id: string;
+  protocol?: string;
+  model?: string;
+  valid: boolean;
+  error?: string;
 }
 
 export interface LLMPresetSummary {

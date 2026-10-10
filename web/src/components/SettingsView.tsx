@@ -2,16 +2,18 @@ import { Fragment, useLayoutEffect, useEffect, useId, useMemo, useRef, useState,
 import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import { openExternalUrl } from "../native";
-import type { AdapterCapabilities, CredentialSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
+import type { AdapterCapabilities, CredentialSummary, DecisionPreset, DecisionPresetSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
 import { ChatGPTSettings, type ChatGPTConnectionSummary } from "./ChatGPTSettings";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
 import { StorageView } from "./StorageView";
 import { Icon } from "./Icons";
+import { Modal } from "./Modal";
+import { ConfirmDialog } from "./TermDialogs";
 
 type ContextStage = keyof ProjectConfig["context"];
 type ConfigScope = "project" | "global";
-type SettingsSection = "config" | "prompts" | "presets" | "adapters" | "credentials" | "chatgpt" | "server" | "storage";
+type SettingsSection = "config" | "prompts" | "presets" | "decisions" | "adapters" | "credentials" | "chatgpt" | "server" | "storage";
 
 interface AdapterRow {
   adapter_id: string;
@@ -39,7 +41,7 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
     }
   }, [focusField, project]);
   const activeScope: ConfigScope = project ? scope : "global";
-  const globalSections: SettingsSection[] = ["presets", "adapters", "credentials", "chatgpt", "server", "storage"];
+  const globalSections: SettingsSection[] = ["presets", "decisions", "adapters", "credentials", "chatgpt", "server", "storage"];
   useEffect(() => {
     if (activeScope === "project" && globalSections.includes(section)) {
       setSection("config");
@@ -70,6 +72,7 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
           <button className={section === "config" ? "active" : ""} onClick={() => setSection("config")}>{translate("settings.config", language)}</button>
           <button className={section === "prompts" ? "active" : ""} onClick={() => setSection("prompts")}>Prompt</button>
           {activeScope === "global" && <button className={section === "presets" ? "active" : ""} onClick={() => setSection("presets")}>LLM Preset</button>}
+          {activeScope === "global" && <button className={section === "decisions" ? "active" : ""} onClick={() => setSection("decisions")}>Decision Preset</button>}
           {activeScope === "global" && <button className={section === "adapters" ? "active" : ""} onClick={() => setSection("adapters")}>LLM Adapter</button>}
           {activeScope === "global" && <button className={section === "credentials" ? "active" : ""} onClick={() => setSection("credentials")}>{translate("credentials.title", language)}</button>}
           {activeScope === "global" && <button className={section === "chatgpt" ? "active" : ""} onClick={() => setSection("chatgpt")}>ChatGPT Plan</button>}
@@ -81,6 +84,7 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
         {section === "config" && <ConfigSettings project={project} scope={activeScope} language={language} focusField={activeScope === "project" ? focusField : null} onFocusConsumed={onFocusConsumed} />}
         {section === "prompts" && <PromptSettings project={project} scope={activeScope} language={language} />}
         {section === "presets" && <PresetSettings language={language} />}
+        {section === "decisions" && <DecisionPresetSettings language={language} />}
         {section === "adapters" && <AdapterSettings language={language} />}
         {section === "chatgpt" && <ChatGPTSettings language={language} />}
         {section === "credentials" && <CredentialsSettings language={language} />}
@@ -94,6 +98,7 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
 function ConfigSettings({ project, scope, language, focusField, onFocusConsumed }: { project: string; scope: ConfigScope; language: Language; focusField: SettingsField | null; onFocusConsumed: () => void }) {
   const [config, setConfig] = useState<ProjectConfig | null>(null);
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
+  const [decisionPresets, setDecisionPresets] = useState<DecisionPresetSummary[]>([]);
   const [validators, setValidators] = useState<TranslationValidatorSummary[]>([]);
   const [message, setMessage] = useState("");
   const [error, setError] = useState<unknown>(null);
@@ -106,15 +111,17 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
 
   async function load() {
     const revision = ++loadRevision.current;
-    const [configResponse, presetResponse, validatorResponse] = await Promise.all([
+    const [configResponse, presetResponse, validatorResponse, decisionResponse] = await Promise.all([
       api<{ config: Record<string, unknown> }>(configPath),
       api<{ presets: LLMPresetSummary[] }>("/api/v1/global/presets"),
       api<{ validators: TranslationValidatorSummary[] }>("/api/v1/translation-validators"),
+      api<{ presets: DecisionPresetSummary[] }>("/api/v1/global/decision-presets"),
     ]);
     if (revision !== loadRevision.current) return;
     setConfig(configResponse.config as unknown as ProjectConfig);
     setPresets(presetResponse.presets);
     setValidators(validatorResponse.validators);
+    setDecisionPresets(decisionResponse.presets);
   }
 
   useEffect(() => {
@@ -215,8 +222,17 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
         label: validatorId,
         plugin_id: "",
         plugin_version: "",
+        phase: "unavailable",
       })),
-  ].sort((left, right) => left.validator_id.localeCompare(right.validator_id));
+  ];
+  const validatorPhases = ["mechanical", "alignment", "terminology", "unavailable"] as const;
+  function decisionPresetField(value: string, onChange: (value: string) => void, inherit = true) {
+    return <Field label="Decision Preset"><select value={value} onChange={(event) => onChange(event.target.value)}>
+      <option value="">{translate(inherit ? "settings.useGlobalPreset" : "decision.select", language)}</option>
+      {value && !decisionPresets.some((item) => item.preset_id === value && item.valid) && <option value={value}>{value} {translate("preset.credentialCurrent", language)}</option>}
+      {decisionPresets.filter((item) => item.valid).map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}
+    </select></Field>;
+  }
   const contextLabels: Array<[ContextStage, string]> = [
     ["terminology", translate("stage.terminology", language)],
     ["translation", translate("stage.translation", language)],
@@ -270,6 +286,9 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <NumberField label={translate("settings.tempProofreading", language)} value={config.llm.temperature_proofreading} min={0} step={0.1} disabled={!supportsTemperature("proofreading")} help={translate(supportsTemperature("proofreading") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_proofreading = value; })} />
           <NumberField label={translate("settings.tempPolishing", language)} value={config.llm.temperature_polishing} min={0} step={0.1} disabled={!supportsTemperature("polishing")} help={translate(supportsTemperature("polishing") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_polishing = value; })} />
         </ConfigSection>
+        <ConfigSection title={translate("settings.decisionConnection", language)} description={translate("settings.decisionConnectionHint", language)}>
+          {decisionPresetField(config.decision.preset, (value) => update((draft) => { draft.decision.preset = value; }), false)}
+        </ConfigSection>
         <ConfigSection title={translate("settings.execution", language)} description={translate("settings.executionHint", language)}>
           <Field label={translate("settings.schedulingMode", language)} help={translate("settings.schedulingModeHint", language)}><select value={config.execution.scheduling_mode} onChange={(event) => update((draft) => { draft.execution.scheduling_mode = event.target.value as ProjectConfig["execution"]["scheduling_mode"]; })}><option value="ordered_by_file">{translate("settings.orderedByFile", language)}</option><option value="parallel">{translate("settings.parallel", language)}</option></select></Field>
           <ToggleField label={translate("settings.splitOversized", language)} checked={config.chunking.allow_split_oversized_segment} help={translate("settings.splitOversizedHint", language)} onChange={(value) => update((draft) => { draft.chunking.allow_split_oversized_segment = value; })} />
@@ -290,7 +309,9 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <Field label={translate("settings.anchorOverflowMode", language)} help={translate("settings.anchorOverflowModeHint", language)}><select value={config.terminology_decision.anchor_overflow_mode} onChange={(event) => update((draft) => { draft.terminology_decision.anchor_overflow_mode = event.target.value as ProjectConfig["terminology_decision"]["anchor_overflow_mode"]; })}><option value="error">{translate("settings.anchorOverflowError", language)}</option><option value="trim">{translate("settings.anchorOverflowTrim", language)}</option><option value="compact">{translate("settings.anchorOverflowCompact", language)}</option></select></Field>
         </ConfigSection>
         <ConfigSection title={translate("settings.validation", language)} description={translate("settings.validationHint", language)}>
-          {validatorRows.map((validator) => {
+          {validatorPhases.filter((phase) => validatorRows.some((item) => item.phase === phase)).map((phase) => <div className="validator-settings-group" key={phase}>
+            <h3>{translate(`settings.validationPhase.${phase}`, language)}</h3>
+            <div className="config-grid">{validatorRows.filter((item) => item.phase === phase).map((validator) => {
             const installed = Boolean(validator.plugin_id);
             const label = validator.validator_id === "japanese_kana"
               ? translate("settings.japaneseKana", language)
@@ -300,11 +321,11 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
                   ? translate("settings.sourceTextResidual", language)
                   : validator.validator_id === "preferred_term_usage"
                     ? translate("settings.preferredTermUsage", language)
-                    : validator.label;
+                    : validator.validator_id === "segment_alignment" ? translate("settings.segmentAlignment", language) : validator.label;
             const help = installed
               ? `${validator.validator_id} · ${validator.plugin_id} ${validator.plugin_version}`
               : translate("settings.validatorUnavailable", language);
-            return <ToggleField
+            const toggle = <ToggleField
               key={validator.validator_id}
               label={label}
               checked={configuredValidatorIds.has(validator.validator_id)}
@@ -314,9 +335,33 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
                 if (value) selected.add(validator.validator_id);
                 else selected.delete(validator.validator_id);
                 draft.validation.translation.validators = [...selected].sort();
+                if (validator.validator_id === "preferred_term_usage" && !value) draft.validation.translation.decision_enabled = false;
               })}
             />;
-          })}
+            if (validator.validator_id === "segment_alignment") return <div key={validator.validator_id} className="validator-settings-group">
+              {toggle}
+              {configuredValidatorIds.has(validator.validator_id) && <div className="config-grid validator-settings-options">
+                {decisionPresetField(config.validation.translation.alignment.decision_preset, (value) => update((draft) => { draft.validation.translation.alignment.decision_preset = value; }))}
+                <NumberField label={translate("decision.threshold", language)} value={config.validation.translation.alignment.confidence_threshold} min={0} max={1} step={0.05} onChange={(value) => update((draft) => { draft.validation.translation.alignment.confidence_threshold = value; })} />
+                <NumberField label={translate("settings.alignmentTailSegments", language)} help={translate("settings.alignmentTailSegmentsHint", language)} value={config.validation.translation.alignment.tail_segments} min={1} step={1} onChange={(value) => update((draft) => { draft.validation.translation.alignment.tail_segments = value; })} />
+              </div>}
+            </div>;
+            if (validator.validator_id !== "preferred_term_usage") return toggle;
+            return <div key={validator.validator_id} className="validator-settings-group">
+              {toggle}
+              {installed && configuredValidatorIds.has(validator.validator_id) && <div className="config-grid validator-settings-options">
+                <ToggleField className="grid-span" label={translate("decision.review", language)} checked={config.validation.translation.decision_enabled} onChange={(value) => update((draft) => { draft.validation.translation.decision_enabled = value; })} help={translate("decision.reviewHint", language)} />
+                {config.validation.translation.decision_enabled && <>
+                  {decisionPresetField(config.validation.translation.decision_preset, (value) => update((draft) => { draft.validation.translation.decision_preset = value; }))}
+                  <NumberField label={translate("decision.threshold", language)} value={config.validation.translation.decision_confidence_threshold} min={0} max={1} step={0.05} onChange={(value) => update((draft) => { draft.validation.translation.decision_confidence_threshold = value; })} />
+                  <div className="context-config-row grid-span">
+                    <ToggleField label={translate("settings.contextEnabled", language, { stage: "Decision" })} checked={config.validation.translation.decision_context_enabled} help={translate("decision.contextHint", language)} onChange={(value) => update((draft) => { draft.validation.translation.decision_context_enabled = value; })} />
+                    <NumberField label={translate("settings.previousSegments", language)} value={config.validation.translation.decision_previous_segments} min={0} step={1} onChange={(value) => update((draft) => { draft.validation.translation.decision_previous_segments = value; })} />
+                  </div>
+                </>}
+              </div>}
+            </div>;
+          })}</div></div>)}
           <NumberField label={translate("settings.repairAttempts", language)} value={config.validation.translation.max_retry_attempts} min={0} step={1} help={translate("settings.repairAttemptsHint", language)} onChange={(value) => update((draft) => { draft.validation.translation.max_retry_attempts = value; })} />
           <Field label={translate("settings.exhaustedMode", language)} help={translate("settings.exhaustedModeHint", language)}><select value={config.validation.translation.exhausted_mode} onChange={(event) => update((draft) => { draft.validation.translation.exhausted_mode = event.target.value as ProjectConfig["validation"]["translation"]["exhausted_mode"]; })}><option value="fail">{translate("settings.markFailed", language)}</option><option value="warning">{translate("settings.acceptWarning", language)}</option></select></Field>
           <NumberField label={translate("settings.httpMaxAttempts", language)} value={config.retry.http_max_attempts} min={1} step={1} help={translate("settings.httpMaxAttemptsHint", language)} onChange={(value) => update((draft) => { draft.retry.http_max_attempts = value; })} />
@@ -359,10 +404,138 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
   );
 }
 
+function CredentialPicker({ language, credential, credentials, onChange }: {
+  language: Language;
+  credential: LLMPreset["credential"];
+  credentials: CredentialSummary[];
+  onChange: (value: DecisionPreset["credential"]) => void;
+}) {
+  return <>
+    <select value={credential.kind} onChange={(event) => onChange({ kind: event.target.value === "keychain" ? "keychain" : "environment", name: "" })}>
+      <option value="environment">{translate("preset.credentialEnvironment", language)}</option>
+      <option value="keychain">{translate("preset.credentialKeychain", language)}</option>
+    </select>
+    {credential.kind === "environment" ? <input value={credential.name} placeholder="API_KEY" onChange={(event) => onChange({ kind: "environment", name: event.target.value })} /> :
+      <select value={credential.name} disabled={!credentials.length && !credential.name} onChange={(event) => onChange({ kind: "keychain", name: event.target.value })}>
+        {!credential.name && <option value="">{translate("credentials.empty", language)}</option>}
+        {credential.name && !credentials.some((item) => item.id === credential.name) && <option value={credential.name}>{credential.name} {translate("preset.credentialCurrent", language)}</option>}
+        {credentials.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}
+      </select>}
+  </>;
+}
+
+function PresetIdDialog({ language, existingIds, onCancel, onCreate }: { language: Language; existingIds: string[]; onCancel: () => void; onCreate: (id: string) => Promise<void> }) {
+  const [id, setId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit() {
+    const nextId = id.trim();
+    if (existingIds.includes(nextId)) { setError(translate("preset.exists", language)); return; }
+    setBusy(true); setError("");
+    try { await onCreate(nextId); } catch (reason) { setError(errorMessage(reason, language)); } finally { setBusy(false); }
+  }
+  return <Modal ariaLabel={translate("common.new", language)}>
+    <h2>{translate("common.new", language)}</h2>
+    <form onSubmit={(event) => { event.preventDefault(); if (!busy && id.trim()) void submit(); }}>
+      <Field label={translate("preset.newId", language)}><input autoFocus disabled={busy} value={id} onChange={(event) => { setId(event.target.value); setError(""); }} /></Field>
+      {error && <div className="error-banner">{error}</div>}
+      <div className="modal-actions"><button type="button" className="quiet-button" disabled={busy} onClick={onCancel}>{translate("common.cancel", language)}</button><button type="submit" className="primary-button" disabled={busy || !id.trim()}>{translate("common.new", language)}</button></div>
+    </form>
+  </Modal>;
+}
+
+function DecisionPresetSettings({ language }: { language: Language }) {
+  const [presets, setPresets] = useState<DecisionPresetSummary[]>([]);
+  const [selected, setSelected] = useState("");
+  const [preset, setPreset] = useState<DecisionPreset | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const switchingPreset = loading || Boolean(preset && preset.preset_id !== selected);
+  async function loadList(preferred?: string | null) {
+    const result = await api<{ presets: DecisionPresetSummary[] }>("/api/v1/global/decision-presets");
+    setPresets(result.presets);
+    const firstValid = result.presets.find((item) => item.valid)?.preset_id ?? "";
+    setSelected(preferred === null ? firstValid : preferred || selected || firstValid);
+  }
+  useEffect(() => {
+    void loadList().catch((reason) => setError(errorMessage(reason, language)));
+    void api<{ credentials: CredentialSummary[] }>("/api/v1/credentials")
+      .then((result) => setCredentials(result.credentials))
+      .catch((reason) => setError(errorMessage(reason, language)));
+  }, []);
+  useEffect(() => {
+    if (!selected) return;
+    let active = true;
+    setLoading(true); setMessage(""); setError("");
+    void api<DecisionPreset>(`/api/v1/global/decision-presets/${selected}`)
+      .then((value) => { if (active) setPreset(value); })
+      .catch((reason) => { if (active) { setPreset(null); setError(errorMessage(reason, language)); } })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [selected]);
+  function update(change: (draft: DecisionPreset) => void) {
+    setMessage(""); setError("");
+    setPreset((current) => { if (!current) return current; const next = structuredClone(current); change(next); return next; });
+  }
+  async function perform(action: () => Promise<void>) {
+    setBusy(true); setError(""); setMessage("");
+    try { await action(); } catch (reason) { setError(errorMessage(reason, language)); } finally { setBusy(false); }
+  }
+  async function createPreset(id: string) {
+    if (!preset) return;
+    await api(`/api/v1/global/decision-presets/${id}`, { method: "PUT", body: JSON.stringify({ ...preset, preset_id: id }) });
+    await loadList(id); setCreating(false);
+  }
+  return <div className="preset-layout">
+    <div className="page-heading preset-list-heading"><div><h1>Decision Preset</h1><p>{translate("preset.subtitle", language)}</p></div><button className="quiet-button" disabled={!preset || switchingPreset || busy} onClick={() => setCreating(true)}>{translate("common.new", language)}</button></div>
+    <aside className="preset-list-body">
+      {presets.map((item) => <button key={item.preset_id} disabled={busy} className={selected === item.preset_id ? "preset-row active" : "preset-row"} onClick={() => setSelected(item.preset_id)}><strong>{item.preset_id}</strong><small>{item.valid ? `${item.protocol} · ${item.model}` : item.error}</small></button>)}
+    </aside>
+    <div className="page-heading settings-action-heading preset-editor-heading"><div><h1>{preset?.preset_id ?? (loading ? translate("preset.loading", language, { id: selected }) : translate("preset.editor", language))}</h1><p>{switchingPreset ? translate("preset.loading", language, { id: selected }) : preset ? translate("preset.changeHint", language) : translate("preset.selectHint", language)}</p></div>
+      {preset && <div className="button-group">
+        <button className="danger-button" disabled={busy || switchingPreset} onClick={() => setDeleting(true)}>{translate("common.delete", language)}</button>
+        <button className="primary-button" disabled={busy || switchingPreset} onClick={() => void perform(async () => {
+          await api(`/api/v1/global/decision-presets/${preset.preset_id}`, { method: "PUT", body: JSON.stringify(preset) });
+          await loadList(preset.preset_id); setMessage(translate("preset.saved", language));
+        })}>{translate("common.validateSave", language)}</button>
+      </div>}
+    </div>
+    <section className="preset-editor-body" aria-busy={busy || switchingPreset}>
+      {error && <div className="error-banner">{error}</div>}
+      {message && <p className="success-text">{message}</p>}
+      {!preset ? <p className="muted">{translate(loading ? "preset.loadingPreset" : "preset.selectHint", language)}</p> : <fieldset className="config-grid preset-fields" disabled={busy || switchingPreset}>
+        <Field label={translate("decision.protocol", language)}><select value={preset.protocol} onChange={(event) => update((draft) => { draft.protocol = event.target.value as DecisionPreset["protocol"]; })}><option value="typesafe">TypeSafe</option><option value="openai-decisions">OpenAI Decisions</option></select></Field>
+        <Field label={translate("decision.url", language)} help={translate("decision.urlHint", language)}><input value={preset.url} onChange={(event) => update((draft) => { draft.url = event.target.value; })} /></Field>
+        <Field label={translate("preset.credential", language)} help={translate("preset.credentialHint", language)}><div className="credential-selector"><CredentialPicker language={language} credential={preset.credential} credentials={credentials} onChange={(value) => update((draft) => { draft.credential = value; })} /></div></Field>
+        <Field label={translate("preset.modelId", language)}><input value={preset.model} onChange={(event) => update((draft) => { draft.model = event.target.value; })} /></Field>
+        <NumberField label={translate("preset.contextWindow", language)} value={preset.context_window_tokens} min={1} step={1} help={translate("decision.contextWindowHint", language)} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} />
+        <NumberField label={translate("preset.contextSafetyMargin", language)} value={preset.context_safety_margin_tokens} min={0} step={1} help={translate("preset.contextSafetyMarginHint", language)} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} />
+        <NumberField label={translate("preset.tokenSafetyFactor", language)} value={preset.token_safety_factor} min={0.01} step={0.05} help={translate("preset.tokenSafetyFactorHint", language)} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} />
+        <Field label={translate("preset.proxyUrl", language)} help={translate("preset.proxyUrlHint", language)}><input value={preset.proxy_url} onChange={(event) => update((draft) => { draft.proxy_url = event.target.value; })} /></Field>
+        <NumberField label={translate("preset.rpm", language)} value={preset.requests_per_minute} min={0} step={1} help={translate("preset.rpmHint", language)} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} />
+        <NumberField label={translate("preset.maxConcurrency", language)} value={preset.max_parallel} min={1} step={1} help={translate("preset.maxConcurrencyHint", language)} onChange={(value) => update((draft) => { draft.max_parallel = value; })} />
+        <NumberField label={translate("preset.timeoutSeconds", language)} value={preset.request_timeout_seconds} min={0.01} step={1} help={translate("decision.timeoutHint", language)} onChange={(value) => update((draft) => { draft.request_timeout_seconds = value; })} />
+      </fieldset>}
+    </section>
+    {creating && <PresetIdDialog language={language} existingIds={presets.map((item) => item.preset_id)} onCancel={() => setCreating(false)} onCreate={createPreset} />}
+    {deleting && preset && <ConfirmDialog language={language} title={translate("common.delete", language)} text={translate("preset.deleteConfirm", language, { id: preset.preset_id })} confirmLabel={translate("common.delete", language)} confirming={busy} onCancel={() => setDeleting(false)} onConfirm={() => {
+      setDeleting(false);
+      void perform(async () => { await api(`/api/v1/global/decision-presets/${preset.preset_id}`, { method: "DELETE" }); setPreset(null); setSelected(""); await loadList(null); });
+    }} />}
+  </div>;
+}
+
 function PresetSettings({ language }: { language: Language }) {
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
   const [adapters, setAdapters] = useState<AdapterRow[]>([]);
   const [selected, setSelected] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [preset, setPreset] = useState<LLMPreset | null>(null);
   const [presetLoading, setPresetLoading] = useState(false);
   const switchingPreset = presetLoading || Boolean(preset && preset.preset_id !== selected);
@@ -478,19 +651,16 @@ function PresetSettings({ language }: { language: Language }) {
     } catch (reason) { setError(errorMessage(reason, language)); }
   }
 
-  async function createPreset() {
-    const presetId = window.prompt(translate("preset.newId", language));
-    if (!presetId || !preset) return;
-    try {
-      const definition = { ...preset, preset_id: presetId, extra_body: JSON.parse(extraBody) as unknown, extra_headers: JSON.parse(extraHeaders) as unknown };
-      await api(`/api/v1/global/presets/${presetId}`, { method: "PUT", body: JSON.stringify(definition) });
-      await loadLists(presetId);
-      setMessage(translate("preset.created", language, { id: presetId }));
-    } catch (reason) { setError(errorMessage(reason, language)); }
+  async function createPreset(presetId: string) {
+    if (!preset) return;
+    const definition = { ...preset, preset_id: presetId, extra_body: JSON.parse(extraBody) as unknown, extra_headers: JSON.parse(extraHeaders) as unknown };
+    await api(`/api/v1/global/presets/${presetId}`, { method: "PUT", body: JSON.stringify(definition) });
+    await loadLists(presetId); setCreating(false);
   }
 
   async function removePreset() {
-    if (!preset || !window.confirm(translate("preset.deleteConfirm", language, { id: preset.preset_id }))) return;
+    if (!preset) return;
+    setDeleting(false);
     try {
       await api(`/api/v1/global/presets/${preset.preset_id}`, { method: "DELETE" });
       setPreset(null); setSelected(""); await loadLists(null);
@@ -499,13 +669,13 @@ function PresetSettings({ language }: { language: Language }) {
 
   return (
     <div className="preset-layout">
-      <div className="page-heading preset-list-heading"><div><h1>{translate("preset.title", language)}</h1><p>{translate("preset.subtitle", language)}</p></div><button className="quiet-button" disabled={!preset || switchingPreset} onClick={createPreset}>{translate("common.new", language)}</button></div>
+      <div className="page-heading preset-list-heading"><div><h1>{translate("preset.title", language)}</h1><p>{translate("preset.subtitle", language)}</p></div><button className="quiet-button" disabled={!preset || switchingPreset} onClick={() => setCreating(true)}>{translate("common.new", language)}</button></div>
       <aside className="preset-list-body">
         {presets.map((item) => <button key={item.preset_id} className={selected === item.preset_id ? "preset-row active" : "preset-row"} onClick={() => setSelected(item.preset_id)}><strong>{item.preset_id}</strong><small>{item.valid ? `${item.adapter_id} · ${item.model}` : item.error}</small></button>)}
       </aside>
       <div className="page-heading settings-action-heading preset-editor-heading">
         <div><h1>{preset?.preset_id ?? (presetLoading ? translate("preset.loading", language, { id: selected }) : translate("preset.editor", language))}</h1><p>{switchingPreset ? translate("preset.loading", language, { id: selected }) : preset ? translate("preset.changeHint", language) : translate("preset.selectHint", language)} </p></div>
-        {preset && <div className="button-group"><button className="danger-button" disabled={switchingPreset} onClick={removePreset}>{translate("common.delete", language)}</button><button className="primary-button" disabled={switchingPreset} onClick={save}>{translate("common.validateSave", language)}</button></div>}
+        {preset && <div className="button-group"><button className="danger-button" disabled={switchingPreset} onClick={() => setDeleting(true)}>{translate("common.delete", language)}</button><button className="primary-button" disabled={switchingPreset} onClick={save}>{translate("common.validateSave", language)}</button></div>}
       </div>
       <section className="preset-editor-body" aria-busy={switchingPreset}>
         {!preset ? (
@@ -527,20 +697,7 @@ function PresetSettings({ language }: { language: Language }) {
               <Field label={translate("preset.credential", language)} help={usesChatGPT ? translate("chatgpt.connectionHint", language) : translate("preset.credentialHint", language)}>
                 <div className="credential-selector">
                   {usesChatGPT ? <span>{chatgpt?.email || translate("chatgpt.disconnected", language)} · {translate(chatgpt?.plan_enabled ? "chatgpt.ready" : "chatgpt.notGranted", language)}</span> : fixedConnection ? <span>{fixedConnection.credential.kind} · {fixedConnection.credential.name}</span> : <>
-                  <select value={preset.credential.kind} onChange={(event) => updateConnection((draft) => { draft.credential.kind = event.target.value === "keychain" ? "keychain" : "environment"; })}>
-                    <option value="environment">{translate("preset.credentialEnvironment", language)}</option>
-                    <option value="keychain">{translate("preset.credentialKeychain", language)}</option>
-                  </select>
-                  {preset.credential.kind === "environment" ? (
-                    <input value={preset.credential.name} placeholder="OPENAI_API_KEY" onChange={(event) => updateConnection((draft) => { draft.credential.name = event.target.value; })} />
-                  ) : keychainCredentials.length === 0 && !preset.credential.name ? (
-                    <select value="" disabled aria-label={translate("preset.credentialKeychain", language)}><option value="">{translate("credentials.empty", language)}</option></select>
-                  ) : (
-                    <select value={preset.credential.name} onChange={(event) => updateConnection((draft) => { draft.credential.name = event.target.value; })}>
-                      {preset.credential.name && !keychainCredentials.some((item) => item.id === preset.credential.name) && <option value={preset.credential.name}>{preset.credential.name} {translate("preset.credentialCurrent", language)}</option>}
-                      {keychainCredentials.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}
-                    </select>
-                  )}
+                  <CredentialPicker language={language} credential={preset.credential} credentials={keychainCredentials} onChange={(value) => updateConnection((draft) => { draft.credential = value; })} />
                 </>}
                 </div>
               </Field>
@@ -579,6 +736,8 @@ function PresetSettings({ language }: { language: Language }) {
           </>
         )}
       </section>
+      {creating && <PresetIdDialog language={language} existingIds={presets.map((item) => item.preset_id)} onCancel={() => setCreating(false)} onCreate={createPreset} />}
+      {deleting && preset && <ConfirmDialog language={language} title={translate("common.delete", language)} text={translate("preset.deleteConfirm", language, { id: preset.preset_id })} confirmLabel={translate("common.delete", language)} confirming={false} onCancel={() => setDeleting(false)} onConfirm={() => void removePreset()} />}
     </div>
   );
 }

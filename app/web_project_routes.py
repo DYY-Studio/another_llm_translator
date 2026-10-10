@@ -299,6 +299,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         if schema_version is not None and schema_version not in {
             3,
             4,
+            5,
             SCHEMA_VERSION,
         }:
             raise UsageError(

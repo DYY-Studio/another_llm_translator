@@ -20,6 +20,7 @@ from .translation_validation import (
     JapaneseKanaValidator,
     KoreanHangulValidator,
     SourceTextResidualValidator,
+    SegmentAlignmentValidator,
 )
 from .user_config import BUILTIN_ROOT, user_root
 
@@ -268,6 +269,7 @@ def _builtin_plugins() -> tuple[plugin_api.PluginDescriptor, ...]:
                 JapaneseKanaValidator(),
                 KoreanHangulValidator(),
                 SourceTextResidualValidator(),
+                SegmentAlignmentValidator(),
             ),
         ),
     )
@@ -486,7 +488,9 @@ def _validate_plugins(
             validator_id = getattr(validator, "validator_id", None)
             version = getattr(validator, "version", None)
             label = getattr(validator, "label", None)
-            validate = getattr(validator, "validate", None)
+            phase = getattr(validator, "phase", None)
+            scope = getattr(validator, "scope", None)
+            validate = getattr(validator, "validate_response" if scope == "response" else "validate", None)
             if (
                 not isinstance(validator_id, str)
                 or not validator_id.strip()
@@ -494,6 +498,10 @@ def _validate_plugins(
                 or not version.strip()
                 or not isinstance(label, str)
                 or not label.strip()
+                or not isinstance(phase, str)
+                or phase not in {"mechanical", "alignment", "terminology"}
+                or not isinstance(scope, str)
+                or scope not in {"segment", "response"}
                 or not callable(validate)
             ):
                 raise _descriptor_failure(
@@ -599,12 +607,14 @@ def resolve_translation_validators(
                         "validator_id": validator.validator_id,
                         "version": validator.version,
                         "label": validator.label,
+                        "phase": validator.phase,
+                        "scope": validator.scope,
                         "plugin_id": plugin.plugin_id,
                         "plugin_version": plugin.version,
                     },
                 )
             )
-    values.sort(key=lambda value: value[1]["validator_id"])
+    values.sort(key=lambda value: (("mechanical", "alignment", "terminology").index(value[1]["phase"]), value[1]["validator_id"]))
     if requested is not None:
         found = {summary["validator_id"] for _, summary in values}
         missing = sorted(requested - found)
