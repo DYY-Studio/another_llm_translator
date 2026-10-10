@@ -2200,7 +2200,7 @@ async def test_summary_run_tracks_only_missing_summary_requests(
         if item["run_id"] == result["run_id"]
     )
     assert [item["file_id"] for item in run["source_ranges"]] == ["F0002"]
-    assert [item["segment_id"] for item in run["source_ranges"][0]["segments"]] == [
+    assert run["source_ranges"][0]["segment_ids"] == [
         "F0002-S000001"
     ]
 
@@ -2276,15 +2276,10 @@ async def test_summary_runtime_split_persists_stable_slice_provenance_and_reuses
     run = next(
         item for item in read_summary_runs(project) if item["run_id"] == first["run_id"]
     )
-    run_slices = [
-        item
-        for source_range in run["source_ranges"]
-        for item in source_range["segments"]
-    ]
-    assert {item["slice_id"] for item in run_slices} == {
-        item["slice_id"] for item in slices
-    }
-    assert all(item["source"] != "ABCDEFGH" for item in run_slices)
+    assert run["source_ranges"] == [{
+        "file_id": "F0001", "part_id": "document",
+        "segment_ids": ["F0001-S000001"],
+    }]
 
     def fail_if_called(_request: httpx.Request) -> httpx.Response:
         raise AssertionError("稳定摘要切片应被复用")

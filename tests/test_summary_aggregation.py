@@ -295,6 +295,7 @@ async def test_aggregation_uses_requested_language_adapter_requirements_and_stan
         "content_summary",
         prompt_middle_digests(project, "content_summary"),
     )
+    assert manifest["summary_boundaries"] == [{"file_id": "F0001", "part_id": "a"}]
 
 
 @pytest.mark.asyncio

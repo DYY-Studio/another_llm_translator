@@ -1481,13 +1481,31 @@ def read_summary_participation(project: Path) -> list[dict[str, Any]]:
         connection.close()
 
 
+def _summary_run_ranges(ranges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep Run coverage by boundary and stable Segment, not request slices."""
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for source_range in ranges:
+        boundary = (source_range["file_id"], source_range["part_id"])
+        target = grouped.setdefault(boundary, {
+            "file_id": boundary[0], "part_id": boundary[1],
+        })
+        if "segments" in source_range or "segment_ids" in source_range:
+            ids = target.setdefault("segment_ids", [])
+            values = source_range.get("segment_ids", [
+                item.get("original_segment_id") or item["segment_id"]
+                for item in source_range.get("segments", [])
+            ])
+            target["segment_ids"] = list(dict.fromkeys([*ids, *values]))
+    return list(grouped.values())
+
+
 def _summary_run_payload(value: dict[str, Any]) -> tuple[Any, ...]:
     updated_at = str(value.get("updated_at") or value.get("started_at") or utc_now())
     return (
         str(value["run_id"]),
         str(value["mode"]),
         str(value["status"]),
-        _json(value["source_ranges"]),
+        _json(_summary_run_ranges(value["source_ranges"])),
         str(value["input_digest"]),
         str(value["prompt_digest"]),
         str(value["model"]),
