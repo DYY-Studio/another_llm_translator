@@ -165,6 +165,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
   const [selectedActivity, setSelectedActivity] = useState<DecisionActivity | null>(null);
   const [decisionErrorsOnly, setDecisionErrorsOnly] = useState(false);
   const [decisionPage, setDecisionPage] = useState(0);
+  const [pausedDecisionRequests, setPausedDecisionRequests] = useState<DiagnosticsRequestSummary[] | null>(null);
   const [level, setLevel] = useState("");
   const [project, setProject] = useState("");
   const [stage, setStage] = useState("");
@@ -249,6 +250,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
     requestFeedRef.current = { sessionId: "", cursor: 0 };
     setRequestSummaries(new Map());
     setSelectedActivity(null);
+    setPausedDecisionRequests(null);
     setValue(null);
     setSelectedRequest(null);
     setDetail(null);
@@ -350,16 +352,23 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
   const decisionPending = decisionActivities.reduce((total, item) => total + item.pending, 0);
   const decisionFailures = decisionActivities.reduce((total, item) => total + item.failed + item.interrupted, 0);
   const metrics = value ? { ...value.metrics, ...(requestKind === "decision" ? value.decision.metrics : {}) } : undefined;
-  const decisionRequests = Array.from(requestSummaries.values()).filter((item) => (
+  const liveDecisionRequests = Array.from(requestSummaries.values()).filter((item) => (
     item.request_kind === "decision" && selectedActivity !== null
     && (item.task_id ?? null) === selectedActivity.task_id && item.model === selectedActivity.model
-    && (!decisionErrorsOnly || item.status === "failed" || item.status === "interrupted")
   )).sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  const decisionRequests = (pausedDecisionRequests ?? liveDecisionRequests).filter((item) => (
+    !decisionErrorsOnly || item.status === "failed" || item.status === "interrupted"
+  ));
   const decisionPageCount = Math.max(1, Math.ceil(decisionRequests.length / 20));
   const currentDecisionPage = Math.min(decisionPage, decisionPageCount - 1);
   const isDecisionDetail = (detail?.request_kind ?? requestSummaries.get(selectedRequest ?? "")?.request_kind) === "decision";
   function openActivity(activity: DecisionActivity, errorsOnly = false) {
     setSelectedActivity(activity); setDecisionErrorsOnly(errorsOnly); setDecisionPage(0);
+    setPausedDecisionRequests(null);
+  }
+  function closeActivity() {
+    setSelectedActivity(null);
+    setPausedDecisionRequests(null);
   }
   const throughput = metrics
     ? {
@@ -493,11 +502,16 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
         </section>
       </div>
 
-      {selectedActivity && !selectedRequest && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedActivity(null); }}>
+      {selectedActivity && !selectedRequest && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeActivity(); }}>
         <section className="modal exchange-dialog decision-dialog" role="dialog" aria-modal="true" aria-label={translate("diagnostics.decisionDetails", language)}>
           <header className="exchange-dialog-heading">
             <div><h2>{translate("diagnostics.decisionDetails", language)}</h2><code>{selectedActivity.project} · {selectedActivity.model}</code></div>
-            <button className="quiet-button" onClick={() => setSelectedActivity(null)}>{translate("diagnostics.close", language)}</button>
+            <div className="button-group">
+              <button className="quiet-button" aria-pressed={pausedDecisionRequests !== null} onClick={() => {
+                setPausedDecisionRequests(pausedDecisionRequests === null ? liveDecisionRequests : null);
+              }}>{translate(pausedDecisionRequests === null ? "diagnostics.pauseRefresh" : "diagnostics.resumeRefresh", language)}</button>
+              <button className="quiet-button" onClick={closeActivity}>{translate("diagnostics.close", language)}</button>
+            </div>
           </header>
           <p className="muted">{translate("diagnostics.decisionRetention", language)}</p>
           <nav className="exchange-tabs">
