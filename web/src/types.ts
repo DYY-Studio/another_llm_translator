@@ -949,7 +949,7 @@ export interface ProjectConfig {
     encoding_confidence_threshold: number;
     fallback_encoding: string;
   };
-  decision: { preset: string; prompt_languages: Record<string, string> };
+  decision: { preset: string };
   llm: {
     preset: string;
     preset_terminology: string;

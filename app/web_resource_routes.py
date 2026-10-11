@@ -147,7 +147,7 @@ def register_resource_routes(
     project: Callable[[str], Path],
 ) -> None:
     from .web_decision_prompt_routes import register_decision_prompt_routes
-    register_decision_prompt_routes(app, project, app_root)
+    register_decision_prompt_routes(app, project)
 
     SESSION_COOKIE = "another_llm_session"
     _SESSION_TTL_SECONDS = 30 * 24 * 3600

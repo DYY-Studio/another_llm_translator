@@ -57,7 +57,7 @@ FastAPI 应用装配、鉴权、生命周期、静态资源和 route 注册。�
 
 - `web_chatgpt_routes.py`：ChatGPT 状态、本机连接管理与 Plan 局域网会话边界。
 - `web_resource_routes.py`：全局配置、Prompt、Adapter、Preset、凭据和服务设置。
-- `web_decision_prompt_routes.py`：插件声明驱动的 Decision 提示词编辑、语言选择与命名模板。
+- `web_decision_prompt_routes.py`：插件声明驱动的 Decision 提示词编辑与命名模板。
 - `web_project_routes.py`：项目创建、打开、删除、File 管理与替换。
 - `web_segment_routes.py`：Segment 浏览、编辑和阶段结果重置。
 - `web_term_routes.py`：术语扫描、编辑、交换、发布与自动决策入口。

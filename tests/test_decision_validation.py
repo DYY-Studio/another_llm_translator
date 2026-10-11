@@ -158,8 +158,8 @@ async def test_translation_decision_context_toggle_and_count(tmp_path, monkeypat
     (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
     from app.decision_prompt import get_declaration, prompt_path
     from app.sqlite_storage import atomic_write_json
-    custom_prompt = {**get_declaration("preferred_term_usage").defaults["en"], "instructions": "Run-specific nickname policy"}
-    atomic_write_json(prompt_path(project, "preferred_term_usage", "en"), custom_prompt)
+    custom_prompt = {**get_declaration("preferred_term_usage").default, "instructions": "Run-specific nickname policy"}
+    atomic_write_json(prompt_path(project, "preferred_term_usage"), custom_prompt)
     monkeypatch.setenv("DECISION_TEST_KEY", "test")
     calls = []
     def respond(request):

@@ -18,8 +18,7 @@ EXPECTED_PLUGIN_FILES = {
     "plugins/term_validation/__init__.py",
     "plugins/term_validation/plugin.py",
     "plugins/term_validation/plugin.toml",
-    "plugins/term_validation/prompts/en.json",
-    "plugins/term_validation/prompts/zh-CN.json",
+    "plugins/term_validation/prompts/default.json",
 }
 
 
@@ -61,7 +60,7 @@ def test_built_distributions_contain_every_project_prompt(tmp_path: Path) -> Non
             if len(PurePosixPath(name).parts) >= 2
         }
     assert EXPECTED_PLUGIN_FILES <= _archive_suffixes(wheel_names, 3) | _archive_suffixes(wheel_names, 4)
-    assert {"app/decision_prompts/en.json", "app/decision_prompts/zh-CN.json"} <= _archive_suffixes(wheel_names, 3)
+    assert {"app/decision_prompts/default.json"} <= _archive_suffixes(wheel_names, 3)
     assert not any(
         "plugins/" in name
         and ("/tests/" in name or "/__pycache__/" in name)
@@ -78,7 +77,7 @@ def test_built_distributions_contain_every_project_prompt(tmp_path: Path) -> Non
             if len(PurePosixPath(name).parts) >= 2
         }
     assert EXPECTED_PLUGIN_FILES <= _archive_suffixes(sdist_names, 3) | _archive_suffixes(sdist_names, 4)
-    assert {"app/decision_prompts/en.json", "app/decision_prompts/zh-CN.json"} <= _archive_suffixes(sdist_names, 3)
+    assert {"app/decision_prompts/default.json"} <= _archive_suffixes(sdist_names, 3)
     assert not any(
         "plugins/" in name
         and ("/tests/" in name or "/__pycache__/" in name)

@@ -5,15 +5,15 @@ import type { PromptLibraryEntry } from "../types";
 import { PromptSyncCard, type PromptGlobalSync } from "./PromptSyncCard";
 import { PromptLibraryControls } from "./PromptLibraryControls";
 
-export interface DecisionPromptSummary { validator_id: string; label: string; languages: string[]; choice_ids: string[] }
+export interface DecisionPromptSummary { validator_id: string; label: string; choice_ids: string[] }
 interface Content { instructions: string; criteria: Record<string, string> }
-interface View { content: Content; language: string; languages: string[]; choice_ids: string[]; inherited: boolean; source: string; global_sync?: PromptGlobalSync }
+interface View { content: Content; choice_ids: string[]; inherited: boolean; global_sync?: PromptGlobalSync }
 
 export function DecisionPromptSettings({ project, scope, language, validator, stageControl }: {
   project: string; scope: "global" | "project"; language: Language; validator: string; stageControl: ReactNode;
 }) {
   const [view, setView] = useState<View>();
-  const [selection, setSelection] = useState<{ language: string; languages: string[] }>();
+  const [defaults, setDefaults] = useState<{ content: Content; choice_ids: string[] }>();
   const [draft, setDraft] = useState<Content>();
   const [entries, setEntries] = useState<PromptLibraryEntry[]>([]);
   const [selected, setSelected] = useState("");
@@ -25,28 +25,28 @@ export function DecisionPromptSettings({ project, scope, language, validator, st
   const [loadedGlobal, setLoadedGlobal] = useState(false);
   const [libraryLoading, setLibraryLoading] = useState(false);
   const path = scope === "global" ? `/api/v1/global/decision-prompts/${validator}` : `/api/v1/projects/${encodeURIComponent(project)}/decision-prompts/${validator}`;
-  const libraryPath = `/api/v1/decision-prompt-library/${validator}/${selection?.language ?? "en"}`;
+  const libraryPath = `/api/v1/decision-prompt-library/${validator}`;
 
   function apply(value: View) { setView(value); setDraft(value.content); setLoadedGlobal(false); }
   useEffect(() => {
     let active = true;
-    setView(undefined); setDraft(undefined); setSelection(undefined); setError(""); setMessage("");
-    void api<{ language: string; languages: string[] }>(`${path}/language`).then(async (selected) => {
+    setView(undefined); setDraft(undefined); setDefaults(undefined); setError(""); setMessage("");
+    void api<{ content: Content; choice_ids: string[] }>(`/api/v1/decision-prompts/${validator}/default`).then(async (value) => {
       if (!active) return;
-      setSelection(selected);
-      const value = await api<View>(path);
-      if (active) apply(value);
+      setDefaults(value);
+      const current = await api<View>(path);
+      if (active) apply(current);
     }).catch((reason) => { if (active) setError(errorMessage(reason, language)); });
     return () => { active = false; };
   }, [path]);
   useEffect(() => {
-    if (!selection) return;
+    if (!defaults) return;
     let active = true;
     setLibraryLoading(true);
     setEntries([]); setSelected(""); setSaveOpen(false); setId(""); setOverwrite(false);
     void api<{ entries: PromptLibraryEntry[] }>(libraryPath).then((value) => { if (active) setEntries(value.entries); }).catch((reason) => { if (active) setError(errorMessage(reason, language)); }).finally(() => { if (active) setLibraryLoading(false); });
     return () => { active = false; };
-  }, [libraryPath, !!selection]);
+  }, [libraryPath, !!defaults]);
 
   async function action(work: () => Promise<void>) {
     setError(""); setMessage("");
@@ -59,46 +59,34 @@ export function DecisionPromptSettings({ project, scope, language, validator, st
     <div className="page-heading config-heading settings-action-heading">
       <div><h1>{translate(scope === "global" ? "settings.globalPromptTitle" : "settings.projectPromptTitle", language)}</h1><p>{translate("decision.promptHint", language)}</p></div>
       <div className="button-group">
-        <button className="quiet-button" disabled={!selection} onClick={() => {
-          if (!selection || !confirmReplace()) return;
-          void action(async () => {
-            const value = await api<{ content: Content; choice_ids: string[] }>(`/api/v1/decision-prompts/${validator}/default?language=${selection.language}`);
-            if (!view) setView({ ...value, ...selection, inherited: false, source: "default" });
-            setDraft(value.content); setLoadedGlobal(false); setMessage(translate("settings.promptDefaultLoaded", language));
-          });
+        <button className="quiet-button" disabled={!defaults} onClick={() => {
+          if (!defaults || !confirmReplace()) return;
+          setError("");
+          if (!view) setView({ ...defaults, inherited: false });
+          setDraft(defaults.content); setLoadedGlobal(false); setMessage(translate("settings.promptDefaultLoaded", language));
         }}>{translate("settings.promptLoadDefault", language)}</button>
         <button className="quiet-button" disabled={!draft} onClick={() => { setSaveOpen(true); setOverwrite(false); }}>{translate("settings.promptLibrarySave", language)}</button>
         <button className="primary-button" disabled={!draft || !view} onClick={() => void action(async () => {
-          await api(path, { method: "PUT", body: JSON.stringify({ language: view!.language, content: draft }) });
-          apply(await api<View>(`${path}?language=${view!.language}`));
+          await api(path, { method: "PUT", body: JSON.stringify({ content: draft }) });
+          apply(await api<View>(path));
           setMessage(translate(scope === "global" ? "settings.globalPromptSaved" : "settings.projectPromptSaved", language));
         })}>{translate("common.validateSave", language)}</button>
       </div>
     </div>
     {stageControl}
-    {selection && <>
-      <label className="stage-select">{translate("settings.promptLanguage", language)}<select value={selection.language} onChange={(event) => {
-        if (!confirmReplace()) return;
-        const next = event.target.value;
-        void action(async () => {
-          await api(`${path}/language`, { method: "PUT", body: JSON.stringify({ language: next }) });
-          setSelection({ ...selection, language: next }); setView(undefined); setDraft(undefined);
-          apply(await api<View>(`${path}?language=${next}`));
-        });
-      }}>{selection.languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
-      <p className="prompt-preview-hint">{translate("decision.promptLanguageHint", language)}</p>
-      {scope === "project" && <PromptSyncCard language={language} sync={view?.global_sync ?? { available: false, same: false, language: selection.language }}
+    {defaults && <>
+      {scope === "project" && <PromptSyncCard language={language} sync={view?.global_sync ?? { available: false, same: false }}
         dirty={!!view && JSON.stringify(draft) !== JSON.stringify(view.content)} loadedGlobal={loadedGlobal} inherited={view?.inherited}
         onLoadGlobal={() => {
           if (!confirmReplace()) return;
           void action(async () => {
-            const global = await api<View>(`/api/v1/global/decision-prompts/${validator}?language=${selection.language}`);
+            const global = await api<View>(`/api/v1/global/decision-prompts/${validator}`);
             setDraft(global.content); setLoadedGlobal(true);
           });
         }}
         onRestore={() => {
           if (!confirmReplace()) return;
-          void action(async () => { await api(`${path}?language=${selection.language}`, { method: "DELETE" }); apply(await api<View>(`${path}?language=${selection.language}`)); });
+          void action(async () => { await api(path, { method: "DELETE" }); apply(await api<View>(path)); });
         }} />}
       <PromptLibraryControls language={language} entries={entries} selected={selected} loading={libraryLoading} saveOpen={saveOpen} id={id} overwrite={overwrite}
         onId={(value) => { setId(value); setOverwrite(false); }} onCancel={() => { setSaveOpen(false); setId(""); setOverwrite(false); }}
@@ -106,7 +94,7 @@ export function DecisionPromptSettings({ project, scope, language, validator, st
           if (!value || !confirmReplace()) return;
           void action(async () => {
             const loaded = (await api<{ content: Content }>(`${libraryPath}/${encodeURIComponent(value)}`)).content;
-            if (!view && selection) setView({ content: loaded, ...selection, choice_ids: Object.keys(loaded.criteria), inherited: false, source: "library" });
+            if (!view) setView({ content: loaded, choice_ids: Object.keys(loaded.criteria), inherited: false });
             setDraft(loaded); setLoadedGlobal(false);
             setSelected(value); setMessage(translate("settings.promptLibraryLoaded", language, { id: value }));
           });

@@ -4,7 +4,6 @@ export type Language = "zh-CN" | "en";
 
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
-    "decision.promptLanguageHint": "所选语言用于后续运行；提示词正文修改需保存后生效。",
     "settings.promptLoadDefault": "加载内置提示词",
     "settings.promptDefaultLoaded": "已加载内置提示词，保存后生效。",
     "decision.promptHint": "编辑判断说明与选项描述，固定选项由校验器定义。",
@@ -1353,7 +1352,6 @@ const messages: Record<Language, Record<string, string>> = {
     "decision.promptRestore": "Restore inheritance",
     "decision.promptInstructions": "Instructions",
     "decision.promptDiscard": "Discard unsaved prompt changes?",
-    "decision.promptLanguageHint": "The selected language applies to subsequent runs; save prompt edits to apply them.",
     "settings.promptLoadDefault": "Load built-in prompt",
     "settings.promptDefaultLoaded": "Built-in prompt loaded. Save to apply.",
 

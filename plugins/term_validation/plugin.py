@@ -21,7 +21,7 @@ def _normalize(value: str) -> str:
 
 class PreferredTermUsageValidator:
     validator_id = "preferred_term_usage"
-    version = "7"
+    version = "8"
     label = "Preferred terminology usage"
     phase = "terminology"
     scope = "segment"
@@ -29,8 +29,8 @@ class PreferredTermUsageValidator:
     @staticmethod
     def prompt_declaration() -> DecisionPromptDeclaration:
         from pathlib import Path
-        from app.decision_prompt import declaration_from_files
-        return declaration_from_files("preferred_term_usage", ("required", "acceptable", "uncertain"), Path(__file__).parent / "prompts")
+        from app.decision_prompt import declaration_from_file
+        return declaration_from_file("preferred_term_usage", ("required", "acceptable", "uncertain"), Path(__file__).parent / "prompts/default.json")
 
     def validate(
         self, context: TranslationValidationContext
@@ -66,7 +66,7 @@ class PreferredTermUsageValidator:
                       findings: list[TranslationValidationMatch]) -> tuple[TranslationValidationMatch, ...]:
         assert context.decision is not None
         prompt = (context.decision_prompts[self.validator_id] if self.validator_id in context.decision_prompts
-                  else self.prompt_declaration().defaults["en"])
+                  else self.prompt_declaration().default)
         terms = {}
         questions = []
         for index, finding in enumerate(findings):
@@ -100,8 +100,8 @@ class PreferredTermUsageValidator:
 def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="term-validation",
-        version="0.5.0",
-        protocol_version=15,
+        version="0.6.0",
+        protocol_version=16,
         translation_validators=(PreferredTermUsageValidator(),),
         decision_prompts=(PreferredTermUsageValidator.prompt_declaration(),),
     )

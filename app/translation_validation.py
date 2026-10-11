@@ -344,7 +344,7 @@ async def validate_translation_text(
 
 class SegmentAlignmentValidator:
     validator_id = "segment_alignment"
-    version = "3"
+    version = "4"
     label = "Segment alignment"
     phase = "alignment"
     scope = "response"
@@ -352,15 +352,15 @@ class SegmentAlignmentValidator:
     @staticmethod
     def prompt_declaration() -> DecisionPromptDeclaration:
         from pathlib import Path
-        from .decision_prompt import declaration_from_files
-        return declaration_from_files("segment_alignment", ("aligned", "misaligned", "uncertain"), Path(__file__).parent / "decision_prompts")
+        from .decision_prompt import declaration_from_file
+        return declaration_from_file("segment_alignment", ("aligned", "misaligned", "uncertain"), Path(__file__).parent / "decision_prompts/default.json")
 
     def __init__(self, decision: DecisionService | None = None, *,
                  confidence_threshold: float = 0.8, tail_segments: int = 3, prompt: dict | None = None) -> None:
         self.decision = decision
         self.confidence_threshold = confidence_threshold
         self.tail_segments = tail_segments
-        self.prompt = prompt if prompt is not None else self.prompt_declaration().defaults["en"]
+        self.prompt = prompt if prompt is not None else self.prompt_declaration().default
 
     async def validate_response(
         self, contexts: tuple[TranslationValidationContext, ...],

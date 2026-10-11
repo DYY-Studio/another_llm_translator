@@ -11,8 +11,8 @@ def test_plugins_declare_optional_decision_prompts():
     declarations = [prompt for plugin in plugins for prompt in plugin.decision_prompts]
     assert {prompt.validator_id for prompt in declarations} == {"preferred_term_usage", "segment_alignment"}
     for prompt in declarations:
-        assert set(prompt.defaults) == {"en", "zh-CN"}
-        assert all(set(content["criteria"]) == set(prompt.choice_ids) for content in prompt.defaults.values())
+        assert not hasattr(prompt, "defaults")
+        assert set(prompt.default["criteria"]) == set(prompt.choice_ids)
 
 
 def test_prompt_declaration_must_belong_to_its_plugin():
@@ -28,16 +28,16 @@ def test_prompt_resolution_precedence_and_invalid_override(tmp_path, monkeypatch
     monkeypatch.setenv("ANOTHER_LLM_USER_ROOT", str(tmp_path / "user"))
     prompt = next(p for plugin in load_plugins() for p in plugin.decision_prompts if p.validator_id == "preferred_term_usage")
     project = tmp_path / "project"
-    global_content = {**prompt.defaults["en"], "instructions": "Global rule"}
+    global_content = {**prompt.default, "instructions": "Global rule"}
     project_content = {**global_content, "instructions": "Project nickname rule"}
-    assert resolve_prompt(prompt, "en")[1] == "default"
-    atomic_write_json(prompt_path(tmp_path / "user", prompt.validator_id, "en"), global_content)
-    assert resolve_prompt(prompt, "en", project)[0] == global_content
-    atomic_write_json(prompt_path(project, prompt.validator_id, "en"), project_content)
-    assert resolve_prompt(prompt, "en", project) == (project_content, "project")
-    atomic_write_json(prompt_path(project, prompt.validator_id, "en"), {**project_content, "criteria": {}})
+    assert resolve_prompt(prompt)[1] == "default"
+    atomic_write_json(prompt_path(tmp_path / "user", prompt.validator_id), global_content)
+    assert resolve_prompt(prompt, project)[0] == global_content
+    atomic_write_json(prompt_path(project, prompt.validator_id), project_content)
+    assert resolve_prompt(prompt, project) == (project_content, "project")
+    atomic_write_json(prompt_path(project, prompt.validator_id), {**project_content, "criteria": {}})
     with pytest.raises(ConfigError, match="选项"):
-        resolve_prompt(prompt, "en", project)
+        resolve_prompt(prompt, project)
 
 
 def test_prompt_routes_project_override_restore_and_library(tmp_path):
@@ -53,48 +53,45 @@ def test_prompt_routes_project_override_restore_and_library(tmp_path):
     app = create_app(app_root=root, projects_root=projects, log_path=tmp_path / "app.log")
     path = "/api/v1/projects/example/decision-prompts/preferred_term_usage"
     global_path = "/api/v1/global/decision-prompts/preferred_term_usage"
-    library = "/api/v1/decision-prompt-library/preferred_term_usage/en/nicknames"
+    library = "/api/v1/decision-prompt-library/preferred_term_usage/nicknames"
     with TestClient(app) as client:
         view = client.get(path).json()
-        assert view["inherited"] and view["language"] == "en"
-        assert view["global_sync"] == {"available": True, "same": True, "language": "en"}
+        assert view["inherited"] and "language" not in view
+        assert view["global_sync"] == {"available": True, "same": True}
         content = {**view["content"], "instructions": "Nicknames are allowed"}
-        assert client.put(global_path, json={"language": "en", "content": content}).status_code == 200
+        assert client.put(global_path, json={"content": content}).status_code == 200
         assert client.get(path).json()["content"] == content
         custom = {**content, "instructions": "Project abbreviations are allowed"}
-        assert client.put(path, json={"language": "en", "content": custom}).status_code == 200
+        assert client.put(path, json={"content": custom}).status_code == 200
         assert not client.get(path).json()["inherited"]
         assert not client.get(path).json()["global_sync"]["same"]
         from app.decision_prompt import prompt_path
         from app.user_config import user_root
-        prompt_path(user_root(), "preferred_term_usage", "en").write_text('{"invalid": true}')
+        prompt_path(user_root(), "preferred_term_usage").write_text('{"invalid": true}')
         unavailable = client.get(path).json()
         assert unavailable["content"] == custom
         assert not unavailable["global_sync"]["available"] and unavailable["global_sync"]["error"]
-        assert client.put(global_path, json={"language": "en", "content": content}).status_code == 200
-        assert client.put(path, json={"language": "en", "content": content}).status_code == 200
+        assert client.put(global_path, json={"content": content}).status_code == 200
+        assert client.put(path, json={"content": content}).status_code == 200
         equal_override = client.get(path).json()
         assert not equal_override["inherited"] and equal_override["global_sync"]["same"]
-        assert client.put(path, json={"language": "en", "content": custom}).status_code == 200
-        before = (project / "decision_prompts/preferred_term_usage/en.json").read_bytes()
-        assert client.put(path, json={"language": "en", "content": {**custom, "criteria": {}}}).status_code == 400
-        assert (project / "decision_prompts/preferred_term_usage/en.json").read_bytes() == before
+        assert client.put(path, json={"content": custom}).status_code == 200
+        before = (project / "decision_prompts/preferred_term_usage.json").read_bytes()
+        assert client.put(path, json={"content": {**custom, "criteria": {}}}).status_code == 400
+        assert (project / "decision_prompts/preferred_term_usage.json").read_bytes() == before
         assert client.put(library, json={"content": custom}).status_code == 200
         assert client.get(library).json()["content"] == custom
         assert client.get(library.rsplit("/", 1)[0]).json()["entries"][0]["id"] == "nicknames"
         assert client.delete(library).status_code == 200
-        (project / "decision_prompts/preferred_term_usage/en.json").write_text('{"bad": true}')
+        (project / "decision_prompts/preferred_term_usage.json").write_text('{"bad": true}')
         assert client.get(path).status_code == 400
-        assert client.get(path + "/language").json()["language"] == "en"
-        assert client.get("/api/v1/decision-prompts/preferred_term_usage/default?language=en").status_code == 200
-        for invalid_language in (["en"], 1, None):
-            assert client.put(global_path, json={"language": invalid_language, "content": content}).status_code == 400
-        assert client.delete(path + "?language=en").status_code == 200
+        assert client.get("/api/v1/decision-prompts/preferred_term_usage/default").json()["content"]["instructions"]
+        assert client.put(global_path, json={"language": "en", "content": content}).status_code == 400
+        assert client.delete(path).status_code == 200
         assert client.get(path).json()["content"] == content
-        assert client.put(global_path + "/language", json={"language": "zh-CN"}).status_code == 200
-        assert client.get(path).json()["language"] == "zh-CN"
-        assert client.put(path + "/language", json={"language": "en"}).status_code == 200
-        assert client.get(path).json()["language"] == "en"
+        custom_language = {**content, "instructions": "允许使用昵称和缩写。"}
+        assert client.put(path, json={"content": custom_language}).status_code == 200
+        assert client.get(path).json()["content"] == custom_language
         assert client.get("/api/v1/global/decision-prompts/missing").status_code == 400
 
 
@@ -119,14 +116,15 @@ def test_run_prompt_snapshot_and_fingerprint(tmp_path):
     (snapshot / "config.toml").write_text(dump_config(config))
     _write_llm_snapshots(snapshot, resolved)
     frozen = resolved["_decision_prompt_definitions"]
+    assert set(frozen["preferred_term_usage"]) == {"choice_ids", "content"}
     content = {**frozen["preferred_term_usage"]["content"], "instructions": "Changed nickname rule"}
-    atomic_write_json(prompt_path(project, "preferred_term_usage", "en"), content)
+    atomic_write_json(prompt_path(project, "preferred_term_usage"), content)
     changed = load_project_config(project, presets_root=root)
     assert stage_fingerprint(changed, "translation", None) != stage_fingerprint(resolved, "translation", None)
     assert load_run_config(snapshot)["_decision_prompt_definitions"] == frozen
     config["validation"]["translation"]["decision_enabled"] = False
     (project / "config.toml").write_text(dump_config(config))
-    atomic_write_json(prompt_path(project, "preferred_term_usage", "en"), {"invalid": True})
+    atomic_write_json(prompt_path(project, "preferred_term_usage"), {"invalid": True})
     assert load_project_config(project, presets_root=root)["_decision_prompt_definitions"] == {}
 
 
@@ -182,14 +180,14 @@ def test_optional_plugin_custom_choices_uninstall_and_reinstall(tmp_path, monkey
         def validate(self, context):
             return ()
     content = {"instructions": "Custom rule", "criteria": {"yes": "Yes", "no": "No"}}
-    declaration = DecisionPromptDeclaration("custom_validator", ("yes", "no"), {"en": content})
+    declaration = DecisionPromptDeclaration("custom_validator", ("yes", "no"), content)
     plugin = PluginDescriptor("custom", "1", PLUGIN_PROTOCOL_VERSION, translation_validators=(Validator(),), decision_prompts=(declaration,))
     _validate_plugins([plugin, PluginDescriptor("no-prompts", "1", PLUGIN_PROTOCOL_VERSION)])
     monkeypatch.setattr(plugins, "_PLUGIN_CACHE", (plugin,))
-    config = {"decision": {"prompt_languages": {}}, "validation": {"translation": {"validators": ["custom_validator"], "decision_enabled": False}}}
+    config = {"decision": {}, "validation": {"translation": {"validators": ["custom_validator"], "decision_enabled": False}}}
     resolve_run_prompts(config)
     assert config["_decision_prompt_definitions"]["custom_validator"]["choice_ids"] == ["yes", "no"]
-    path = prompt_path(tmp_path, "custom_validator", "en")
+    path = prompt_path(tmp_path, "custom_validator")
     custom = {**content, "instructions": "Saved custom policy"}
     atomic_write_json(path, custom)
     monkeypatch.setattr(plugins, "_PLUGIN_CACHE", ())
@@ -198,8 +196,8 @@ def test_optional_plugin_custom_choices_uninstall_and_reinstall(tmp_path, monkey
     with pytest.raises(ConfigError, match="未安装"):
         plugins.resolve_translation_validators(["custom_validator"])
     monkeypatch.setattr(plugins, "_PLUGIN_CACHE", (plugin,))
-    assert resolve_prompt(prompt_declarations()["custom_validator"], "en", tmp_path)[0] == custom
-    changed = replace(declaration, choice_ids=("pass", "fail"), defaults={"en": {"instructions": "New rule", "criteria": {"pass": "Pass", "fail": "Fail"}}})
+    assert resolve_prompt(prompt_declarations()["custom_validator"], tmp_path)[0] == custom
+    changed = replace(declaration, choice_ids=("pass", "fail"), default={"instructions": "New rule", "criteria": {"pass": "Pass", "fail": "Fail"}})
     monkeypatch.setattr(plugins, "_PLUGIN_CACHE", (replace(plugin, decision_prompts=(changed,)),))
     with pytest.raises(ConfigError, match="选项"):
-        resolve_prompt(prompt_declarations()["custom_validator"], "en", tmp_path)
+        resolve_prompt(prompt_declarations()["custom_validator"], tmp_path)

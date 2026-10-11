@@ -102,7 +102,6 @@ allow_soft_target_overflow = true
 anchor_overflow_mode = "error"
 
 [decision]
-prompt_languages = {}
 preset = ""
 
 [validation.translation]

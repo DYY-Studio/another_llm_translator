@@ -84,6 +84,5 @@ llm_presets = [
   "plugins/term_validation/plugin.toml",
 ]
 "plugins/term_validation/prompts" = [
-  "plugins/term_validation/prompts/en.json",
-  "plugins/term_validation/prompts/zh-CN.json",
+  "plugins/term_validation/prompts/default.json",
 ]
