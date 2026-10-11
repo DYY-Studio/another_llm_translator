@@ -77,10 +77,10 @@ def test_summary_source_snapshots_deduplicate_and_restore_historical_text(tmp_pa
         packed = json.loads(database.execute(
             "SELECT source_range_json FROM content_summaries LIMIT 1"
         ).fetchone()[0])
-        assert set(packed["segments"][0]) == {
-            "segment_id", "slice_index", "source_digest", "model_text_digest",
-            "original_source_digest", "original_model_text_digest",
-        }
+        expected_keys = {"segment_id", "slice_index", "source_digest"}
+        if not same_model_text:
+            expected_keys.add("model_text_digest")
+        assert set(packed["segments"][0]) == expected_keys
         assert "segment_ids" not in packed
     segments = read_segments(project)
     segments[0]["source"] = "变更后的原文"
@@ -90,6 +90,84 @@ def test_summary_source_snapshots_deduplicate_and_restore_historical_text(tmp_pa
         database.execute("DELETE FROM summary_source_texts WHERE digest = ?", (summary["source_range"]["segments"][0]["model_text_digest"],))
     with pytest.raises(StorageError, match="概括源文本快照缺失"):
         read_content_summaries(project)
+
+
+def _seed_v6_summary(project: Path, *, same_model_text: bool = True) -> dict:
+    summary = _text_summary(project, same_model_text=same_model_text)
+    write_content_summary(project, summary)
+    packed = json.loads(json.dumps(summary["source_range"]))
+    packed.pop("segment_ids")
+    for value in packed["segments"]:
+        for key in ("source", "model_text", "original_segment_id", "slice_id"):
+            value.pop(key)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("UPDATE schema_meta SET value = '6' WHERE key = 'schema_version'")
+        database.execute(
+            "UPDATE content_summaries SET source_range_json = ? WHERE summary_id = ?",
+            (json.dumps(packed, ensure_ascii=False), summary["record_id"]),
+        )
+    from app.sqlite_storage import _SUPPORTED_CACHE
+    _SUPPORTED_CACHE.discard(project / "project.sqlite")
+    return summary
+
+
+@pytest.mark.parametrize("same_model_text", [False, True])
+def test_v6_summary_upgrade_deduplicates_hashes_without_changing_history(
+    tmp_path: Path, same_model_text: bool,
+) -> None:
+    from app.sqlite_storage import _take_migration_backup_notice
+
+    project = create_project(tmp_path)
+    summary = _seed_v6_summary(project, same_model_text=same_model_text)
+    backup = ensure_supported(project)
+    assert backup is not None
+    with sqlite3.connect(backup) as database:
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "6"
+        assert "original_source_digest" in json.loads(database.execute(
+            "SELECT source_range_json FROM content_summaries"
+        ).fetchone()[0])["segments"][0]
+    restored = read_content_summaries(project)[0]
+    for key in ("record_id", "source_range", "source_digest", "input_digest", "text", "status"):
+        assert restored[key] == summary[key]
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
+        value = json.loads(database.execute("SELECT source_range_json FROM content_summaries").fetchone()[0])["segments"][0]
+        assert "original_source_digest" not in value
+        assert "original_model_text_digest" not in value
+        assert ("model_text_digest" not in value) == same_model_text
+    assert _take_migration_backup_notice(project) is None
+    assert ensure_supported(project) is None
+    assert list((project / "snapshots" / "storage_migrations").glob("*.sqlite")) == [backup]
+
+
+def test_summary_hash_dedup_preserves_distinct_original_hashes(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    summary = _text_summary(project)
+    value = summary["source_range"]["segments"][0]
+    value["slice_index"] = 1
+    value["original_source_digest"] = digest("完整原文")
+    value["original_model_text_digest"] = digest("完整模型输入")
+    value["slice_id"] = f"F0001-S000001#slice-0001-{value['source_digest'][7:15]}-{value['model_text_digest'][7:15]}"
+    summary["source_digest"] = digest(summary["source_range"]["segments"])
+    write_content_summary(project, summary)
+    assert read_content_summaries(project)[0]["source_range"] == summary["source_range"]
+    with sqlite3.connect(project / "project.sqlite") as database:
+        packed = json.loads(database.execute("SELECT source_range_json FROM content_summaries").fetchone()[0])["segments"][0]
+        for key in ("source_digest", "model_text_digest", "original_source_digest", "original_model_text_digest"):
+            assert packed[key] == value[key]
+
+
+def test_v6_summary_upgrade_failure_preserves_schema_and_ranges(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    _seed_v6_summary(project)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        before = database.execute("SELECT source_range_json FROM content_summaries").fetchone()[0]
+        database.execute("DELETE FROM summary_source_texts")
+    with pytest.raises(StorageError, match="概括源文本快照缺失"):
+        ensure_supported(project)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "6"
+        assert database.execute("SELECT source_range_json FROM content_summaries").fetchone()[0] == before
 
 
 def _seed_v5_summary(project: Path, *, corrupt: bool = False, legacy: bool = False) -> dict:

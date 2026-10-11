@@ -300,6 +300,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             3,
             4,
             5,
+            6,
             SCHEMA_VERSION,
         }:
             raise UsageError(

@@ -15,7 +15,7 @@ from typing import Any, Iterable
 from .errors import ProjectError, StorageError, UsageError
 from .stage_result_retention import prune_stage_results
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 STAGES = frozenset(
     {
@@ -652,7 +652,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             (str(version),),
         )
         return None
-    elif version not in {3, 4, 5, SCHEMA_VERSION}:
+    elif version not in {3, 4, 5, 6, SCHEMA_VERSION}:
         raise ProjectError(
             f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
         )
@@ -671,7 +671,10 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         _create_tables(connection)
         if version < 5:
             _migrate_to_v5(connection, project)
-        _migrate_summary_storage_to_v6(connection, project)
+        if version < 6:
+            _migrate_summary_storage_to_v6(connection, project)
+        else:
+            _migrate_summary_hashes_to_v7(connection, project)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -682,13 +685,14 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         connection.rollback()
         raise
     try:
-        project_id = _project_id(connection)
-        for row in connection.execute(
-            "SELECT * FROM runs WHERE json_type(payload_json, '$.summary_boundaries') = 'array'"
-        ):
-            manifest = project / "runs" / str(row["run_id"]) / "manifest.json"
-            if manifest.is_file():
-                atomic_write_json(manifest, _hydrate_run(row, project_id))
+        if version < 6:
+            project_id = _project_id(connection)
+            for row in connection.execute(
+                "SELECT * FROM runs WHERE json_type(payload_json, '$.summary_boundaries') = 'array'"
+            ):
+                manifest = project / "runs" / str(row["run_id"]) / "manifest.json"
+                if manifest.is_file():
+                    atomic_write_json(manifest, _hydrate_run(row, project_id))
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         connection.execute("VACUUM")
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -1007,6 +1011,13 @@ def _pack_summary_range(connection: sqlite3.Connection, source_range: dict[str, 
         if all(key in value for key in ("slice_index", "source_digest", "model_text_digest")):
             if value.get("slice_id") == _summary_slice_id(value):
                 value.pop("slice_id")
+        for key, base in (
+            ("original_model_text_digest", "model_text_digest"),
+            ("original_source_digest", "source_digest"),
+            ("model_text_digest", "source_digest"),
+        ):
+            if key in value and value[key] == value.get(base):
+                value.pop(key)
         values.append(value)
     packed["segments"] = values
     if packed.get("segment_ids") == list(dict.fromkeys(
@@ -1023,6 +1034,10 @@ def _unpack_summary_range(source_range: dict[str, Any], texts: dict[str, str]) -
     values = []
     for raw in source_range["segments"]:
         value = dict(raw)
+        if "source_digest" in value:
+            value.setdefault("model_text_digest", value["source_digest"])
+            value.setdefault("original_source_digest", value["source_digest"])
+            value.setdefault("original_model_text_digest", value["model_text_digest"])
         for key, digest_key in (("source", "source_digest"), ("model_text", "model_text_digest")):
             if digest_key in value:
                 text_digest = value[digest_key]
@@ -1042,6 +1057,22 @@ def _unpack_summary_range(source_range: dict[str, Any], texts: dict[str, str]) -
 
 def _summary_source_texts(connection: sqlite3.Connection) -> dict[str, str]:
     return dict(connection.execute("SELECT digest, text FROM summary_source_texts"))
+
+
+def _migrate_summary_hashes_to_v7(connection: sqlite3.Connection, project: Path) -> None:
+    texts = _summary_source_texts(connection)
+    try:
+        for row in connection.execute("SELECT summary_id, source_range_json FROM content_summaries").fetchall():
+            source_range = _unpack_summary_range(json.loads(row["source_range_json"]), texts)
+            packed = _pack_summary_range(connection, source_range)
+            if _unpack_summary_range(packed, texts) != source_range:
+                raise StorageError(f"概括源范围无法无损转换：{row['summary_id']}")
+            connection.execute(
+                "UPDATE content_summaries SET source_range_json = ? WHERE summary_id = ?",
+                (_json(packed), row["summary_id"]),
+            )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StorageError(f"无法精简概括哈希：{project}: {exc}") from exc
 
 
 def _migrate_summary_storage_to_v6(connection: sqlite3.Connection, project: Path) -> None:
