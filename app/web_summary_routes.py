@@ -96,6 +96,13 @@ def register_summary_routes(
             visible_artifacts.append(
                 {
                     **artifact,
+                    "source_range": {
+                        **artifact["source_range"],
+                        "segments": [
+                            {key: item[key] for key in ("segment_id", "original_segment_id") if key in item}
+                            for item in artifact["source_range"].get("segments", [])
+                        ],
+                    },
                     "expired": assessment.expired if assessment is not None else False,
                     "expiry_reason": (
                         assessment.expiry_reason if assessment is not None else None

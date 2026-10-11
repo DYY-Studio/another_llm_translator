@@ -34,7 +34,10 @@ export interface SummaryArtifact {
   error_message?: string | null;
   error?: string | null;
   refs?: string[];
-  source_range: Record<string, unknown>;
+  source_range: {
+    segments: Array<{ segment_id: string; original_segment_id?: string }>;
+    [key: string]: unknown;
+  };
   source_changed: boolean;
   expired: boolean;
   expiry_reason: SummaryExpiryReason | null;
