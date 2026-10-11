@@ -1668,6 +1668,7 @@ def read_content_summaries(
         raise ProjectError(f"不支持的内容概括 status：{status}")
     connection = _with_db(project)
     try:
+        connection.execute("BEGIN")
         clauses = []
         params: list[Any] = []
         if file_id:
@@ -3110,21 +3111,24 @@ def terminology_scan_state(
     values = [str(value) for value in segment_ids]
     if not values:
         return set(), set()
-    placeholders = ",".join("?" for _ in values)
     connection = _with_db(project)
     try:
         connection.execute("BEGIN")
-        rows = connection.execute(
-            f"""
-            SELECT DISTINCT segment_id,
-                   json_extract(payload_json, '$._request_meta') AS metadata_ref
-            FROM terminology_scans
-            WHERE active_task_id = ?
-              AND status = 'completed'
-              AND segment_id IN ({placeholders})
-            """,
-            [task_id, *values],
-        ).fetchall()
+        rows = []
+        for start in range(0, len(values), 500):
+            batch = values[start:start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows.extend(connection.execute(
+                f"""
+                SELECT DISTINCT segment_id,
+                       json_extract(payload_json, '$._request_meta') AS metadata_ref
+                FROM terminology_scans
+                WHERE active_task_id = ?
+                  AND status = 'completed'
+                  AND segment_id IN ({placeholders})
+                """,
+                [task_id, *batch],
+            ).fetchall())
         completed = {str(row["segment_id"]) for row in rows}
         metadata = _request_metadata(connection)
         fingerprints = {

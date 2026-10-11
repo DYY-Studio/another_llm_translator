@@ -2134,3 +2134,66 @@ def test_applied_text_resolution_preserves_raw_records_and_exact_parent(tmp_path
     application["base_result_id"] = "missing"
     with pytest.raises(StorageError, match="引用"):
         resolve_stage_result_texts(project, [application], records_by_id=lineage)
+
+
+def test_summary_reads_keep_source_texts_in_the_same_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import sqlite_storage
+
+    project = create_project(tmp_path)
+    artifact = _text_summary(project)
+    write_content_summary(project, artifact)
+    expected = read_content_summaries(project)
+    original = sqlite_storage._summary_source_texts
+
+    def reclaim_before_text_read(connection):
+        with sqlite3.connect(project / "project.sqlite") as writer:
+            writer.execute("DELETE FROM content_summaries")
+            sqlite_storage._prune_summary_source_texts(writer)
+        return original(connection)
+
+    monkeypatch.setattr(sqlite_storage, "_summary_source_texts", reclaim_before_text_read)
+    assert read_content_summaries(project) == expected
+
+
+def test_scan_progress_batches_segment_ids_with_low_bind_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import sqlite_storage
+
+    project = create_project(tmp_path)
+    _, scan = _seed_fingerprint_records(project)
+    original = sqlite_storage._with_db
+
+    def limited_connection(project):
+        connection = original(project)
+        connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        return connection
+
+    monkeypatch.setattr(sqlite_storage, "_with_db", limited_connection)
+    ids = [scan["segment_id"], *(f"absent-{i}" for i in range(1000))]
+    assert sqlite_storage.terminology_scan_state(project, "TASK-SHARED", ids) == (
+        {scan["segment_id"]}, {scan["stage_fingerprint"]},
+    )
+
+
+@pytest.mark.parametrize("maintenance", [False, True])
+def test_retention_removes_unneeded_reset_in_one_pass(tmp_path: Path, maintenance: bool) -> None:
+    from app import sqlite_storage
+    from app.stage_result_retention import maintain_stage_results, obsolete_stage_results
+
+    project = create_project(tmp_path)
+    project_id = read_json(project, project / "project.json")["project_id"]
+    records = [record_header("stage_result", project_id, record_id=key,
+                            stage="translation", segment_id="F0001-S000001", status=status)
+               for key, status in [("old", "completed"), ("reset", "reset"), ("failed", "failed")]]
+    if maintenance:
+        connection = sqlite_storage._with_db(project)
+        try:
+            with connection:
+                sqlite_storage._insert_stage(connection, records)
+                assert obsolete_stage_results(connection) == {"old", "reset"}
+                assert maintain_stage_results(connection) == 2
+                assert not obsolete_stage_results(connection)
+        finally:
+            connection.close()
+    else:
+        sqlite_storage.append_stage_results(project, records)
+    assert [record["record_id"] for record in read_jsonl(project, project / "stages" / "translation.jsonl")] == ["failed"]

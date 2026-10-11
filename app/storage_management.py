@@ -820,10 +820,10 @@ class StorageManager:
             )
         maintenance = {"obsolete_stage_records": None, "deduplicatable_applied_records": None, "can_maintain": False,
                        "blocked_reason": busy_reason if scan.complete else _PROJECT_SCAN_BLOCKED_REASON}
-        if scan.complete:
+        if scan.complete and busy_reason is None:
             try:
                 maintenance.update(database_maintenance_info(root))
-                maintenance["can_maintain"] = busy_reason is None
+                maintenance["can_maintain"] = True
             except (AppError, OSError, sqlite3.Error) as exc:
                 maintenance["blocked_reason"] = str(exc)
         return {
