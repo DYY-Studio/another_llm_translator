@@ -225,3 +225,24 @@ def test_project_prompt_reports_unavailable_global_prompt(tmp_path: Path) -> Non
         "same": False,
         "language": "zh-CN",
     }
+
+
+def test_builtin_prompt_view_ignores_global_overrides(tmp_path: Path):
+    from fastapi.testclient import TestClient
+    from app.web import create_app
+    from tests.test_foundation import make_app_root
+    root = make_app_root(tmp_path)
+    app = create_app(app_root=root, projects_root=tmp_path / "projects", log_path=tmp_path / "app.log")
+    original = (root / "prompts/terminology.en.middle.txt").read_text()
+    with TestClient(app) as client:
+        for stage in ("terminology", "translation", "fragment_summary"):
+            assert client.put(f"/api/v1/global/prompts/{stage}", json={"language": "en", "content": "Custom global " + stage}).status_code == 200
+        response = client.get("/api/v1/prompts/terminology/default?language=en")
+        assert response.status_code == 200
+        value = response.json()
+        assert value["content"] == original
+        assert "Custom global" not in value["assembled_modes"]["terms+translation+fragment-summary"]
+        assert client.get("/api/v1/global/prompts/terminology?language=en").json()["content"] == "Custom global terminology"
+        assert client.get("/api/v1/prompts/unknown/default?language=en").status_code == 400
+        (root / "prompts/terminology.en.middle.txt").unlink()
+        assert client.get("/api/v1/prompts/terminology/default?language=en").status_code == 400

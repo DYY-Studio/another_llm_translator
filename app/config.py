@@ -541,6 +541,7 @@ def load_project_config(
         load_config(project / "config.toml"),
         stage=stage,
         presets_root=presets_root,
+        project=project,
     )
 
 
@@ -550,6 +551,7 @@ def _resolve_config(
     *,
     stage: str | None,
     error_kind: str,
+    project: Path | None = None,
 ) -> dict[str, Any]:
     config = deepcopy(config)
     from .plugins import resolve_translation_validators
@@ -564,6 +566,8 @@ def _resolve_config(
         validator for validator, _ in validator_bindings
     )
     _resolve_decision_config(config, root)
+    from .decision_prompt import resolve_run_prompts
+    resolve_run_prompts(config, project=project)
     configured_preset_id = _preset_id_for_stage(config, stage)
     preset_path(root, configured_preset_id)
     preset = load_llm_preset(
@@ -585,6 +589,7 @@ def _resolve_config(
 def resolve_project_config(
     config: dict[str, Any],
     *,
+    project: Path | None = None,
     stage: str | None = None,
     presets_root: Path | None = None,
 ) -> dict[str, Any]:
@@ -593,6 +598,7 @@ def resolve_project_config(
         presets_root or APP_ROOT,
         stage=stage,
         error_kind="项目配置",
+        project=project,
     )
 
 
@@ -647,6 +653,8 @@ def _resolve_decision_config(config: dict[str, Any], root: Path, *, snapshot: bo
 def load_run_config(run_dir: Path) -> dict[str, Any]:
     config = load_config(run_dir / "config.toml")
     _resolve_decision_config(config, run_dir, snapshot=True)
+    from .decision_prompt import resolve_run_prompts
+    resolve_run_prompts(config, snapshot=run_dir)
     preset = load_llm_preset(run_dir / "llm_preset.json")
     return _resolve_llm_config(
         config,
