@@ -37,6 +37,7 @@ from .plugins import (
 )
 from .sqlite_storage import (
     append_jsonl,
+    append_stage_results,
     latest_stage_states,
     read_content_summaries,
     record_header,
@@ -698,45 +699,32 @@ async def run_translation(
     report_progress()
 
     async def save_completed(
-        segment_id: str,
-        text: str,
-        request_id: str,
+        completions: list[tuple[str, str, str]],
         *,
         validation_status: str = "passed",
         findings: list[dict[str, Any]] | None = None,
     ) -> None:
-        text = _restore_leading_whitespace(
-            str(by_id[segment_id]["source"]),
-            text,
-        )
+        if not completions:
+            return
+        records = [record_header(
+            "stage_result", str(metadata["project_id"]), stage="translation",
+            segment_id=segment_id, status="completed",
+            text=_restore_leading_whitespace(str(by_id[segment_id]["source"]), text),
+            validation_status=validation_status, validation_findings=findings or [],
+            stage_fingerprint=fingerprint, terms_revision=terms_revision,
+            **({"generation_origin": "terminology_draft"} if draft_scan else {}),
+            run_id=run_id, request_id=request_id,
+        ) for segment_id, text, request_id in completions]
         async with write_lock:
-            append_jsonl(
-                project,
-                result_path,
-                record_header(
-                    "stage_result",
-                    str(metadata["project_id"]),
-                    stage="translation",
-                    segment_id=segment_id,
-                    status="completed",
-                    text=text,
-                    validation_status=validation_status,
-                    validation_findings=findings or [],
-                    stage_fingerprint=fingerprint,
-                    terms_revision=terms_revision,
-                    **(
-                        {"generation_origin": "terminology_draft"} if draft_scan else {}
-                    ),
-                    run_id=run_id,
-                    request_id=request_id,
-                ),
-            )
-        completed_ids.add(segment_id)
-        if draft_scan is not None:
-            draft_scan.translation_done.add(segment_id)
-            draft_scan.translation_failed.discard(segment_id)
+            append_stage_results(project, records)
+        for record in records:
+            segment_id = record["segment_id"]
+            completed_ids.add(segment_id)
+            if draft_scan is not None:
+                draft_scan.translation_done.add(segment_id)
+                draft_scan.translation_failed.discard(segment_id)
+            latest_text[segment_id] = record["text"]
         report_progress()
-        latest_text[segment_id] = text
 
     async def save_failed(
         segment_id: str,
@@ -842,6 +830,7 @@ async def run_translation(
                 len(ordered) if blocks_response else len(findings),
                 repairable,
             )
+        completions = []
         for segment_id in ordered:
             text, request_id = response_candidates.pop(segment_id)
             if segment_id in findings or blocks_response:
@@ -856,7 +845,8 @@ async def run_translation(
                                                   "findings": own, "request_id": request_id}
             else:
                 validation_pending.pop(segment_id, None)
-                await save_completed(segment_id, text, request_id)
+                completions.append((segment_id, text, request_id))
+        await save_completed(completions)
 
     segment_order = {str(item["segment_id"]): index for index, item in enumerate(segments)}
 
@@ -1242,9 +1232,7 @@ async def run_translation(
                 or exhausted_mode == "warning"
             ):
                 await save_completed(
-                    segment_id,
-                    item["candidate"],
-                    item["request_id"],
+                    [(segment_id, item["candidate"], item["request_id"])],
                     validation_status="warning",
                     findings=item["findings"],
                 )

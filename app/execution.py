@@ -52,7 +52,7 @@ from .llm_response import TerminologyResponseMode, response_record_types
 
 
 from .sqlite_storage import (
-    append_jsonl,
+    append_jsonl_records,
     atomic_write_json,
     read_json,
     read_jsonl,
@@ -1648,22 +1648,14 @@ def save_debug_chunks(
     stage: str,
     chunks: Iterable[ChunkPlan],
 ) -> None:
-    for chunk in chunks:
-        append_jsonl(
-            project,
-            run_dir / "chunks.jsonl",
-            record_header(
-                "chunk_manifest",
-                project_id,
-                record_id=str(chunk.chunk_id),
-                run_id=run_id,
-                stage=stage,
-                chunk_id=chunk.chunk_id,
-                file_id=chunk.file_id,
-                segment_ids=[str(segment["segment_id"]) for segment in chunk.segments],
-                estimated_input_tokens=chunk.estimated_input_tokens,
-            ),
-        )
+    append_jsonl_records(project, run_dir / "chunks.jsonl", (
+        record_header(
+            "chunk_manifest", project_id, record_id=str(chunk.chunk_id),
+            run_id=run_id, stage=stage, chunk_id=chunk.chunk_id, file_id=chunk.file_id,
+            segment_ids=[str(segment["segment_id"]) for segment in chunk.segments],
+            estimated_input_tokens=chunk.estimated_input_tokens,
+        ) for chunk in chunks
+    ))
 
 _Item = TypeVar("_Item")
 

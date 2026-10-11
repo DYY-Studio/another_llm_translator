@@ -2230,3 +2230,16 @@ def test_run_index_omits_modes_but_detail_preserves_them(tmp_path: Path) -> None
     assert rows == [{key: value for key, value in read_run_record(project, "RUN-MODES").items()
                      if key != "terminology_modes"}]
     assert read_run_record(project, "RUN-MODES")["terminology_modes"] == record["terminology_modes"]
+
+
+def test_batch_append_rolls_back_all_records_on_duplicate(tmp_path: Path) -> None:
+    from app.sqlite_storage import append_jsonl_records
+
+    project = create_project(tmp_path)
+    _, scan = _seed_fingerprint_records(project)
+    fresh = {**scan, "record_id": "SCAN-FRESH", "request_id": "REQ-FRESH"}
+    with pytest.raises(StorageError):
+        append_jsonl_records(project, project / "terminology" / "scans.jsonl", [fresh, scan])
+    assert read_jsonl(project, project / "terminology" / "scans.jsonl") == [scan]
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT count(*) FROM request_metadata").fetchone()[0] == 1

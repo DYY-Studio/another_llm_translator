@@ -2071,6 +2071,46 @@ def replace_source(
         connection.close()
 
 
+def write_adapter_states(project: Path, states: Iterable[dict[str, Any]]) -> None:
+    """Update existing Adapter states without rewriting project source data."""
+    connection = _with_db(project)
+    try:
+        with connection:
+            for state in states:
+                cursor = connection.execute("UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+                    (zlib.compress(_residual(state, _ADAPTER_RESIDUAL_FIELDS).encode("utf-8")), state["file_id"]))
+                if cursor.rowcount != 1:
+                    raise StorageError(f"Document Adapter 状态缺失：{state['file_id']}")
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法更新 Adapter 状态：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def reorder_files(project: Path, file_ids: list[str]) -> None:
+    """Caller validates the complete order and holds the project write lock."""
+    connection = _with_db(project)
+    try:
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            old = dict(connection.execute("SELECT file_id, file_order FROM files"))
+            changed = [file_id for order, file_id in enumerate(file_ids, 1) if old[file_id] != order]
+            if not changed:
+                return
+            # Move orders out of the final range before assigning the UNIQUE column.
+            offset = max(old.values()) + len(file_ids)
+            connection.execute("UPDATE files SET file_order = file_order + ?", (offset,))
+            connection.executemany("UPDATE files SET file_order = ? WHERE file_id = ?",
+                                   enumerate(file_ids, 1))
+            now = utc_now()
+            connection.executemany("UPDATE content_summaries SET source_changed = 1, updated_at = ? WHERE file_id = ?",
+                                   ((now, file_id) for file_id in changed))
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法重排项目文件：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def read_files(project: Path) -> list[dict[str, Any]]:
     connection = _with_db(project)
     try:
@@ -2493,19 +2533,27 @@ def _insert_chunks(connection: sqlite3.Connection, records: Iterable[dict[str, A
 
 
 def append_jsonl(project: Path, path: Path, value: dict[str, Any]) -> None:
+    append_jsonl_records(project, path, [value])
+
+
+def append_jsonl_records(project: Path, path: Path, records: Iterable[dict[str, Any]]) -> None:
+    """Commit records already available from one response or debug plan together."""
+    values = list(records)
+    if not values:
+        return
     kind, key = _kind(path, project)
     connection = _with_db(project)
     try:
         with connection:
             if kind == "stage":
-                _insert_stage(connection, [value])
-                prune_stage_results(connection, [(str(value.get("stage")), value.get("segment_id"))])
+                _insert_stage(connection, values)
+                prune_stage_results(connection, [(str(value.get("stage")), value.get("segment_id")) for value in values])
             elif kind == "scans":
-                _insert_scans(connection, [value])
+                _insert_scans(connection, values)
             elif kind == "candidates":
-                _insert_candidates(connection, [value])
+                _insert_candidates(connection, values)
             elif kind == "chunks":
-                _insert_chunks(connection, [value], str(key))
+                _insert_chunks(connection, values, str(key))
             else:
                 raise StorageError(f"SQLite 不支持追加记录类型：{kind}")
     except sqlite3.Error as exc:
