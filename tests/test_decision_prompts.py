@@ -57,12 +57,25 @@ def test_prompt_routes_project_override_restore_and_library(tmp_path):
     with TestClient(app) as client:
         view = client.get(path).json()
         assert view["inherited"] and view["language"] == "en"
+        assert view["global_sync"] == {"available": True, "same": True, "language": "en"}
         content = {**view["content"], "instructions": "Nicknames are allowed"}
         assert client.put(global_path, json={"language": "en", "content": content}).status_code == 200
         assert client.get(path).json()["content"] == content
         custom = {**content, "instructions": "Project abbreviations are allowed"}
         assert client.put(path, json={"language": "en", "content": custom}).status_code == 200
         assert not client.get(path).json()["inherited"]
+        assert not client.get(path).json()["global_sync"]["same"]
+        from app.decision_prompt import prompt_path
+        from app.user_config import user_root
+        prompt_path(user_root(), "preferred_term_usage", "en").write_text('{"invalid": true}')
+        unavailable = client.get(path).json()
+        assert unavailable["content"] == custom
+        assert not unavailable["global_sync"]["available"] and unavailable["global_sync"]["error"]
+        assert client.put(global_path, json={"language": "en", "content": content}).status_code == 200
+        assert client.put(path, json={"language": "en", "content": content}).status_code == 200
+        equal_override = client.get(path).json()
+        assert not equal_override["inherited"] and equal_override["global_sync"]["same"]
+        assert client.put(path, json={"language": "en", "content": custom}).status_code == 200
         before = (project / "decision_prompts/preferred_term_usage/en.json").read_bytes()
         assert client.put(path, json={"language": "en", "content": {**custom, "criteria": {}}}).status_code == 400
         assert (project / "decision_prompts/preferred_term_usage/en.json").read_bytes() == before

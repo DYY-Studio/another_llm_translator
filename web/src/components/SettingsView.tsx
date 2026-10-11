@@ -9,6 +9,7 @@ import { ServerSettings } from "./ServerSettings";
 import { StorageView } from "./StorageView";
 import { Icon } from "./Icons";
 import { DecisionPromptSettings, type DecisionPromptSummary } from "./DecisionPromptSettings";
+import { PromptSyncCard, type PromptGlobalSync } from "./PromptSyncCard";
 import { PromptLibraryControls } from "./PromptLibraryControls";
 import { Modal } from "./Modal";
 import { ConfirmDialog } from "./TermDialogs";
@@ -997,11 +998,7 @@ interface PromptView {
     groups: Array<{ file_id: string; adapter_ids: string[]; file_count: number; has_requirements: boolean }>;
   };
   languages: string[];
-  global_sync?: {
-    available: boolean;
-    same: boolean;
-    language: string;
-  };
+  global_sync?: PromptGlobalSync;
 }
 
 function PromptSettings({ project, scope, language }: { project: string; scope: ConfigScope; language: Language }) {
@@ -1010,7 +1007,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   const [error, setError] = useState("");
   useEffect(() => { let active = true; void api<{ prompts: DecisionPromptSummary[] }>("/api/v1/decision-prompts").then((value) => { if (active) setDecisionPrompts(value.prompts); }).catch((reason) => { if (active) setError(errorMessage(reason, language)); }); return () => { active = false; }; }, []);
   const stageControl = <label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}>
-    {[["terminology", "stage.terminology"], ["terminology_decision", "stage.terminologyDecision"], ["content_summary", "stage.contentSummary"], ["fragment_summary", "stage.fragmentSummary"], ["translation", "stage.translation"], ["proofreading", "stage.proofreading"], ["polishing", "stage.polishing"]].map(([id, label]) => <option key={id} value={id}>{translate(label, language)}</option>)}
+    <optgroup label="LLM">{[["terminology", "stage.terminology"], ["terminology_decision", "stage.terminologyDecision"], ["content_summary", "stage.contentSummary"], ["fragment_summary", "stage.fragmentSummary"], ["translation", "stage.translation"], ["proofreading", "stage.proofreading"], ["polishing", "stage.polishing"]].map(([id, label]) => <option key={id} value={id}>{translate(label, language)}</option>)}</optgroup>
     {decisionPrompts.length > 0 && <optgroup label="Decision">{decisionPrompts.map((prompt) => <option key={prompt.validator_id} value={`decision:${prompt.validator_id}`}>{prompt.validator_id === "preferred_term_usage" ? translate("settings.preferredTermUsage", language) : prompt.validator_id === "segment_alignment" ? translate("settings.segmentAlignment", language) : prompt.label}</option>)}</optgroup>}
   </select></label>;
   return <>{error && <div className="error-banner">{error}</div>}{stage.startsWith("decision:")
@@ -1205,10 +1202,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
     </div>
     {stageControl}
     <label className="stage-select">{translate("settings.promptLanguage", language)}<select value={promptLanguage} onChange={(event) => setPromptLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
-    {showSyncCard && <div className={`prompt-sync-card ${globalSync.available && globalSync.same && !draftDirty ? "synced" : "out-of-sync"}`}>
-      <div><strong>{!globalSync.available ? translate("settings.promptGlobalUnavailable", language) : draftDirty ? translate("settings.promptUnsaved", language) : globalSync.same ? translate("settings.promptSynced", language) : translate("settings.promptOutOfSync", language)}</strong><small>{!globalSync.available ? translate("settings.promptSyncLanguage", language, { language: globalSync.language }) : loadedGlobalDraft ? translate("settings.promptGlobalLoadedHint", language) : translate("settings.promptSyncLanguage", language, { language: globalSync.language })}</small></div>
-      {globalSync.available && !globalSync.same && !loadedGlobalDraft && <button className="quiet-button" onClick={() => void loadGlobalDraft()}>{translate("settings.promptLoadGlobal", language)}</button>}
-    </div>}
+    {showSyncCard && <PromptSyncCard language={language} sync={globalSync} dirty={draftDirty} loadedGlobal={loadedGlobalDraft} onLoadGlobal={() => void loadGlobalDraft()} />}
     {scope === "project" && <PromptLibraryControls language={language} entries={libraryEntries} selected={selectedLibraryEntry} loading={libraryLoading} saveOpen={librarySaveOpen} id={libraryIdDraft} overwrite={!!libraryOverwriteId}
       onId={(value) => { setLibraryIdDraft(value); setLibraryOverwriteId(""); }} onCancel={() => { setLibrarySaveOpen(false); setLibraryIdDraft(""); setLibraryOverwriteId(""); }}
       onSelect={(value) => void loadLibraryEntry(value)} onDelete={() => void deleteLibraryEntry()} onSave={() => void saveToLibrary()} />}

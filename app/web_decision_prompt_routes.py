@@ -10,7 +10,7 @@ from fastapi import FastAPI
 
 from .config import dump_config, load_config
 from .decision_prompt import get_declaration, prompt_declarations, prompt_path, read_content, resolve_prompt, validate_content
-from .errors import UsageError
+from .errors import ConfigError, UsageError
 from .locking import project_write_lock
 from .plugins import resolve_translation_validators
 from .prompt_library import validate_prompt_library_id
@@ -35,8 +35,15 @@ def register_decision_prompt_routes(app: FastAPI, project: Callable[[str], Path]
         selected = selection(validator_id, root)
         language = language or selected
         content, source = resolve_prompt(declaration, language, root)
-        return {"content": content, "language": language, "languages": list(declaration.defaults), "choice_ids": list(declaration.choice_ids),
-                "source": source, "inherited": root is not None and source != "project"}
+        result = {"content": content, "language": language, "languages": list(declaration.defaults), "choice_ids": list(declaration.choice_ids),
+                  "source": source, "inherited": root is not None and source != "project"}
+        if root is not None:
+            try:
+                global_content, _ = resolve_prompt(declaration, language)
+                result["global_sync"] = {"available": True, "same": content == global_content, "language": language}
+            except ConfigError as exc:
+                result["global_sync"] = {"available": False, "same": False, "language": language, "error": str(exc)}
+        return result
 
     def save(validator_id: str, payload: dict, root: Path | None) -> dict:
         declaration = get_declaration(validator_id)
