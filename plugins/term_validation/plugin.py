@@ -7,6 +7,7 @@ from dataclasses import asdict, replace
 
 from app.plugin_api import (
     DecisionQuestion,
+    DecisionPromptDeclaration,
     PluginDescriptor,
     TranslationValidationContext,
     TranslationValidationMatch,
@@ -26,7 +27,7 @@ class PreferredTermUsageValidator:
     scope = "segment"
 
     @staticmethod
-    def prompt_declaration():
+    def prompt_declaration() -> DecisionPromptDeclaration:
         from pathlib import Path
         from app.decision_prompt import declaration_from_files
         return declaration_from_files("preferred_term_usage", ("required", "acceptable", "uncertain"), Path(__file__).parent / "prompts")

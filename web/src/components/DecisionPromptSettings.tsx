@@ -59,7 +59,7 @@ export function DecisionPromptSettings({ project, scope, language, validator, st
           if (!selection || !confirmReplace()) return;
           void action(async () => {
             const value = await api<{ content: Content; choice_ids: string[] }>(`/api/v1/decision-prompts/${validator}/default?language=${selection.language}`);
-            setView({ ...value, ...selection, inherited: false, source: "default" });
+            if (!view) setView({ ...value, ...selection, inherited: false, source: "default" });
             setDraft(value.content); setMessage(translate("decision.promptDefaultLoaded", language));
           });
         }}>{translate("decision.promptLoadDefault", language)}</button>
@@ -82,6 +82,7 @@ export function DecisionPromptSettings({ project, scope, language, validator, st
           apply(await api<View>(`${path}?language=${next}`));
         });
       }}>{selection.languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+      <p className="prompt-preview-hint">{translate("decision.promptLanguageHint", language)}</p>
       {scope === "project" && <div className={`prompt-sync-card ${view?.inherited ? "synced" : "out-of-sync"}`}>
         <div><strong>{translate(view?.inherited ? "decision.promptInherited" : "decision.promptOverride", language)}</strong></div>
         <button className="quiet-button" disabled={view?.inherited} onClick={() => {

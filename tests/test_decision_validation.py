@@ -156,12 +156,17 @@ async def test_translation_decision_context_toggle_and_count(tmp_path, monkeypat
     config["validation"]["translation"].update(validators=["preferred_term_usage"], decision_enabled=True,
         decision_preset="local", decision_context_enabled=enabled, decision_previous_segments=count)
     (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+    from app.decision_prompt import get_declaration, prompt_path
+    from app.sqlite_storage import atomic_write_json
+    custom_prompt = {**get_declaration("preferred_term_usage").defaults["en"], "instructions": "Run-specific nickname policy"}
+    atomic_write_json(prompt_path(project, "preferred_term_usage", "en"), custom_prompt)
     monkeypatch.setenv("DECISION_TEST_KEY", "test")
     calls = []
     def respond(request):
         body = json.loads(request.content)
         if str(request.url) == value["url"]:
             calls.append(body)
+            assert all(question["instructions"].endswith(custom_prompt["instructions"]) for question in body["questions"].values())
             assert body["state"].get("reference_context", []) == expected
             return httpx.Response(200, json=dict(model="decision-test", answers={name: dict(type="choice",
                 choice="acceptable", confidence=0.9,
@@ -180,6 +185,7 @@ async def test_translation_decision_context_toggle_and_count(tmp_path, monkeypat
     store = WebStore(project)
     manual_context = store._translation_validation_context(segment, "她到了。")
     assert list(manual_context.previous_source) == expected
+    assert manual_context.decision_prompts["preferred_term_usage"] == custom_prompt
 
 
 @pytest.mark.asyncio

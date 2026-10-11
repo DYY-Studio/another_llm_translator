@@ -115,3 +115,78 @@ def test_run_prompt_snapshot_and_fingerprint(tmp_path):
     (project / "config.toml").write_text(dump_config(config))
     atomic_write_json(prompt_path(project, "preferred_term_usage", "en"), {"invalid": True})
     assert load_project_config(project, presets_root=root)["_decision_prompt_definitions"] == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["typesafe", "openai-decisions"])
+@pytest.mark.parametrize("validator_id", ["preferred_term_usage", "segment_alignment"])
+async def test_custom_prompt_reaches_both_apis_and_keeps_outcome(protocol, validator_id, monkeypatch):
+    import json
+    import httpx
+    from app.decision import DecisionClient
+    from app.decision_prompt import get_declaration
+    from app.translation_validation import SegmentAlignmentValidator, TranslationTermMatch, TranslationValidationContext
+    from plugins.term_validation.plugin import PreferredTermUsageValidator
+    from tests.test_decision import preset
+    monkeypatch.setenv("DECISION_TEST_KEY", "secret")
+    declaration = get_declaration(validator_id)
+    content = {"instructions": "Custom nickname and abbreviation policy", "criteria": {choice: "Custom " + choice for choice in declaration.choice_ids}}
+    choice = "acceptable" if validator_id == "preferred_term_usage" else "aligned"
+    calls = []
+    def respond(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        questions = list(body["questions"].values()) if protocol == "typesafe" else body["questions"]
+        assert all(question["instructions"].endswith(content["instructions"]) for question in questions)
+        if protocol == "typesafe":
+            assert all(question["criteria"] == content["criteria"] for question in questions)
+            answers = {name: {"type": "choice", "choice": choice, "confidence": .9, "probabilities": {key: int(key == choice) for key in declaration.choice_ids}} for name in body["questions"]}
+        else:
+            assert all(question["choices"] == [{"value": key, "description": value} for key, value in content["criteria"].items()] for question in questions)
+            answers = [{"name": question["name"], "type": "choice", "choice": choice, "confidence": .9, "probabilities": [{"value": key, "probability": int(key == choice)} for key in declaration.choice_ids]} for question in questions]
+        return httpx.Response(200, json={"model": "test-model", "answers": answers})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = DecisionClient(preset(protocol), http_client=http)
+        context = TranslationValidationContext("Alice arrived", "她到了", terms=(TranslationTermMatch("Alice", "Alice", "source", "爱丽丝"),), segment_id="S1", decision=client, decision_prompts={validator_id: content})
+        if validator_id == "preferred_term_usage":
+            assert await PreferredTermUsageValidator().validate(context) == ()
+        else:
+            assert await SegmentAlignmentValidator(client, prompt=content).validate_response((context,)) == {}
+    assert len(calls) == 1
+
+
+def test_optional_plugin_custom_choices_uninstall_and_reinstall(tmp_path, monkeypatch):
+    from app import plugins
+    from app.decision_prompt import DecisionPromptDeclaration, prompt_declarations, prompt_path, resolve_prompt, resolve_run_prompts
+    from app.plugin_api import PluginDescriptor, PLUGIN_PROTOCOL_VERSION
+    from app.sqlite_storage import atomic_write_json
+    class Validator:
+        validator_id = "custom_validator"
+        version = "1"
+        label = "Custom validator"
+        phase = "alignment"
+        scope = "segment"
+        def validate(self, context):
+            return ()
+    content = {"instructions": "Custom rule", "criteria": {"yes": "Yes", "no": "No"}}
+    declaration = DecisionPromptDeclaration("custom_validator", ("yes", "no"), {"en": content})
+    plugin = PluginDescriptor("custom", "1", PLUGIN_PROTOCOL_VERSION, translation_validators=(Validator(),), decision_prompts=(declaration,))
+    _validate_plugins([plugin, PluginDescriptor("no-prompts", "1", PLUGIN_PROTOCOL_VERSION)])
+    monkeypatch.setattr(plugins, "_PLUGIN_CACHE", (plugin,))
+    config = {"decision": {"prompt_languages": {}}, "validation": {"translation": {"validators": ["custom_validator"], "decision_enabled": False}}}
+    resolve_run_prompts(config)
+    assert config["_decision_prompt_definitions"]["custom_validator"]["choice_ids"] == ["yes", "no"]
+    path = prompt_path(tmp_path, "custom_validator", "en")
+    custom = {**content, "instructions": "Saved custom policy"}
+    atomic_write_json(path, custom)
+    monkeypatch.setattr(plugins, "_PLUGIN_CACHE", ())
+    assert prompt_declarations() == {}
+    assert path.is_file()
+    with pytest.raises(ConfigError, match="未安装"):
+        plugins.resolve_translation_validators(["custom_validator"])
+    monkeypatch.setattr(plugins, "_PLUGIN_CACHE", (plugin,))
+    assert resolve_prompt(prompt_declarations()["custom_validator"], "en", tmp_path)[0] == custom
+    changed = replace(declaration, choice_ids=("pass", "fail"), defaults={"en": {"instructions": "New rule", "criteria": {"pass": "Pass", "fail": "Fail"}}})
+    monkeypatch.setattr(plugins, "_PLUGIN_CACHE", (replace(plugin, decision_prompts=(changed,)),))
+    with pytest.raises(ConfigError, match="选项"):
+        resolve_prompt(prompt_declarations()["custom_validator"], "en", tmp_path)

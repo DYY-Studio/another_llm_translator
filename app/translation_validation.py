@@ -14,6 +14,7 @@ from .errors import ExternalError, ProjectError
 
 if TYPE_CHECKING:
     from .decision import DecisionService
+    from .decision_prompt import DecisionPromptDeclaration
 
 
 @dataclass(frozen=True)
@@ -349,7 +350,7 @@ class SegmentAlignmentValidator:
     scope = "response"
 
     @staticmethod
-    def prompt_declaration():
+    def prompt_declaration() -> DecisionPromptDeclaration:
         from pathlib import Path
         from .decision_prompt import declaration_from_files
         return declaration_from_files("segment_alignment", ("aligned", "misaligned", "uncertain"), Path(__file__).parent / "decision_prompts")
