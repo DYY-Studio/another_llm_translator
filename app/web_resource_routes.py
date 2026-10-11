@@ -545,9 +545,9 @@ def register_resource_routes(
             raise UsageError("config 必须是对象")
         content = dump_config(config)
         root = project(name)
-        resolve_project_config(config, presets_root=app_root, project=project(name))
+        resolve_project_config(config, presets_root=app_root, project=root)
         for stage in LLM_MODEL_STAGES:
-            resolve_project_config(config, stage=stage, presets_root=app_root, project=project(name))
+            resolve_project_config(config, stage=stage, presets_root=app_root, project=root)
         with project_write_lock(root):
             atomic_write_text(root / "config.toml", content)
         return {"saved": True}

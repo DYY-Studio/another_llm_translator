@@ -1012,7 +1012,7 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   </select></label>;
   return <>{error && <div className="error-banner">{error}</div>}{stage.startsWith("decision:")
     ? <DecisionPromptSettings key={`${scope}:${project}:${stage}`} project={project} scope={scope} language={language} validator={stage.slice(9)} stageControl={stageControl} />
-    : <LLMPromptSettings project={project} scope={scope} language={language} stage={stage} stageControl={stageControl} />}</>;
+    : <LLMPromptSettings key={`${scope}:${project}:${stage}`} project={project} scope={scope} language={language} stage={stage} stageControl={stageControl} />}</>;
 }
 
 function LLMPromptSettings({ project, scope, language, stage, stageControl }: { project: string; scope: ConfigScope; language: Language; stage: string; stageControl: ReactNode }) {
@@ -1133,7 +1133,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
   }
 
   async function loadLibraryEntry(promptId: string) {
-    if (!promptId) return;
+    if (!promptId || (content !== savedContent && !window.confirm(translate("settings.promptSyncDraftConfirm", language)))) return;
     try {
       const value = await api<PromptView & { id: string }>(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}/${encodeURIComponent(promptId)}`);
       setContent(value.content);

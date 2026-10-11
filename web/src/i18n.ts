@@ -10,6 +10,8 @@ const messages: Record<Language, Record<string, string>> = {
     "decision.promptInherited": "使用全局提示词",
     "decision.promptOverride": "使用项目独立提示词",
     "decision.promptRestore": "恢复继承",
+    "decision.promptRestored": "已恢复继承全局提示词",
+    "decision.promptLibraryHint": "按校验器保存、切换提示词；载入只更新草稿，保存后生效。",
     "decision.promptInstructions": "判断说明",
     "decision.promptDiscard": "有未保存的提示词修改，是否放弃？",
 
@@ -1350,6 +1352,8 @@ const messages: Record<Language, Record<string, string>> = {
     "decision.promptInherited": "Using global prompt",
     "decision.promptOverride": "Using project prompt override",
     "decision.promptRestore": "Restore inheritance",
+    "decision.promptRestored": "Global prompt inheritance restored",
+    "decision.promptLibraryHint": "Save and switch prompts by validator. Loading updates the draft; save to apply.",
     "decision.promptInstructions": "Instructions",
     "decision.promptDiscard": "Discard unsaved prompt changes?",
     "settings.promptLoadDefault": "Load built-in prompt",

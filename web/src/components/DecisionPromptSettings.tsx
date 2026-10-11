@@ -86,9 +86,9 @@ export function DecisionPromptSettings({ project, scope, language, validator, st
         }}
         onRestore={() => {
           if (!confirmReplace()) return;
-          void action(async () => { await api(path, { method: "DELETE" }); apply(await api<View>(path)); });
+          void action(async () => { await api(path, { method: "DELETE" }); apply(await api<View>(path)); setMessage(translate("decision.promptRestored", language)); });
         }} />}
-      <PromptLibraryControls language={language} entries={entries} selected={selected} loading={libraryLoading} saveOpen={saveOpen} id={id} overwrite={overwrite}
+      <PromptLibraryControls language={language} hint={translate("decision.promptLibraryHint", language)} entries={entries} selected={selected} loading={libraryLoading} saveOpen={saveOpen} id={id} overwrite={overwrite}
         onId={(value) => { setId(value); setOverwrite(false); }} onCancel={() => { setSaveOpen(false); setId(""); setOverwrite(false); }}
         onSelect={(value) => {
           if (!value || !confirmReplace()) return;
@@ -101,12 +101,12 @@ export function DecisionPromptSettings({ project, scope, language, validator, st
         }}
         onDelete={() => {
           if (!selected || !window.confirm(translate("settings.promptLibraryDeleteConfirm", language, { id: selected }))) return;
-          void action(async () => { await api(`${libraryPath}/${encodeURIComponent(selected)}`, { method: "DELETE" }); await refreshEntries(); setSelected(""); });
+          void action(async () => { await api(`${libraryPath}/${encodeURIComponent(selected)}`, { method: "DELETE" }); await refreshEntries(); setSelected(""); setMessage(translate("settings.promptLibraryDeleted", language)); });
         }}
         onSave={() => {
           const name = id.trim(); if (!name || !draft) return;
           if (entries.some((entry) => entry.id === name) && !overwrite) { setOverwrite(true); return; }
-          void action(async () => { await api(`${libraryPath}/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ content: draft }) }); await refreshEntries(); setSelected(name); setSaveOpen(false); setOverwrite(false); });
+          void action(async () => { await api(`${libraryPath}/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ content: draft }) }); await refreshEntries(); setSelected(name); setSaveOpen(false); setId(""); setOverwrite(false); setMessage(translate("settings.promptLibrarySaved", language, { id: name })); });
         }} />
     </>}
     {error && <div className="error-banner">{error}</div>}

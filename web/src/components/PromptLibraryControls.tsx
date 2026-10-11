@@ -1,12 +1,12 @@
 import { translate, type Language } from "../i18n";
 import type { PromptLibraryEntry } from "../types";
 
-export function PromptLibraryControls({ language, entries, selected, loading, saveOpen, id, overwrite, onSelect, onDelete, onId, onCancel, onSave }: {
-  language: Language; entries: PromptLibraryEntry[]; selected: string; loading: boolean; saveOpen: boolean; id: string; overwrite: boolean;
+export function PromptLibraryControls({ language, hint, entries, selected, loading, saveOpen, id, overwrite, onSelect, onDelete, onId, onCancel, onSave }: {
+  language: Language; hint?: string; entries: PromptLibraryEntry[]; selected: string; loading: boolean; saveOpen: boolean; id: string; overwrite: boolean;
   onSelect: (id: string) => void; onDelete: () => void; onId: (id: string) => void; onCancel: () => void; onSave: () => void;
 }) {
   return <div className="prompt-library-card">
-    <div><strong>{translate("settings.promptLibraryTitle", language)}</strong><small>{translate("settings.promptLibraryHint", language)}</small></div>
+    <div><strong>{translate("settings.promptLibraryTitle", language)}</strong><small>{hint ?? translate("settings.promptLibraryHint", language)}</small></div>
     {saveOpen && <div className="prompt-library-save-form">
       <input aria-label={translate("settings.promptLibraryNewId", language)} value={id} onChange={(event) => onId(event.target.value)} placeholder="custom-rules" />
       {overwrite && <small>{translate("settings.promptLibraryOverwriteConfirm", language, { id })}</small>}
