@@ -1930,7 +1930,12 @@ def test_epub_missing_or_corrupt_state_fails_without_txt_fallback(
     project = init_epub(tmp_path)
     file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
-    write_json(project, state_path, {"schema_version": 1, "state": []})
+    # Simulate disk corruption, bypassing transactional Adapter validation.
+    import sqlite3
+    import zlib
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+                         (zlib.compress(b'{"schema_version":1,"state":[]}'), file_record["file_id"]))
     with pytest.raises(ConfigError, match="run_options") as raised:
         export_project(
             project, "translated", bilingual=False, allow_missing=True
