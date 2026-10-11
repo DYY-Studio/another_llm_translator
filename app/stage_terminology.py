@@ -44,6 +44,7 @@ from .llm_response import (
 from .logging_utils import get_logger
 from .sqlite_storage import (
     append_jsonl,
+    append_jsonl_records,
     atomic_write_json,
     mark_content_summary_fragments_stale,
     read_content_summaries,
@@ -1593,24 +1594,15 @@ async def run_terminology(
                         or "响应缺少有效 summary",
                     )
                 if term_ok and failed_class is not TerminologyResponseMode.SUMMARY_ONLY:
-                    for owner in mark_class_success(unresolved, "term"):
-                        if owner not in term_scan_recorded:
-                            append_jsonl(
-                                project,
-                                project / "terminology" / "scans.jsonl",
-                                record_header(
-                                    "terminology_scan",
-                                    str(metadata["project_id"]),
-                                    stage="terminology",
-                                    segment_id=owner,
-                                    status="completed",
-                                    run_id=run_id,
-                                    request_id=request_id,
-                                    active_task_id=task_id,
-                                    stage_fingerprint=fingerprint,
-                                ),
-                            )
-                            term_scan_recorded.add(owner)
+                    owners = mark_class_success(unresolved, "term")
+                    records = [record_header(
+                        "terminology_scan", str(metadata["project_id"]), stage="terminology",
+                        segment_id=owner, status="completed", run_id=run_id,
+                        request_id=request_id, active_task_id=task_id, stage_fingerprint=fingerprint,
+                    ) for owner in owners if owner not in term_scan_recorded]
+                    append_jsonl_records(project, project / "terminology" / "scans.jsonl", records)
+                    term_scan_recorded.update(record["segment_id"] for record in records)
+                    for owner in owners:
                         maybe_complete(owner)
                 if (
                     summary_ok

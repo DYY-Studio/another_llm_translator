@@ -698,7 +698,7 @@ def test_web_project_list_reports_repair_for_missing_prompt(
     assert listed.json()["projects"][0]["repair_needed"] is True
 
 
-@pytest.mark.parametrize("schema_version", ["3", "4", "5", None])
+@pytest.mark.parametrize("schema_version", ["3", "4", "5", "6", None])
 def test_web_project_list_checks_schema_read_only_while_project_is_locked(
     tmp_path: Path, schema_version: str | None
 ) -> None:
@@ -1532,11 +1532,17 @@ def test_web_open_project_rejects_unsupported_storage_schema(
     assert "schema_version" in opened.json()["error"]
 
 
-def test_web_lists_and_opens_v5_project_with_silent_upgrade(tmp_path: Path) -> None:
-    from tests.test_sqlite_storage import _seed_v5_summary
+@pytest.mark.parametrize("schema_version", [5, 6])
+def test_web_lists_and_opens_project_with_silent_upgrade(
+    tmp_path: Path, schema_version: int,
+) -> None:
+    from tests.test_sqlite_storage import _seed_v5_summary, _seed_v6_summary
 
     projects_root, project = make_project(tmp_path)
-    _seed_v5_summary(project)
+    if schema_version == 5:
+        _seed_v5_summary(project)
+    else:
+        _seed_v6_summary(project)
     client = TestClient(create_app(projects_root=projects_root))
     backups = project / "snapshots" / "storage_migrations"
 

@@ -8,6 +8,8 @@ import sqlite3
 import tempfile
 import threading
 import uuid
+import zlib
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -15,7 +17,7 @@ from typing import Any, Iterable
 from .errors import ProjectError, StorageError, UsageError
 from .stage_result_retention import prune_stage_results
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 STAGES = frozenset(
     {
@@ -197,7 +199,11 @@ def _create_tables(connection: sqlite3.Connection) -> None:
         );
         CREATE TABLE IF NOT EXISTS adapter_states (
             file_id TEXT PRIMARY KEY REFERENCES files(file_id) ON DELETE CASCADE,
-            payload_json TEXT NOT NULL
+            payload_json BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS request_metadata (
+            metadata_id INTEGER PRIMARY KEY,
+            payload_json TEXT NOT NULL UNIQUE
         );
         CREATE TABLE IF NOT EXISTS stage_results (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -210,9 +216,11 @@ def _create_tables(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS stage_results_stage_segment
             ON stage_results(stage, segment_id, sequence);
         CREATE INDEX IF NOT EXISTS stage_results_base_reference
-            ON stage_results(json_extract(payload_json, '$.base_result_id'));
+            ON stage_results(json_extract(payload_json, '$.base_result_id'))
+            WHERE json_extract(payload_json, '$.base_result_id') IS NOT NULL;
         CREATE INDEX IF NOT EXISTS stage_results_suggestion_reference
-            ON stage_results(json_extract(payload_json, '$.suggestion_result_id'));
+            ON stage_results(json_extract(payload_json, '$.suggestion_result_id'))
+            WHERE json_extract(payload_json, '$.suggestion_result_id') IS NOT NULL;
         CREATE TABLE IF NOT EXISTS terminology_scans (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             record_id TEXT NOT NULL UNIQUE,
@@ -308,6 +316,22 @@ def _create_tables(connection: sqlite3.Connection) -> None:
         if statement:
             connection.execute(statement)
 
+    for table in ("stage_results", "terminology_scans"):
+        connection.execute(
+            f"CREATE INDEX IF NOT EXISTS {table}_request_metadata "
+            f"ON {table}(json_extract(payload_json, '$._request_meta')) "
+            "WHERE json_extract(payload_json, '$._request_meta') IS NOT NULL"
+        )
+        connection.execute(
+            f"CREATE TRIGGER IF NOT EXISTS {table}_release_metadata AFTER DELETE ON {table} "
+            "BEGIN DELETE FROM request_metadata "
+            "WHERE metadata_id = json_extract(OLD.payload_json, '$._request_meta') "
+            "AND NOT EXISTS (SELECT 1 FROM stage_results "
+            "WHERE json_extract(payload_json, '$._request_meta') = metadata_id) "
+            "AND NOT EXISTS (SELECT 1 FROM terminology_scans "
+            "WHERE json_extract(payload_json, '$._request_meta') = metadata_id); END"
+        )
+
 
 def _project_id(connection: sqlite3.Connection) -> str | None:
     row = connection.execute(
@@ -327,6 +351,64 @@ def _residual(value: dict[str, Any], keys: Iterable[str]) -> str:
     for key in keys:
         residual.pop(key, None)
     return _json(residual)
+
+
+_REQUEST_METADATA_FIELDS = ("run_id", "request_id", "created_at", "stage_fingerprint")
+
+
+def _request_metadata(
+    connection: sqlite3.Connection, references: Iterable[int | None] | None = None,
+) -> dict[int, dict[str, Any]]:
+    if references is None:
+        return {row[0]: _load(row[1]) for row in connection.execute(
+            "SELECT metadata_id, payload_json FROM request_metadata")}
+    values = list(set(references) - {None})
+    result = {}
+    for start in range(0, len(values), 500):
+        batch = values[start:start + 500]
+        result.update((row[0], _load(row[1])) for row in connection.execute(
+            f"SELECT metadata_id, payload_json FROM request_metadata WHERE metadata_id IN ({','.join('?' for _ in batch)})",
+            batch))
+    return result
+
+
+def _shared_metadata(reference: Any, metadata: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    if reference is None:
+        return {}
+    if reference not in metadata:
+        raise StorageError(f"请求元数据引用不存在：{reference}")
+    return metadata[reference]
+
+
+def _request_payload(raw: str, metadata: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    value = _load(raw)
+    value.update(_shared_metadata(value.pop("_request_meta", None), metadata))
+    return value
+
+
+def _request_residual(
+    connection: sqlite3.Connection, value: dict[str, Any], keys: Iterable[str],
+    cache: dict[str, int],
+) -> str:
+    shared = {key: value[key] for key in _REQUEST_METADATA_FIELDS if key in value}
+    if not shared:
+        return _residual(value, keys)
+    raw = _json(shared)
+    reference = cache.get(raw)
+    if reference is None:
+        row = connection.execute(
+            "INSERT INTO request_metadata(payload_json) VALUES (?) "
+            "ON CONFLICT(payload_json) DO NOTHING RETURNING metadata_id", (raw,),
+        ).fetchone()
+        if row is None:
+            row = connection.execute(
+                "SELECT metadata_id FROM request_metadata WHERE payload_json = ?", (raw,),
+            ).fetchone()
+        reference = row["metadata_id"]
+        cache[raw] = reference
+    residual = {key: item for key, item in value.items() if key not in shared}
+    residual["_request_meta"] = reference
+    return _residual(residual, keys)
 
 
 _FILE_RESIDUAL_FIELDS = (
@@ -652,7 +734,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             (str(version),),
         )
         return None
-    elif version not in {3, 4, 5, SCHEMA_VERSION}:
+    elif version not in {3, 4, 5, 6, SCHEMA_VERSION}:
         raise ProjectError(
             f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
         )
@@ -668,10 +750,40 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         # version check and sqlite's online backup.
         connection.execute("BEGIN IMMEDIATE")
         backup_path = _backup_before_schema_upgrade(project, version)
+        for kind in ("base", "suggestion"):
+            connection.execute(f"DROP INDEX IF EXISTS stage_results_{kind}_reference")
         _create_tables(connection)
         if version < 5:
             _migrate_to_v5(connection, project)
-        _migrate_summary_storage_to_v6(connection, project)
+        if version < 6:
+            _migrate_summary_storage_to_v6(connection, project)
+        elif version < 7:
+            _migrate_summary_hashes_to_v7(connection, project)
+        for row in connection.execute(
+            "SELECT file_id, payload_json FROM adapter_states WHERE typeof(payload_json) = 'text'"
+        ).fetchall():
+            raw = row["payload_json"]
+            _load(raw)
+            connection.execute(
+                "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+                (zlib.compress(raw.encode("utf-8")), row["file_id"]),
+            )
+        metadata_cache: dict[str, int] = {}
+        for table in ("stage_results", "terminology_scans"):
+            updates = []
+            for row in connection.execute(f"SELECT sequence, payload_json FROM {table}"):
+                value = _load(row["payload_json"])
+                if any(key in value for key in _REQUEST_METADATA_FIELDS):
+                    updates.append((_request_residual(connection, value, (), metadata_cache), row["sequence"]))
+                    if len(updates) == 500:
+                        connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
+                        updates.clear()
+            connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
+        for row in connection.execute("SELECT run_id, payload_json FROM runs"):
+            payload = _load(row["payload_json"])
+            if "terminology_modes" in payload:
+                connection.execute("UPDATE runs SET payload_json = ? WHERE run_id = ?",
+                                   (_run_residual(payload), row["run_id"]))
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -682,13 +794,14 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         connection.rollback()
         raise
     try:
-        project_id = _project_id(connection)
-        for row in connection.execute(
-            "SELECT * FROM runs WHERE json_type(payload_json, '$.summary_boundaries') = 'array'"
-        ):
-            manifest = project / "runs" / str(row["run_id"]) / "manifest.json"
-            if manifest.is_file():
-                atomic_write_json(manifest, _hydrate_run(row, project_id))
+        if version < 6:
+            project_id = _project_id(connection)
+            for row in connection.execute(
+                "SELECT * FROM runs WHERE json_type(payload_json, '$.summary_boundaries') = 'array'"
+            ):
+                manifest = project / "runs" / str(row["run_id"]) / "manifest.json"
+                if manifest.is_file():
+                    atomic_write_json(manifest, _hydrate_run(row, project_id))
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         connection.execute("VACUUM")
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -812,8 +925,11 @@ def _hydrate_segment(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]
 def _hydrate_adapter_state(
     row: sqlite3.Row, project_id: str | None
 ) -> dict[str, Any]:
-    value = _load(str(row["payload_json"]))
     file_id = str(row["file_id"])
+    try:
+        value = _load(zlib.decompress(row["payload_json"]).decode("utf-8"))
+    except (zlib.error, TypeError, UnicodeDecodeError) as exc:
+        raise StorageError(f"Adapter 状态压缩数据损坏：{file_id}: {exc}") from exc
     return _with_common_header(
         value,
         project_id=project_id,
@@ -823,10 +939,12 @@ def _hydrate_adapter_state(
     )
 
 
-def _hydrate_stage(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
+def _hydrate_stage(
+    row: sqlite3.Row, project_id: str | None, metadata: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
     status = row["status"]
     return _with_common_header(
-        _load(str(row["payload_json"])),
+        _request_payload(str(row["payload_json"]), metadata),
         project_id=project_id,
         record_type=_stage_record_type(status),
         record_id=str(row["record_id"]),
@@ -838,9 +956,11 @@ def _hydrate_stage(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
     )
 
 
-def _hydrate_scan(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
+def _hydrate_scan(
+    row: sqlite3.Row, project_id: str | None, metadata: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
     return _with_common_header(
-        _load(str(row["payload_json"])),
+        _request_payload(str(row["payload_json"]), metadata),
         project_id=project_id,
         record_type="terminology_scan",
         record_id=str(row["record_id"]),
@@ -867,9 +987,23 @@ def _hydrate_candidate(row: sqlite3.Row, project_id: str | None) -> dict[str, An
     )
 
 
+def _run_residual(value: dict[str, Any]) -> str:
+    payload = dict(value)
+    if "terminology_modes" in payload:
+        groups: dict[str, list[str]] = {}
+        for segment_id, modes in payload.pop("terminology_modes").items():
+            groups.setdefault(_json(modes), []).append(segment_id)
+        payload["_terminology_mode_groups"] = [[json.loads(modes), ids] for modes, ids in groups.items()]
+    return _residual(payload, _RUN_RESIDUAL_FIELDS)
+
+
 def _hydrate_run(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
+    payload = _load(str(row["payload_json"]))
+    if "_terminology_mode_groups" in payload:
+        payload["terminology_modes"] = {segment_id: deepcopy(modes)
+            for modes, ids in payload.pop("_terminology_mode_groups") for segment_id in ids}
     return _with_common_header(
-        _load(str(row["payload_json"])),
+        payload,
         project_id=project_id,
         record_type="run",
         record_id=str(row["run_id"]),
@@ -1007,6 +1141,13 @@ def _pack_summary_range(connection: sqlite3.Connection, source_range: dict[str, 
         if all(key in value for key in ("slice_index", "source_digest", "model_text_digest")):
             if value.get("slice_id") == _summary_slice_id(value):
                 value.pop("slice_id")
+        for key, base in (
+            ("original_model_text_digest", "model_text_digest"),
+            ("original_source_digest", "source_digest"),
+            ("model_text_digest", "source_digest"),
+        ):
+            if key in value and value[key] == value.get(base):
+                value.pop(key)
         values.append(value)
     packed["segments"] = values
     if packed.get("segment_ids") == list(dict.fromkeys(
@@ -1023,6 +1164,10 @@ def _unpack_summary_range(source_range: dict[str, Any], texts: dict[str, str]) -
     values = []
     for raw in source_range["segments"]:
         value = dict(raw)
+        if "source_digest" in value:
+            value.setdefault("model_text_digest", value["source_digest"])
+            value.setdefault("original_source_digest", value["source_digest"])
+            value.setdefault("original_model_text_digest", value["model_text_digest"])
         for key, digest_key in (("source", "source_digest"), ("model_text", "model_text_digest")):
             if digest_key in value:
                 text_digest = value[digest_key]
@@ -1040,8 +1185,36 @@ def _unpack_summary_range(source_range: dict[str, Any], texts: dict[str, str]) -
     return result
 
 
-def _summary_source_texts(connection: sqlite3.Connection) -> dict[str, str]:
-    return dict(connection.execute("SELECT digest, text FROM summary_source_texts"))
+def _summary_source_texts(
+    connection: sqlite3.Connection, ranges: Iterable[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    if ranges is None:
+        return dict(connection.execute("SELECT digest, text FROM summary_source_texts"))
+    values = list({piece[key] for source_range in ranges
+                   for piece in source_range.get("segments", [])
+                   for key in ("source_digest", "model_text_digest") if key in piece})
+    result = {}
+    for start in range(0, len(values), 500):
+        batch = values[start:start + 500]
+        result.update(connection.execute(
+            f"SELECT digest, text FROM summary_source_texts WHERE digest IN ({','.join('?' for _ in batch)})", batch))
+    return result
+
+
+def _migrate_summary_hashes_to_v7(connection: sqlite3.Connection, project: Path) -> None:
+    texts = _summary_source_texts(connection)
+    try:
+        for row in connection.execute("SELECT summary_id, source_range_json FROM content_summaries").fetchall():
+            source_range = _unpack_summary_range(json.loads(row["source_range_json"]), texts)
+            packed = _pack_summary_range(connection, source_range)
+            if _unpack_summary_range(packed, texts) != source_range:
+                raise StorageError(f"概括源范围无法无损转换：{row['summary_id']}")
+            connection.execute(
+                "UPDATE content_summaries SET source_range_json = ? WHERE summary_id = ?",
+                (_json(packed), row["summary_id"]),
+            )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StorageError(f"无法精简概括哈希：{project}: {exc}") from exc
 
 
 def _migrate_summary_storage_to_v6(connection: sqlite3.Connection, project: Path) -> None:
@@ -1151,6 +1324,9 @@ def write_content_summary(project: Path, value: dict[str, Any]) -> None:
     connection = _with_db(project)
     try:
         with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replacing = connection.execute("SELECT 1 FROM content_summaries WHERE summary_id = ?",
+                                           (checked["record_id"],)).fetchone() is not None
             connection.execute(
                 """
                 INSERT INTO content_summaries(
@@ -1171,7 +1347,8 @@ def write_content_summary(project: Path, value: dict[str, Any]) -> None:
                 """,
                 _summary_record_payload(connection, checked),
             )
-            _prune_summary_source_texts(connection)
+            if replacing:
+                _prune_summary_source_texts(connection)
     except sqlite3.Error as exc:
         raise StorageError(f"无法写入内容概括：{project}: {exc}") from exc
     finally:
@@ -1543,6 +1720,7 @@ def read_content_summaries(
         raise ProjectError(f"不支持的内容概括 status：{status}")
     connection = _with_db(project)
     try:
+        connection.execute("BEGIN")
         clauses = []
         params: list[Any] = []
         if file_id:
@@ -1565,8 +1743,11 @@ def read_content_summaries(
             + " ORDER BY file_id, part_id, kind, updated_at, summary_id",
             params,
         ).fetchall()
+        if not rows:
+            return []
         project_id = _project_id(connection)
-        texts = _summary_source_texts(connection)
+        texts = _summary_source_texts(connection,
+            (json.loads(row["source_range_json"]) for row in rows))
         return [_hydrate_summary(row, project_id, texts) for row in rows]
     except (sqlite3.Error, json.JSONDecodeError) as exc:
         raise StorageError(f"无法读取内容概括：{project}: {exc}") from exc
@@ -1891,7 +2072,7 @@ def replace_source(
                 [
                     (
                         str(item["file_id"]),
-                        _residual(item, _ADAPTER_RESIDUAL_FIELDS),
+                        zlib.compress(_residual(item, _ADAPTER_RESIDUAL_FIELDS).encode("utf-8")),
                     )
                     for item in state_values
                 ],
@@ -1913,6 +2094,46 @@ def replace_source(
                 )
     except sqlite3.Error as exc:
         raise StorageError(f"无法写入项目源数据：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def write_adapter_states(project: Path, states: Iterable[dict[str, Any]]) -> None:
+    """Update existing Adapter states without rewriting project source data."""
+    connection = _with_db(project)
+    try:
+        with connection:
+            for state in states:
+                cursor = connection.execute("UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+                    (zlib.compress(_residual(state, _ADAPTER_RESIDUAL_FIELDS).encode("utf-8")), state["file_id"]))
+                if cursor.rowcount != 1:
+                    raise StorageError(f"Document Adapter 状态缺失：{state['file_id']}")
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法更新 Adapter 状态：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def reorder_files(project: Path, file_ids: list[str]) -> None:
+    """Caller validates the complete order and holds the project write lock."""
+    connection = _with_db(project)
+    try:
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            old = dict(connection.execute("SELECT file_id, file_order FROM files"))
+            changed = [file_id for order, file_id in enumerate(file_ids, 1) if old[file_id] != order]
+            if not changed:
+                return
+            # Move orders out of the final range before assigning the UNIQUE column.
+            offset = max(old.values()) + len(file_ids)
+            connection.execute("UPDATE files SET file_order = file_order + ?", (offset,))
+            connection.executemany("UPDATE files SET file_order = ? WHERE file_id = ?",
+                                   enumerate(file_ids, 1))
+            now = utc_now()
+            connection.executemany("UPDATE content_summaries SET source_changed = 1, updated_at = ? WHERE file_id = ?",
+                                   ((now, file_id) for file_id in changed))
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法重排项目文件：{project}: {exc}") from exc
     finally:
         connection.close()
 
@@ -2087,7 +2308,7 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
                     "ON CONFLICT(file_id) DO UPDATE SET payload_json=excluded.payload_json",
                     (
                         str(value.get("file_id") or key),
-                        _residual(value, _ADAPTER_RESIDUAL_FIELDS),
+                        zlib.compress(_residual(value, _ADAPTER_RESIDUAL_FIELDS).encode("utf-8")),
                     ),
                 )
             elif kind in {"terms", "overrides", "active_task"}:
@@ -2113,7 +2334,7 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
                         str(value["stage"]),
                         str(value["status"]),
                         value.get("started_at"),
-                        _residual(value, _RUN_RESIDUAL_FIELDS),
+                        _run_residual(value),
                     ),
                 )
             else:
@@ -2190,7 +2411,7 @@ def write_terminology_decision_state(
                     str(run_manifest["stage"]),
                     str(run_manifest["status"]),
                     run_manifest.get("started_at"),
-                    _residual(run_manifest, _RUN_RESIDUAL_FIELDS),
+                    _run_residual(run_manifest),
                 ),
             )
     except sqlite3.Error as exc:
@@ -2213,16 +2434,19 @@ def _records(
 ) -> list[dict[str, Any]]:
     connection = _with_db(project)
     try:
+        connection.execute("BEGIN")
         project_id = _project_id(connection)
         if kind == "stage":
+            metadata = _request_metadata(connection)
             rows = connection.execute(
                 """SELECT sequence, record_id, stage, segment_id, status,
                           payload_json
                    FROM stage_results WHERE stage = ? ORDER BY sequence""",
                 (key,),
             ).fetchall()
-            return [_hydrate_stage(row, project_id) for row in rows]
+            return [_hydrate_stage(row, project_id, metadata) for row in rows]
         elif kind == "scans":
+            metadata = _request_metadata(connection)
             if task_id is not None:
                 rows = connection.execute(
                     "SELECT sequence, record_id, active_task_id, segment_id, status, "
@@ -2235,7 +2459,7 @@ def _records(
                     "SELECT sequence, record_id, active_task_id, segment_id, status, "
                     "payload_json FROM terminology_scans ORDER BY sequence"
                 ).fetchall()
-            return [_hydrate_scan(row, project_id) for row in rows]
+            return [_hydrate_scan(row, project_id, metadata) for row in rows]
         elif kind == "candidates":
             if task_id is not None:
                 rows = connection.execute(
@@ -2274,6 +2498,7 @@ def read_jsonl(
 
 
 def _insert_stage(connection: sqlite3.Connection, records: Iterable[dict[str, Any]]) -> None:
+    cache: dict[str, int] = {}
     connection.executemany(
         "INSERT INTO stage_results(record_id,stage,segment_id,status,payload_json) VALUES (?, ?, ?, ?, ?)",
         [
@@ -2282,7 +2507,7 @@ def _insert_stage(connection: sqlite3.Connection, records: Iterable[dict[str, An
                 str(item.get("stage")),
                 item.get("segment_id"),
                 item.get("status"),
-                _residual(item, _STAGE_RESIDUAL_FIELDS),
+                _request_residual(connection, item, _STAGE_RESIDUAL_FIELDS, cache),
             )
             for item in records
         ],
@@ -2290,6 +2515,7 @@ def _insert_stage(connection: sqlite3.Connection, records: Iterable[dict[str, An
 
 
 def _insert_scans(connection: sqlite3.Connection, records: Iterable[dict[str, Any]]) -> None:
+    cache: dict[str, int] = {}
     connection.executemany(
         "INSERT INTO terminology_scans(record_id,active_task_id,segment_id,status,payload_json) VALUES (?, ?, ?, ?, ?)",
         [
@@ -2298,7 +2524,7 @@ def _insert_scans(connection: sqlite3.Connection, records: Iterable[dict[str, An
                 str(item["active_task_id"]),
                 item.get("segment_id"),
                 item.get("status"),
-                _residual(item, _SCAN_RESIDUAL_FIELDS),
+                _request_residual(connection, item, _SCAN_RESIDUAL_FIELDS, cache),
             )
             for item in records
         ],
@@ -2334,19 +2560,27 @@ def _insert_chunks(connection: sqlite3.Connection, records: Iterable[dict[str, A
 
 
 def append_jsonl(project: Path, path: Path, value: dict[str, Any]) -> None:
+    append_jsonl_records(project, path, [value])
+
+
+def append_jsonl_records(project: Path, path: Path, records: Iterable[dict[str, Any]]) -> None:
+    """Commit records already available from one response or debug plan together."""
+    values = list(records)
+    if not values:
+        return
     kind, key = _kind(path, project)
     connection = _with_db(project)
     try:
         with connection:
             if kind == "stage":
-                _insert_stage(connection, [value])
-                prune_stage_results(connection, [(str(value.get("stage")), value.get("segment_id"))])
+                _insert_stage(connection, values)
+                prune_stage_results(connection, [(str(value.get("stage")), value.get("segment_id")) for value in values])
             elif kind == "scans":
-                _insert_scans(connection, [value])
+                _insert_scans(connection, values)
             elif kind == "candidates":
-                _insert_candidates(connection, [value])
+                _insert_candidates(connection, values)
             elif kind == "chunks":
-                _insert_chunks(connection, [value], str(key))
+                _insert_chunks(connection, values, str(key))
             else:
                 raise StorageError(f"SQLite 不支持追加记录类型：{kind}")
     except sqlite3.Error as exc:
@@ -2461,6 +2695,17 @@ def read_project_meta_read_only(project: Path) -> dict[str, Any]:
         connection.close()
 
 
+def read_run_states(project: Path) -> list[dict[str, Any]]:
+    """Read Run identity and activity without decoding execution snapshots."""
+    connection = _read_only_connection(project)
+    try:
+        return [dict(row) for row in connection.execute("SELECT run_id, stage, status FROM runs")]
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法只读查询 Run 状态：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def list_run_index(
     project: Path,
     stage: str | None = None,
@@ -2487,7 +2732,7 @@ def list_run_index(
             ).fetchone()[0]
         )
         rows = connection.execute(
-            "SELECT run_id, stage, status, started_at, payload_json "
+            "SELECT run_id, stage, status, started_at, json_remove(payload_json, '$._terminology_mode_groups') AS payload_json "
             f"FROM runs WHERE {where} "
             "ORDER BY started_at DESC, run_id DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
@@ -2520,9 +2765,14 @@ def read_run_record(project: Path, run_id: str) -> dict[str, Any] | None:
         connection.close()
 
 
-def _stage_cte(stage: str | None, alias: str = "latest_stage") -> tuple[str, list[Any]]:
+def _stage_cte(
+    stage: str | None, alias: str = "latest_stage", *,
+    file_id: str | None = None, part_id: str | None = None,
+) -> tuple[str, list[Any]]:
     if not stage:
         return "", []
+    boundary = " AND segment_id IN (SELECT segment_id FROM segments WHERE file_id = ? AND part_id = ?)" if file_id else ""
+    params = [stage, file_id, part_id] if file_id else [stage]
     return (
         f"""
         LEFT JOIN (
@@ -2531,24 +2781,25 @@ def _stage_cte(stage: str | None, alias: str = "latest_stage") -> tuple[str, lis
             JOIN (
                 SELECT segment_id, MAX(sequence) AS seq
                 FROM stage_results
-                WHERE stage = ?
+                WHERE stage = ?{boundary}
                 GROUP BY segment_id
             ) AS latest ON latest.seq = sr2.sequence
             WHERE sr2.status != 'reset'
         ) AS {alias}
           ON {alias}.segment_id = segments.segment_id
         """,
-        [stage],
+        params,
     )
 
 
 def _stage_filters(
-    *, status: str | None, search: str | None, stage: str | None
+    *, status: str | None, search: str | None, stage: str | None,
+    file_id: str | None = None, part_id: str | None = None
 ) -> tuple[str, list[Any], list[str]]:
     """Build the stage-result join and clauses, or nothing when unfiltered."""
     if not status and not search:
         return "", [], []
-    join, params = _stage_cte(stage)
+    join, params = _stage_cte(stage, file_id=file_id, part_id=part_id)
     clauses = []
     if status:
         if stage in {"proofreading", "polishing"} and status not in {
@@ -2556,16 +2807,16 @@ def _stage_filters(
             "failed",
             "warning",
         }:
-            base_join, base_params = _stage_cte("translation", "review_translation")
+            base_join, base_params = _stage_cte("translation", "review_translation", file_id=file_id, part_id=part_id)
             applied_join, applied_params = _stage_cte(
-                f"{stage}_applied", "review_applied"
+                f"{stage}_applied", "review_applied", file_id=file_id, part_id=part_id
             )
             join += base_join + applied_join
             params.extend([*base_params, *applied_params])
             base_id = "review_translation.record_id"
             if stage == "polishing":
                 proof_join, proof_params = _stage_cte(
-                    "proofreading_applied", "review_proofreading"
+                    "proofreading_applied", "review_proofreading", file_id=file_id, part_id=part_id
                 )
                 join += proof_join
                 params.extend(proof_params)
@@ -2647,7 +2898,7 @@ def segment_count(
     connection = _with_db(project)
     try:
         join, params, stage_clauses = _stage_filters(
-            status=status, search=search, stage=stage
+            status=status, search=search, stage=stage, file_id=file_id, part_id=part_id
         )
         clauses = ["segments.is_empty = 0", *stage_clauses]
         if bool(file_id) != bool(part_id):
@@ -2677,7 +2928,7 @@ def query_segments(
     connection = _with_db(project)
     try:
         join, params, stage_clauses = _stage_filters(
-            status=status, search=search, stage=stage
+            status=status, search=search, stage=stage, file_id=file_id, part_id=part_id
         )
         clauses = ["segments.is_empty = 0", *stage_clauses]
         if bool(file_id) != bool(part_id):
@@ -2763,7 +3014,7 @@ def segment_ids(
     connection = _with_db(project)
     try:
         join, params, stage_clauses = _stage_filters(
-            status=status, search=search, stage=stage
+            status=status, search=search, stage=stage, file_id=file_id, part_id=part_id
         )
         clauses = ["segments.is_empty = 0", *stage_clauses]
         if bool(file_id) != bool(part_id):
@@ -2808,6 +3059,7 @@ def latest_stage_results(
 ) -> dict[str, dict[str, Any]]:
     connection = _with_db(project)
     try:
+        connection.execute("BEGIN")
         values = list(segment_ids) if segment_ids is not None else None
         if values == []:
             return {}
@@ -2818,19 +3070,21 @@ def latest_stage_results(
             params = [stage, *batch] if batch is not None else [stage]
             rows.extend(connection.execute(
                 f"""
-                SELECT record_id, stage, segment_id, status, payload_json FROM (
-                    SELECT record_id, stage, status, payload_json, segment_id,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY segment_id ORDER BY sequence DESC
-                           ) AS rank
+                SELECT sr.record_id, sr.stage, sr.segment_id, sr.status, sr.payload_json
+                FROM stage_results AS sr
+                JOIN (
+                    SELECT segment_id, MAX(sequence) AS seq
                     FROM stage_results
                     WHERE stage = ?{filter_sql}
-                ) WHERE rank = 1
+                    GROUP BY segment_id
+                ) AS latest ON latest.seq = sr.sequence
                 """,
                 params,
             ).fetchall())
         project_id = _project_id(connection)
-        values_by_id = [_hydrate_stage(row, project_id) for row in rows]
+        metadata = _request_metadata(connection,
+            (_load(row["payload_json"]).get("_request_meta") for row in rows))
+        values_by_id = [_hydrate_stage(row, project_id, metadata) for row in rows]
         return {str(item["segment_id"]): item for item in values_by_id}
     finally:
         connection.close()
@@ -2848,6 +3102,7 @@ def latest_stage_summary(
         return {}
     connection = _with_db(project)
     try:
+        connection.execute("BEGIN")
         rows = []
         for start in range(0, len(values), 500):
             batch = values[start:start + 500]
@@ -2860,8 +3115,8 @@ def latest_stage_summary(
                            AND NOT (COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0)) AS failed,
                        CASE
                            WHEN COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0)
-                           THEN json_extract(completed.payload_json, '$.stage_fingerprint')
-                       END AS fingerprint
+                           THEN json_extract(completed.payload_json, '$._request_meta')
+                       END AS metadata_ref
                 FROM (
                     SELECT segment_id,
                            MAX(CASE WHEN status = 'completed' THEN sequence END) AS last_completed,
@@ -2876,11 +3131,12 @@ def latest_stage_summary(
                 """,
                 [stage, *batch],
             ).fetchall())
+        metadata = _request_metadata(connection, (row["metadata_ref"] for row in rows))
         return {
             str(row["segment_id"]): {
                 "completed": bool(row["completed"]),
                 "failed": bool(row["failed"]),
-                "stage_fingerprint": row["fingerprint"],
+                "stage_fingerprint": _shared_metadata(row["metadata_ref"], metadata).get("stage_fingerprint"),
             }
             for row in rows
         }
@@ -2899,6 +3155,7 @@ def latest_stage_states(
         return {}
     connection = _with_db(project)
     try:
+        connection.execute("BEGIN")
         rows = []
         project_id = _project_id(connection)
         for start in range(0, len(values), 500):
@@ -2937,6 +3194,9 @@ def latest_stage_states(
                 """,
                 [stage, *batch],
             ).fetchall())
+        metadata = _request_metadata(connection,
+            (_load(row["completed_payload"]).get("_request_meta")
+             for row in rows if row["completed_payload"] is not None))
         result: dict[str, dict[str, Any]] = {}
         for row in rows:
             completed_payload = row["completed_payload"]
@@ -2952,6 +3212,7 @@ def latest_stage_states(
                             "payload_json": completed_payload,
                         },
                         project_id,
+                        metadata,
                     ),
                     f"stage={stage} segment={row['segment_id']}",
                 )
@@ -2973,26 +3234,29 @@ def terminology_scan_state(
     values = [str(value) for value in segment_ids]
     if not values:
         return set(), set()
-    placeholders = ",".join("?" for _ in values)
     connection = _with_db(project)
     try:
-        rows = connection.execute(
-            f"""
-            SELECT DISTINCT segment_id,
-                   json_extract(payload_json, '$.stage_fingerprint')
-                       AS stage_fingerprint
-            FROM terminology_scans
-            WHERE active_task_id = ?
-              AND status = 'completed'
-              AND segment_id IN ({placeholders})
-            """,
-            [task_id, *values],
-        ).fetchall()
+        connection.execute("BEGIN")
+        rows = []
+        for start in range(0, len(values), 500):
+            batch = values[start:start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows.extend(connection.execute(
+                f"""
+                SELECT DISTINCT segment_id,
+                       json_extract(payload_json, '$._request_meta') AS metadata_ref
+                FROM terminology_scans
+                WHERE active_task_id = ?
+                  AND status = 'completed'
+                  AND segment_id IN ({placeholders})
+                """,
+                [task_id, *batch],
+            ).fetchall())
         completed = {str(row["segment_id"]) for row in rows}
+        metadata = _request_metadata(connection, (row["metadata_ref"] for row in rows))
         fingerprints = {
-            str(row["stage_fingerprint"])
-            for row in rows
-            if row["stage_fingerprint"] is not None
+            str(value) for row in rows
+            if (value := _shared_metadata(row["metadata_ref"], metadata).get("stage_fingerprint")) is not None
         }
         return completed, fingerprints
     finally:
@@ -3046,9 +3310,11 @@ def _stage_result_lineage(
         for start in range(0, len(values), 500):
             batch = values[start:start + 500]
             rows = connection.execute(
-                f"SELECT record_id,stage,segment_id,status,payload_json FROM stage_results WHERE record_id IN ({','.join('?' for _ in batch)})", batch)
+                f"SELECT record_id,stage,segment_id,status,payload_json FROM stage_results WHERE record_id IN ({','.join('?' for _ in batch)})", batch).fetchall()
+            metadata = _request_metadata(connection,
+                (_load(row["payload_json"]).get("_request_meta") for row in rows))
             for row in rows:
-                record = _validate_record(_hydrate_stage(row, project_id), "export lineage")
+                record = _validate_record(_hydrate_stage(row, project_id, metadata), "export lineage")
                 key = str(record["record_id"])
                 result[key] = record
                 pending.add(key)
@@ -3062,6 +3328,7 @@ def stage_result_lineage(project: Path, records: Iterable[dict[str, Any]]) -> di
     """Load exact parents in batches for business reads."""
     connection = _with_db(project)
     try:
+        connection.execute("BEGIN")
         return _stage_result_lineage(connection, records)
     finally:
         connection.close()
@@ -3135,7 +3402,7 @@ def segment_page_counts(
         return count, count
     if status is None and not search:
         # Avoid materializing a LEFT JOIN for the unfiltered first page.
-        join, params = _stage_cte(stage)
+        join, params = _stage_cte(stage, file_id=file_id, part_id=part_id)
         boundary = " AND segments.file_id = ? AND segments.part_id = ?" if file_id else ""
         bounds = [file_id, part_id] if file_id else []
         connection = _with_db(project)
@@ -3148,7 +3415,7 @@ def segment_page_counts(
             return int(row[0]), int(row[1])
         finally:
             connection.close()
-    join, params, filters = _stage_filters(status=status or "completed", search=None, stage=stage)
+    join, params, filters = _stage_filters(status=status or "completed", search=None, stage=stage, file_id=file_id, part_id=part_id)
     if status is None:
         match = "1"
         params.pop()  # The unused completed predicate parameter.
@@ -3184,7 +3451,8 @@ def obsolete_stage_result_count(project: Path) -> int:
 
 def _deduplicatable_applied_results(connection: sqlite3.Connection, obsolete: set[str]) -> list[str]:
     project_id = _project_id(connection)
-    records = [_validate_record(_hydrate_stage(row, project_id), "applied text maintenance")
+    metadata = _request_metadata(connection)
+    records = [_validate_record(_hydrate_stage(row, project_id, metadata), "applied text maintenance")
                for row in connection.execute(
                    "SELECT record_id,stage,segment_id,status,payload_json FROM stage_results "
                    "WHERE stage IN ('proofreading_applied','polishing_applied') "
@@ -3219,6 +3487,7 @@ def database_maintenance_info(project: Path) -> dict[str, int]:
     connection = _read_only_connection(project)
     try:
         with connection:
+            connection.execute("BEGIN")
             obsolete = obsolete_stage_results(connection)
             return {"obsolete_stage_records": len(obsolete),
                     "deduplicatable_applied_records": len(_deduplicatable_applied_results(connection, obsolete))}
