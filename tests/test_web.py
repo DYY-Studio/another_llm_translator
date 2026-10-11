@@ -7025,3 +7025,39 @@ async def test_continuous_joint_draft_ends_on_last_executed_stage(
     assert result["status"] == "completed"
     assert result["current_stage"] == "terminology"
     assert result["steps"][-1]["reason"] == "joint_draft_translation"
+
+
+def test_segment_read_keeps_task_status_responsive(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    import threading
+    import httpx
+    from app.web_store import WebStore
+    from tests.test_web_store import create_web_store_project
+
+    project = create_web_store_project(tmp_path)
+    app = create_app(projects_root=project.parent)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_query(self, **kwargs):
+        entered.set()
+        release.wait(2)
+        return {"segments": [], "total": 0}
+
+    monkeypatch.setattr(WebStore, "segment_query", blocked_query)
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            heavy = asyncio.create_task(client.post('/api/v1/projects/web-demo/segments/query', json={"stage": "translation"}))
+            try:
+                assert await asyncio.to_thread(entered.wait, 2)
+                status = await client.get('/api/v1/tasks/active')
+                assert status.status_code == 200
+                assert not heavy.done(), "heavy read blocked task status until it finished"
+            finally:
+                release.set()
+                result = await heavy
+            assert result.status_code == 200
+            assert result.json() == {"segments": [], "total": 0}
+
+    asyncio.run(exercise())
