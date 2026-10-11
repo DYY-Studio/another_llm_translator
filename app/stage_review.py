@@ -548,7 +548,6 @@ async def run_review(
             accept=accept_result,
             save_error=save_external_error,
             parse=_map_local_review_response,
-            prompt_language=language,
             by_id=by_id,
             segments=segments,
             prompt_partition_key=prompt_partition_key,

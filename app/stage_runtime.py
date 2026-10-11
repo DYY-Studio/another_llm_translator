@@ -846,7 +846,6 @@ async def _localized_request_loop(
         [str, dict[str, str]],
         _SegmentParseResult,
     ],
-    prompt_language: str,
     by_id: dict[str, dict[str, Any]],
     segments: list[dict[str, Any]],
     prompt_partition_key: Callable[[dict[str, Any]], object],
@@ -874,12 +873,14 @@ async def _localized_request_loop(
         if not items:
             payload["segments"] = []
         if repair_candidates is not None:
-            payload["validation_repair"] = ", ".join(sorted({
-                str(finding["match_type"])
+            feedback = ", ".join(sorted({
+                str(finding["validator"] if finding["match_type"] == "character" else finding["match_type"])
                 for item in items
                 for finding in repair_candidates[str(item["segment_id"])]["findings"]
                 if finding.get("repairable", True)
             }))
+            if feedback:
+                payload["validation_repair"] = feedback
         payload, id_map = localize_request_ids(payload, items)
         messages = render_messages(prompt, payload)
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"

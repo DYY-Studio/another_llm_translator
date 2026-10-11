@@ -428,7 +428,6 @@ def _analyze_decisions(
     list[str],
     list[tuple[str, str]],
     list[dict[str, Any]],
-    list[dict[str, Any]],
     bool,
 ]:
     document = parse_jsonl_document(content, record_type="decision")
@@ -449,8 +448,6 @@ def _analyze_decisions(
     ignored_read_only: list[str] = []
     seen_targets: set[str] = set()
     normalized_redundant: list[tuple[str, str]] = []
-    invalid_records: list[dict[str, Any]] = []
-    raw_by_normalized: dict[str, dict[str, Any]] = {}
     visible_forms = {
         str(value)
         for state in visible_states
@@ -467,7 +464,6 @@ def _analyze_decisions(
                 **({"normalized": normalized} if isinstance(normalized, str) else {}),
             }
         )
-        invalid_records.append(deepcopy(value))
 
     for value in document.records:
         normalized = value.get("normalized")
@@ -483,7 +479,6 @@ def _analyze_decisions(
             reject("duplicate_record", f"术语决策重复：{normalized}", value)
             continue
         seen_targets.add(normalized)
-        raw_by_normalized[normalized] = value
         if action not in DECISION_ACTIONS:
             reject("invalid_action", f"术语决策 action 无效：{normalized}", value)
             continue
@@ -721,11 +716,6 @@ def _analyze_decisions(
             }
         )
         decisions.pop(normalized, None)
-        if (
-            normalized in raw_by_normalized
-            and raw_by_normalized[normalized] not in invalid_records
-        ):
-            invalid_records.append(deepcopy(raw_by_normalized[normalized]))
     missing = sorted(set(expected) - seen_targets)
     if missing:
         errors.extend(
@@ -741,7 +731,6 @@ def _analyze_decisions(
         ignored_read_only,
         normalized_redundant,
         errors,
-        invalid_records,
         batch_error,
     )
 

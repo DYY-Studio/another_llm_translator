@@ -418,7 +418,7 @@ async def test_translation_complete_id_mismatch_retries_original_batch(
 
 
 @pytest.mark.asyncio
-async def test_old_top_level_json_enters_current_task_format_correction(
+async def test_old_top_level_json_retries_without_added_feedback(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "one")
@@ -434,15 +434,7 @@ async def test_old_top_level_json_enters_current_task_format_correction(
                 {"segments": [{"id": segment_id, "translation": "old"}]}
             )
         else:
-            correction = payload["format_correction"]
-            assert "当前待处理内容" in correction
-            assert "JSONL 结构" in correction
-            assert "固定字段" in correction
-            assert "完整" in correction
-            assert "上次" not in correction
-            assert "第 1 行" not in correction
-            assert "未知 type" not in correction
-            assert "缺少最终 end 记录" not in correction
+            assert "format_correction" not in payload
             content = llm_jsonl(
                 [
                     {
@@ -550,7 +542,7 @@ async def test_malformed_end_keeps_candidates_and_marks_scan_failed(
 
 
 @pytest.mark.asyncio
-async def test_terminology_format_retry_uses_abstract_guidance(
+async def test_terminology_format_retry_adds_no_guidance(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "Alice")
@@ -563,14 +555,7 @@ async def test_terminology_format_retry_uses_abstract_guidance(
         if calls == 1:
             content = '{"type":"type":"end"}'
         else:
-            correction = payload["format_correction"]
-            assert "当前待处理内容" in correction
-            assert "JSONL 结构" in correction
-            assert "固定字段" in correction
-            assert "完整" in correction
-            assert "上次" not in correction
-            assert "第 1 行" not in correction
-            assert "不是合法 JSON 对象" not in correction
+            assert "format_correction" not in payload
             content = llm_jsonl(
                 [
                     {

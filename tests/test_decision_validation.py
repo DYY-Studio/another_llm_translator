@@ -586,3 +586,30 @@ def test_term_warning_threshold_rejects_invalid_config(value):
     config["validation"]["translation"]["decision_warning_threshold"] = value
     with pytest.raises(ConfigError, match="术语复核警告阈值"):
         dump_config(config)
+
+
+@pytest.mark.asyncio
+async def test_validation_retry_missing_end_sends_no_empty_feedback(tmp_path):
+    project = await create_project(tmp_path, "One.")
+    config = load_config(project / "config.toml")
+    config["validation"]["translation"]["validators"] = ["japanese_kana"]
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+    requests = []
+
+    def respond(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        records = [{"type": "segment", "id": item["id"],
+                    "translation": "カ" if len(requests) == 1 else "译文"}
+                   for item in payload["segments"]]
+        content = "\n".join(json.dumps(record) for record in records) if len(requests) == 2 else llm_jsonl(records)
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        result = await run_translation(project, Scope(), http_client=client)
+    assert result["completed"] == 1
+    assert len(requests) == 3
+    assert requests[1]["validation_repair"] == "japanese_kana"
+    assert requests[2]["segments"] == []
+    assert "validation_repair" not in requests[2]
+    assert all("format_correction" not in request for request in requests)

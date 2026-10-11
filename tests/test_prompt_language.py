@@ -561,7 +561,7 @@ async def test_english_validation_repair_sends_only_error_type(
         if "validation_repair" in payload:
             repairs += 1
             instruction = payload["validation_repair"]
-            assert instruction == "character"
+            assert instruction == "japanese_kana"
             assert all(set(item) == {"id", "source"} for item in payload["segments"])
             prefix = "repaired:"
         else:
