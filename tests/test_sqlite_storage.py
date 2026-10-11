@@ -47,14 +47,90 @@ def _adapter_payload_json(raw: str | bytes) -> str:
     return zlib.decompress(raw).decode("utf-8") if isinstance(raw, bytes) else raw
 
 
-@pytest.mark.parametrize("version", [6, 7])
-def test_adapter_state_compresses_on_open_without_changing_version_7_history(
-    tmp_path: Path, version: int,
+def _seed_fingerprint_records(project: Path, *, same_scan_fingerprint: bool = True) -> tuple[dict, dict]:
+    project_id = read_json(project, project / "project.json")["project_id"]
+    fingerprint = digest("run settings")
+    write_json(project, project / "runs" / "RUN-SHARED" / "manifest.json", record_header(
+        "run", project_id, record_id="RUN-SHARED", run_id="RUN-SHARED",
+        stage="translation", status="completed", stage_fingerprint=fingerprint,
+    ))
+    stage = record_header(
+        "stage_result", project_id, record_id="RESULT-SHARED", stage="translation",
+        segment_id="F0001-S000001", status="completed", text="译文",
+        run_id="RUN-SHARED", stage_fingerprint=fingerprint,
+    )
+    scan = record_header(
+        "terminology_scan", project_id, record_id="SCAN-SHARED", stage="terminology",
+        segment_id="F0001-S000001", status="completed", active_task_id="TASK-SHARED",
+        run_id="RUN-SHARED", stage_fingerprint=fingerprint if same_scan_fingerprint else digest("other settings"),
+    )
+    append_jsonl(project, project / "stages" / "translation.jsonl", stage)
+    append_jsonl(project, project / "terminology" / "scans.jsonl", scan)
+    return stage, scan
+
+
+@pytest.mark.parametrize("same_scan_fingerprint", [False, True])
+def test_run_fingerprint_reuse_preserves_records_and_progress(
+    tmp_path: Path, same_scan_fingerprint: bool,
+) -> None:
+    from app.sqlite_storage import latest_stage_results, latest_stage_states, terminology_scan_state
+
+    project = create_project(tmp_path)
+    stage, scan = _seed_fingerprint_records(project, same_scan_fingerprint=same_scan_fingerprint)
+    ids = [stage["segment_id"]]
+    assert read_jsonl(project, project / "stages" / "translation.jsonl") == [stage]
+    assert read_jsonl(project, project / "terminology" / "scans.jsonl") == [scan]
+    assert latest_stage_results(project, "translation", ids)[ids[0]] == stage
+    assert latest_stage_states(project, "translation", ids)[ids[0]]["completed"] == stage
+    assert latest_stage_summary(project, "translation", ids)[ids[0]]["stage_fingerprint"] == stage["stage_fingerprint"]
+    assert terminology_scan_state(project, "TASK-SHARED", ids) == (set(ids), {scan["stage_fingerprint"]})
+    with sqlite3.connect(project / "project.sqlite") as database:
+        payload = json.loads(database.execute("SELECT payload_json FROM stage_results").fetchone()[0])
+        assert payload["stage_fingerprint"] != stage["stage_fingerprint"]
+        payload = json.loads(database.execute("SELECT payload_json FROM terminology_scans").fetchone()[0])
+        assert (payload["stage_fingerprint"] != scan["stage_fingerprint"]) == same_scan_fingerprint
+
+
+def test_v6_migration_reuses_fingerprints_without_changing_records(tmp_path: Path) -> None:
+    from app import sqlite_storage
+
+    project = create_project(tmp_path)
+    stage, scan = _seed_fingerprint_records(project)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        for table, record in [("stage_results", stage), ("terminology_scans", scan)]:
+            payload = json.loads(database.execute(f"SELECT payload_json FROM {table}").fetchone()[0])
+            payload["stage_fingerprint"] = record["stage_fingerprint"]
+            database.execute(f"UPDATE {table} SET payload_json=?", (json.dumps(payload),))
+        database.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
+    sqlite_storage._SUPPORTED_CACHE.discard(project / "project.sqlite")
+    backup = ensure_supported(project)
+    assert backup is not None
+    assert read_jsonl(project, project / "stages" / "translation.jsonl") == [stage]
+    assert read_jsonl(project, project / "terminology" / "scans.jsonl") == [scan]
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+        for table in ("stage_results", "terminology_scans"):
+            payload = json.loads(database.execute(f"SELECT payload_json FROM {table}").fetchone()[0])
+            assert payload["stage_fingerprint"] != stage["stage_fingerprint"]
+
+
+def test_dangling_run_fingerprint_reference_fails_explicitly(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    _seed_fingerprint_records(project)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("DELETE FROM runs")
+    with pytest.raises(StorageError, match="指纹引用"):
+        read_jsonl(project, project / "stages" / "translation.jsonl")
+
+
+def test_v6_adapter_state_compresses_on_open_preserving_history(
+    tmp_path: Path,
 ) -> None:
     from app import sqlite_storage
     from tests.test_documents import init_epub
 
     project = init_epub(tmp_path)
+    version = 6
     expected = read_adapter_state(project, "F0001")
     with sqlite3.connect(project / "project.sqlite") as database:
         raw = _adapter_payload_json(database.execute("SELECT payload_json FROM adapter_states").fetchone()[0])
@@ -102,19 +178,20 @@ def test_corrupt_compressed_adapter_state_fails_explicitly(tmp_path: Path, paylo
         read_adapter_state(project, "F0001")
 
 
-def test_invalid_adapter_json_rolls_back_same_version_migration(tmp_path: Path) -> None:
+def test_invalid_adapter_json_rolls_back_v6_migration(tmp_path: Path) -> None:
     from app import sqlite_storage
     from tests.test_documents import init_epub
 
     project = init_epub(tmp_path)
     with sqlite3.connect(project / "project.sqlite") as database:
         database.execute("UPDATE adapter_states SET payload_json = 'not json'")
+        database.execute("UPDATE schema_meta SET value = '6' WHERE key='schema_version'")
     sqlite_storage._SUPPORTED_CACHE.discard(project / "project.sqlite")
     with pytest.raises(StorageError, match="损坏"):
         ensure_supported(project)
     with sqlite3.connect(project / "project.sqlite") as database:
         assert database.execute("SELECT payload_json FROM adapter_states").fetchone()[0] == "not json"
-        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "6"
     assert len(list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))) == 1
 
 

@@ -330,6 +330,45 @@ def _residual(value: dict[str, Any], keys: Iterable[str]) -> str:
     return _json(residual)
 
 
+_RUN_FINGERPRINT_REF = "@run"
+
+
+def _run_fingerprints(connection: sqlite3.Connection) -> dict[str, str]:
+    return {
+        str(row["run_id"]): str(row["fingerprint"])
+        for row in connection.execute(
+            "SELECT run_id, json_extract(payload_json, '$.stage_fingerprint') AS fingerprint "
+            "FROM runs WHERE json_type(payload_json, '$.stage_fingerprint') = 'text'"
+        )
+    }
+
+
+def _resolve_fingerprint(value: Any, run_id: Any, fingerprints: dict[str, str]) -> Any:
+    if value != _RUN_FINGERPRINT_REF:
+        return value
+    if run_id not in fingerprints:
+        raise StorageError(f"阶段指纹引用不存在：{run_id}")
+    return fingerprints[run_id]
+
+
+def _fingerprint_payload(raw: str, fingerprints: dict[str, str]) -> dict[str, Any]:
+    value = _load(raw)
+    if value.get("stage_fingerprint") == _RUN_FINGERPRINT_REF:
+        value["stage_fingerprint"] = _resolve_fingerprint(
+            value["stage_fingerprint"], value.get("run_id"), fingerprints
+        )
+    return value
+
+
+def _fingerprint_residual(
+    value: dict[str, Any], keys: Iterable[str], fingerprints: dict[str, str],
+) -> str:
+    fingerprint = value.get("stage_fingerprint")
+    if isinstance(fingerprint, str) and fingerprint and fingerprint == fingerprints.get(value.get("run_id")):
+        value = {**value, "stage_fingerprint": _RUN_FINGERPRINT_REF}
+    return _residual(value, keys)
+
+
 _FILE_RESIDUAL_FIELDS = (
     "schema_version",
     "record_type",
@@ -657,9 +696,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         raise ProjectError(
             f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
         )
-    if version == SCHEMA_VERSION and connection.execute(
-        "SELECT 1 FROM adapter_states WHERE typeof(payload_json) = 'text' LIMIT 1"
-    ).fetchone() is None:
+    if version == SCHEMA_VERSION:
         _create_tables(connection)
         return None
 
@@ -686,6 +723,21 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             connection.execute(
                 "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
                 (zlib.compress(raw.encode("utf-8")), row["file_id"]),
+            )
+        for table in ("stage_results", "terminology_scans"):
+            connection.executemany(
+                f"UPDATE {table} SET payload_json = ? WHERE sequence = ?",
+                [
+                    (_json({**_load(row["payload_json"]), "stage_fingerprint": _RUN_FINGERPRINT_REF}), row["sequence"])
+                    for row in connection.execute(
+                        f"SELECT records.sequence, records.payload_json FROM {table} AS records "
+                        "JOIN runs ON runs.run_id = json_extract(records.payload_json, '$.run_id') "
+                        "WHERE json_type(records.payload_json, '$.stage_fingerprint') = 'text' "
+                        "AND length(json_extract(records.payload_json, '$.stage_fingerprint')) > 0 "
+                        "AND json_extract(records.payload_json, '$.stage_fingerprint') "
+                        "= json_extract(runs.payload_json, '$.stage_fingerprint')"
+                    )
+                ],
             )
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
@@ -842,10 +894,12 @@ def _hydrate_adapter_state(
     )
 
 
-def _hydrate_stage(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
+def _hydrate_stage(
+    row: sqlite3.Row, project_id: str | None, fingerprints: dict[str, str],
+) -> dict[str, Any]:
     status = row["status"]
     return _with_common_header(
-        _load(str(row["payload_json"])),
+        _fingerprint_payload(str(row["payload_json"]), fingerprints),
         project_id=project_id,
         record_type=_stage_record_type(status),
         record_id=str(row["record_id"]),
@@ -857,9 +911,11 @@ def _hydrate_stage(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
     )
 
 
-def _hydrate_scan(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
+def _hydrate_scan(
+    row: sqlite3.Row, project_id: str | None, fingerprints: dict[str, str],
+) -> dict[str, Any]:
     return _with_common_header(
-        _load(str(row["payload_json"])),
+        _fingerprint_payload(str(row["payload_json"]), fingerprints),
         project_id=project_id,
         record_type="terminology_scan",
         record_id=str(row["record_id"]),
@@ -2261,14 +2317,16 @@ def _records(
     try:
         project_id = _project_id(connection)
         if kind == "stage":
+            fingerprints = _run_fingerprints(connection)
             rows = connection.execute(
                 """SELECT sequence, record_id, stage, segment_id, status,
                           payload_json
                    FROM stage_results WHERE stage = ? ORDER BY sequence""",
                 (key,),
             ).fetchall()
-            return [_hydrate_stage(row, project_id) for row in rows]
+            return [_hydrate_stage(row, project_id, fingerprints) for row in rows]
         elif kind == "scans":
+            fingerprints = _run_fingerprints(connection)
             if task_id is not None:
                 rows = connection.execute(
                     "SELECT sequence, record_id, active_task_id, segment_id, status, "
@@ -2281,7 +2339,7 @@ def _records(
                     "SELECT sequence, record_id, active_task_id, segment_id, status, "
                     "payload_json FROM terminology_scans ORDER BY sequence"
                 ).fetchall()
-            return [_hydrate_scan(row, project_id) for row in rows]
+            return [_hydrate_scan(row, project_id, fingerprints) for row in rows]
         elif kind == "candidates":
             if task_id is not None:
                 rows = connection.execute(
@@ -2320,6 +2378,7 @@ def read_jsonl(
 
 
 def _insert_stage(connection: sqlite3.Connection, records: Iterable[dict[str, Any]]) -> None:
+    fingerprints = _run_fingerprints(connection)
     connection.executemany(
         "INSERT INTO stage_results(record_id,stage,segment_id,status,payload_json) VALUES (?, ?, ?, ?, ?)",
         [
@@ -2328,7 +2387,7 @@ def _insert_stage(connection: sqlite3.Connection, records: Iterable[dict[str, An
                 str(item.get("stage")),
                 item.get("segment_id"),
                 item.get("status"),
-                _residual(item, _STAGE_RESIDUAL_FIELDS),
+                _fingerprint_residual(item, _STAGE_RESIDUAL_FIELDS, fingerprints),
             )
             for item in records
         ],
@@ -2336,6 +2395,7 @@ def _insert_stage(connection: sqlite3.Connection, records: Iterable[dict[str, An
 
 
 def _insert_scans(connection: sqlite3.Connection, records: Iterable[dict[str, Any]]) -> None:
+    fingerprints = _run_fingerprints(connection)
     connection.executemany(
         "INSERT INTO terminology_scans(record_id,active_task_id,segment_id,status,payload_json) VALUES (?, ?, ?, ?, ?)",
         [
@@ -2344,7 +2404,7 @@ def _insert_scans(connection: sqlite3.Connection, records: Iterable[dict[str, An
                 str(item["active_task_id"]),
                 item.get("segment_id"),
                 item.get("status"),
-                _residual(item, _SCAN_RESIDUAL_FIELDS),
+                _fingerprint_residual(item, _SCAN_RESIDUAL_FIELDS, fingerprints),
             )
             for item in records
         ],
@@ -2876,7 +2936,8 @@ def latest_stage_results(
                 params,
             ).fetchall())
         project_id = _project_id(connection)
-        values_by_id = [_hydrate_stage(row, project_id) for row in rows]
+        fingerprints = _run_fingerprints(connection)
+        values_by_id = [_hydrate_stage(row, project_id, fingerprints) for row in rows]
         return {str(item["segment_id"]): item for item in values_by_id}
     finally:
         connection.close()
@@ -2907,7 +2968,8 @@ def latest_stage_summary(
                        CASE
                            WHEN COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0)
                            THEN json_extract(completed.payload_json, '$.stage_fingerprint')
-                       END AS fingerprint
+                       END AS fingerprint,
+                       json_extract(completed.payload_json, '$.run_id') AS run_id
                 FROM (
                     SELECT segment_id,
                            MAX(CASE WHEN status = 'completed' THEN sequence END) AS last_completed,
@@ -2922,11 +2984,12 @@ def latest_stage_summary(
                 """,
                 [stage, *batch],
             ).fetchall())
+        fingerprints = _run_fingerprints(connection)
         return {
             str(row["segment_id"]): {
                 "completed": bool(row["completed"]),
                 "failed": bool(row["failed"]),
-                "stage_fingerprint": row["fingerprint"],
+                "stage_fingerprint": _resolve_fingerprint(row["fingerprint"], row["run_id"], fingerprints),
             }
             for row in rows
         }
@@ -2947,6 +3010,7 @@ def latest_stage_states(
     try:
         rows = []
         project_id = _project_id(connection)
+        fingerprints = _run_fingerprints(connection)
         for start in range(0, len(values), 500):
             batch = values[start:start + 500]
             placeholders = ",".join("?" for _ in batch)
@@ -2998,6 +3062,7 @@ def latest_stage_states(
                             "payload_json": completed_payload,
                         },
                         project_id,
+                        fingerprints,
                     ),
                     f"stage={stage} segment={row['segment_id']}",
                 )
@@ -3026,7 +3091,8 @@ def terminology_scan_state(
             f"""
             SELECT DISTINCT segment_id,
                    json_extract(payload_json, '$.stage_fingerprint')
-                       AS stage_fingerprint
+                       AS stage_fingerprint,
+                   json_extract(payload_json, '$.run_id') AS run_id
             FROM terminology_scans
             WHERE active_task_id = ?
               AND status = 'completed'
@@ -3035,8 +3101,9 @@ def terminology_scan_state(
             [task_id, *values],
         ).fetchall()
         completed = {str(row["segment_id"]) for row in rows}
+        run_fingerprints = _run_fingerprints(connection)
         fingerprints = {
-            str(row["stage_fingerprint"])
+            str(_resolve_fingerprint(row["stage_fingerprint"], row["run_id"], run_fingerprints))
             for row in rows
             if row["stage_fingerprint"] is not None
         }
@@ -3083,6 +3150,7 @@ def _stage_result_lineage(
     result = {str(record["record_id"]): record for record in records}
     pending = set(result)
     project_id = _project_id(connection)
+    fingerprints = _run_fingerprints(connection)
     while pending:
         parents = {str(result[key][field]) for key in pending
                    for field in ("base_result_id", "suggestion_result_id")
@@ -3094,7 +3162,7 @@ def _stage_result_lineage(
             rows = connection.execute(
                 f"SELECT record_id,stage,segment_id,status,payload_json FROM stage_results WHERE record_id IN ({','.join('?' for _ in batch)})", batch)
             for row in rows:
-                record = _validate_record(_hydrate_stage(row, project_id), "export lineage")
+                record = _validate_record(_hydrate_stage(row, project_id, fingerprints), "export lineage")
                 key = str(record["record_id"])
                 result[key] = record
                 pending.add(key)
@@ -3230,7 +3298,8 @@ def obsolete_stage_result_count(project: Path) -> int:
 
 def _deduplicatable_applied_results(connection: sqlite3.Connection, obsolete: set[str]) -> list[str]:
     project_id = _project_id(connection)
-    records = [_validate_record(_hydrate_stage(row, project_id), "applied text maintenance")
+    fingerprints = _run_fingerprints(connection)
+    records = [_validate_record(_hydrate_stage(row, project_id, fingerprints), "applied text maintenance")
                for row in connection.execute(
                    "SELECT record_id,stage,segment_id,status,payload_json FROM stage_results "
                    "WHERE stage IN ('proofreading_applied','polishing_applied') "
