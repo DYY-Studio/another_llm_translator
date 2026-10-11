@@ -775,8 +775,9 @@ def _next_file_sequence(
 
 
 def _running_run_ids(project: Path) -> list[str]:
-    from .sqlite_storage import read_run_states
+    from .sqlite_storage import ensure_supported, read_run_states
 
+    ensure_supported(project)
     return [str(item["run_id"]) for item in read_run_states(project) if item["status"] == "running"]
 
 
