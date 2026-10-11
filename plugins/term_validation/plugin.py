@@ -21,7 +21,7 @@ def _normalize(value: str) -> str:
 
 class PreferredTermUsageValidator:
     validator_id = "preferred_term_usage"
-    version = "8"
+    version = "9"
     label = "Preferred terminology usage"
     phase = "terminology"
     scope = "segment"
@@ -88,11 +88,12 @@ class PreferredTermUsageValidator:
         for question, finding in zip(questions, findings, strict=True):
             answer = answers[question.name]
             certain = not answer.refused and answer.confidence >= context.decision_confidence_threshold
-            if certain and answer.choice == "acceptable":
-                continue
             if certain and answer.choice == "required":
                 result.append(finding)
-            else:
+            elif context.decision_warning_threshold > 0 and (
+                answer.refused or answer.confidence < context.decision_warning_threshold
+                or answer.choice == "uncertain"
+            ):
                 result.append(replace(finding, match_type="preferred_term_uncertain", repairable=False))
         return tuple(result)
 
@@ -100,7 +101,7 @@ class PreferredTermUsageValidator:
 def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="term-validation",
-        version="0.6.0",
+        version="0.7.0",
         protocol_version=16,
         translation_validators=(PreferredTermUsageValidator(),),
         decision_prompts=(PreferredTermUsageValidator.prompt_declaration(),),

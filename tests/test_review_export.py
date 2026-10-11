@@ -617,11 +617,9 @@ async def test_review_complete_id_mismatch_retries_original_batch(
             ]
         else:
             review_calls.append(ids)
-            if "format_correction" in payload:
-                correction = payload["format_correction"]
-                assert "遵守固定字段" in correction
-                assert "accepted 仅含 type、id、status" in system
-                assert '"suggested_text":"完整建议"' in system
+            assert "format_correction" not in payload
+            assert "accepted 仅含 type、id、status" in system
+            assert '"suggested_text":"完整建议"' in system
             returned = ids[1:2] if len(review_calls) == 1 else ids
             records = [
                 {
@@ -808,7 +806,7 @@ async def test_chunk_retry_discards_partial_results(
     assert [item["id"] for item in calls[0]["segments"]] == ["1", "2", "3"]
     for payload in calls[1:]:
         assert payload["segments"] == calls[0]["segments"]
-        assert payload["format_correction"]
+        assert "format_correction" not in payload
     records = read_jsonl(project, result_path)
     assert summary["completed"] == (3 if succeeds else 0)
     assert summary["failed"] == (0 if succeeds else 3)
@@ -822,7 +820,7 @@ async def test_chunk_retry_discards_partial_results(
 
 
 @pytest.mark.asyncio
-async def test_review_format_retry_uses_abstract_guidance(
+async def test_review_format_retry_adds_no_guidance(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "one")
@@ -848,15 +846,7 @@ async def test_review_format_retry_uses_abstract_guidance(
             if review_calls == 1:
                 content = json.dumps({"segments": [{"id": "1"}]})
             else:
-                correction = payload["format_correction"]
-                assert "当前待处理内容" in correction
-                assert "JSONL 结构" in correction
-                assert "固定字段" in correction
-                assert "完整" in correction
-                assert "上次" not in correction
-                assert "第 1 行" not in correction
-                assert "未知 type" not in correction
-                assert "缺少最终 end 记录" not in correction
+                assert "format_correction" not in payload
                 records = [
                     {
                         "type": "segment",

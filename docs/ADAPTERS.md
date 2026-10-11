@@ -590,7 +590,7 @@ def descriptor() -> PluginDescriptor:
 
 翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `16`；每个校验器声明唯一的 `validator_id`、`version`、`label`、`phase`、`scope`，并按执行粒度实现同步或异步校验。
 
-上下文包含当前 Segment 的 ID、源文、候选译文、逐 Segment 术语命中，以及可选的宿主 `DecisionService` 和置信度门槛。术语命中包含分类和说明；上下文不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
+上下文包含当前 Segment 的 ID、源文、候选译文、逐 Segment 术语命中，以及可选的宿主 `DecisionService` 和独立的修复置信度门槛、警告阈值（`decision_warning_threshold`）。术语命中包含分类和说明；上下文不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
 
 `phase` 为 `mechanical`、`alignment` 或 `terminology`，宿主按此顺序执行；同层按 ID 排序，完成整层后存在任何 finding 就阻挡后续层。`scope=segment` 使用 `validate(context)`；`scope=response` 使用 `validate_response(contexts)`，输入为按请求顺序排列的完整 Segment 上下文元组，返回以输入 Segment ID 为键、finding 元组为值的字典。手动编辑只执行逐 Segment 校验。
 
@@ -711,13 +711,13 @@ OpenAI Decisions 将共享证据编码为 JSON 字符串写入 `input`，问题�
 空响应、JSON 解析失败、回答缺失或重复、选项错误及非法概率，与网络异常、HTTP 429 和 5xx 共用 `retry.http_max_attempts` 及指数退避；预算耗尽后明确失败。每次尝试记录到诊断及已启用的 Debug 保存中。明确拒答返回 `refused=True`。
 
 `validation.translation` 的 `decision_enabled` 默认 false，`decision_preset` 默认空字符串，
-`decision_confidence_threshold` 默认 0.8；`decision_context_enabled` 默认 false，
+`decision_confidence_threshold` 与 `decision_warning_threshold` 默认均为 0.8，后者为 0 时关闭不确定警告；`decision_context_enabled` 默认 false，
 `decision_previous_segments` 默认 1，为非负整数。启用上文时，
 `TranslationValidationContext.previous_source` 提供同一 File、同一分区内前序非空 Segment 的原文。
 推荐译名复核的 `terms` 列出本次提问的术语，`matched_terms` 只保留未提问的其他命中术语，供重叠关系判断。
 推荐译名复核需要安装并选择 `preferred_term_usage`。`decision.preset` 提供通用连接；校验器的 `decision_preset` 为空时继承通用连接，非空时独立覆盖。置信度及上下文设置按校验器独立配置。Run 在 `decision_presets/<preset_id>.json` 保存所有实际使用的连接；同一 Preset 共用客户端与限流。实际连接、校验器绑定、置信度门槛及上文设置参与翻译指纹。
 
-错位校验器 `segment_alignment` 为内置响应级校验器，通过 `validation.translation.validators` 显式启用。`validation.translation.alignment` 的 `decision_preset` 默认空字符串、`confidence_threshold` 默认 0.8、`tail_segments` 默认 3 且必须为正整数。宿主将拆分片段重组后，按请求顺序抽取尾部完整 Segment；证据为 `segments` 配对列表；其中原文和译文均去除 Ruby 标记及注音、保留正文，持久化文本和 finding 定位保持原样。问题按配对顺序命名，选项为 `aligned`、`misaligned`、`uncertain`。不携带历史上文，也不在超限时缩减抽查数量。错位 findings 为 `segment_misaligned`，不确定为不可修复的 advisory `segment_alignment_uncertain`；`matched_source` 记录抽查 Segment ID。两者都覆盖整批，具体保存和修复语义见 [翻译阶段](MINIMAL.md#53-翻译)。
+错位校验器 `segment_alignment` 为内置响应级校验器，通过 `validation.translation.validators` 显式启用。`validation.translation.alignment` 的 `decision_preset` 默认空字符串、`confidence_threshold` 和 `warning_threshold` 默认均为 0.8（后者为 0 时关闭不确定警告）、`tail_segments` 默认 3 且必须为正整数。宿主将拆分片段重组后，按请求顺序抽取尾部完整 Segment；证据为 `segments` 配对列表；其中原文和译文均去除 Ruby 标记及注音、保留正文，持久化文本和 finding 定位保持原样。问题按配对顺序命名，选项为 `aligned`、`misaligned`、`uncertain`。不携带历史上文，也不在超限时缩减抽查数量。错位 findings 为 `segment_misaligned`，不确定为不可修复的 advisory `segment_alignment_uncertain`；`matched_source` 记录抽查 Segment ID。两者都覆盖整批，具体保存和修复语义见 [翻译阶段](MINIMAL.md#53-翻译)。
 
 术语插件将同一 Segment 的推荐译名缺失项合并请求，输出 required（需要术语修复）、
 acceptable（无需修复，包括无关日常含义、正确译名及写法一致的合理简称）或 uncertain。请求同时携带本句全部命中术语作为只读参照，

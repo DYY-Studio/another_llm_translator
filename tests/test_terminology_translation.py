@@ -1465,16 +1465,8 @@ async def test_advisory_term_usage_repairs_once_even_when_hard_repairs_are_zero(
     assert summary["failed"] == 0
     assert len(calls) == 2
     assert calls[0]["terms"] == calls[1]["terms"]
-    assert calls[1]["segments"][0]["validation_matches"][0] == {
-        "validator": "preferred_term_usage",
-        "match_type": "preferred_term_missing",
-        "severity": "advisory",
-        "start": None,
-        "end": None,
-        "term_source": "Alice",
-        "matched_source": "Alice",
-        "expected_translation": "爱丽丝",
-    }
+    assert calls[1]["validation_repair"] == "preferred_term_missing"
+    assert calls[1]["segments"] == calls[0]["segments"]
     record = read_jsonl(project, project / "stages" / "translation.jsonl")[-1]
     assert record["validation_status"] == "passed"
     assert record["validation_findings"] == []
@@ -2848,7 +2840,7 @@ async def test_draft_scan_requires_explicit_term_response_before_saving(
     assert len(requests) == (1 if declaration == {"type": "no_terms"} else 2)
     assert all(request["response_mode"] == "terms+translation" for request in requests)
     if len(requests) == 2:
-        assert "format_correction" in requests[1]
+        assert "format_correction" not in requests[1]
     assert load_stage_history(project, "translation")[0]["text"] == "门开了。"
 
 
@@ -2937,3 +2929,63 @@ async def test_draft_scan_accepts_model_merged_term_and_alias_without_retry(
     assert load_terms(project)["terms"][0]["aliases"] == ["せいが"]
     assert result["draft_progress"]["terminology"]["completed"] == 1
     assert result["draft_progress"]["translation"]["completed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_translation_persists_nonrepairable_warning_before_run_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import stage_translation
+    from app.translation_validation import TranslationValidationMatch
+
+    project = await create_project(tmp_path, "first\nsecond")
+    extra = tmp_path / "extra.txt"
+    extra.write_text("later", encoding="utf-8")
+    add_project_files(project, [str(extra)])
+    validated = asyncio.Event()
+    original_context = stage_translation._project_context
+
+    class WarningValidator:
+        validator_id = "warning_probe"
+        version = "1"
+        label = "warning probe"
+        phase = "alignment"
+        scope = "response"
+
+        async def validate_response(self, contexts):
+            validated.set()
+            return {context.segment_id: (TranslationValidationMatch(
+                "segment_alignment_uncertain", None, None, None,
+                severity="advisory", repairable=False,
+            ),) for context in contexts}
+
+    def project_context(*args, **kwargs):
+        config, *rest = original_context(*args, **kwargs)
+        config["_translation_validator_instances"] = (WarningValidator(),)
+        return config, *rest
+
+    async def handler(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if any(item["source"] == "later" for item in payload["segments"]):
+            await asyncio.Event().wait()
+        return translation_response(request)
+
+    monkeypatch.setattr(stage_translation, "_project_context", project_context)
+    progress = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        task = asyncio.create_task(run_translation(
+            project, Scope(), http_client=client,
+            on_progress=lambda *counts: progress.append(counts),
+        ))
+        try:
+            await asyncio.wait_for(validated.wait(), 5)
+            await asyncio.sleep(0)
+            records = load_stage_history(project, "translation")
+            assert len(records) == 2
+            assert all(record["validation_status"] == "warning" for record in records)
+            assert progress[-1] == (2, 0, 3)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    assert len(load_stage_history(project, "translation")) == 2

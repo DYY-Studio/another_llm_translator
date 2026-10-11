@@ -60,7 +60,6 @@ from .sqlite_storage import (
     write_summary_run,
 )
 from .stage_runtime import (
-    _FORMAT_CORRECTION,
     StageRunState,
     _assemble_warnings,
     _create_or_continue_run,
@@ -1462,10 +1461,6 @@ async def run_terminology(
             if failed_class is not TerminologyResponseMode.TERMS_ONLY:
                 observe_summary_request(unresolved)
             payload = payload_builder(unresolved)
-            if format_attempt:
-                payload["format_correction"] = _FORMAT_CORRECTION[
-                    prompt_language_for_items(unresolved)
-                ]
             actual_mode, requirements, prompt_text = prompt_details_for_items(
                 unresolved
             )
@@ -1645,10 +1640,6 @@ async def run_terminology(
         parse_errors: list[str] = []
         for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
             payload = payload_builder(unresolved)
-            if format_attempt:
-                payload["format_correction"] = _FORMAT_CORRECTION[
-                    prompt_language_for_items(unresolved)
-                ]
             actual_mode, requirements, prompt_text = prompt_details_for_items(
                 unresolved
             )

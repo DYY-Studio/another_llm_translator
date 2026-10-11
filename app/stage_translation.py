@@ -49,7 +49,7 @@ from .translation_validation import (
     SegmentAlignmentValidator,
 )
 
-from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _frozen_run_options, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _replace_with_runtime_parts, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _segment_model_payload_value, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests, _FORMAT_CORRECTION)
+from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _frozen_run_options, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _replace_with_runtime_parts, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _segment_model_payload_value, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests)
 
 
 def _summary_segment_id(item: dict[str, Any]) -> str:
@@ -639,6 +639,7 @@ async def run_translation(
     translation_validators = tuple(
         SegmentAlignmentValidator(decision_clients[decision_bindings["segment_alignment"]],
             confidence_threshold=alignment_options["confidence_threshold"],
+            warning_threshold=alignment_options["warning_threshold"],
             tail_segments=alignment_options["tail_segments"],
             prompt=config["_decision_prompt_definitions"]["segment_alignment"]["content"])
         if validator.validator_id == "segment_alignment" else validator
@@ -672,6 +673,7 @@ async def run_translation(
             decision=decision_client if segment_id not in part_original else None,
             decision_prompts={key: value["content"] for key, value in config.get("_decision_prompt_definitions", {}).items()},
             decision_confidence_threshold=config["validation"]["translation"]["decision_confidence_threshold"],
+            decision_warning_threshold=config["validation"]["translation"]["decision_warning_threshold"],
             segment_id=original_id or segment_id,
             previous_source=tuple(entry["source"] for entry in context_index.previous(
                 item, config["validation"]["translation"]["decision_previous_segments"],
@@ -703,14 +705,17 @@ async def run_translation(
         *,
         validation_status: str = "passed",
         findings: list[dict[str, Any]] | None = None,
+        findings_by_segment: dict[str, list[dict[str, Any]]] | None = None,
     ) -> None:
         if not completions:
             return
+        findings_by_segment = findings_by_segment or {}
         records = [record_header(
             "stage_result", str(metadata["project_id"]), stage="translation",
             segment_id=segment_id, status="completed",
             text=_restore_leading_whitespace(str(by_id[segment_id]["source"]), text),
-            validation_status=validation_status, validation_findings=findings or [],
+            validation_status="warning" if segment_id in findings_by_segment else validation_status,
+            validation_findings=findings_by_segment.get(segment_id, findings or []),
             stage_fingerprint=fingerprint, terms_revision=terms_revision,
             **({"generation_origin": "terminology_draft"} if draft_scan else {}),
             run_id=run_id, request_id=request_id,
@@ -831,6 +836,7 @@ async def run_translation(
                 repairable,
             )
         completions = []
+        immediate_warnings: dict[str, list[dict[str, Any]]] = {}
         for segment_id in ordered:
             text, request_id = response_candidates.pop(segment_id)
             if segment_id in findings or blocks_response:
@@ -841,12 +847,17 @@ async def run_translation(
                             "start": 0 if hard else None, "end": len(text) if hard else None,
                             **({"matched_text": text} if hard else {}),
                             **({"repairable": False} if not repairable else {})}]
-                validation_pending[segment_id] = {"segment": by_id[segment_id], "candidate": text,
-                                                  "findings": own, "request_id": request_id}
+                if hard or repairable:
+                    validation_pending[segment_id] = {"segment": by_id[segment_id], "candidate": text,
+                                                      "findings": own, "request_id": request_id}
+                else:
+                    validation_pending.pop(segment_id, None)
+                    immediate_warnings[segment_id] = own
+                    completions.append((segment_id, text, request_id))
             else:
                 validation_pending.pop(segment_id, None)
                 completions.append((segment_id, text, request_id))
-        await save_completed(completions)
+        await save_completed(completions, findings_by_segment=immediate_warnings)
 
     segment_order = {str(item["segment_id"]): index for index, item in enumerate(segments)}
 
@@ -913,8 +924,6 @@ async def run_translation(
             prepare_candidate=prepare_candidate,
             save_error=save_external_error,
             parse=_map_local_translation_response,
-            format_correction=_FORMAT_CORRECTION[language],
-            prompt_language=language,
             by_id=by_id,
             segments=segments,
             prompt_partition_key=prompt_partition_key,
@@ -971,8 +980,6 @@ async def run_translation(
                 prepare_candidate=prepare_candidate,
                 save_error=save_external_error,
                 parse=_map_local_translation_response,
-                format_correction=_FORMAT_CORRECTION[language],
-                prompt_language=language,
                 by_id=by_id,
                 segments=segments,
                 prompt_partition_key=prompt_partition_key,

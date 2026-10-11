@@ -998,10 +998,11 @@ export interface ProjectConfig {
   validation: {
     translation: {
       validators: string[];
-      alignment: { decision_preset: string; confidence_threshold: number; tail_segments: number };
+      alignment: { decision_preset: string; confidence_threshold: number; warning_threshold: number; tail_segments: number };
       decision_enabled: boolean;
       decision_preset: string;
       decision_confidence_threshold: number;
+      decision_warning_threshold: number;
       decision_context_enabled: boolean;
       decision_previous_segments: number;
       max_retry_attempts: number;

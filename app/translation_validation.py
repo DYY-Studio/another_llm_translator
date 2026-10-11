@@ -41,6 +41,7 @@ class TranslationValidationContext:
     segment_id: str | None = None
     previous_source: tuple[str, ...] = ()
     decision_prompts: dict[str, dict] = field(default_factory=dict)
+    decision_warning_threshold: float = 0.8
 
 
 @dataclass(frozen=True)
@@ -344,7 +345,7 @@ async def validate_translation_text(
 
 class SegmentAlignmentValidator:
     validator_id = "segment_alignment"
-    version = "4"
+    version = "5"
     label = "Segment alignment"
     phase = "alignment"
     scope = "response"
@@ -356,9 +357,11 @@ class SegmentAlignmentValidator:
         return declaration_from_file("segment_alignment", ("aligned", "misaligned", "uncertain"), Path(__file__).parent / "decision_prompts/default.json")
 
     def __init__(self, decision: DecisionService | None = None, *,
-                 confidence_threshold: float = 0.8, tail_segments: int = 3, prompt: dict | None = None) -> None:
+                 confidence_threshold: float = 0.8, warning_threshold: float = 0.8,
+                 tail_segments: int = 3, prompt: dict | None = None) -> None:
         self.decision = decision
         self.confidence_threshold = confidence_threshold
+        self.warning_threshold = warning_threshold
         self.tail_segments = tail_segments
         self.prompt = prompt if prompt is not None else self.prompt_declaration().default
 
@@ -384,7 +387,10 @@ class SegmentAlignmentValidator:
             answer = answers[question.name]
             certain = not answer.refused and answer.confidence >= self.confidence_threshold
             misaligned |= certain and answer.choice == "misaligned"
-            uncertain |= not certain or answer.choice == "uncertain"
+            uncertain |= self.warning_threshold > 0 and (
+                answer.refused or answer.confidence < self.warning_threshold
+                or answer.choice == "uncertain"
+            )
         if not misaligned and not uncertain:
             return {}
         evidence = ", ".join(str(context.segment_id) for context in sample)

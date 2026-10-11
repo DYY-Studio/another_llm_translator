@@ -71,11 +71,13 @@ SCHEMA: dict[str, Any] = {
             "decision_enabled": None,
             "decision_preset": None,
             "decision_confidence_threshold": None,
+            "decision_warning_threshold": None,
             "decision_context_enabled": None,
             "decision_previous_segments": None,
             "alignment": {
                 "decision_preset": None,
                 "confidence_threshold": None,
+                "warning_threshold": None,
                 "tail_segments": None,
             },
             "max_retry_attempts": None,
@@ -290,6 +292,9 @@ def validate_config(config: dict[str, Any]) -> None:
     threshold = decision["decision_confidence_threshold"]
     if type(threshold) not in {int, float} or not 0 <= threshold <= 1:
         raise ConfigError("Decision 置信度门槛必须在 0 到 1 之间")
+    warning_threshold = decision["decision_warning_threshold"]
+    if type(warning_threshold) not in {int, float} or not 0 <= warning_threshold <= 1:
+        raise ConfigError("术语复核警告阈值必须在 0 到 1 之间")
     if not isinstance(config["decision"]["preset"], str):
         raise ConfigError("通用 Decision Preset 必须是字符串")
     if decision["decision_enabled"] and "preferred_term_usage" not in decision["validators"]:
@@ -299,6 +304,8 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("错位校验 Decision Preset 必须是字符串")
     if type(alignment["confidence_threshold"]) not in {int, float} or not 0 <= alignment["confidence_threshold"] <= 1:
         raise ConfigError("错位校验置信度门槛必须在 0 到 1 之间")
+    if type(alignment["warning_threshold"]) not in {int, float} or not 0 <= alignment["warning_threshold"] <= 1:
+        raise ConfigError("错位校验警告阈值必须在 0 到 1 之间")
     if type(alignment["tail_segments"]) is not int or alignment["tail_segments"] < 1:
         raise ConfigError("错位校验尾部 Segment 数必须是正整数")
     for validator_id, override in decision_validator_overrides(config).items():
@@ -524,9 +531,13 @@ def load_config(path: Path) -> dict[str, Any]:
         translation_validation.setdefault("decision_enabled", False)
         translation_validation.setdefault("decision_preset", "")
         translation_validation.setdefault("decision_confidence_threshold", 0.8)
+        translation_validation.setdefault("decision_warning_threshold", 0.8)
         translation_validation.setdefault("decision_context_enabled", False)
         translation_validation.setdefault("decision_previous_segments", 1)
         translation_validation.setdefault("alignment", {"decision_preset": "", "confidence_threshold": 0.8, "tail_segments": 3})
+        alignment = translation_validation["alignment"]
+        if isinstance(alignment, dict):
+            alignment.setdefault("warning_threshold", 0.8)
     validate_config(config)
     return config
 

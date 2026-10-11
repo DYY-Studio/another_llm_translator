@@ -19,7 +19,7 @@ from .sqlite_storage import (
     read_segments,
 )
 from .term_decision_protocol import (
-    format_correction,
+    validation_feedback,
 )
 from .term_decision_rules import *
 from .term_decision_rules import _relation_keys
@@ -751,7 +751,6 @@ async def _request_batch(
         for item in component
     }
     previous_errors: list[dict[str, Any]] = []
-    previous_invalid: list[dict[str, Any]] = []
     previous_signature: tuple[tuple[str, str | None], ...] | None = None
     parent_request_id: str | None = None
     last_request_id: str | None = None
@@ -775,7 +774,6 @@ async def _request_batch(
         else:
             pending_groups = [set(unresolved)]
         round_errors: list[dict[str, Any]] = []
-        round_invalid: list[dict[str, Any]] = []
         for target_ids in pending_groups:
             request_focus = [
                 by_normalized[normalized] for normalized in sorted(target_ids)
@@ -793,20 +791,21 @@ async def _request_batch(
                 evidence=_compact_anchor_evidence(evidence, request_anchors),
                 conflicts=conflicts,
             )
-            if attempt:
-                payload["format_correction"] = format_correction(
-                    language=prompt_language,
-                    errors=previous_errors,
-                    previous_invalid_records=previous_invalid,
-                    accepted_normalized=sorted(accepted),
-                    target_normalized=sorted(target_ids),
-                )
+            feedback = validation_feedback(previous_errors, target_ids)
+            if feedback:
+                payload["validation_repair"] = feedback
             messages = render_messages(prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             last_request_id = request_id
             estimate = estimate_messages(
                 messages, float(config["execution"]["token_safety_factor"])
             )
+            _, hard_limit, context_limit, itpm_limit = _request_limits(config)
+            if estimate > hard_limit:
+                raise RequestSizeError(
+                    f"术语决策完整请求估算 {estimate} tokens，超过硬限制 {hard_limit} tokens",
+                    reason="itpm" if 0 < itpm_limit < context_limit else "context",
+                )
             response, request_id = await llm.chat(
                 messages=messages,
                 temperature=float(config["llm"]["temperature_terminology_decision"]),
@@ -820,7 +819,6 @@ async def _request_batch(
                 ignored_read_only,
                 normalized_redundant,
                 errors,
-                invalid_records,
                 batch_error,
             ) = _analyze_decisions(
                 response.content,
@@ -876,13 +874,11 @@ async def _request_batch(
                 unresolved.difference_update(decisions)
                 unresolved.update(expanded)
             round_errors.extend(errors)
-            round_invalid.extend(invalid_records)
             parent_request_id = request_id
         if not unresolved:
             return accepted
         previous_signature = signature
         previous_errors = round_errors
-        previous_invalid = round_invalid
     detail = "；".join(error["message"] for error in previous_errors[:5])
     error = UsageError(f"术语决策格式修正重试耗尽：{detail}")
     error.params = {
