@@ -33,6 +33,14 @@ const workspaceProjectRef = { current: "" };
 let workspacePrefetchGeneration = 0;
 const pageSize = 100;
 
+function selectWorkspaceProject(projectId: string) {
+  if (workspaceProjectRef.current === projectId) return;
+  workspaceProjectRef.current = projectId;
+  for (const key of workspaceCache.keys()) {
+    if ((JSON.parse(key) as string[])[0] !== projectId) workspaceCache.delete(key);
+  }
+}
+
 interface SegmentBoundaryOption {
   file_id: string;
   part_id: string;
@@ -52,7 +60,7 @@ function boundaryKey(fileId: string, partId: string): string {
 // segment so the mount-time index refresh preserves the restored window.
 export function prefetchWorkspace(project: string, projectId: string) {
   const generation = ++workspacePrefetchGeneration;
-  workspaceProjectRef.current = projectId;
+  selectWorkspaceProject(projectId);
   const keys = (["translation", "proofreading", "polishing"] as const)
     .map((stage) => JSON.stringify([projectId, stage, "all", "all", ""]));
   if (keys.every((key) => workspaceCache.has(key))) return;
@@ -222,17 +230,8 @@ export function SegmentWorkspace({
   }, []);
 
   useEffect(() => {
-    if (workspaceProjectRef.current !== projectId) {
-      workspaceProjectRef.current = projectId;
-      // Drop only entries of other projects. Entries are keyed by project, so
-      // nothing leaks across projects, while the current project's prefetched
-      // entries for unvisited stages survive for the first mount.
-      for (const key of [...workspaceCache.keys()]) {
-        if ((JSON.parse(key) as string[])[0] !== projectId) {
-          workspaceCache.delete(key);
-        }
-      }
-    }
+    // Preserve this project's prefetched stages while dropping other projects.
+    selectWorkspaceProject(projectId);
   }, [projectId]);
 
   // Restore a cached window synchronously during render so the browser never
