@@ -5244,3 +5244,54 @@ async def test_isolated_content_retries_send_only_current_error_types(tmp_path: 
             for payload in llm.payloads] == [["alice", "bob"], ["alice", "bob"], ["alice"], ["bob"]]
     assert all(set(payload) <= {"phase", "target_language", "terms", "anchors", "validation_repair"}
                for payload in llm.payloads)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["context", "itpm"])
+@pytest.mark.parametrize("overflow_on_retry", [False, True])
+async def test_decision_rechecks_complete_request_limit_before_sending(
+    tmp_path: Path, monkeypatch, reason, overflow_on_retry,
+) -> None:
+    project = create_decision_project(tmp_path)
+    config = load_project_config(project, stage="terminology_decision")
+    config["llm"].update(context_window_tokens=100 if reason == "context" else 1000,
+                         context_safety_margin_tokens=20)
+    config["execution"]["input_tokens_per_minute"] = 80 if reason == "itpm" else 0
+    focus = [_batch_state("alice", "Alice"), _batch_state("bob", "Bob")]
+    estimated_payloads = []
+
+    def estimate(messages, factor):
+        payload = json.loads(messages[1]["content"])
+        estimated_payloads.append(payload)
+        return 80 if overflow_on_retry and len(estimated_payloads) == 1 else 81
+
+    monkeypatch.setattr("app.term_decision_batches.estimate_messages", estimate)
+
+    class StubLLM:
+        logger = logging.getLogger("test-request-limit")
+        calls = 0
+
+        async def chat(self, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(content=llm_jsonl([
+                {"type": "decision", "normalized": "alice", "action": "keep", "reason": "ok"},
+                {"type": "decision", "normalized": "bob", "action": "update", "reason": "bad relation",
+                 "changes": {"group_primary": "bob"}},
+            ])), None
+
+    llm = StubLLM()
+    with pytest.raises(RequestSizeError) as error:
+        await _request_batch(
+            llm, focus=focus, anchors=[], phase="consistency", prompt="synthetic",
+            config=config, evidence=_batch_evidence(*focus),
+            known_states={term["normalized"]: term for term in focus},
+            read_only_terms=set(), prompt_language="zh-CN", review_states={},
+            spec=term_normalization(config),
+        )
+    assert error.value.params["reason"] == reason
+    assert llm.calls == int(overflow_on_retry)
+    if overflow_on_retry:
+        payload = estimated_payloads[-1]
+        assert [term["normalized"] for term in payload["terms"]] == ["bob"]
+        assert "alice" in {term["normalized"] for term in payload["anchors"]}
+        assert payload["validation_repair"] == "invalid_relationship"

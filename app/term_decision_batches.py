@@ -800,6 +800,12 @@ async def _request_batch(
             estimate = estimate_messages(
                 messages, float(config["execution"]["token_safety_factor"])
             )
+            _, hard_limit, context_limit, itpm_limit = _request_limits(config)
+            if estimate > hard_limit:
+                raise RequestSizeError(
+                    f"术语决策完整请求估算 {estimate} tokens，超过硬限制 {hard_limit} tokens",
+                    reason="itpm" if 0 < itpm_limit < context_limit else "context",
+                )
             response, request_id = await llm.chat(
                 messages=messages,
                 temperature=float(config["llm"]["temperature_terminology_decision"]),
