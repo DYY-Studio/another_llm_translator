@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.web_store import WebStore
-from app.errors import ProjectError, TermGroupError, UsageError
+from app.errors import ProjectError, StorageError, TermGroupError, UsageError
 from app.execution import latest_completed_by_segment, load_stage_history
 from app.project import add_project_files, init_project, update_file_run_options
 from app.sqlite_storage import (
@@ -186,8 +186,16 @@ def test_web_store_rejects_adapter_state_not_owned_by_file(
     file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
     state = read_json(project, state_path)
+    original = dict(state)
     state[field] = value
-    write_json(project, state_path, state)
+    with pytest.raises(StorageError, match="状态归属或版本不匹配"):
+        write_json(project, state_path, state)
+    assert read_json(project, state_path) == original
+    # A disk-corrupted record must still fail at the translation write boundary.
+    import zlib
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+                         (zlib.compress(json.dumps(state).encode()), file_record["file_id"]))
 
     store = WebStore(project)
     with pytest.raises(ProjectError, match="状态"):

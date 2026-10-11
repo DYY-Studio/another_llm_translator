@@ -2117,7 +2117,7 @@ def write_adapter_states(project: Path, states: Iterable[dict[str, Any]]) -> Non
                     (zlib.compress(_residual(state, _ADAPTER_RESIDUAL_FIELDS).encode("utf-8")), state["file_id"]))
                 if cursor.rowcount != 1:
                     raise StorageError(f"Document Adapter 状态缺失：{state['file_id']}")
-                if old_state is None or old_state["state"] != state["state"]:
+                if old_state is None or any(old_state.get(key) != state.get(key) for key in ("adapter_id", "adapter_version", "state")):
                     _refresh_segment_format_counts(connection, [str(state["file_id"])])
     except sqlite3.Error as exc:
         raise StorageError(f"无法更新 Adapter 状态：{project}: {exc}") from exc
@@ -2390,7 +2390,7 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
                         zlib.compress(_residual(value, _ADAPTER_RESIDUAL_FIELDS).encode("utf-8")),
                     ),
                 )
-                if old_state is None or old_state["state"] != value["state"]:
+                if old_state is None or any(old_state.get(key) != value.get(key) for key in ("adapter_id", "adapter_version", "state")):
                     _refresh_segment_format_counts(connection, [file_id])
             elif kind in {"terms", "overrides", "active_task"}:
                 connection.execute(
