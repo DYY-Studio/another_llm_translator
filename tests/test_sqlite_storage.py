@@ -1721,7 +1721,13 @@ def test_v3_run_payload_does_not_duplicate_sql_timestamps(tmp_path: Path) -> Non
 def test_v3_payloads_keep_only_nonrelational_fields(tmp_path: Path) -> None:
     project = create_project(tmp_path)
     project_id = str(read_json(project, project / "project.json")["project_id"])
-    file_id = str(read_files(project)[0]["file_id"])
+    files = read_files(project)
+    file_id = str(files[0]["file_id"])
+    files[0]["document_adapter_state"] = f"source/adapters/{file_id}.json"
+    state = record_header("document_adapter_state", project_id, record_id=f"DOCUMENT-{file_id}",
+                          file_id=file_id, adapter_id=files[0]["document_adapter_id"],
+                          adapter_version=files[0]["document_adapter_version"], state={"kept": True}, run_options={})
+    replace_source(project, files, read_segments(project), read_json(project, project / "project.json"), [state])
 
     write_json(
         project,
@@ -1731,7 +1737,8 @@ def test_v3_payloads_keep_only_nonrelational_fields(tmp_path: Path) -> None:
             project_id,
             record_id=f"DOCUMENT-{file_id}",
             file_id=file_id,
-            state={"kept": True},
+            adapter_id=state["adapter_id"], adapter_version=state["adapter_version"],
+            state={"kept": True}, run_options={},
         ),
     )
     append_jsonl(
@@ -2320,3 +2327,51 @@ def test_v6_upgrade_groups_modes_and_replaces_full_reference_indexes(tmp_path: P
         plans = [row[3] for row in database.execute("EXPLAIN QUERY PLAN SELECT record_id FROM stage_results WHERE json_extract(payload_json,'$.base_result_id') IN (?) OR json_extract(payload_json,'$.suggestion_result_id') IN (?)", ("parent", "parent"))]
         assert any("stage_results_base_reference" in plan for plan in plans)
         assert any("stage_results_suggestion_reference" in plan for plan in plans)
+
+
+def test_format_counts_migration_failure_rolls_back(tmp_path: Path, monkeypatch) -> None:
+    from app import sqlite_storage
+    from app.sqlite_storage import read_segment_format_counts
+
+    project = create_project(tmp_path)
+    before = read_segments(project)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("DROP TABLE segment_format_counts")
+        database.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
+    sqlite_storage._SUPPORTED_CACHE.discard(project / "project.sqlite")
+    calls = 0
+
+    def fail_after_one(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ProjectError("count probe failed")
+        return 0
+
+    with monkeypatch.context() as patch:
+        patch.setattr("app.plugins.document_adapter_segment_format_count", fail_after_one)
+        with pytest.raises(ProjectError, match="count probe failed"):
+            ensure_supported(project)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == '6'
+        assert not database.execute("SELECT 1 FROM sqlite_master WHERE name='segment_format_counts'").fetchone()
+    ensure_supported(project)
+    assert read_segments(project) == before
+    assert read_segment_format_counts(project, [item['segment_id'] for item in before]) == {
+        item['segment_id']: 0 for item in before
+    }
+
+
+def test_format_count_read_batches_and_rejects_missing_count(tmp_path: Path) -> None:
+    from app.sqlite_storage import read_segment_format_counts
+
+    source = tmp_path / "many.txt"
+    source.write_text("\n".join(f"line {i}" for i in range(1001)), encoding="utf-8")
+    project, _ = init_project([str(source)], name="counts", app_root=make_app_root(tmp_path), projects_root=tmp_path / "projects")
+    assert project is not None
+    ids = [item['segment_id'] for item in read_segments(project)]
+    assert read_segment_format_counts(project, ids) == dict.fromkeys(ids, 0)
+    with sqlite3.connect(project / 'project.sqlite') as database:
+        database.execute('DELETE FROM segment_format_counts WHERE segment_id=?', (ids[-1],))
+    with pytest.raises(StorageError, match='格式计数缺失'):
+        read_segment_format_counts(project, ids)

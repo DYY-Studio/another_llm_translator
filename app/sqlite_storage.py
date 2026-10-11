@@ -197,6 +197,10 @@ def _create_tables(connection: sqlite3.Connection) -> None:
             created_at TEXT,
             UNIQUE(file_id, line_index)
         );
+        CREATE TABLE IF NOT EXISTS segment_format_counts (
+            segment_id TEXT PRIMARY KEY REFERENCES segments(segment_id) ON DELETE CASCADE,
+            format_count INTEGER NOT NULL CHECK (typeof(format_count) = 'integer' AND format_count >= 0)
+        );
         CREATE TABLE IF NOT EXISTS adapter_states (
             file_id TEXT PRIMARY KEY REFERENCES files(file_id) ON DELETE CASCADE,
             payload_json BLOB NOT NULL
@@ -784,6 +788,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             if "terminology_modes" in payload:
                 connection.execute("UPDATE runs SET payload_json = ? WHERE run_id = ?",
                                    (_run_residual(payload), row["run_id"]))
+        _refresh_segment_format_counts(connection)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -2082,6 +2087,7 @@ def replace_source(
                 "INSERT INTO project_meta(key, value_json) VALUES (?, ?)",
                 [(key, _json(item)) for key, item in metadata.items()],
             )
+            _refresh_segment_format_counts(connection)
             removed_ids = {str(row["segment_id"]) for row in old_rows} - {str(item["segment_id"]) for item in segment_values}
             from .stage_result_retention import STAGES as retained_stages
             prune_stage_results(connection, ((stage, sid) for stage in retained_stages for sid in removed_ids))
@@ -2104,10 +2110,15 @@ def write_adapter_states(project: Path, states: Iterable[dict[str, Any]]) -> Non
     try:
         with connection:
             for state in states:
+                old = connection.execute("SELECT file_id, payload_json FROM adapter_states WHERE file_id = ?",
+                                         (state["file_id"],)).fetchone()
+                old_state = _hydrate_adapter_state(old, _project_id(connection)) if old is not None else None
                 cursor = connection.execute("UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
                     (zlib.compress(_residual(state, _ADAPTER_RESIDUAL_FIELDS).encode("utf-8")), state["file_id"]))
                 if cursor.rowcount != 1:
                     raise StorageError(f"Document Adapter 状态缺失：{state['file_id']}")
+                if old_state is None or any(old_state.get(key) != state.get(key) for key in ("adapter_id", "adapter_version", "state")):
+                    _refresh_segment_format_counts(connection, [str(state["file_id"])])
     except sqlite3.Error as exc:
         raise StorageError(f"无法更新 Adapter 状态：{project}: {exc}") from exc
     finally:
@@ -2196,6 +2207,71 @@ def read_segment_sources(project: Path) -> list[dict[str, Any]]:
         ]
     except sqlite3.Error as exc:
         raise StorageError(f"无法读取 Segment 源文本：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def _refresh_segment_format_counts(
+    connection: sqlite3.Connection, file_ids: list[str] | None = None,
+) -> None:
+    """Rebuild the UI projection in the same transaction as its source state."""
+    from .plugins import get_document_adapter, document_adapter_segment_format_count
+
+    project_id = _project_id(connection)
+    files = connection.execute("SELECT * FROM files ORDER BY file_order").fetchall()
+    for row in files:
+        file_id = str(row["file_id"])
+        if file_ids is not None and file_id not in file_ids:
+            continue
+        file_record = _hydrate_file(row, project_id)
+        adapter_id = str(file_record["document_adapter_id"])
+        adapter = get_document_adapter(adapter_id)
+        state_row = connection.execute("SELECT file_id, payload_json FROM adapter_states WHERE file_id = ?", (file_id,)).fetchone()
+        state = _hydrate_adapter_state(state_row, project_id) if state_row is not None else None
+        if state is None:
+            if file_record.get("document_adapter_state") is not None or adapter.run_options:
+                raise StorageError(f"Document Adapter 状态缺失：{file_id}")
+            opaque_state = None
+        else:
+            if (file_record.get("document_adapter_state") is None
+                    or state.get("adapter_id") != adapter_id
+                    or state.get("adapter_version") != file_record.get("document_adapter_version")
+                    or "state" not in state):
+                raise StorageError(f"Document Adapter 状态归属或版本不匹配：{file_id}")
+            opaque_state = state["state"]
+        connection.execute("DELETE FROM segment_format_counts WHERE segment_id IN (SELECT segment_id FROM segments WHERE file_id = ?)", (file_id,))
+        connection.executemany(
+            "INSERT INTO segment_format_counts(segment_id, format_count) VALUES (?, ?)",
+            ((str(segment["segment_id"]), document_adapter_segment_format_count(
+                adapter, segment=_hydrate_segment(segment, project_id), opaque_state=opaque_state))
+             for segment in connection.execute("SELECT * FROM segments WHERE file_id = ?", (file_id,))),
+        )
+
+
+def read_segment_format_counts(project: Path, segment_ids: Iterable[str]) -> dict[str, int]:
+    ids = list(dict.fromkeys(segment_ids))
+    if not ids:
+        return {}
+    connection = _with_db(project)
+    try:
+        connection.execute("BEGIN")
+        counts: dict[str, int] = {}
+        for start in range(0, len(ids), 500):
+            batch = ids[start:start + 500]
+            rows = connection.execute(
+                f"SELECT segment_id, format_count FROM segment_format_counts WHERE segment_id IN ({','.join('?' for _ in batch)})", batch,
+            ).fetchall()
+            for row in rows:
+                count = row["format_count"]
+                if not isinstance(count, int) or count < 0:
+                    raise StorageError(f"Segment 格式计数无效：{row['segment_id']}")
+                counts[str(row["segment_id"])] = count
+        missing = set(ids) - counts.keys()
+        if missing:
+            raise StorageError(f"Segment 格式计数缺失：{next(iter(missing))}")
+        return counts
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法读取 Segment 格式计数：{project}: {exc}") from exc
     finally:
         connection.close()
 
@@ -2303,6 +2379,9 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
                     [(name, _json(item)) for name, item in value.items()],
                 )
             elif kind == "adapter_state":
+                file_id = str(value.get("file_id") or key)
+                old = connection.execute("SELECT file_id, payload_json FROM adapter_states WHERE file_id = ?", (file_id,)).fetchone()
+                old_state = _hydrate_adapter_state(old, _project_id(connection)) if old is not None else None
                 connection.execute(
                     "INSERT INTO adapter_states(file_id, payload_json) VALUES (?, ?) "
                     "ON CONFLICT(file_id) DO UPDATE SET payload_json=excluded.payload_json",
@@ -2311,6 +2390,8 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
                         zlib.compress(_residual(value, _ADAPTER_RESIDUAL_FIELDS).encode("utf-8")),
                     ),
                 )
+                if old_state is None or any(old_state.get(key) != value.get(key) for key in ("adapter_id", "adapter_version", "state")):
+                    _refresh_segment_format_counts(connection, [file_id])
             elif kind in {"terms", "overrides", "active_task"}:
                 connection.execute(
                     "INSERT INTO terms_state(key, payload_json) VALUES (?, ?) "

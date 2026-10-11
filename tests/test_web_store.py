@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.web_store import WebStore
-from app.errors import ProjectError, TermGroupError, UsageError
+from app.errors import ProjectError, StorageError, TermGroupError, UsageError
 from app.execution import latest_completed_by_segment, load_stage_history
 from app.project import add_project_files, init_project, update_file_run_options
 from app.sqlite_storage import (
@@ -186,8 +186,16 @@ def test_web_store_rejects_adapter_state_not_owned_by_file(
     file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
     state = read_json(project, state_path)
+    original = dict(state)
     state[field] = value
-    write_json(project, state_path, state)
+    with pytest.raises(StorageError, match="状态归属或版本不匹配"):
+        write_json(project, state_path, state)
+    assert read_json(project, state_path) == original
+    # A disk-corrupted record must still fail at the translation write boundary.
+    import zlib
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+                         (zlib.compress(json.dumps(state).encode()), file_record["file_id"]))
 
     store = WebStore(project)
     with pytest.raises(ProjectError, match="状态"):
@@ -1020,6 +1028,7 @@ def test_web_store_format_count_accepts_missing_epub_formats(
 
 def test_web_store_format_count_reports_all_epub_format_ranges(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "formatted.epub"
     make_epub(
@@ -1038,6 +1047,10 @@ def test_web_store_format_count_reports_all_epub_format_ranges(
     )
     assert project is not None
 
+    def reject_adapter_read(*args, **kwargs):
+        raise AssertionError("Web reads must use persisted format counts")
+
+    monkeypatch.setattr("app.web_store._read_adapter_context", reject_adapter_read)
     store = WebStore(project)
 
     overview_segment = store.overview()["segments"][0]
@@ -1106,10 +1119,9 @@ def test_web_store_format_count_rejects_damaged_locator_state(
     assert isinstance(opaque_state, dict)
     slot = opaque_state["locators"][0]["slot"]
     slot["formats"] = {"invalid": True}
-    write_json(project, state_path, state)
-
     with pytest.raises(ProjectError, match="格式"):
-        WebStore(project).overview()
+        write_json(project, state_path, state)
+    assert WebStore(project).overview()["segments"][0]["format_count"] == 0
 
 
 def test_web_store_epub_format_count_rejects_missing_state(
@@ -1129,10 +1141,9 @@ def test_web_store_epub_format_count_rejects_missing_state(
     state_path = project / str(file_record["document_adapter_state"])
     state = read_json(project, state_path)
     state["state"] = None
-    write_json(project, state_path, state)
-
     with pytest.raises(ProjectError, match="状态"):
-        WebStore(project).overview()
+        write_json(project, state_path, state)
+    assert WebStore(project).overview()["segments"][0]["format_count"] == 0
 
 
 def test_web_store_overview_reports_storage_and_source_file_sizes(
@@ -1676,7 +1687,7 @@ def test_web_store_keeps_case_distinct_aliases_when_case_insensitive_off(
     assert [item["source"] for item in match_terms("alice arrived", load_terms(project), 10, spec)] == ["Alice"]
 
 
-def test_detail_reuses_adapter_context_only_within_operation(tmp_path: Path, monkeypatch) -> None:
+def test_detail_does_not_read_adapter_state(tmp_path: Path, monkeypatch) -> None:
     import app.web_store as module
     project = create_web_store_project(tmp_path, "one\ntwo")
     store = WebStore(project)
@@ -1687,6 +1698,6 @@ def test_detail_reuses_adapter_context_only_within_operation(tmp_path: Path, mon
         return original(*args)
     monkeypatch.setattr(module, "_read_adapter_context", read)
     store.segment_detail("F0001-S000001")
-    assert len(calls) == 1
+    assert calls == []
     store.segment_detail("F0001-S000001")
-    assert len(calls) == 2
+    assert calls == []
