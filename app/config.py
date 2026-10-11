@@ -71,6 +71,7 @@ SCHEMA: dict[str, Any] = {
             "decision_enabled": None,
             "decision_preset": None,
             "decision_confidence_threshold": None,
+            "decision_warning_threshold": None,
             "decision_context_enabled": None,
             "decision_previous_segments": None,
             "alignment": {
@@ -291,6 +292,9 @@ def validate_config(config: dict[str, Any]) -> None:
     threshold = decision["decision_confidence_threshold"]
     if type(threshold) not in {int, float} or not 0 <= threshold <= 1:
         raise ConfigError("Decision 置信度门槛必须在 0 到 1 之间")
+    warning_threshold = decision["decision_warning_threshold"]
+    if type(warning_threshold) not in {int, float} or not 0 <= warning_threshold <= 1:
+        raise ConfigError("术语复核警告阈值必须在 0 到 1 之间")
     if not isinstance(config["decision"]["preset"], str):
         raise ConfigError("通用 Decision Preset 必须是字符串")
     if decision["decision_enabled"] and "preferred_term_usage" not in decision["validators"]:
@@ -527,6 +531,7 @@ def load_config(path: Path) -> dict[str, Any]:
         translation_validation.setdefault("decision_enabled", False)
         translation_validation.setdefault("decision_preset", "")
         translation_validation.setdefault("decision_confidence_threshold", 0.8)
+        translation_validation.setdefault("decision_warning_threshold", 0.8)
         translation_validation.setdefault("decision_context_enabled", False)
         translation_validation.setdefault("decision_previous_segments", 1)
         translation_validation.setdefault("alignment", {"decision_preset": "", "confidence_threshold": 0.8, "tail_segments": 3})

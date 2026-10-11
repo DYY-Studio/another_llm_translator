@@ -735,6 +735,7 @@ def stage_fingerprint(
                 "decision_validator_presets": config.get("_decision_validator_presets", {}),
                 "alignment": config["validation"]["translation"]["alignment"],
                 "decision_confidence_threshold": config["validation"]["translation"].get("decision_confidence_threshold", 0.8),
+                "decision_warning_threshold": config["validation"]["translation"]["decision_warning_threshold"],
                 "decision_context_enabled": config["validation"]["translation"]["decision_context_enabled"],
                 "decision_previous_segments": config["validation"]["translation"]["decision_previous_segments"],
             }

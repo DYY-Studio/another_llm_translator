@@ -41,6 +41,7 @@ class TranslationValidationContext:
     segment_id: str | None = None
     previous_source: tuple[str, ...] = ()
     decision_prompts: dict[str, dict] = field(default_factory=dict)
+    decision_warning_threshold: float = 0.8
 
 
 @dataclass(frozen=True)

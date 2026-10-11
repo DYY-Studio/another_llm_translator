@@ -65,16 +65,20 @@ async def test_alignment_uses_plain_ruby_evidence_and_preserves_finding_offsets(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("choice,confidence,repairs,status", [
-    ("required", 0.9, 1, "passed"),
-    ("acceptable", 0.9, 0, "passed"),
-    ("required", 0.5, 0, "warning"),
-    ("uncertain", 0.9, 0, "warning"),
-    ("still_missing", 0.9, 1, "warning"),
-    ("http_error", 0, 0, "failed"),
-    ("context_error", 0, 0, "failed"),
+@pytest.mark.parametrize("choice,confidence,repairs,status,warning_threshold", [
+    ("required", 0.9, 1, "passed", 0.8),
+    ("acceptable", 0.9, 0, "passed", 0.8),
+    ("required", 0.5, 0, "warning", 0.8),
+    ("uncertain", 0.9, 0, "warning", 0.8),
+    ("still_missing", 0.9, 1, "warning", 0.8),
+    ("http_error", 0, 0, "failed", 0.8),
+    ("context_error", 0, 0, "failed", 0.8),
+    ("uncertain", 0.9, 0, "passed", 0),
+    ("required", 0.5, 0, "passed", 0),
+    ("required", 0.9, 1, "passed", 0),
+    ("acceptable", 0.7, 0, "passed", 0.6),
 ])
-async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypatch, choice, confidence, repairs, status):
+async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypatch, choice, confidence, repairs, status, warning_threshold):
     project = await create_project(tmp_path, "Alice arrived.")
     metadata = read_json(project, project / "project.json")
     write_json(project, project / "terminology" / "terms.json", record_header(
@@ -87,7 +91,7 @@ async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypa
         value.update(context_window_tokens=513, context_safety_margin_tokens=512)
     write_user("decision_presets/local.json").write_text(json.dumps(value), encoding="utf-8")
     config = load_config(project / "config.toml")
-    config["validation"]["translation"].update(validators=["preferred_term_usage"], decision_enabled=True, decision_preset="local")
+    config["validation"]["translation"].update(validators=["preferred_term_usage"], decision_enabled=True, decision_preset="local", decision_warning_threshold=warning_threshold)
     (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
     monkeypatch.setenv("DECISION_TEST_KEY", "test")
     calls = []
@@ -541,4 +545,42 @@ def test_alignment_warning_threshold_rejects_invalid_config(value) -> None:
     config = load_config(Path(__file__).parents[1] / "config/config.toml")
     config["validation"]["translation"]["alignment"]["warning_threshold"] = value
     with pytest.raises(ConfigError, match="警告阈值"):
+        dump_config(config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("threshold,choice,confidence,refused,expected", [
+    (0.6, "acceptable", 0.59, False, "preferred_term_uncertain"),
+    (0.6, "acceptable", 0.6, False, None),
+    (0.6, "uncertain", 0.9, False, "preferred_term_uncertain"),
+    (0.6, "required", 0.9, True, "preferred_term_uncertain"),
+    (0, "required", 0.9, True, None),
+])
+async def test_term_warning_threshold_boundary_and_refusal(
+    threshold, choice, confidence, refused, expected,
+):
+    from app.translation_validation import TranslationTermMatch
+    from plugins.term_validation.plugin import PreferredTermUsageValidator
+
+    class Decision:
+        async def choose(self, state, questions, **kwargs):
+            return {question.name: DecisionAnswer(choice, {}, confidence, refused)
+                    for question in questions}
+
+    findings = await PreferredTermUsageValidator().validate(TranslationValidationContext(
+        "Alice arrived.", "她到了。",
+        terms=(TranslationTermMatch("Alice", "Alice", "source", "爱丽丝"),),
+        decision=Decision(), decision_warning_threshold=threshold,
+    ))
+    assert [finding.match_type for finding in findings] == ([] if expected is None else [expected])
+    assert all(not finding.repairable for finding in findings)
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, True])
+def test_term_warning_threshold_rejects_invalid_config(value):
+    from app.errors import ConfigError
+
+    config = load_config(Path("config/config.toml"))
+    config["validation"]["translation"]["decision_warning_threshold"] = value
+    with pytest.raises(ConfigError, match="术语复核警告阈值"):
         dump_config(config)

@@ -673,6 +673,7 @@ async def run_translation(
             decision=decision_client if segment_id not in part_original else None,
             decision_prompts={key: value["content"] for key, value in config.get("_decision_prompt_definitions", {}).items()},
             decision_confidence_threshold=config["validation"]["translation"]["decision_confidence_threshold"],
+            decision_warning_threshold=config["validation"]["translation"]["decision_warning_threshold"],
             segment_id=original_id or segment_id,
             previous_source=tuple(entry["source"] for entry in context_index.previous(
                 item, config["validation"]["translation"]["decision_previous_segments"],
