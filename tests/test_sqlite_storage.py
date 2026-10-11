@@ -2243,3 +2243,30 @@ def test_batch_append_rolls_back_all_records_on_duplicate(tmp_path: Path) -> Non
     assert read_jsonl(project, project / "terminology" / "scans.jsonl") == [scan]
     with sqlite3.connect(project / "project.sqlite") as database:
         assert database.execute("SELECT count(*) FROM request_metadata").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_v6_metadata_migration_batches_preserve_atomicity(tmp_path: Path, corrupt: bool) -> None:
+    from app import sqlite_storage
+
+    project = create_project(tmp_path)
+    payloads = [json.dumps({"run_id": "RUN-BATCH", "request_id": f"REQ-{i}", "text": f"text-{i}"})
+                for i in range(1200)]
+    if corrupt:
+        payloads[1000] = "[]"
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.executemany("INSERT INTO stage_results(record_id,stage,segment_id,status,payload_json) VALUES (?,'translation','F0001-S000001','completed',?)",
+                             ((f"batch-{i}", payload) for i, payload in enumerate(payloads)))
+        database.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
+    sqlite_storage._SUPPORTED_CACHE.discard(project / "project.sqlite")
+    if corrupt:
+        with pytest.raises(StorageError):
+            ensure_supported(project)
+        with sqlite3.connect(project / "project.sqlite") as database:
+            assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "6"
+            assert [row[0] for row in database.execute("SELECT payload_json FROM stage_results ORDER BY sequence")] == payloads
+            assert database.execute("SELECT count(*) FROM request_metadata").fetchone()[0] == 0
+    else:
+        assert ensure_supported(project) is not None
+        values = read_jsonl(project, project / "stages" / "translation.jsonl")
+        assert [(record["request_id"], record["text"]) for record in values] == [(f"REQ-{i}", f"text-{i}") for i in range(1200)]

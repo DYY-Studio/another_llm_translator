@@ -766,10 +766,13 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         metadata_cache: dict[str, int] = {}
         for table in ("stage_results", "terminology_scans"):
             updates = []
-            for row in connection.execute(f"SELECT sequence, payload_json FROM {table}").fetchall():
+            for row in connection.execute(f"SELECT sequence, payload_json FROM {table}"):
                 value = _load(row["payload_json"])
                 if any(key in value for key in _REQUEST_METADATA_FIELDS):
                     updates.append((_request_residual(connection, value, (), metadata_cache), row["sequence"]))
+                    if len(updates) == 500:
+                        connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
+                        updates.clear()
             connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
