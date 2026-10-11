@@ -2270,3 +2270,53 @@ def test_v6_metadata_migration_batches_preserve_atomicity(tmp_path: Path, corrup
         assert ensure_supported(project) is not None
         values = read_jsonl(project, project / "stages" / "translation.jsonl")
         assert [(record["request_id"], record["text"]) for record in values] == [(f"REQ-{i}", f"text-{i}") for i in range(1200)]
+
+
+def test_run_modes_group_on_write_and_restore_on_read(tmp_path: Path) -> None:
+    from app.sqlite_storage import read_run_record
+
+    project = create_project(tmp_path)
+    project_id = read_json(project, project / "project.json")["project_id"]
+    modes = {"one": ["summary", "term"], "two": ["summary", "term"], "three": ["term"]}
+    record = record_header("run", project_id, record_id="RUN-GROUPED", run_id="RUN-GROUPED",
+                           stage="terminology", status="running", terminology_modes=modes)
+    path = project / "runs" / "RUN-GROUPED" / "manifest.json"
+    write_json(project, path, record)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        payload = json.loads(database.execute("SELECT payload_json FROM runs WHERE run_id='RUN-GROUPED'").fetchone()[0])
+    assert "terminology_modes" not in payload
+    assert len(payload["_terminology_mode_groups"]) == 2
+    assert read_run_record(project, "RUN-GROUPED")["terminology_modes"] == modes
+    restored = read_run_record(project, "RUN-GROUPED")["terminology_modes"]
+    restored["one"].append("changed")
+    assert restored["two"] == modes["two"]
+    assert json.loads(path.read_text())["terminology_modes"] == modes
+    write_json(project, path, {**record, "terminology_modes": {}})
+    assert read_run_record(project, "RUN-GROUPED")["terminology_modes"] == {}
+    write_json(project, path, {key: value for key, value in record.items() if key != "terminology_modes"})
+    assert "terminology_modes" not in read_run_record(project, "RUN-GROUPED")
+
+
+def test_v6_upgrade_groups_modes_and_replaces_full_reference_indexes(tmp_path: Path) -> None:
+    from app import sqlite_storage
+
+    project = create_project(tmp_path)
+    modes = {"one": ["term"], "two": ["term"]}
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("INSERT INTO runs VALUES ('RUN-OLD','terminology','completed',NULL,?)",
+                         (json.dumps({"terminology_modes": modes}),))
+        for kind in ("base", "suggestion"):
+            database.execute(f"DROP INDEX stage_results_{kind}_reference")
+            database.execute(f"CREATE INDEX stage_results_{kind}_reference ON stage_results(json_extract(payload_json, '$.{kind}_result_id'))")
+        database.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
+    sqlite_storage._SUPPORTED_CACHE.discard(project / "project.sqlite")
+    assert ensure_supported(project) is not None
+    assert sqlite_storage.read_run_record(project, "RUN-OLD")["terminology_modes"] == modes
+    with sqlite3.connect(project / "project.sqlite") as database:
+        indexes = {row[1]: row[4] for row in database.execute("PRAGMA index_list(stage_results)")}
+        assert indexes["stage_results_base_reference"] == indexes["stage_results_suggestion_reference"] == 1
+        assert "terminology_modes" not in json.loads(database.execute("SELECT payload_json FROM runs").fetchone()[0])
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+        plans = [row[3] for row in database.execute("EXPLAIN QUERY PLAN SELECT record_id FROM stage_results WHERE json_extract(payload_json,'$.base_result_id') IN (?) OR json_extract(payload_json,'$.suggestion_result_id') IN (?)", ("parent", "parent"))]
+        assert any("stage_results_base_reference" in plan for plan in plans)
+        assert any("stage_results_suggestion_reference" in plan for plan in plans)

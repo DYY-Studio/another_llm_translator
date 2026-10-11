@@ -9,6 +9,7 @@ import tempfile
 import threading
 import uuid
 import zlib
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -215,9 +216,11 @@ def _create_tables(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS stage_results_stage_segment
             ON stage_results(stage, segment_id, sequence);
         CREATE INDEX IF NOT EXISTS stage_results_base_reference
-            ON stage_results(json_extract(payload_json, '$.base_result_id'));
+            ON stage_results(json_extract(payload_json, '$.base_result_id'))
+            WHERE json_extract(payload_json, '$.base_result_id') IS NOT NULL;
         CREATE INDEX IF NOT EXISTS stage_results_suggestion_reference
-            ON stage_results(json_extract(payload_json, '$.suggestion_result_id'));
+            ON stage_results(json_extract(payload_json, '$.suggestion_result_id'))
+            WHERE json_extract(payload_json, '$.suggestion_result_id') IS NOT NULL;
         CREATE TABLE IF NOT EXISTS terminology_scans (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             record_id TEXT NOT NULL UNIQUE,
@@ -747,6 +750,8 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         # version check and sqlite's online backup.
         connection.execute("BEGIN IMMEDIATE")
         backup_path = _backup_before_schema_upgrade(project, version)
+        for kind in ("base", "suggestion"):
+            connection.execute(f"DROP INDEX IF EXISTS stage_results_{kind}_reference")
         _create_tables(connection)
         if version < 5:
             _migrate_to_v5(connection, project)
@@ -774,6 +779,11 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
                         connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
                         updates.clear()
             connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
+        for row in connection.execute("SELECT run_id, payload_json FROM runs"):
+            payload = _load(row["payload_json"])
+            if "terminology_modes" in payload:
+                connection.execute("UPDATE runs SET payload_json = ? WHERE run_id = ?",
+                                   (_run_residual(payload), row["run_id"]))
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -977,9 +987,23 @@ def _hydrate_candidate(row: sqlite3.Row, project_id: str | None) -> dict[str, An
     )
 
 
+def _run_residual(value: dict[str, Any]) -> str:
+    payload = dict(value)
+    if "terminology_modes" in payload:
+        groups: dict[str, list[str]] = {}
+        for segment_id, modes in payload.pop("terminology_modes").items():
+            groups.setdefault(_json(modes), []).append(segment_id)
+        payload["_terminology_mode_groups"] = [[json.loads(modes), ids] for modes, ids in groups.items()]
+    return _residual(payload, _RUN_RESIDUAL_FIELDS)
+
+
 def _hydrate_run(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
+    payload = _load(str(row["payload_json"]))
+    if "_terminology_mode_groups" in payload:
+        payload["terminology_modes"] = {segment_id: deepcopy(modes)
+            for modes, ids in payload.pop("_terminology_mode_groups") for segment_id in ids}
     return _with_common_header(
-        _load(str(row["payload_json"])),
+        payload,
         project_id=project_id,
         record_type="run",
         record_id=str(row["run_id"]),
@@ -2310,7 +2334,7 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
                         str(value["stage"]),
                         str(value["status"]),
                         value.get("started_at"),
-                        _residual(value, _RUN_RESIDUAL_FIELDS),
+                        _run_residual(value),
                     ),
                 )
             else:
@@ -2387,7 +2411,7 @@ def write_terminology_decision_state(
                     str(run_manifest["stage"]),
                     str(run_manifest["status"]),
                     run_manifest.get("started_at"),
-                    _residual(run_manifest, _RUN_RESIDUAL_FIELDS),
+                    _run_residual(run_manifest),
                 ),
             )
     except sqlite3.Error as exc:
@@ -2708,7 +2732,7 @@ def list_run_index(
             ).fetchone()[0]
         )
         rows = connection.execute(
-            "SELECT run_id, stage, status, started_at, json_remove(payload_json, '$.terminology_modes') AS payload_json "
+            "SELECT run_id, stage, status, started_at, json_remove(payload_json, '$._terminology_mode_groups') AS payload_json "
             f"FROM runs WHERE {where} "
             "ORDER BY started_at DESC, run_id DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
