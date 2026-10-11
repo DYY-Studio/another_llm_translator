@@ -30,6 +30,7 @@ interface WorkspaceCacheEntry {
 // changes so cached data never leaks across projects.
 const workspaceCache = new Map<string, WorkspaceCacheEntry>();
 const workspaceProjectRef = { current: "" };
+let workspacePrefetchGeneration = 0;
 const pageSize = 100;
 
 interface SegmentBoundaryOption {
@@ -50,33 +51,37 @@ function boundaryKey(fileId: string, partId: string): string {
 // workspace's initial default-filter query, and focusedId is the first
 // segment so the mount-time index refresh preserves the restored window.
 export function prefetchWorkspace(project: string, projectId: string) {
-  for (const stage of ["translation", "proofreading", "polishing"] as const) {
-    const key = JSON.stringify([projectId, stage, "all", "all", ""]);
-    if (workspaceCache.has(key)) continue;
-    void Promise.all([
-      api<{ segment_ids: string[]; total: number }>(
-        `/api/v1/projects/${project}/segments/ids`,
-        { method: "POST", body: JSON.stringify({ stage }) },
-      ),
-      api<SegmentQueryResponse>(
-        `/api/v1/projects/${project}/segments/query`,
-        { method: "POST", body: JSON.stringify({ stage, offset: 0, limit: pageSize }) },
-      ),
-    ])
-      .then(([index, page]) => {
-        if (workspaceCache.has(key)) return;
+  const generation = ++workspacePrefetchGeneration;
+  workspaceProjectRef.current = projectId;
+  const keys = (["translation", "proofreading", "polishing"] as const)
+    .map((stage) => JSON.stringify([projectId, stage, "all", "all", ""]));
+  if (keys.every((key) => workspaceCache.has(key))) return;
+  void Promise.all([
+    api<{ segment_ids: string[]; total: number }>(
+      `/api/v1/projects/${project}/segments/ids`,
+      { method: "POST", body: JSON.stringify({ stage: "translation" }) },
+    ),
+    api<SegmentQueryResponse>(
+      `/api/v1/projects/${project}/segments/query`,
+      { method: "POST", body: JSON.stringify({ stage: "translation", offset: 0, limit: pageSize }) },
+    ),
+  ])
+    .then(([index, page]) => {
+      if (workspaceProjectRef.current !== projectId || generation !== workspacePrefetchGeneration) return;
+      for (const key of keys) {
+        if (workspaceCache.has(key)) continue;
         const records: Record<string, Segment> = {};
         for (const item of page.segments) records[item.segment_id] = item;
         workspaceCache.set(key, {
-          orderedIds: index.segment_ids,
+          orderedIds: [...index.segment_ids],
           total: index.total,
           records,
           focusedId: index.segment_ids[0] ?? "",
           scrollTop: 0,
         });
-      })
-      .catch(() => {});
-  }
+      }
+    })
+    .catch(() => {});
 }
 
 function resultFor(segment: Segment, stage: "translation" | "proofreading" | "polishing") {
