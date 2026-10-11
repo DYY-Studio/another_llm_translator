@@ -284,6 +284,8 @@ async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monke
     assert {record["validation_status"] for record in records} == {expected_status}
     if repairs:
         assert len(requests[-1]["segments"]) == 4
+        assert requests[-1]["segments"] == requests[0]["segments"]
+        assert requests[-1]["validation_repair"] == "segment_misaligned"
     repair_logs = [item["message"] for item in diagnostics.logs if item["message"].startswith("validation repair ")]
     assert len(repair_logs) == repairs
     if repairs:

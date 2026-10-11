@@ -547,7 +547,7 @@ async def test_english_format_correction_contains_no_chinese(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_english_validation_repair_defines_candidate_scope(
+async def test_english_validation_repair_sends_only_error_type(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path)
@@ -566,11 +566,8 @@ async def test_english_validation_repair_defines_candidate_scope(
         if "validation_repair" in payload:
             repairs += 1
             instruction = payload["validation_repair"]
-            assert "Use failed_candidate as the base" in instruction
-            assert "fix only the issues in validation_matches" in instruction
-            assert not any("\u4e00" <= char <= "\u9fff" for char in instruction)
-            assert all("failed_candidate" in item for item in payload["segments"])
-            assert all("validation_matches" in item for item in payload["segments"])
+            assert instruction == "character"
+            assert all(set(item) == {"id", "source"} for item in payload["segments"])
             prefix = "repaired:"
         else:
             prefix = "candidateカ:"

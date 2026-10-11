@@ -86,26 +86,6 @@ _FORMAT_CORRECTION = {
     ),
 }
 
-_VALIDATION_REPAIR = {
-    "zh-CN": (
-        "若 validation_matches 包含 segment_misaligned，整批按各 ID 的原文重新翻译，"
-        "不得交换 ID、只改尾部或沿用错位内容。否则以 failed_candidate 为基准，仅修复 validation_matches 所列问题，"
-        "返回完整且格式合规的译文。对于 advisory 术语建议，先判断推荐译名"
-        "是否适合当前语境；适用时采用，不适用时可以保留候选。"
-        "简称或部分名称应按对应部分修正，保留原文的简称形式。"
-    ),
-    "en": (
-        "Use failed_candidate as the base for ordinary findings; fix only the issues in "
-        "validation_matches, and return a complete, format-compliant translation. "
-        "If validation_matches contains segment_misaligned, instead retranslate the whole batch from each ID’s own source; "
-        "do not swap IDs, fix only the tail, or retain shifted content. "
-        "For advisory terminology suggestions, first decide whether the "
-        "recommended translation fits this context; use it when it does, but "
-        "you may keep the candidate when it does not. For a short form or partial "
-        "name, correct the corresponding part while preserving the source abbreviation."
-    ),
-}
-
 
 def _frozen_run_options(project: Path, run_id: str | None) -> dict[str, dict[str, str]] | None:
     if run_id is None:
@@ -909,20 +889,12 @@ async def _localized_request_loop(
         if not items:
             payload["segments"] = []
         if repair_candidates is not None:
-            payload["segments"] = [
-                {
-                    "id": item["segment_id"],
-                    "source": segment_model_source(item),
-                    "failed_candidate": segment_model_text(
-                        item,
-                        str(repair_candidates[str(item["segment_id"])]["candidate"]),
-                    ),
-                    "validation_matches": [finding for finding in repair_candidates[str(item["segment_id"])]["findings"]
-                                           if finding.get("repairable", True)],
-                }
+            payload["validation_repair"] = ", ".join(sorted({
+                str(finding["match_type"])
                 for item in items
-            ]
-            payload["validation_repair"] = _VALIDATION_REPAIR[prompt_language]
+                for finding in repair_candidates[str(item["segment_id"])]["findings"]
+                if finding.get("repairable", True)
+            }))
         if format_attempt:
             payload["format_correction"] = format_correction
         payload, id_map = localize_request_ids(payload, items)
