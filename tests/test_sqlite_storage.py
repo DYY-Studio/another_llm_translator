@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import zipfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,81 @@ from app.sqlite_storage import (
 )
 from app.summary_provenance import build_provenance, digest
 from tests.test_foundation import make_app_root
+
+
+def _adapter_payload_json(raw: str | bytes) -> str:
+    return zlib.decompress(raw).decode("utf-8") if isinstance(raw, bytes) else raw
+
+
+@pytest.mark.parametrize("version", [6, 7])
+def test_adapter_state_compresses_on_open_without_changing_version_7_history(
+    tmp_path: Path, version: int,
+) -> None:
+    from app import sqlite_storage
+    from tests.test_documents import init_epub
+
+    project = init_epub(tmp_path)
+    expected = read_adapter_state(project, "F0001")
+    with sqlite3.connect(project / "project.sqlite") as database:
+        raw = _adapter_payload_json(database.execute("SELECT payload_json FROM adapter_states").fetchone()[0])
+        database.execute("UPDATE adapter_states SET payload_json = ?", (raw,))
+        database.execute("UPDATE schema_meta SET value = ? WHERE key='schema_version'", (str(version),))
+    sqlite_storage._SUPPORTED_CACHE.discard(project / "project.sqlite")
+    backup = ensure_supported(project)
+    assert backup is not None
+    with sqlite3.connect(backup) as database:
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(version)
+        assert database.execute("SELECT payload_json FROM adapter_states").fetchone()[0] == raw
+    with sqlite3.connect(project / "project.sqlite") as database:
+        packed = database.execute("SELECT payload_json FROM adapter_states").fetchone()[0]
+        assert isinstance(packed, bytes)
+        assert zlib.decompress(packed).decode("utf-8") == raw
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+    assert read_adapter_state(project, "F0001") == expected
+    assert sqlite_storage._take_migration_backup_notice(project) is None
+    assert ensure_supported(project) is None
+    assert list((project / "snapshots" / "storage_migrations").glob("*.sqlite")) == [backup]
+
+
+def test_adapter_state_writes_and_source_replacement_keep_compressed_storage(tmp_path: Path) -> None:
+    from tests.test_documents import init_epub
+
+    project = init_epub(tmp_path)
+    state = read_adapter_state(project, "F0001")
+    assert state is not None
+    state["state"]["kept"] = {"text": "原文🙂", "values": [None, False, 1]}
+    write_json(project, project / "source" / "adapters" / "F0001.json", state)
+    replace_source(project, read_files(project), read_segments(project), read_json(project, project / "project.json"), adapter_states=[state])
+    assert read_adapter_state(project, "F0001") == state
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT typeof(payload_json) FROM adapter_states").fetchone()[0] == "blob"
+
+
+@pytest.mark.parametrize("payload", [b"broken", zlib.compress(b"\xff"), zlib.compress(b"not json")])
+def test_corrupt_compressed_adapter_state_fails_explicitly(tmp_path: Path, payload: bytes) -> None:
+    from tests.test_documents import init_epub
+
+    project = init_epub(tmp_path)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("UPDATE adapter_states SET payload_json = ?", (payload,))
+    with pytest.raises(StorageError, match="损坏"):
+        read_adapter_state(project, "F0001")
+
+
+def test_invalid_adapter_json_rolls_back_same_version_migration(tmp_path: Path) -> None:
+    from app import sqlite_storage
+    from tests.test_documents import init_epub
+
+    project = init_epub(tmp_path)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("UPDATE adapter_states SET payload_json = 'not json'")
+    sqlite_storage._SUPPORTED_CACHE.discard(project / "project.sqlite")
+    with pytest.raises(StorageError, match="损坏"):
+        ensure_supported(project)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT payload_json FROM adapter_states").fetchone()[0] == "not json"
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+    assert len(list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))) == 1
 
 
 def _text_summary(project: Path, summary_id: str = "TEXT-FRAGMENT", *, same_model_text: bool = False) -> dict:
@@ -895,7 +971,7 @@ def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
             (str(file_row["file_id"]),),
         ).fetchone()
         assert state_row is not None
-        state_payload = json.loads(str(state_row["payload_json"]))
+        state_payload = json.loads(_adapter_payload_json(state_row["payload_json"]))
         state_payload["adapter_version"] = "0.5"
         state_payload.pop("run_options", None)
         state_payload["state"].update(
@@ -985,7 +1061,7 @@ def test_v3_and_v4_upgrade_rebuild_epub_state_and_interrupt_runs(
             database.execute("SELECT payload_json FROM files").fetchone()[0]
         )
         state_payload = json.loads(
-            database.execute("SELECT payload_json FROM adapter_states").fetchone()[0]
+            _adapter_payload_json(database.execute("SELECT payload_json FROM adapter_states").fetchone()[0])
         )
         assert file_payload["document_adapter_version"] == "0.6"
         assert state_payload["adapter_version"] == "0.6"
@@ -1051,7 +1127,7 @@ def test_v4_epub_upgrade_defaults_missing_options_and_rejects_invalid_values(
     project = init_epub(tmp_path)
     with sqlite3.connect(project / "project.sqlite") as database:
         state_payload = json.loads(
-            database.execute("SELECT payload_json FROM adapter_states").fetchone()[0]
+            _adapter_payload_json(database.execute("SELECT payload_json FROM adapter_states").fetchone()[0])
         )
         state_payload["adapter_version"] = "0.5"
         state_payload.pop("run_options", None)
@@ -1082,7 +1158,7 @@ def test_v4_epub_upgrade_defaults_missing_options_and_rejects_invalid_values(
         ensure_supported(project)
         with sqlite3.connect(project / "project.sqlite") as database:
             options = json.loads(
-                database.execute("SELECT payload_json FROM adapter_states").fetchone()[0]
+                _adapter_payload_json(database.execute("SELECT payload_json FROM adapter_states").fetchone()[0])
             )["run_options"]
         assert options == {
             "ruby_mode": "compact",
@@ -1126,10 +1202,10 @@ def test_epub_upgrade_failure_rolls_back_and_keeps_backup(tmp_path: Path) -> Non
         file_payload = json.loads(str(file_row["payload_json"]))
         file_payload["document_adapter_version"] = "0.5"
         state_payload = json.loads(
-            database.execute(
+            _adapter_payload_json(database.execute(
                 "SELECT payload_json FROM adapter_states WHERE file_id = ?",
                 (str(file_row["file_id"]),),
-            ).fetchone()[0]
+            ).fetchone()[0])
         )
         state_payload["adapter_version"] = "0.5"
         database.execute(
@@ -1180,7 +1256,7 @@ def _downgrade_epub_project_to_v4(project: Path) -> None:
             (str(file_row["file_id"]),),
         ).fetchone()
         assert state_row is not None
-        state_payload = json.loads(str(state_row["payload_json"]))
+        state_payload = json.loads(_adapter_payload_json(state_row["payload_json"]))
         state_payload["adapter_version"] = "0.5"
         database.execute(
             "UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'"
@@ -1620,9 +1696,9 @@ def test_v3_payloads_keep_only_nonrelational_fields(tmp_path: Path) -> None:
                 database.execute("SELECT payload_json FROM files").fetchone()[0]
             ),
             "adapter_states": json.loads(
-                database.execute(
+                _adapter_payload_json(database.execute(
                     "SELECT payload_json FROM adapter_states"
-                ).fetchone()[0]
+                ).fetchone()[0])
             ),
             "stage_results": json.loads(
                 database.execute("SELECT payload_json FROM stage_results").fetchone()[0]

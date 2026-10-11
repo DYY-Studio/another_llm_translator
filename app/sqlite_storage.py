@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import threading
 import uuid
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -197,7 +198,7 @@ def _create_tables(connection: sqlite3.Connection) -> None:
         );
         CREATE TABLE IF NOT EXISTS adapter_states (
             file_id TEXT PRIMARY KEY REFERENCES files(file_id) ON DELETE CASCADE,
-            payload_json TEXT NOT NULL
+            payload_json BLOB NOT NULL
         );
         CREATE TABLE IF NOT EXISTS stage_results (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -656,7 +657,9 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         raise ProjectError(
             f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
         )
-    if version == SCHEMA_VERSION:
+    if version == SCHEMA_VERSION and connection.execute(
+        "SELECT 1 FROM adapter_states WHERE typeof(payload_json) = 'text' LIMIT 1"
+    ).fetchone() is None:
         _create_tables(connection)
         return None
 
@@ -673,8 +676,17 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             _migrate_to_v5(connection, project)
         if version < 6:
             _migrate_summary_storage_to_v6(connection, project)
-        else:
+        elif version < 7:
             _migrate_summary_hashes_to_v7(connection, project)
+        for row in connection.execute(
+            "SELECT file_id, payload_json FROM adapter_states WHERE typeof(payload_json) = 'text'"
+        ).fetchall():
+            raw = row["payload_json"]
+            _load(raw)
+            connection.execute(
+                "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+                (zlib.compress(raw.encode("utf-8")), row["file_id"]),
+            )
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -816,8 +828,11 @@ def _hydrate_segment(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]
 def _hydrate_adapter_state(
     row: sqlite3.Row, project_id: str | None
 ) -> dict[str, Any]:
-    value = _load(str(row["payload_json"]))
     file_id = str(row["file_id"])
+    try:
+        value = _load(zlib.decompress(row["payload_json"]).decode("utf-8"))
+    except (zlib.error, TypeError, UnicodeDecodeError) as exc:
+        raise StorageError(f"Adapter 状态压缩数据损坏：{file_id}: {exc}") from exc
     return _with_common_header(
         value,
         project_id=project_id,
@@ -1922,7 +1937,7 @@ def replace_source(
                 [
                     (
                         str(item["file_id"]),
-                        _residual(item, _ADAPTER_RESIDUAL_FIELDS),
+                        zlib.compress(_residual(item, _ADAPTER_RESIDUAL_FIELDS).encode("utf-8")),
                     )
                     for item in state_values
                 ],
@@ -2118,7 +2133,7 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
                     "ON CONFLICT(file_id) DO UPDATE SET payload_json=excluded.payload_json",
                     (
                         str(value.get("file_id") or key),
-                        _residual(value, _ADAPTER_RESIDUAL_FIELDS),
+                        zlib.compress(_residual(value, _ADAPTER_RESIDUAL_FIELDS).encode("utf-8")),
                     ),
                 )
             elif kind in {"terms", "overrides", "active_task"}:

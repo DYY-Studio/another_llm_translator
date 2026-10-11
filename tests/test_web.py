@@ -1601,6 +1601,29 @@ def test_web_open_project_reports_backup_after_read_triggered_upgrade(
     assert not any("升级前备份位于" in warning for warning in reopened.json()["warnings"])
 
 
+def test_web_open_compresses_existing_v7_adapter_state_silently(tmp_path: Path) -> None:
+    from tests.test_sqlite_storage import _adapter_payload_json
+
+    project = init_epub(tmp_path)
+    state = read_json(project, project / "source" / "adapters" / "F0001.json")
+    with sqlite3.connect(project / "project.sqlite") as database:
+        raw = _adapter_payload_json(database.execute("SELECT payload_json FROM adapter_states").fetchone()[0])
+        database.execute("UPDATE adapter_states SET payload_json = ?", (raw,))
+    sqlite_storage._SUPPORTED_CACHE.discard(project / "project.sqlite")
+    client = TestClient(create_app(projects_root=project.parent))
+
+    listed = client.get("/api/v1/projects")
+    assert listed.status_code == 200
+    assert listed.json()["projects"][0]["repair_needed"] is False
+    opened = client.post("/api/v1/projects/open", json={"path": str(project)})
+    assert opened.status_code == 200
+    assert opened.json()["warnings"] == []
+    assert read_json(project, project / "source" / "adapters" / "F0001.json") == state
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT typeof(payload_json) FROM adapter_states").fetchone()[0] == "blob"
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+
+
 def test_web_browses_server_directories_one_level_and_filters_symlinks(
     tmp_path: Path,
 ) -> None:

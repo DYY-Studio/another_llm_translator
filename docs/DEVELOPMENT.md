@@ -319,6 +319,8 @@ pytest 探针不替代真实 PBS 源归档探针或 packaged `.app` 外部插件
 去重，精简摘要依赖和 Run 范围副本，并在事务提交后压缩数据库。v5 项目不会重新执行 EPUB
 运行协议升级，也不会改变已有 Run 的状态。
 SQLite v6→v7 省略概括切片中相同的文本哈希，读取时恢复完整字段，保留不同的原文、模型输入及完整段落哈希。
+v7 的 Adapter 状态以 zlib 压缩的 UTF-8 JSON BLOB 保存，业务读写接口保持完整 JSON 对象。
+已是 v7 的未压缩状态也在打开时备份、转换并压缩数据库，schema version 保持 7。
 
 使用项目临时副本验证打开时升级，比较迁移前后的摘要 ID、源范围、历史 Markdown 导出及过期判断，
 检查 `PRAGMA integrity_check`、文件体积与升级前备份；迁移失败应保留旧 schema 和记录。
