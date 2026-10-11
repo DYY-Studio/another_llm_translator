@@ -82,7 +82,7 @@ def read_content(path: Path, choice_ids: tuple[str, ...]) -> dict:
 
 def resolve_prompt(declaration: DecisionPromptDeclaration, language: str, project: Path | None = None) -> tuple[dict, str]:
     from .user_config import user_root
-    if language not in declaration.defaults:
+    if not isinstance(language, str) or language not in declaration.defaults:
         raise ConfigError(f"Decision 提示词不支持语言：{language}")
     paths = [(prompt_path(project, declaration.validator_id, language), "project")] if project is not None else []
     paths.append((prompt_path(user_root(), declaration.validator_id, language), "global"))
@@ -109,7 +109,7 @@ def resolve_run_prompts(config: dict, *, project: Path | None = None, global_lan
                 raise ConfigError(f"无法读取 Decision 提示词快照：{validator_id}") from exc
             if not isinstance(definition, dict) or set(definition) != {"language", "choice_ids", "content"}:
                 raise ConfigError("Decision 提示词快照无效")
-            if definition["language"] not in declaration.defaults or definition["choice_ids"] != list(declaration.choice_ids):
+            if not isinstance(definition["language"], str) or definition["language"] not in declaration.defaults or definition["choice_ids"] != list(declaration.choice_ids):
                 raise ConfigError("Decision 提示词快照与插件声明不一致")
             content = validate_content(definition["content"], declaration.choice_ids)
             language = definition["language"]

@@ -6,3 +6,6 @@ include plugins/srt/plugin.toml
 include plugins/term_validation/__init__.py
 include plugins/term_validation/plugin.py
 include plugins/term_validation/plugin.toml
+
+recursive-include app/decision_prompts *.json
+recursive-include plugins/term_validation/prompts *.json

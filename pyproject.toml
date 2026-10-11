@@ -35,7 +35,7 @@ packages = ["app"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-app = ["web_dist/**"]
+app = ["web_dist/**", "decision_prompts/*.json"]
 
 [tool.setuptools.data-files]
 config = ["config/config.toml"]
@@ -82,4 +82,8 @@ llm_presets = [
   "plugins/term_validation/__init__.py",
   "plugins/term_validation/plugin.py",
   "plugins/term_validation/plugin.toml",
+]
+"plugins/term_validation/prompts" = [
+  "plugins/term_validation/prompts/en.json",
+  "plugins/term_validation/prompts/zh-CN.json",
 ]

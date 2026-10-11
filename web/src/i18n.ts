@@ -4,6 +4,15 @@ export type Language = "zh-CN" | "en";
 
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
+    "decision.promptLoadDefault": "加载内置提示词",
+    "decision.promptDefaultLoaded": "已加载内置提示词，保存后生效。",
+    "decision.promptHint": "编辑判断说明与选项描述，固定选项由校验器定义。",
+    "decision.promptInherited": "使用全局提示词",
+    "decision.promptOverride": "使用项目独立提示词",
+    "decision.promptRestore": "恢复继承",
+    "decision.promptInstructions": "判断说明",
+    "decision.promptDiscard": "有未保存的提示词修改，是否放弃？",
+
     "decision.review": "Decision 语义复核（实验）",
     "decision.reviewHint": "复核推荐译名缺失项；确认需要修复时触发修复，正确简称可放行，无法判断时保留警告。",
     "decision.contextHint": "携带同一文件、同一分区的上文原文；超出窗口时逐个移除最远 Segment，并记录缩减情况。",
@@ -1337,6 +1346,15 @@ const messages: Record<Language, Record<string, string>> = {
     "dialog.openHint": "只打开此目录，不扫描父目录，也不会移动项目。",
   },
   en: {
+    "decision.promptHint": "Edit instructions and choice descriptions. Choice IDs are defined by the validator.",
+    "decision.promptInherited": "Using global prompt",
+    "decision.promptOverride": "Using project prompt override",
+    "decision.promptRestore": "Restore inheritance",
+    "decision.promptInstructions": "Instructions",
+    "decision.promptDiscard": "Discard unsaved prompt changes?",
+    "decision.promptLoadDefault": "Load built-in prompt",
+    "decision.promptDefaultLoaded": "Built-in prompt loaded. Save to apply.",
+
     "decision.review": "Decision semantic review (experimental)",
     "decision.reviewHint": "Review missing preferred translations; repair confirmed errors, accept valid short forms, and keep uncertain cases as warnings.",
     "decision.contextHint": "Include preceding source Segments from the same file and part. Remove the oldest Segments when capacity is exceeded and log the reduction.",

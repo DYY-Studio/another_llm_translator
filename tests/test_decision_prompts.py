@@ -70,6 +70,12 @@ def test_prompt_routes_project_override_restore_and_library(tmp_path):
         assert client.get(library).json()["content"] == custom
         assert client.get(library.rsplit("/", 1)[0]).json()["entries"][0]["id"] == "nicknames"
         assert client.delete(library).status_code == 200
+        (project / "decision_prompts/preferred_term_usage/en.json").write_text('{"bad": true}')
+        assert client.get(path).status_code == 400
+        assert client.get(path + "/language").json()["language"] == "en"
+        assert client.get("/api/v1/decision-prompts/preferred_term_usage/default?language=en").status_code == 200
+        for invalid_language in (["en"], 1, None):
+            assert client.put(global_path, json={"language": invalid_language, "content": content}).status_code == 400
         assert client.delete(path + "?language=en").status_code == 200
         assert client.get(path).json()["content"] == content
         assert client.put(global_path + "/language", json={"language": "zh-CN"}).status_code == 200

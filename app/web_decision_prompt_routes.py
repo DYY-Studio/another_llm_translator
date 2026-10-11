@@ -35,14 +35,13 @@ def register_decision_prompt_routes(app: FastAPI, project: Callable[[str], Path]
         selected = selection(validator_id, root)
         language = language or selected
         content, source = resolve_prompt(declaration, language, root)
-        return {"content": content, "language": language, "selected_language": selected,
-                "languages": list(declaration.defaults), "choice_ids": list(declaration.choice_ids),
+        return {"content": content, "language": language, "languages": list(declaration.defaults), "choice_ids": list(declaration.choice_ids),
                 "source": source, "inherited": root is not None and source != "project"}
 
     def save(validator_id: str, payload: dict, root: Path | None) -> dict:
         declaration = get_declaration(validator_id)
         language = payload.get("language")
-        if language not in declaration.defaults:
+        if not isinstance(language, str) or language not in declaration.defaults:
             raise UsageError("Decision 提示词语言无效")
         content = validate_content(payload.get("content"), declaration.choice_ids)
         with project_write_lock(root) if root is not None else nullcontext():
@@ -52,7 +51,7 @@ def register_decision_prompt_routes(app: FastAPI, project: Callable[[str], Path]
     def select_language(validator_id: str, payload: dict, root: Path | None) -> dict:
         declaration = get_declaration(validator_id)
         language = payload.get("language")
-        if language not in declaration.defaults:
+        if not isinstance(language, str) or language not in declaration.defaults:
             raise UsageError("Decision 提示词语言无效")
         with project_write_lock(root) if root is not None else nullcontext():
             config = load_config(config_path(root))
@@ -65,6 +64,25 @@ def register_decision_prompt_routes(app: FastAPI, project: Callable[[str], Path]
         summaries = {value["validator_id"]: value for _, value in resolve_translation_validators()}
         return {"prompts": [{"validator_id": key, "label": summaries[key]["label"], "languages": list(value.defaults),
                              "choice_ids": list(value.choice_ids)} for key, value in prompt_declarations().items()]}
+
+    def language_view(validator_id: str, root: Path | None) -> dict:
+        declaration = get_declaration(validator_id)
+        return {"language": selection(validator_id, root), "languages": list(declaration.defaults)}
+
+    @app.get("/api/v1/global/decision-prompts/{validator_id}/language")
+    async def get_global_language(validator_id: str) -> dict:
+        return language_view(validator_id, None)
+
+    @app.get("/api/v1/projects/{name}/decision-prompts/{validator_id}/language")
+    async def get_project_language(name: str, validator_id: str) -> dict:
+        return language_view(validator_id, project(name))
+
+    @app.get("/api/v1/decision-prompts/{validator_id}/default")
+    async def get_default(validator_id: str, language: str) -> dict:
+        declaration = get_declaration(validator_id)
+        if not isinstance(language, str) or language not in declaration.defaults:
+            raise UsageError("Decision 提示词语言无效")
+        return {"content": validate_content(declaration.defaults[language], declaration.choice_ids), "choice_ids": list(declaration.choice_ids)}
 
     @app.get("/api/v1/global/decision-prompts/{validator_id}")
     async def get_global(validator_id: str, language: str | None = None) -> dict:
@@ -93,7 +111,7 @@ def register_decision_prompt_routes(app: FastAPI, project: Callable[[str], Path]
     @app.delete("/api/v1/projects/{name}/decision-prompts/{validator_id}")
     async def restore_project(name: str, validator_id: str, language: str) -> dict:
         declaration = get_declaration(validator_id)
-        if language not in declaration.defaults:
+        if not isinstance(language, str) or language not in declaration.defaults:
             raise UsageError("Decision 提示词语言无效")
         root = project(name)
         with project_write_lock(root):
@@ -102,7 +120,7 @@ def register_decision_prompt_routes(app: FastAPI, project: Callable[[str], Path]
 
     def library_path(validator_id: str, language: str, prompt_id: str | None = None) -> Path:
         declaration = get_declaration(validator_id)
-        if language not in declaration.defaults:
+        if not isinstance(language, str) or language not in declaration.defaults:
             raise UsageError("Decision 提示词语言无效")
         path = user_root() / "prompt_library" / "decision" / validator_id / language
         if prompt_id is not None:
