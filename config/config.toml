@@ -122,6 +122,8 @@ exhausted_mode = "fail"
 [validation.translation.alignment]
 decision_preset = ""
 confidence_threshold = 0.8
+# 低于此置信度或判定为不确定时提示警告；0 关闭不确定警告，错位错误门槛保持独立。
+warning_threshold = 0.8
 tail_segments = 3
 
 [retry]

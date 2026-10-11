@@ -639,6 +639,7 @@ async def run_translation(
     translation_validators = tuple(
         SegmentAlignmentValidator(decision_clients[decision_bindings["segment_alignment"]],
             confidence_threshold=alignment_options["confidence_threshold"],
+            warning_threshold=alignment_options["warning_threshold"],
             tail_segments=alignment_options["tail_segments"],
             prompt=config["_decision_prompt_definitions"]["segment_alignment"]["content"])
         if validator.validator_id == "segment_alignment" else validator

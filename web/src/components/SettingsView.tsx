@@ -345,7 +345,8 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
               {toggle}
               {configuredValidatorIds.has(validator.validator_id) && <div className="config-grid validator-settings-options">
                 {decisionPresetField(config.validation.translation.alignment.decision_preset, (value) => update((draft) => { draft.validation.translation.alignment.decision_preset = value; }))}
-                <NumberField label={translate("decision.threshold", language)} value={config.validation.translation.alignment.confidence_threshold} min={0} max={1} step={0.05} onChange={(value) => update((draft) => { draft.validation.translation.alignment.confidence_threshold = value; })} />
+                <NumberField label={translate("settings.alignmentErrorThreshold", language)} value={config.validation.translation.alignment.confidence_threshold} min={0} max={1} step={0.05} onChange={(value) => update((draft) => { draft.validation.translation.alignment.confidence_threshold = value; })} />
+                <NumberField label={translate("settings.alignmentWarningThreshold", language)} help={translate("settings.alignmentWarningThresholdHint", language)} value={config.validation.translation.alignment.warning_threshold} min={0} max={1} step={0.05} onChange={(value) => update((draft) => { draft.validation.translation.alignment.warning_threshold = value; })} />
                 <NumberField label={translate("settings.alignmentTailSegments", language)} help={translate("settings.alignmentTailSegmentsHint", language)} value={config.validation.translation.alignment.tail_segments} min={1} step={1} onChange={(value) => update((draft) => { draft.validation.translation.alignment.tail_segments = value; })} />
               </div>}
             </div>;
