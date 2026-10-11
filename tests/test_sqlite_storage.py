@@ -57,20 +57,21 @@ def _seed_fingerprint_records(project: Path, *, same_scan_fingerprint: bool = Tr
     stage = record_header(
         "stage_result", project_id, record_id="RESULT-SHARED", stage="translation",
         segment_id="F0001-S000001", status="completed", text="译文",
-        run_id="RUN-SHARED", stage_fingerprint=fingerprint,
+        run_id="RUN-SHARED", request_id="REQ-SHARED", stage_fingerprint=fingerprint,
     )
     scan = record_header(
         "terminology_scan", project_id, record_id="SCAN-SHARED", stage="terminology",
         segment_id="F0001-S000001", status="completed", active_task_id="TASK-SHARED",
-        run_id="RUN-SHARED", stage_fingerprint=fingerprint if same_scan_fingerprint else digest("other settings"),
+        run_id="RUN-SHARED", request_id="REQ-SHARED", stage_fingerprint=fingerprint if same_scan_fingerprint else digest("other settings"),
     )
+    scan["created_at"] = stage["created_at"]
     append_jsonl(project, project / "stages" / "translation.jsonl", stage)
     append_jsonl(project, project / "terminology" / "scans.jsonl", scan)
     return stage, scan
 
 
 @pytest.mark.parametrize("same_scan_fingerprint", [False, True])
-def test_run_fingerprint_reuse_preserves_records_and_progress(
+def test_request_metadata_sharing_preserves_records_and_progress(
     tmp_path: Path, same_scan_fingerprint: bool,
 ) -> None:
     from app.sqlite_storage import latest_stage_results, latest_stage_states, terminology_scan_state
@@ -86,12 +87,14 @@ def test_run_fingerprint_reuse_preserves_records_and_progress(
     assert terminology_scan_state(project, "TASK-SHARED", ids) == (set(ids), {scan["stage_fingerprint"]})
     with sqlite3.connect(project / "project.sqlite") as database:
         payload = json.loads(database.execute("SELECT payload_json FROM stage_results").fetchone()[0])
-        assert payload["stage_fingerprint"] != stage["stage_fingerprint"]
+        reference = payload["_request_meta"]
+        assert not ({"run_id", "request_id", "created_at", "stage_fingerprint"} & payload.keys())
         payload = json.loads(database.execute("SELECT payload_json FROM terminology_scans").fetchone()[0])
-        assert (payload["stage_fingerprint"] != scan["stage_fingerprint"]) == same_scan_fingerprint
+        assert (payload["_request_meta"] == reference) == same_scan_fingerprint
+        assert database.execute("SELECT count(*) FROM request_metadata").fetchone()[0] == (1 if same_scan_fingerprint else 2)
 
 
-def test_v6_migration_reuses_fingerprints_without_changing_records(tmp_path: Path) -> None:
+def test_v6_migration_shares_request_metadata_without_changing_records(tmp_path: Path) -> None:
     from app import sqlite_storage
 
     project = create_project(tmp_path)
@@ -99,8 +102,10 @@ def test_v6_migration_reuses_fingerprints_without_changing_records(tmp_path: Pat
     with sqlite3.connect(project / "project.sqlite") as database:
         for table, record in [("stage_results", stage), ("terminology_scans", scan)]:
             payload = json.loads(database.execute(f"SELECT payload_json FROM {table}").fetchone()[0])
-            payload["stage_fingerprint"] = record["stage_fingerprint"]
+            payload.pop("_request_meta", None)
+            payload.update({key:record[key] for key in ("run_id","request_id","created_at","stage_fingerprint")})
             database.execute(f"UPDATE {table} SET payload_json=?", (json.dumps(payload),))
+        database.execute("DROP TABLE request_metadata")
         database.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
     sqlite_storage._SUPPORTED_CACHE.discard(project / "project.sqlite")
     backup = ensure_supported(project)
@@ -111,16 +116,73 @@ def test_v6_migration_reuses_fingerprints_without_changing_records(tmp_path: Pat
         assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
         for table in ("stage_results", "terminology_scans"):
             payload = json.loads(database.execute(f"SELECT payload_json FROM {table}").fetchone()[0])
-            assert payload["stage_fingerprint"] != stage["stage_fingerprint"]
+            assert payload["_request_meta"] > 0
+        assert database.execute("SELECT count(*) FROM request_metadata").fetchone()[0] == 1
 
 
-def test_dangling_run_fingerprint_reference_fails_explicitly(tmp_path: Path) -> None:
+def test_dangling_request_metadata_reference_fails_explicitly(tmp_path: Path) -> None:
     project = create_project(tmp_path)
     _seed_fingerprint_records(project)
     with sqlite3.connect(project / "project.sqlite") as database:
-        database.execute("DELETE FROM runs")
-    with pytest.raises(StorageError, match="指纹引用"):
+        database.execute("DELETE FROM request_metadata")
+    with pytest.raises(StorageError, match="请求元数据引用"):
         read_jsonl(project, project / "stages" / "translation.jsonl")
+
+
+def test_request_metadata_cleanup_preserves_other_references(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    _seed_fingerprint_records(project)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("DELETE FROM stage_results")
+        assert database.execute("SELECT count(*) FROM request_metadata").fetchone()[0] == 1
+        database.execute("DELETE FROM terminology_scans")
+        assert database.execute("SELECT count(*) FROM request_metadata").fetchone()[0] == 0
+
+
+def test_request_metadata_preserves_missing_and_null_fields(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    stage, scan = _seed_fingerprint_records(project)
+    missing = {**scan, "record_id":"SCAN-MISSING"}
+    missing.pop("request_id")
+    explicit_null = {**missing, "record_id":"SCAN-NULL", "request_id":None}
+    different_time = {**scan, "record_id":"SCAN-TIME", "created_at":"2026-10-11T12:00:00+08:00"}
+    for record in (missing, explicit_null, different_time):
+        append_jsonl(project, project / "terminology" / "scans.jsonl", record)
+    assert read_jsonl(project, project / "terminology" / "scans.jsonl") == [scan, missing, explicit_null, different_time]
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT count(*) FROM request_metadata").fetchone()[0] == 4
+
+
+def test_request_metadata_insert_rolls_back_with_failed_record(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    stage, scan = _seed_fingerprint_records(project)
+    duplicate = {**stage, "request_id":"REQ-NEW"}
+    with pytest.raises(StorageError):
+        append_jsonl(project, project / "stages" / "translation.jsonl", duplicate)
+    assert read_jsonl(project, project / "stages" / "translation.jsonl") == [stage]
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute("SELECT count(*) FROM request_metadata").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("query", ["records", "summary"])
+def test_request_metadata_reads_share_a_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, query: str) -> None:
+    from app import sqlite_storage
+
+    project = create_project(tmp_path)
+    stage, scan = _seed_fingerprint_records(project)
+    original = sqlite_storage._request_metadata
+
+    def remove_records_before_metadata_read(connection):
+        with sqlite3.connect(project / "project.sqlite") as writer:
+            writer.execute("DELETE FROM stage_results")
+            writer.execute("DELETE FROM terminology_scans")
+        return original(connection)
+
+    monkeypatch.setattr(sqlite_storage, "_request_metadata", remove_records_before_metadata_read)
+    if query == "records":
+        assert read_jsonl(project, project / "stages" / "translation.jsonl") == [stage]
+    else:
+        assert latest_stage_summary(project, "translation", [stage["segment_id"]])[stage["segment_id"]]["stage_fingerprint"] == stage["stage_fingerprint"]
 
 
 def test_v6_adapter_state_compresses_on_open_preserving_history(

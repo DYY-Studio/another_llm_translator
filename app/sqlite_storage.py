@@ -200,6 +200,10 @@ def _create_tables(connection: sqlite3.Connection) -> None:
             file_id TEXT PRIMARY KEY REFERENCES files(file_id) ON DELETE CASCADE,
             payload_json BLOB NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS request_metadata (
+            metadata_id INTEGER PRIMARY KEY,
+            payload_json TEXT NOT NULL UNIQUE
+        );
         CREATE TABLE IF NOT EXISTS stage_results (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             record_id TEXT NOT NULL UNIQUE,
@@ -309,6 +313,22 @@ def _create_tables(connection: sqlite3.Connection) -> None:
         if statement:
             connection.execute(statement)
 
+    for table in ("stage_results", "terminology_scans"):
+        connection.execute(
+            f"CREATE INDEX IF NOT EXISTS {table}_request_metadata "
+            f"ON {table}(json_extract(payload_json, '$._request_meta')) "
+            "WHERE json_extract(payload_json, '$._request_meta') IS NOT NULL"
+        )
+        connection.execute(
+            f"CREATE TRIGGER IF NOT EXISTS {table}_release_metadata AFTER DELETE ON {table} "
+            "BEGIN DELETE FROM request_metadata "
+            "WHERE metadata_id = json_extract(OLD.payload_json, '$._request_meta') "
+            "AND NOT EXISTS (SELECT 1 FROM stage_results "
+            "WHERE json_extract(payload_json, '$._request_meta') = metadata_id) "
+            "AND NOT EXISTS (SELECT 1 FROM terminology_scans "
+            "WHERE json_extract(payload_json, '$._request_meta') = metadata_id); END"
+        )
+
 
 def _project_id(connection: sqlite3.Connection) -> str | None:
     row = connection.execute(
@@ -330,43 +350,53 @@ def _residual(value: dict[str, Any], keys: Iterable[str]) -> str:
     return _json(residual)
 
 
-_RUN_FINGERPRINT_REF = "@run"
+_REQUEST_METADATA_FIELDS = ("run_id", "request_id", "created_at", "stage_fingerprint")
 
 
-def _run_fingerprints(connection: sqlite3.Connection) -> dict[str, str]:
+def _request_metadata(connection: sqlite3.Connection) -> dict[int, dict[str, Any]]:
     return {
-        str(row["run_id"]): str(row["fingerprint"])
-        for row in connection.execute(
-            "SELECT run_id, json_extract(payload_json, '$.stage_fingerprint') AS fingerprint "
-            "FROM runs WHERE json_type(payload_json, '$.stage_fingerprint') = 'text'"
-        )
+        row["metadata_id"]: _load(row["payload_json"])
+        for row in connection.execute("SELECT metadata_id, payload_json FROM request_metadata")
     }
 
 
-def _resolve_fingerprint(value: Any, run_id: Any, fingerprints: dict[str, str]) -> Any:
-    if value != _RUN_FINGERPRINT_REF:
-        return value
-    if run_id not in fingerprints:
-        raise StorageError(f"阶段指纹引用不存在：{run_id}")
-    return fingerprints[run_id]
+def _shared_metadata(reference: Any, metadata: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    if reference is None:
+        return {}
+    if reference not in metadata:
+        raise StorageError(f"请求元数据引用不存在：{reference}")
+    return metadata[reference]
 
 
-def _fingerprint_payload(raw: str, fingerprints: dict[str, str]) -> dict[str, Any]:
+def _request_payload(raw: str, metadata: dict[int, dict[str, Any]]) -> dict[str, Any]:
     value = _load(raw)
-    if value.get("stage_fingerprint") == _RUN_FINGERPRINT_REF:
-        value["stage_fingerprint"] = _resolve_fingerprint(
-            value["stage_fingerprint"], value.get("run_id"), fingerprints
-        )
+    value.update(_shared_metadata(value.pop("_request_meta", None), metadata))
     return value
 
 
-def _fingerprint_residual(
-    value: dict[str, Any], keys: Iterable[str], fingerprints: dict[str, str],
+def _request_residual(
+    connection: sqlite3.Connection, value: dict[str, Any], keys: Iterable[str],
+    cache: dict[str, int],
 ) -> str:
-    fingerprint = value.get("stage_fingerprint")
-    if isinstance(fingerprint, str) and fingerprint and fingerprint == fingerprints.get(value.get("run_id")):
-        value = {**value, "stage_fingerprint": _RUN_FINGERPRINT_REF}
-    return _residual(value, keys)
+    shared = {key: value[key] for key in _REQUEST_METADATA_FIELDS if key in value}
+    if not shared:
+        return _residual(value, keys)
+    raw = _json(shared)
+    reference = cache.get(raw)
+    if reference is None:
+        row = connection.execute(
+            "INSERT INTO request_metadata(payload_json) VALUES (?) "
+            "ON CONFLICT(payload_json) DO NOTHING RETURNING metadata_id", (raw,),
+        ).fetchone()
+        if row is None:
+            row = connection.execute(
+                "SELECT metadata_id FROM request_metadata WHERE payload_json = ?", (raw,),
+            ).fetchone()
+        reference = row["metadata_id"]
+        cache[raw] = reference
+    residual = {key: item for key, item in value.items() if key not in shared}
+    residual["_request_meta"] = reference
+    return _residual(residual, keys)
 
 
 _FILE_RESIDUAL_FIELDS = (
@@ -724,21 +754,14 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
                 "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
                 (zlib.compress(raw.encode("utf-8")), row["file_id"]),
             )
+        metadata_cache: dict[str, int] = {}
         for table in ("stage_results", "terminology_scans"):
-            connection.executemany(
-                f"UPDATE {table} SET payload_json = ? WHERE sequence = ?",
-                [
-                    (_json({**_load(row["payload_json"]), "stage_fingerprint": _RUN_FINGERPRINT_REF}), row["sequence"])
-                    for row in connection.execute(
-                        f"SELECT records.sequence, records.payload_json FROM {table} AS records "
-                        "JOIN runs ON runs.run_id = json_extract(records.payload_json, '$.run_id') "
-                        "WHERE json_type(records.payload_json, '$.stage_fingerprint') = 'text' "
-                        "AND length(json_extract(records.payload_json, '$.stage_fingerprint')) > 0 "
-                        "AND json_extract(records.payload_json, '$.stage_fingerprint') "
-                        "= json_extract(runs.payload_json, '$.stage_fingerprint')"
-                    )
-                ],
-            )
+            updates = []
+            for row in connection.execute(f"SELECT sequence, payload_json FROM {table}").fetchall():
+                value = _load(row["payload_json"])
+                if any(key in value for key in _REQUEST_METADATA_FIELDS):
+                    updates.append((_request_residual(connection, value, (), metadata_cache), row["sequence"]))
+            connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -895,11 +918,11 @@ def _hydrate_adapter_state(
 
 
 def _hydrate_stage(
-    row: sqlite3.Row, project_id: str | None, fingerprints: dict[str, str],
+    row: sqlite3.Row, project_id: str | None, metadata: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
     status = row["status"]
     return _with_common_header(
-        _fingerprint_payload(str(row["payload_json"]), fingerprints),
+        _request_payload(str(row["payload_json"]), metadata),
         project_id=project_id,
         record_type=_stage_record_type(status),
         record_id=str(row["record_id"]),
@@ -912,10 +935,10 @@ def _hydrate_stage(
 
 
 def _hydrate_scan(
-    row: sqlite3.Row, project_id: str | None, fingerprints: dict[str, str],
+    row: sqlite3.Row, project_id: str | None, metadata: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
     return _with_common_header(
-        _fingerprint_payload(str(row["payload_json"]), fingerprints),
+        _request_payload(str(row["payload_json"]), metadata),
         project_id=project_id,
         record_type="terminology_scan",
         record_id=str(row["record_id"]),
@@ -2315,18 +2338,19 @@ def _records(
 ) -> list[dict[str, Any]]:
     connection = _with_db(project)
     try:
+        connection.execute("BEGIN")
         project_id = _project_id(connection)
         if kind == "stage":
-            fingerprints = _run_fingerprints(connection)
+            metadata = _request_metadata(connection)
             rows = connection.execute(
                 """SELECT sequence, record_id, stage, segment_id, status,
                           payload_json
                    FROM stage_results WHERE stage = ? ORDER BY sequence""",
                 (key,),
             ).fetchall()
-            return [_hydrate_stage(row, project_id, fingerprints) for row in rows]
+            return [_hydrate_stage(row, project_id, metadata) for row in rows]
         elif kind == "scans":
-            fingerprints = _run_fingerprints(connection)
+            metadata = _request_metadata(connection)
             if task_id is not None:
                 rows = connection.execute(
                     "SELECT sequence, record_id, active_task_id, segment_id, status, "
@@ -2339,7 +2363,7 @@ def _records(
                     "SELECT sequence, record_id, active_task_id, segment_id, status, "
                     "payload_json FROM terminology_scans ORDER BY sequence"
                 ).fetchall()
-            return [_hydrate_scan(row, project_id, fingerprints) for row in rows]
+            return [_hydrate_scan(row, project_id, metadata) for row in rows]
         elif kind == "candidates":
             if task_id is not None:
                 rows = connection.execute(
@@ -2378,7 +2402,7 @@ def read_jsonl(
 
 
 def _insert_stage(connection: sqlite3.Connection, records: Iterable[dict[str, Any]]) -> None:
-    fingerprints = _run_fingerprints(connection)
+    cache: dict[str, int] = {}
     connection.executemany(
         "INSERT INTO stage_results(record_id,stage,segment_id,status,payload_json) VALUES (?, ?, ?, ?, ?)",
         [
@@ -2387,7 +2411,7 @@ def _insert_stage(connection: sqlite3.Connection, records: Iterable[dict[str, An
                 str(item.get("stage")),
                 item.get("segment_id"),
                 item.get("status"),
-                _fingerprint_residual(item, _STAGE_RESIDUAL_FIELDS, fingerprints),
+                _request_residual(connection, item, _STAGE_RESIDUAL_FIELDS, cache),
             )
             for item in records
         ],
@@ -2395,7 +2419,7 @@ def _insert_stage(connection: sqlite3.Connection, records: Iterable[dict[str, An
 
 
 def _insert_scans(connection: sqlite3.Connection, records: Iterable[dict[str, Any]]) -> None:
-    fingerprints = _run_fingerprints(connection)
+    cache: dict[str, int] = {}
     connection.executemany(
         "INSERT INTO terminology_scans(record_id,active_task_id,segment_id,status,payload_json) VALUES (?, ?, ?, ?, ?)",
         [
@@ -2404,7 +2428,7 @@ def _insert_scans(connection: sqlite3.Connection, records: Iterable[dict[str, An
                 str(item["active_task_id"]),
                 item.get("segment_id"),
                 item.get("status"),
-                _fingerprint_residual(item, _SCAN_RESIDUAL_FIELDS, fingerprints),
+                _request_residual(connection, item, _SCAN_RESIDUAL_FIELDS, cache),
             )
             for item in records
         ],
@@ -2914,6 +2938,7 @@ def latest_stage_results(
 ) -> dict[str, dict[str, Any]]:
     connection = _with_db(project)
     try:
+        connection.execute("BEGIN")
         values = list(segment_ids) if segment_ids is not None else None
         if values == []:
             return {}
@@ -2936,8 +2961,8 @@ def latest_stage_results(
                 params,
             ).fetchall())
         project_id = _project_id(connection)
-        fingerprints = _run_fingerprints(connection)
-        values_by_id = [_hydrate_stage(row, project_id, fingerprints) for row in rows]
+        metadata = _request_metadata(connection)
+        values_by_id = [_hydrate_stage(row, project_id, metadata) for row in rows]
         return {str(item["segment_id"]): item for item in values_by_id}
     finally:
         connection.close()
@@ -2955,6 +2980,7 @@ def latest_stage_summary(
         return {}
     connection = _with_db(project)
     try:
+        connection.execute("BEGIN")
         rows = []
         for start in range(0, len(values), 500):
             batch = values[start:start + 500]
@@ -2967,9 +2993,8 @@ def latest_stage_summary(
                            AND NOT (COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0)) AS failed,
                        CASE
                            WHEN COALESCE(agg.last_completed, 0) > COALESCE(agg.last_reset, 0)
-                           THEN json_extract(completed.payload_json, '$.stage_fingerprint')
-                       END AS fingerprint,
-                       json_extract(completed.payload_json, '$.run_id') AS run_id
+                           THEN json_extract(completed.payload_json, '$._request_meta')
+                       END AS metadata_ref
                 FROM (
                     SELECT segment_id,
                            MAX(CASE WHEN status = 'completed' THEN sequence END) AS last_completed,
@@ -2984,12 +3009,12 @@ def latest_stage_summary(
                 """,
                 [stage, *batch],
             ).fetchall())
-        fingerprints = _run_fingerprints(connection)
+        metadata = _request_metadata(connection)
         return {
             str(row["segment_id"]): {
                 "completed": bool(row["completed"]),
                 "failed": bool(row["failed"]),
-                "stage_fingerprint": _resolve_fingerprint(row["fingerprint"], row["run_id"], fingerprints),
+                "stage_fingerprint": _shared_metadata(row["metadata_ref"], metadata).get("stage_fingerprint"),
             }
             for row in rows
         }
@@ -3008,9 +3033,10 @@ def latest_stage_states(
         return {}
     connection = _with_db(project)
     try:
+        connection.execute("BEGIN")
         rows = []
         project_id = _project_id(connection)
-        fingerprints = _run_fingerprints(connection)
+        metadata = _request_metadata(connection)
         for start in range(0, len(values), 500):
             batch = values[start:start + 500]
             placeholders = ",".join("?" for _ in batch)
@@ -3062,7 +3088,7 @@ def latest_stage_states(
                             "payload_json": completed_payload,
                         },
                         project_id,
-                        fingerprints,
+                        metadata,
                     ),
                     f"stage={stage} segment={row['segment_id']}",
                 )
@@ -3087,12 +3113,11 @@ def terminology_scan_state(
     placeholders = ",".join("?" for _ in values)
     connection = _with_db(project)
     try:
+        connection.execute("BEGIN")
         rows = connection.execute(
             f"""
             SELECT DISTINCT segment_id,
-                   json_extract(payload_json, '$.stage_fingerprint')
-                       AS stage_fingerprint,
-                   json_extract(payload_json, '$.run_id') AS run_id
+                   json_extract(payload_json, '$._request_meta') AS metadata_ref
             FROM terminology_scans
             WHERE active_task_id = ?
               AND status = 'completed'
@@ -3101,11 +3126,10 @@ def terminology_scan_state(
             [task_id, *values],
         ).fetchall()
         completed = {str(row["segment_id"]) for row in rows}
-        run_fingerprints = _run_fingerprints(connection)
+        metadata = _request_metadata(connection)
         fingerprints = {
-            str(_resolve_fingerprint(row["stage_fingerprint"], row["run_id"], run_fingerprints))
-            for row in rows
-            if row["stage_fingerprint"] is not None
+            str(value) for row in rows
+            if (value := _shared_metadata(row["metadata_ref"], metadata).get("stage_fingerprint")) is not None
         }
         return completed, fingerprints
     finally:
@@ -3150,7 +3174,7 @@ def _stage_result_lineage(
     result = {str(record["record_id"]): record for record in records}
     pending = set(result)
     project_id = _project_id(connection)
-    fingerprints = _run_fingerprints(connection)
+    metadata = _request_metadata(connection)
     while pending:
         parents = {str(result[key][field]) for key in pending
                    for field in ("base_result_id", "suggestion_result_id")
@@ -3162,7 +3186,7 @@ def _stage_result_lineage(
             rows = connection.execute(
                 f"SELECT record_id,stage,segment_id,status,payload_json FROM stage_results WHERE record_id IN ({','.join('?' for _ in batch)})", batch)
             for row in rows:
-                record = _validate_record(_hydrate_stage(row, project_id, fingerprints), "export lineage")
+                record = _validate_record(_hydrate_stage(row, project_id, metadata), "export lineage")
                 key = str(record["record_id"])
                 result[key] = record
                 pending.add(key)
@@ -3176,6 +3200,7 @@ def stage_result_lineage(project: Path, records: Iterable[dict[str, Any]]) -> di
     """Load exact parents in batches for business reads."""
     connection = _with_db(project)
     try:
+        connection.execute("BEGIN")
         return _stage_result_lineage(connection, records)
     finally:
         connection.close()
@@ -3298,8 +3323,8 @@ def obsolete_stage_result_count(project: Path) -> int:
 
 def _deduplicatable_applied_results(connection: sqlite3.Connection, obsolete: set[str]) -> list[str]:
     project_id = _project_id(connection)
-    fingerprints = _run_fingerprints(connection)
-    records = [_validate_record(_hydrate_stage(row, project_id, fingerprints), "applied text maintenance")
+    metadata = _request_metadata(connection)
+    records = [_validate_record(_hydrate_stage(row, project_id, metadata), "applied text maintenance")
                for row in connection.execute(
                    "SELECT record_id,stage,segment_id,status,payload_json FROM stage_results "
                    "WHERE stage IN ('proofreading_applied','polishing_applied') "
@@ -3334,6 +3359,7 @@ def database_maintenance_info(project: Path) -> dict[str, int]:
     connection = _read_only_connection(project)
     try:
         with connection:
+            connection.execute("BEGIN")
             obsolete = obsolete_stage_results(connection)
             return {"obsolete_stage_records": len(obsolete),
                     "deduplicatable_applied_records": len(_deduplicatable_applied_results(connection, obsolete))}

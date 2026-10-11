@@ -320,7 +320,7 @@ pytest 探针不替代真实 PBS 源归档探针或 packaged `.app` 外部插件
 运行协议升级，也不会改变已有 Run 的状态。
 SQLite v6→v7 省略概括切片中相同的文本哈希，读取时恢复完整字段，保留不同的原文、模型输入及完整段落哈希。
 v7 的 Adapter 状态以 zlib 压缩的 UTF-8 JSON BLOB 保存，业务读写接口保持完整 JSON 对象。
-v6→v7 同时将阶段结果和术语扫描中与所属 Run 相同的阶段指纹保存为 `@run` 引用，读取时恢复完整值；不同指纹保留原值。
+v6→v7 将阶段结果和术语扫描中完全相同的 `run_id`、`request_id`、`created_at`、`stage_fingerprint` 组合集中保存到 `request_metadata`，记录保存 `_request_meta` 引用，读取时恢复完整字段及缺失/null 的区别。删除最后一条引用记录时，SQLite 触发器通过非空引用索引回收对应元数据。
 
 使用项目临时副本验证打开时升级，比较迁移前后的摘要 ID、源范围、历史 Markdown 导出及过期判断，
 检查 `PRAGMA integrity_check`、文件体积与升级前备份；迁移失败应保留旧 schema 和记录。
