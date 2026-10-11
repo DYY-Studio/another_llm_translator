@@ -2840,7 +2840,7 @@ async def test_draft_scan_requires_explicit_term_response_before_saving(
     assert len(requests) == (1 if declaration == {"type": "no_terms"} else 2)
     assert all(request["response_mode"] == "terms+translation" for request in requests)
     if len(requests) == 2:
-        assert "format_correction" in requests[1]
+        assert "format_correction" not in requests[1]
     assert load_stage_history(project, "translation")[0]["text"] == "门开了。"
 
 

@@ -498,7 +498,7 @@ def test_web_task_start_forwards_language(
 
 
 @pytest.mark.asyncio
-async def test_english_format_correction_contains_no_chinese(tmp_path: Path) -> None:
+async def test_english_format_retry_does_not_add_instructions(tmp_path: Path) -> None:
     project = await create_project(tmp_path)
     calls = 0
 
@@ -509,13 +509,8 @@ async def test_english_format_correction_contains_no_chinese(tmp_path: Path) -> 
         if calls == 1:
             content = json.dumps({"segments": []})
         else:
-            correction = payload["format_correction"]
-            assert "current pending content" in correction
-            assert "JSONL structure" in correction
-            assert "fixed fields" in correction
-            assert "complete" in correction
-            assert "previous response" not in correction
-            assert not any("\u4e00" <= char <= "\u9fff" for char in correction)
+            assert "format_correction" not in payload
+            assert "validation_repair" not in payload
             content = llm_jsonl(
                 [
                     {

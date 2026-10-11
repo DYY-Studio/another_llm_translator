@@ -73,20 +73,6 @@ from .sqlite_storage import (
     read_json,
 )
 
-_FORMAT_CORRECTION = {
-    "zh-CN": (
-        "只处理当前待处理内容，并完整覆盖本次内容，遵守固定字段。"
-        "严格 JSONL 结构：每个非空物理行一个紧凑 JSON 对象，仅用换行分隔记录，"
-        '末行精确为 {"type":"end"}。'
-    ),
-    "en": (
-        "Process only the current pending content, cover it completely, and follow "
-        "the fixed fields. Use strict JSONL structure: one compact JSON object per "
-        'non-empty physical line, separated only by newlines, ending exactly with {"type":"end"}.'
-    ),
-}
-
-
 def _frozen_run_options(project: Path, run_id: str | None) -> dict[str, dict[str, str]] | None:
     if run_id is None:
         return None
@@ -860,7 +846,6 @@ async def _localized_request_loop(
         [str, dict[str, str]],
         _SegmentParseResult,
     ],
-    format_correction: str,
     prompt_language: str,
     by_id: dict[str, dict[str, Any]],
     segments: list[dict[str, Any]],
@@ -895,8 +880,6 @@ async def _localized_request_loop(
                 for finding in repair_candidates[str(item["segment_id"])]["findings"]
                 if finding.get("repairable", True)
             }))
-        if format_attempt:
-            payload["format_correction"] = format_correction
         payload, id_map = localize_request_ids(payload, items)
         messages = render_messages(prompt, payload)
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"

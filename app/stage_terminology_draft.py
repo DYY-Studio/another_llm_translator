@@ -43,7 +43,6 @@ from .sqlite_storage import (
     write_summary_run,
 )
 from .stage_runtime import (
-    _FORMAT_CORRECTION,
     _prompt_factory,
     _request_estimate,
     _project_context,
@@ -720,8 +719,6 @@ class DraftTerminologyScan:
                     str(index): str(item["segment_id"])
                     for index, item in enumerate(pending, 1)
                 }
-            if attempt:
-                payload["format_correction"] = _FORMAT_CORRECTION[self.language]
             generated_prompt = prompt_builder(pending)
             messages = render_messages(generated_prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
