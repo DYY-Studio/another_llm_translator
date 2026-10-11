@@ -484,6 +484,21 @@ def register_resource_routes(
         atomic_write_text(write_user("config/config.toml"), content)
         return {"saved": True}
 
+    @app.get("/api/v1/prompts/{stage}/default")
+    async def get_builtin_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
+        if stage not in PROMPT_RESOURCE_STAGES:
+            raise UsageError(f"未知 Prompt 阶段：{stage}")
+        validate_language(language)
+        def builtin_file(resource: str, value: str) -> Path:
+            return app_root / "prompts" / prompt_file(resource, value)
+        return prompt_view(
+            stage, language,
+            lambda value: builtin_file(stage, value),
+            [value for value in PROMPT_LANGUAGES if builtin_file(stage, value).is_file()],
+            translation_file_for=lambda value: builtin_file("translation", value),
+            fragment_summary_file_for=(lambda value: builtin_file("fragment_summary", value)) if stage == "terminology" else None,
+        )
+
     @app.get("/api/v1/global/prompts/{stage}")
     async def get_global_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
         if stage not in PROMPT_RESOURCE_STAGES:

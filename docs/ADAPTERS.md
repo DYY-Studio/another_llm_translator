@@ -733,3 +733,5 @@ Segment ID、证据摘要、耗时和用量；生成与校验用量合并汇总�
 Decision 提示词资源接口使用 `/api/v1/global/decision-prompts/{validator_id}` 与 `/api/v1/projects/{name}/decision-prompts/{validator_id}`：GET 读取有效内容，项目响应附 `global_sync`（available、same、language；全局无效时附 error），PUT 接收 `{language, content}`，项目 DELETE 按 `language` 删除覆盖。`/language` PUT 接收 `{language}` 设置实际运行语言，配置位于 `decision.prompt_languages` 的校验器 ID 映射。`/api/v1/decision-prompts` 列举已加载声明。命名模板由 `/api/v1/decision-prompt-library/{validator_id}/{language}` 列举，其 `/{prompt_id}` 提供 GET、PUT `{content}` 和 DELETE。
 
 `/language` GET 可独立读取选择语言及支持语言，不读取覆盖正文；`/api/v1/decision-prompts/{validator_id}/default?language=...` GET 读取插件默认内容，供用户显式加载草稿，便于修正无效覆盖。Run 在 `decision_prompts/{validator_id}.json` 保存 `{language, choice_ids, content}` 快照，加载时检查与已安装声明一致。
+
+LLM Prompt 的 `/api/v1/prompts/{stage}/default?language=...` GET 直接读取程序分发的原始 Prompt，组合预览也只使用内置资源，不读取用户全局覆盖。资源缺失时明确失败。

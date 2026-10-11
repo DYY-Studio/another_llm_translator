@@ -64,9 +64,9 @@ export function DecisionPromptSettings({ project, scope, language, validator, st
           void action(async () => {
             const value = await api<{ content: Content; choice_ids: string[] }>(`/api/v1/decision-prompts/${validator}/default?language=${selection.language}`);
             if (!view) setView({ ...value, ...selection, inherited: false, source: "default" });
-            setDraft(value.content); setLoadedGlobal(false); setMessage(translate("decision.promptDefaultLoaded", language));
+            setDraft(value.content); setLoadedGlobal(false); setMessage(translate("settings.promptDefaultLoaded", language));
           });
-        }}>{translate("decision.promptLoadDefault", language)}</button>
+        }}>{translate("settings.promptLoadDefault", language)}</button>
         <button className="quiet-button" disabled={!draft} onClick={() => { setSaveOpen(true); setOverwrite(false); }}>{translate("settings.promptLibrarySave", language)}</button>
         <button className="primary-button" disabled={!draft || !view} onClick={() => void action(async () => {
           await api(path, { method: "PUT", body: JSON.stringify({ language: view!.language, content: draft }) });

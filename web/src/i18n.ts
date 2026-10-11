@@ -5,8 +5,8 @@ export type Language = "zh-CN" | "en";
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
     "decision.promptLanguageHint": "所选语言用于后续运行；提示词正文修改需保存后生效。",
-    "decision.promptLoadDefault": "加载内置提示词",
-    "decision.promptDefaultLoaded": "已加载内置提示词，保存后生效。",
+    "settings.promptLoadDefault": "加载内置提示词",
+    "settings.promptDefaultLoaded": "已加载内置提示词，保存后生效。",
     "decision.promptHint": "编辑判断说明与选项描述，固定选项由校验器定义。",
     "decision.promptInherited": "使用全局提示词",
     "decision.promptOverride": "使用项目独立提示词",
@@ -1354,8 +1354,8 @@ const messages: Record<Language, Record<string, string>> = {
     "decision.promptInstructions": "Instructions",
     "decision.promptDiscard": "Discard unsaved prompt changes?",
     "decision.promptLanguageHint": "The selected language applies to subsequent runs; save prompt edits to apply them.",
-    "decision.promptLoadDefault": "Load built-in prompt",
-    "decision.promptDefaultLoaded": "Built-in prompt loaded. Save to apply.",
+    "settings.promptLoadDefault": "Load built-in prompt",
+    "settings.promptDefaultLoaded": "Built-in prompt loaded. Save to apply.",
 
     "decision.review": "Decision semantic review (experimental)",
     "decision.reviewHint": "Review missing preferred translations; repair confirmed errors, accept valid short forms, and keep uncertain cases as warnings.",

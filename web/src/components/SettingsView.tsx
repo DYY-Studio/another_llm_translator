@@ -1085,14 +1085,6 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
   }, [path, promptLanguage]);
 
   useEffect(() => {
-    if (scope !== "project") {
-      setLibraryEntries([]);
-      setSelectedLibraryEntry("");
-      setLibrarySaveOpen(false);
-      setLibraryIdDraft("");
-      setLibraryOverwriteId("");
-      return;
-    }
     let active = true;
     setLibraryLoading(true);
     void api<{ entries: PromptLibraryEntry[] }>(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}`).then((value) => {
@@ -1114,6 +1106,17 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
       await api(path, { method: "PUT", body: JSON.stringify({ language: promptLanguage, content }) });
       await loadPrompt();
       setMessage(scope === "global" ? translate("settings.globalPromptSaved", language) : translate("settings.projectPromptSaved", language));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
+  async function loadBuiltinDraft() {
+    if (content !== savedContent && !window.confirm(translate("decision.promptDiscard", language))) return;
+    try {
+      const value = await api<PromptView>(`/api/v1/prompts/${stage}/default?language=${encodeURIComponent(promptLanguage)}`);
+      setContent(value.content);
+      applyPromptPreview(value);
+      setLoadedGlobalDraft(false);
+      setMessage(translate("settings.promptDefaultLoaded", language));
     } catch (reason) { setError(errorMessage(reason, language)); }
   }
 
@@ -1142,7 +1145,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
   }
 
   async function saveToLibrary() {
-    if (scope !== "project" || !content.trim()) return;
+    if (!content.trim()) return;
     const promptId = libraryIdDraft.trim();
     if (!promptId) return;
     if (libraryEntries.some((item) => item.id === promptId) && libraryOverwriteId !== promptId) {
@@ -1196,16 +1199,17 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
     <div className="page-heading config-heading settings-action-heading">
       <div><h1>{scope === "global" ? translate("settings.globalPromptTitle", language) : translate("settings.projectPromptTitle", language)}</h1><p>{scope === "global" ? translate("settings.globalConfigHint", language) : translate("settings.projectPromptHint", language)}</p></div>
       <div className="button-group">
-        {scope === "project" && <button className="quiet-button" onClick={() => { setLibrarySaveOpen(true); setLibraryOverwriteId(""); }}>{translate("settings.promptLibrarySave", language)}</button>}
+        <button className="quiet-button" onClick={() => void loadBuiltinDraft()}>{translate("settings.promptLoadDefault", language)}</button>
+        <button className="quiet-button" onClick={() => { setLibrarySaveOpen(true); setLibraryOverwriteId(""); }}>{translate("settings.promptLibrarySave", language)}</button>
         <button className="primary-button" onClick={() => void save()}>{translate("common.validateSave", language)}</button>
       </div>
     </div>
     {stageControl}
     <label className="stage-select">{translate("settings.promptLanguage", language)}<select value={promptLanguage} onChange={(event) => setPromptLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
     {showSyncCard && <PromptSyncCard language={language} sync={globalSync} dirty={draftDirty} loadedGlobal={loadedGlobalDraft} onLoadGlobal={() => void loadGlobalDraft()} />}
-    {scope === "project" && <PromptLibraryControls language={language} entries={libraryEntries} selected={selectedLibraryEntry} loading={libraryLoading} saveOpen={librarySaveOpen} id={libraryIdDraft} overwrite={!!libraryOverwriteId}
+    <PromptLibraryControls language={language} entries={libraryEntries} selected={selectedLibraryEntry} loading={libraryLoading} saveOpen={librarySaveOpen} id={libraryIdDraft} overwrite={!!libraryOverwriteId}
       onId={(value) => { setLibraryIdDraft(value); setLibraryOverwriteId(""); }} onCancel={() => { setLibrarySaveOpen(false); setLibraryIdDraft(""); setLibraryOverwriteId(""); }}
-      onSelect={(value) => void loadLibraryEntry(value)} onDelete={() => void deleteLibraryEntry()} onSave={() => void saveToLibrary()} />}
+      onSelect={(value) => void loadLibraryEntry(value)} onDelete={() => void deleteLibraryEntry()} onSave={() => void saveToLibrary()} />
     {error && <div className="error-banner">{error}</div>}
     {message && <span className="success-text">{message}</span>}
     <textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => { setContent(event.target.value); setLoadedGlobalDraft(false); setMessage(""); }} />
