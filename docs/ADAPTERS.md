@@ -729,3 +729,5 @@ Segment ID、证据摘要、耗时和用量；生成与校验用量合并汇总�
 ### Decision 提示词声明
 
 插件可通过 `PluginDescriptor.decision_prompts` 声明 `DecisionPromptDeclaration(validator_id, choice_ids, defaults)`；未声明的插件不提供编辑入口。声明必须属于本插件的校验器且不重复，固定选项为 2 至 255 个唯一非空 ID。`defaults` 按 `en`、`zh-CN` 提供内容，必须包含英文默认值；每份内容只含非空 `instructions` 和按固定 ID 填写非空描述的 `criteria`。宿主不允许用户增删选项。逐段校验器从 `context.decision_prompts[validator_id]` 取得运行时冻结内容，动态问题定位由校验器附加。
+
+Decision 提示词资源接口使用 `/api/v1/global/decision-prompts/{validator_id}` 与 `/api/v1/projects/{name}/decision-prompts/{validator_id}`：GET 读取有效内容，PUT 接收 `{language, content}`，项目 DELETE 按 `language` 删除覆盖。`/language` PUT 接收 `{language}` 设置实际运行语言，配置位于 `decision.prompt_languages` 的校验器 ID 映射。`/api/v1/decision-prompts` 列举已加载声明。命名模板由 `/api/v1/decision-prompt-library/{validator_id}/{language}` 列举，其 `/{prompt_id}` 提供 GET、PUT `{content}` 和 DELETE。

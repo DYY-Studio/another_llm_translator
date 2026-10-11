@@ -39,7 +39,7 @@ SCHEMA: dict[str, Any] = {
         "temperature_proofreading": None,
         "temperature_polishing": None,
     },
-    "decision": {"preset": None},
+    "decision": {"preset": None, "prompt_languages": None},
     "execution": {"scheduling_mode": None},
     "chunking": {
         "allow_split_oversized_segment": None,
@@ -290,6 +290,9 @@ def validate_config(config: dict[str, Any]) -> None:
     threshold = decision["decision_confidence_threshold"]
     if type(threshold) not in {int, float} or not 0 <= threshold <= 1:
         raise ConfigError("Decision 置信度门槛必须在 0 到 1 之间")
+    languages = config["decision"]["prompt_languages"]
+    if not isinstance(languages, dict) or any(not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_-]*", key) or value not in ("en", "zh-CN") for key, value in languages.items()):
+        raise ConfigError("Decision 提示词语言映射无效")
     if not isinstance(config["decision"]["preset"], str):
         raise ConfigError("通用 Decision Preset 必须是字符串")
     if decision["decision_enabled"] and "preferred_term_usage" not in decision["validators"]:
@@ -446,6 +449,8 @@ def _toml_scalar(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(json.dumps(key) + " = " + _toml_scalar(child) for key, child in value.items()) + " }"
     if isinstance(value, list):
         return "[" + ", ".join(_toml_scalar(item) for item in value) + "]"
     return str(value)
@@ -519,6 +524,7 @@ def load_config(path: Path) -> dict[str, Any]:
             for key in legacy_keys:
                 del translation_validation[key]
     config.setdefault("decision", {"preset": ""})
+    config["decision"].setdefault("prompt_languages", {})
     translation_validation = config.get("validation", {}).get("translation")
     if isinstance(translation_validation, dict):
         translation_validation.setdefault("decision_enabled", False)
@@ -541,6 +547,7 @@ def load_project_config(
         load_config(project / "config.toml"),
         stage=stage,
         presets_root=presets_root,
+        project=project,
     )
 
 
@@ -550,6 +557,7 @@ def _resolve_config(
     *,
     stage: str | None,
     error_kind: str,
+    project: Path | None = None,
 ) -> dict[str, Any]:
     config = deepcopy(config)
     from .plugins import resolve_translation_validators
@@ -564,6 +572,11 @@ def _resolve_config(
         validator for validator, _ in validator_bindings
     )
     _resolve_decision_config(config, root)
+    from .decision_prompt import resolve_run_prompts
+    from .user_config import user_root
+    global_config_path = user_root() / "config" / "config.toml"
+    global_languages = load_config(global_config_path)["decision"]["prompt_languages"] if project is not None and global_config_path.exists() else None
+    resolve_run_prompts(config, project=project, global_languages=global_languages)
     configured_preset_id = _preset_id_for_stage(config, stage)
     preset_path(root, configured_preset_id)
     preset = load_llm_preset(
@@ -585,6 +598,7 @@ def _resolve_config(
 def resolve_project_config(
     config: dict[str, Any],
     *,
+    project: Path | None = None,
     stage: str | None = None,
     presets_root: Path | None = None,
 ) -> dict[str, Any]:
@@ -593,6 +607,7 @@ def resolve_project_config(
         presets_root or APP_ROOT,
         stage=stage,
         error_kind="项目配置",
+        project=project,
     )
 
 
@@ -647,6 +662,8 @@ def _resolve_decision_config(config: dict[str, Any], root: Path, *, snapshot: bo
 def load_run_config(run_dir: Path) -> dict[str, Any]:
     config = load_config(run_dir / "config.toml")
     _resolve_decision_config(config, run_dir, snapshot=True)
+    from .decision_prompt import resolve_run_prompts
+    resolve_run_prompts(config, snapshot=run_dir)
     preset = load_llm_preset(run_dir / "llm_preset.json")
     return _resolve_llm_config(
         config,

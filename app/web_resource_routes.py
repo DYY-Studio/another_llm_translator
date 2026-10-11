@@ -146,6 +146,9 @@ def register_resource_routes(
     app_root: Path,
     project: Callable[[str], Path],
 ) -> None:
+    from .web_decision_prompt_routes import register_decision_prompt_routes
+    register_decision_prompt_routes(app, project, app_root)
+
     SESSION_COOKIE = "another_llm_session"
     _SESSION_TTL_SECONDS = 30 * 24 * 3600
     def valid_session(token: str | None) -> bool:
@@ -527,9 +530,9 @@ def register_resource_routes(
             raise UsageError("config 必须是对象")
         content = dump_config(config)
         root = project(name)
-        resolve_project_config(config, presets_root=app_root)
+        resolve_project_config(config, presets_root=app_root, project=project(name))
         for stage in LLM_MODEL_STAGES:
-            resolve_project_config(config, stage=stage, presets_root=app_root)
+            resolve_project_config(config, stage=stage, presets_root=app_root, project=project(name))
         with project_write_lock(root):
             atomic_write_text(root / "config.toml", content)
         return {"saved": True}

@@ -638,7 +638,8 @@ async def run_translation(
     translation_validators = tuple(
         SegmentAlignmentValidator(decision_clients[decision_bindings["segment_alignment"]],
             confidence_threshold=alignment_options["confidence_threshold"],
-            tail_segments=alignment_options["tail_segments"])
+            tail_segments=alignment_options["tail_segments"],
+            prompt=config["_decision_prompt_definitions"]["segment_alignment"]["content"])
         if validator.validator_id == "segment_alignment" else validator
         for validator in translation_validators
     )
@@ -668,6 +669,7 @@ async def run_translation(
             translation=translation,
             terms=term_match_cache.validation_matches_for_item(item),
             decision=decision_client if segment_id not in part_original else None,
+            decision_prompts={key: value["content"] for key, value in config.get("_decision_prompt_definitions", {}).items()},
             decision_confidence_threshold=config["validation"]["translation"]["decision_confidence_threshold"],
             segment_id=original_id or segment_id,
             previous_source=tuple(entry["source"] for entry in context_index.previous(
