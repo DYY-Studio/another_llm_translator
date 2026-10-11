@@ -703,14 +703,17 @@ async def run_translation(
         *,
         validation_status: str = "passed",
         findings: list[dict[str, Any]] | None = None,
+        findings_by_segment: dict[str, list[dict[str, Any]]] | None = None,
     ) -> None:
         if not completions:
             return
+        findings_by_segment = findings_by_segment or {}
         records = [record_header(
             "stage_result", str(metadata["project_id"]), stage="translation",
             segment_id=segment_id, status="completed",
             text=_restore_leading_whitespace(str(by_id[segment_id]["source"]), text),
-            validation_status=validation_status, validation_findings=findings or [],
+            validation_status="warning" if segment_id in findings_by_segment else validation_status,
+            validation_findings=findings_by_segment.get(segment_id, findings or []),
             stage_fingerprint=fingerprint, terms_revision=terms_revision,
             **({"generation_origin": "terminology_draft"} if draft_scan else {}),
             run_id=run_id, request_id=request_id,
@@ -831,6 +834,7 @@ async def run_translation(
                 repairable,
             )
         completions = []
+        immediate_warnings: dict[str, list[dict[str, Any]]] = {}
         for segment_id in ordered:
             text, request_id = response_candidates.pop(segment_id)
             if segment_id in findings or blocks_response:
@@ -841,12 +845,17 @@ async def run_translation(
                             "start": 0 if hard else None, "end": len(text) if hard else None,
                             **({"matched_text": text} if hard else {}),
                             **({"repairable": False} if not repairable else {})}]
-                validation_pending[segment_id] = {"segment": by_id[segment_id], "candidate": text,
-                                                  "findings": own, "request_id": request_id}
+                if hard or repairable:
+                    validation_pending[segment_id] = {"segment": by_id[segment_id], "candidate": text,
+                                                      "findings": own, "request_id": request_id}
+                else:
+                    validation_pending.pop(segment_id, None)
+                    immediate_warnings[segment_id] = own
+                    completions.append((segment_id, text, request_id))
             else:
                 validation_pending.pop(segment_id, None)
                 completions.append((segment_id, text, request_id))
-        await save_completed(completions)
+        await save_completed(completions, findings_by_segment=immediate_warnings)
 
     segment_order = {str(item["segment_id"]): index for index, item in enumerate(segments)}
 
