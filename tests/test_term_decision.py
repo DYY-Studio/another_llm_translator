@@ -4523,6 +4523,26 @@ def test_alias_transfer_requires_a_complete_relationship() -> None:
     assert decisions["bob"]["action"] == "needs_review"
 
 
+@pytest.mark.parametrize("released", [False, True])
+def test_group_member_can_receive_released_alias(released: bool) -> None:
+    spec = term_normalization(
+        {"terminology": {"unicode_normalization": "NFKC", "case_insensitive": True}}
+    )
+    original = {
+        "alice": _batch_state("alice", "Alice"),
+        "bob": {**_batch_state("bob", "Bob"), "group_primary": "alice"},
+        "charlie": {**_batch_state("charlie", "Charlie"), "aliases": ["Chuck"]},
+    }
+    final = deepcopy(original)
+    final["bob"]["aliases"] = ["Chuck"]
+    if released:
+        final["charlie"]["aliases"] = []
+
+    assert _alias_violations(original, final, spec) == (
+        [] if released else [("alias_transfer", ("bob", "charlie", "chuck"))]
+    )
+
+
 def test_alias_transfer_requires_releasing_or_disabling_the_owner() -> None:
     spec = term_normalization(
         {

@@ -49,8 +49,6 @@ def _alias_violation_message(violation: _GroupViolation, language: str) -> str:
         return (f"alias {alias} remains owned by {owner} while added to {receiver}" if language == "en" else f"alias {alias} 已由 {owner} 保留却被新增到 {receiver}")
     if kind == "self_alias":
         return (f"term {values[0]} contains its own source as alias {values[1]}" if language == "en" else f"术语 {values[0]} 将自身原文 {values[1]} 作为 alias")
-    if kind == "non_root_receiver":
-        return (f"alias receiver {values[0]} is not a root term" if language == "en" else f"alias 接收方 {values[0]} 不是组根术语")
     if kind == "disabled_receiver":
         return (f"disabled term {values[0]} cannot receive alias {values[1]}" if language == "en" else f"已禁用术语 {values[0]} 不能接收 alias {values[1]}")
     if kind == "unknown_alias":
@@ -387,15 +385,6 @@ def _alias_violations(
         if state.get("disabled"):
             violations.extend(
                 ("disabled_receiver", (normalized, alias_form))
-                for alias_form in sorted(added)
-            )
-            continue
-        if state.get("group_primary") is not None:
-            violations.extend(
-                (
-                    "non_root_receiver",
-                    (normalized, str(state["group_primary"]), alias_form),
-                )
                 for alias_form in sorted(added)
             )
             continue
@@ -857,7 +846,7 @@ def _relationship_violation_nodes(
         "unknown_alias",
     }:
         return {values[0]}
-    if kind in {"non_root_receiver", "alias_transfer", "unknown_owner", "group_alias_overlap"}:
+    if kind in {"alias_transfer", "unknown_owner", "group_alias_overlap"}:
         return set(values[:2])
     return set(values)
 

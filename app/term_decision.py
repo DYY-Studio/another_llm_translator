@@ -149,10 +149,6 @@ def _alias_violation_message(violation: _GroupViolation, language: str) -> str:
         if language == "en":
             return f"term {values[0]} contains its own source as alias {values[1]}"
         return f"术语 {values[0]} 将自身原文 {values[1]} 作为 alias"
-    if kind == "non_root_receiver":
-        if language == "en":
-            return f"alias receiver {values[0]} is not a root term"
-        return f"alias 接收方 {values[0]} 不是组根术语"
     if kind == "disabled_receiver":
         if language == "en":
             return f"disabled term {values[0]} cannot receive alias {values[1]}"
