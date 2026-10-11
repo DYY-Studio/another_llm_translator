@@ -353,11 +353,20 @@ def _residual(value: dict[str, Any], keys: Iterable[str]) -> str:
 _REQUEST_METADATA_FIELDS = ("run_id", "request_id", "created_at", "stage_fingerprint")
 
 
-def _request_metadata(connection: sqlite3.Connection) -> dict[int, dict[str, Any]]:
-    return {
-        row["metadata_id"]: _load(row["payload_json"])
-        for row in connection.execute("SELECT metadata_id, payload_json FROM request_metadata")
-    }
+def _request_metadata(
+    connection: sqlite3.Connection, references: Iterable[int | None] | None = None,
+) -> dict[int, dict[str, Any]]:
+    if references is None:
+        return {row[0]: _load(row[1]) for row in connection.execute(
+            "SELECT metadata_id, payload_json FROM request_metadata")}
+    values = list(set(references) - {None})
+    result = {}
+    for start in range(0, len(values), 500):
+        batch = values[start:start + 500]
+        result.update((row[0], _load(row[1])) for row in connection.execute(
+            f"SELECT metadata_id, payload_json FROM request_metadata WHERE metadata_id IN ({','.join('?' for _ in batch)})",
+            batch))
+    return result
 
 
 def _shared_metadata(reference: Any, metadata: dict[int, dict[str, Any]]) -> dict[str, Any]:
@@ -1149,8 +1158,20 @@ def _unpack_summary_range(source_range: dict[str, Any], texts: dict[str, str]) -
     return result
 
 
-def _summary_source_texts(connection: sqlite3.Connection) -> dict[str, str]:
-    return dict(connection.execute("SELECT digest, text FROM summary_source_texts"))
+def _summary_source_texts(
+    connection: sqlite3.Connection, ranges: Iterable[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    if ranges is None:
+        return dict(connection.execute("SELECT digest, text FROM summary_source_texts"))
+    values = list({piece[key] for source_range in ranges
+                   for piece in source_range.get("segments", [])
+                   for key in ("source_digest", "model_text_digest") if key in piece})
+    result = {}
+    for start in range(0, len(values), 500):
+        batch = values[start:start + 500]
+        result.update(connection.execute(
+            f"SELECT digest, text FROM summary_source_texts WHERE digest IN ({','.join('?' for _ in batch)})", batch))
+    return result
 
 
 def _migrate_summary_hashes_to_v7(connection: sqlite3.Connection, project: Path) -> None:
@@ -1276,6 +1297,9 @@ def write_content_summary(project: Path, value: dict[str, Any]) -> None:
     connection = _with_db(project)
     try:
         with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replacing = connection.execute("SELECT 1 FROM content_summaries WHERE summary_id = ?",
+                                           (checked["record_id"],)).fetchone() is not None
             connection.execute(
                 """
                 INSERT INTO content_summaries(
@@ -1296,7 +1320,8 @@ def write_content_summary(project: Path, value: dict[str, Any]) -> None:
                 """,
                 _summary_record_payload(connection, checked),
             )
-            _prune_summary_source_texts(connection)
+            if replacing:
+                _prune_summary_source_texts(connection)
     except sqlite3.Error as exc:
         raise StorageError(f"无法写入内容概括：{project}: {exc}") from exc
     finally:
@@ -1691,8 +1716,11 @@ def read_content_summaries(
             + " ORDER BY file_id, part_id, kind, updated_at, summary_id",
             params,
         ).fetchall()
+        if not rows:
+            return []
         project_id = _project_id(connection)
-        texts = _summary_source_texts(connection)
+        texts = _summary_source_texts(connection,
+            (json.loads(row["source_range_json"]) for row in rows))
         return [_hydrate_summary(row, project_id, texts) for row in rows]
     except (sqlite3.Error, json.JSONDecodeError) as exc:
         raise StorageError(f"无法读取内容概括：{project}: {exc}") from exc
@@ -2592,6 +2620,17 @@ def read_project_meta_read_only(project: Path) -> dict[str, Any]:
         connection.close()
 
 
+def read_run_states(project: Path) -> list[dict[str, Any]]:
+    """Read Run identity and activity without decoding execution snapshots."""
+    connection = _read_only_connection(project)
+    try:
+        return [dict(row) for row in connection.execute("SELECT run_id, stage, status FROM runs")]
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法只读查询 Run 状态：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def list_run_index(
     project: Path,
     stage: str | None = None,
@@ -2618,7 +2657,7 @@ def list_run_index(
             ).fetchone()[0]
         )
         rows = connection.execute(
-            "SELECT run_id, stage, status, started_at, payload_json "
+            "SELECT run_id, stage, status, started_at, json_remove(payload_json, '$.terminology_modes') AS payload_json "
             f"FROM runs WHERE {where} "
             "ORDER BY started_at DESC, run_id DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
@@ -2651,9 +2690,14 @@ def read_run_record(project: Path, run_id: str) -> dict[str, Any] | None:
         connection.close()
 
 
-def _stage_cte(stage: str | None, alias: str = "latest_stage") -> tuple[str, list[Any]]:
+def _stage_cte(
+    stage: str | None, alias: str = "latest_stage", *,
+    file_id: str | None = None, part_id: str | None = None,
+) -> tuple[str, list[Any]]:
     if not stage:
         return "", []
+    boundary = " AND segment_id IN (SELECT segment_id FROM segments WHERE file_id = ? AND part_id = ?)" if file_id else ""
+    params = [stage, file_id, part_id] if file_id else [stage]
     return (
         f"""
         LEFT JOIN (
@@ -2662,24 +2706,25 @@ def _stage_cte(stage: str | None, alias: str = "latest_stage") -> tuple[str, lis
             JOIN (
                 SELECT segment_id, MAX(sequence) AS seq
                 FROM stage_results
-                WHERE stage = ?
+                WHERE stage = ?{boundary}
                 GROUP BY segment_id
             ) AS latest ON latest.seq = sr2.sequence
             WHERE sr2.status != 'reset'
         ) AS {alias}
           ON {alias}.segment_id = segments.segment_id
         """,
-        [stage],
+        params,
     )
 
 
 def _stage_filters(
-    *, status: str | None, search: str | None, stage: str | None
+    *, status: str | None, search: str | None, stage: str | None,
+    file_id: str | None = None, part_id: str | None = None
 ) -> tuple[str, list[Any], list[str]]:
     """Build the stage-result join and clauses, or nothing when unfiltered."""
     if not status and not search:
         return "", [], []
-    join, params = _stage_cte(stage)
+    join, params = _stage_cte(stage, file_id=file_id, part_id=part_id)
     clauses = []
     if status:
         if stage in {"proofreading", "polishing"} and status not in {
@@ -2687,16 +2732,16 @@ def _stage_filters(
             "failed",
             "warning",
         }:
-            base_join, base_params = _stage_cte("translation", "review_translation")
+            base_join, base_params = _stage_cte("translation", "review_translation", file_id=file_id, part_id=part_id)
             applied_join, applied_params = _stage_cte(
-                f"{stage}_applied", "review_applied"
+                f"{stage}_applied", "review_applied", file_id=file_id, part_id=part_id
             )
             join += base_join + applied_join
             params.extend([*base_params, *applied_params])
             base_id = "review_translation.record_id"
             if stage == "polishing":
                 proof_join, proof_params = _stage_cte(
-                    "proofreading_applied", "review_proofreading"
+                    "proofreading_applied", "review_proofreading", file_id=file_id, part_id=part_id
                 )
                 join += proof_join
                 params.extend(proof_params)
@@ -2778,7 +2823,7 @@ def segment_count(
     connection = _with_db(project)
     try:
         join, params, stage_clauses = _stage_filters(
-            status=status, search=search, stage=stage
+            status=status, search=search, stage=stage, file_id=file_id, part_id=part_id
         )
         clauses = ["segments.is_empty = 0", *stage_clauses]
         if bool(file_id) != bool(part_id):
@@ -2808,7 +2853,7 @@ def query_segments(
     connection = _with_db(project)
     try:
         join, params, stage_clauses = _stage_filters(
-            status=status, search=search, stage=stage
+            status=status, search=search, stage=stage, file_id=file_id, part_id=part_id
         )
         clauses = ["segments.is_empty = 0", *stage_clauses]
         if bool(file_id) != bool(part_id):
@@ -2894,7 +2939,7 @@ def segment_ids(
     connection = _with_db(project)
     try:
         join, params, stage_clauses = _stage_filters(
-            status=status, search=search, stage=stage
+            status=status, search=search, stage=stage, file_id=file_id, part_id=part_id
         )
         clauses = ["segments.is_empty = 0", *stage_clauses]
         if bool(file_id) != bool(part_id):
@@ -2950,19 +2995,20 @@ def latest_stage_results(
             params = [stage, *batch] if batch is not None else [stage]
             rows.extend(connection.execute(
                 f"""
-                SELECT record_id, stage, segment_id, status, payload_json FROM (
-                    SELECT record_id, stage, status, payload_json, segment_id,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY segment_id ORDER BY sequence DESC
-                           ) AS rank
+                SELECT sr.record_id, sr.stage, sr.segment_id, sr.status, sr.payload_json
+                FROM stage_results AS sr
+                JOIN (
+                    SELECT segment_id, MAX(sequence) AS seq
                     FROM stage_results
                     WHERE stage = ?{filter_sql}
-                ) WHERE rank = 1
+                    GROUP BY segment_id
+                ) AS latest ON latest.seq = sr.sequence
                 """,
                 params,
             ).fetchall())
         project_id = _project_id(connection)
-        metadata = _request_metadata(connection)
+        metadata = _request_metadata(connection,
+            (_load(row["payload_json"]).get("_request_meta") for row in rows))
         values_by_id = [_hydrate_stage(row, project_id, metadata) for row in rows]
         return {str(item["segment_id"]): item for item in values_by_id}
     finally:
@@ -3010,7 +3056,7 @@ def latest_stage_summary(
                 """,
                 [stage, *batch],
             ).fetchall())
-        metadata = _request_metadata(connection)
+        metadata = _request_metadata(connection, (row["metadata_ref"] for row in rows))
         return {
             str(row["segment_id"]): {
                 "completed": bool(row["completed"]),
@@ -3037,7 +3083,6 @@ def latest_stage_states(
         connection.execute("BEGIN")
         rows = []
         project_id = _project_id(connection)
-        metadata = _request_metadata(connection)
         for start in range(0, len(values), 500):
             batch = values[start:start + 500]
             placeholders = ",".join("?" for _ in batch)
@@ -3074,6 +3119,9 @@ def latest_stage_states(
                 """,
                 [stage, *batch],
             ).fetchall())
+        metadata = _request_metadata(connection,
+            (_load(row["completed_payload"]).get("_request_meta")
+             for row in rows if row["completed_payload"] is not None))
         result: dict[str, dict[str, Any]] = {}
         for row in rows:
             completed_payload = row["completed_payload"]
@@ -3130,7 +3178,7 @@ def terminology_scan_state(
                 [task_id, *batch],
             ).fetchall())
         completed = {str(row["segment_id"]) for row in rows}
-        metadata = _request_metadata(connection)
+        metadata = _request_metadata(connection, (row["metadata_ref"] for row in rows))
         fingerprints = {
             str(value) for row in rows
             if (value := _shared_metadata(row["metadata_ref"], metadata).get("stage_fingerprint")) is not None
@@ -3178,7 +3226,6 @@ def _stage_result_lineage(
     result = {str(record["record_id"]): record for record in records}
     pending = set(result)
     project_id = _project_id(connection)
-    metadata = _request_metadata(connection)
     while pending:
         parents = {str(result[key][field]) for key in pending
                    for field in ("base_result_id", "suggestion_result_id")
@@ -3188,7 +3235,9 @@ def _stage_result_lineage(
         for start in range(0, len(values), 500):
             batch = values[start:start + 500]
             rows = connection.execute(
-                f"SELECT record_id,stage,segment_id,status,payload_json FROM stage_results WHERE record_id IN ({','.join('?' for _ in batch)})", batch)
+                f"SELECT record_id,stage,segment_id,status,payload_json FROM stage_results WHERE record_id IN ({','.join('?' for _ in batch)})", batch).fetchall()
+            metadata = _request_metadata(connection,
+                (_load(row["payload_json"]).get("_request_meta") for row in rows))
             for row in rows:
                 record = _validate_record(_hydrate_stage(row, project_id, metadata), "export lineage")
                 key = str(record["record_id"])
@@ -3278,7 +3327,7 @@ def segment_page_counts(
         return count, count
     if status is None and not search:
         # Avoid materializing a LEFT JOIN for the unfiltered first page.
-        join, params = _stage_cte(stage)
+        join, params = _stage_cte(stage, file_id=file_id, part_id=part_id)
         boundary = " AND segments.file_id = ? AND segments.part_id = ?" if file_id else ""
         bounds = [file_id, part_id] if file_id else []
         connection = _with_db(project)
@@ -3291,7 +3340,7 @@ def segment_page_counts(
             return int(row[0]), int(row[1])
         finally:
             connection.close()
-    join, params, filters = _stage_filters(status=status or "completed", search=None, stage=stage)
+    join, params, filters = _stage_filters(status=status or "completed", search=None, stage=stage, file_id=file_id, part_id=part_id)
     if status is None:
         match = "1"
         params.pop()  # The unused completed predicate parameter.

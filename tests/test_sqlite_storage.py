@@ -172,11 +172,11 @@ def test_request_metadata_reads_share_a_snapshot(tmp_path: Path, monkeypatch: py
     stage, scan = _seed_fingerprint_records(project)
     original = sqlite_storage._request_metadata
 
-    def remove_records_before_metadata_read(connection):
+    def remove_records_before_metadata_read(connection, references=None):
         with sqlite3.connect(project / "project.sqlite") as writer:
             writer.execute("DELETE FROM stage_results")
             writer.execute("DELETE FROM terminology_scans")
-        return original(connection)
+        return original(connection, references)
 
     monkeypatch.setattr(sqlite_storage, "_request_metadata", remove_records_before_metadata_read)
     if query == "records":
@@ -2145,11 +2145,11 @@ def test_summary_reads_keep_source_texts_in_the_same_snapshot(tmp_path: Path, mo
     expected = read_content_summaries(project)
     original = sqlite_storage._summary_source_texts
 
-    def reclaim_before_text_read(connection):
+    def reclaim_before_text_read(connection, ranges=None):
         with sqlite3.connect(project / "project.sqlite") as writer:
             writer.execute("DELETE FROM content_summaries")
             sqlite_storage._prune_summary_source_texts(writer)
-        return original(connection)
+        return original(connection, ranges)
 
     monkeypatch.setattr(sqlite_storage, "_summary_source_texts", reclaim_before_text_read)
     assert read_content_summaries(project) == expected
@@ -2197,3 +2197,36 @@ def test_retention_removes_unneeded_reset_in_one_pass(tmp_path: Path, maintenanc
     else:
         sqlite_storage.append_stage_results(project, records)
     assert [record["record_id"] for record in read_jsonl(project, project / "stages" / "translation.jsonl")] == ["failed"]
+
+
+def test_scoped_reads_do_not_decode_unrelated_shared_payloads(tmp_path: Path) -> None:
+    from app.sqlite_storage import latest_stage_results, latest_stage_states, terminology_scan_state
+
+    project = create_project(tmp_path)
+    stage, scan = _seed_fingerprint_records(project)
+    summary = _text_summary(project)
+    write_content_summary(project, summary)
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("INSERT INTO request_metadata(payload_json) VALUES ('invalid json')")
+        database.execute("INSERT INTO summary_source_texts VALUES ('unused', 'unused source')")
+    ids = [stage["segment_id"]]
+    assert latest_stage_results(project, "translation", ids)[ids[0]] == stage
+    assert latest_stage_states(project, "translation", ids)[ids[0]]["completed"] == stage
+    assert latest_stage_summary(project, "translation", ids)[ids[0]]["stage_fingerprint"] == stage["stage_fingerprint"]
+    assert terminology_scan_state(project, "TASK-SHARED", ids) == (set(ids), {scan["stage_fingerprint"]})
+    assert read_content_summaries(project, file_id="F0001", part_id="document")[0]["source_range"] == summary["source_range"]
+
+
+def test_run_index_omits_modes_but_detail_preserves_them(tmp_path: Path) -> None:
+    from app.sqlite_storage import list_run_index, read_run_record
+
+    project = create_project(tmp_path)
+    project_id = read_json(project, project / "project.json")["project_id"]
+    record = record_header("run", project_id, record_id="RUN-MODES", run_id="RUN-MODES",
+                           stage="terminology", status="completed", terminology_modes={"segment": "terms_only"})
+    write_json(project, project / "runs" / "RUN-MODES" / "manifest.json", record)
+    rows, total = list_run_index(project)
+    assert total == 1
+    assert rows == [{key: value for key, value in read_run_record(project, "RUN-MODES").items()
+                     if key != "terminology_modes"}]
+    assert read_run_record(project, "RUN-MODES")["terminology_modes"] == record["terminology_modes"]

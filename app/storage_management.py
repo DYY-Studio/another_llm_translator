@@ -18,7 +18,7 @@ from .sqlite_storage import (
     database_path,
     database_maintenance_info,
     maintain_project_database,
-    list_run_index,
+    read_run_states,
     read_project_meta_read_only,
 )
 
@@ -166,17 +166,9 @@ def _format_scan_error(path: Path, exc: BaseException) -> str:
 def _read_run_index(project: Path) -> tuple[dict[str, dict[str, Any]], list[str]]:
     index: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
-    offset = 0
     try:
-        while True:
-            rows, total = list_run_index(project, offset=offset, limit=200)
-            for row in rows:
-                run_id = str(row.get("run_id", ""))
-                if run_id:
-                    index[run_id] = row
-            offset += len(rows)
-            if offset >= total or not rows:
-                break
+        for row in read_run_states(project):
+            index[str(row["run_id"])] = row
     except AppError as exc:
         errors.append(str(exc))
     except (OSError, ValueError) as exc:
