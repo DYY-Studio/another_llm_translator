@@ -69,18 +69,14 @@ def register_summary_routes(
             for item in read_summary_participation(root)
         }
         boundaries: dict[tuple[str, str], int] = {}
+        current_by_boundary: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for segment in load_segments(root):
             if segment.get("is_empty"):
                 continue
             key = (str(segment["file_id"]), str(segment["part_id"]))
             boundaries[key] = boundaries.get(key, 0) + 1
+            current_by_boundary.setdefault(key, []).append(segment)
         artifacts = read_content_summaries(root)
-        current_by_boundary: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for segment in load_segments(root):
-            if segment.get("is_empty"):
-                continue
-            boundary = (str(segment["file_id"]), str(segment["part_id"]))
-            current_by_boundary.setdefault(boundary, []).append(segment)
         artifacts_by_boundary: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for artifact in artifacts:
             boundary = (str(artifact["file_id"]), str(artifact["part_id"]))
