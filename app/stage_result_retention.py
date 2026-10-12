@@ -24,7 +24,7 @@ def _parents(row: sqlite3.Row) -> tuple[str, ...]:
     return tuple(value for value in values if value is not None)
 
 
-def _roots(connection: sqlite3.Connection, rows: dict[str, sqlite3.Row]) -> set[str]:
+def _roots(connection: sqlite3.Connection, rows: dict[str, sqlite3.Row]) -> tuple[set[str], dict[str, set[str]]]:
     groups = defaultdict(list)
     for row in rows.values():
         groups[(row["stage"], row["segment_id"])].append(row)
@@ -33,6 +33,7 @@ def _roots(connection: sqlite3.Connection, rows: dict[str, sqlite3.Row]) -> set[
         active.update(row[0] for row in connection.execute(
             f"SELECT segment_id FROM segments WHERE segment_id IN ({','.join('?' for _ in batch)})", batch))
     roots = set()
+    barriers = {}
     for (_, sid), group in groups.items():
         if sid not in active:
             continue
@@ -43,11 +44,13 @@ def _roots(connection: sqlite3.Connection, rows: dict[str, sqlite3.Row]) -> set[
         if completed is not None and (reset is None or completed["sequence"] > reset["sequence"]):
             roots.add(completed["record_id"])
         elif reset is not None and completed is not None:
-            roots.add(reset["record_id"])
-    return roots
+            barriers[reset["record_id"]] = {row["record_id"] for row in group
+                                              if row["status"] == "completed"}
+    return roots, barriers
 
 
-def _closure(connection: sqlite3.Connection, rows: dict[str, sqlite3.Row], roots: set[str]) -> set[str]:
+def _closure(connection: sqlite3.Connection, rows: dict[str, sqlite3.Row], roots: set[str],
+             barriers: dict[str, set[str]]) -> set[str]:
     retained = set()
     pending = roots
     while pending:
@@ -59,7 +62,8 @@ def _closure(connection: sqlite3.Connection, rows: dict[str, sqlite3.Row], roots
         if absent:
             raise StorageError(f"必要阶段结果引用不存在：{next(iter(absent))}")
         retained.update(pending)
-        pending = {parent for key in pending for parent in _parents(rows[key])} - retained
+        pending = ({parent for key in pending for parent in _parents(rows[key])}
+                   | {key for key, completed in barriers.items() if completed & retained}) - retained
     return retained
 
 
@@ -68,7 +72,8 @@ def obsolete_stage_results(connection: sqlite3.Connection) -> set[str]:
     rows = {row["record_id"]: row for row in connection.execute(
         f"SELECT {_COLUMNS} FROM stage_results WHERE stage IN ({','.join('?' for _ in STAGES)})", tuple(STAGES))}
     candidates = set(rows)
-    retained = _closure(connection, rows, _roots(connection, rows))
+    roots, barriers = _roots(connection, rows)
+    retained = _closure(connection, rows, roots, barriers)
     return candidates - retained
 
 
@@ -90,15 +95,17 @@ def prune_stage_results(connection: sqlite3.Connection, pairs: Iterable[tuple[st
                 rows.update((row["record_id"], row) for row in connection.execute(
                     f"SELECT {_COLUMNS} FROM stage_results WHERE stage = ? AND segment_id IN ({','.join('?' for _ in batch)})", [stage, *batch]))
         candidates = set(rows)
-        roots = _roots(connection, rows)
+        roots, barriers = _roots(connection, rows)
+        retained = _closure(connection, rows, roots, barriers)
         # A child outside these groups protects its exact parent, regardless of age.
-        for batch in _batches(candidates):
+        for batch in _batches(candidates - retained):
             placeholders = ','.join('?' for _ in batch)
             for row in connection.execute(
                 f"SELECT {_COLUMNS} FROM stage_results WHERE json_extract(payload_json,'$.base_result_id') IN ({placeholders}) OR json_extract(payload_json,'$.suggestion_result_id') IN ({placeholders})", batch + batch):
                 if row["record_id"] not in candidates:
                     roots.update(parent for parent in _parents(row) if parent in candidates)
-        retained = _closure(connection, rows, roots)
+        if roots - retained:
+            retained = _closure(connection, rows, roots, barriers)
         obsolete = candidates - retained
         if not obsolete:
             break

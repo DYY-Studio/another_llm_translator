@@ -343,7 +343,7 @@ async def test_joint_partitioned_summaries_persist_separate_fragments(
             assert payload["source_segments"] == requests[0]["source_segments"]
             prompt = json.loads(request.content)["messages"][0]["content"]
             assert 'type="summary"' in prompt and 'type="term"' in prompt
-            assert "format_correction" in payload
+            assert "format_correction" not in payload
             assert not read_content_summaries(
                 project, kind="fragment", status="completed"
             )
@@ -1655,7 +1655,7 @@ async def test_terms_only_run_does_not_read_fragment_prompt(
 
 
 @pytest.mark.asyncio
-async def test_summary_format_correction_uses_requested_language(
+async def test_summary_format_retry_adds_no_guidance(
     tmp_path: Path,
 ) -> None:
     project = _project(tmp_path, "Alice entered.")
@@ -1721,9 +1721,7 @@ async def test_summary_format_correction_uses_requested_language(
                     ]
                 },
             )
-        correction = payload["format_correction"]
-        assert "只处理当前待处理内容" in correction
-        assert "current pending content" not in correction
+        assert "format_correction" not in payload
         return httpx.Response(
             200,
             json={

@@ -120,7 +120,7 @@ def test_translation_validation_rejects_invalid_plugin_match(match) -> None:
         ))
 
 
-@pytest.mark.parametrize("field", ["phase", "scope"])
+@pytest.mark.parametrize("field", ["phase", "scope", "retry_instruction"])
 def test_plugin_host_rejects_non_string_validator_contract(monkeypatch, field):
     class Validator:
         phase = "mechanical"
@@ -131,6 +131,9 @@ def test_plugin_host_rejects_non_string_validator_contract(monkeypatch, field):
 
         def validate(self, context):
             return ()
+
+        def retry_instruction(self, match_type, language):
+            return ""
 
     validator = Validator()
     setattr(validator, field, [])
@@ -155,6 +158,9 @@ def test_plugin_host_rejects_duplicate_translation_validator(
         def validate(self, context: TranslationValidationContext) -> tuple[()]:
             del context
             return ()
+
+        def retry_instruction(self, match_type, language):
+            return ""
 
     descriptor = PluginDescriptor(
         plugin_id="duplicate-validator-plugin",
@@ -231,6 +237,9 @@ def test_external_translation_validator_is_discoverable(
             del context
             return ()
 
+        def retry_instruction(self, match_type, language):
+            return ""
+
     descriptor = PluginDescriptor(
         plugin_id="external-validator-plugin",
         version="3",
@@ -272,6 +281,9 @@ def test_translation_validator_resolution_reuses_loaded_instance(
         def validate(self, context: TranslationValidationContext) -> tuple[()]:
             del context
             return ()
+
+        def retry_instruction(self, match_type, language):
+            return ""
 
     validator = ExternalValidator()
     descriptor = PluginDescriptor(
@@ -326,6 +338,9 @@ def test_project_config_and_web_store_reuse_one_validator_resolution(
         def validate(self, context: TranslationValidationContext) -> tuple[()]:
             del context
             return ()
+
+        def retry_instruction(self, match_type, language):
+            return ""
 
     validator = ExternalValidator()
     descriptor = PluginDescriptor(
@@ -389,3 +404,66 @@ async def test_response_validation_orders_phases_and_blocks_whole_response():
     validators[-1].finding = False
     assert await validate_translation_response(contexts, validators) == {}
     assert calls == [("mechanical", "S1"), ("mechanical", "S2"), ("alignment", ("S1", "S2")), ("terminology", "S1"), ("terminology", "S2")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("instruction", ["Use the source meaning in this request.", "", None])
+async def test_external_validator_controls_retry_instruction(tmp_path, monkeypatch, instruction):
+    import json
+    import httpx
+    from app.execution import Scope
+    from app.stage_translation import run_translation
+    from tests.helpers import llm_jsonl
+    from tests.test_terminology_translation import create_project
+
+    project = await create_project(tmp_path, "First source.\nSecond source.")
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    calls = []
+    guidance_calls = []
+
+    class ExternalValidator:
+        validator_id = "external_retry"
+        version = "1"
+        label = "External retry"
+        phase = "mechanical"
+        scope = "segment"
+
+        def validate(self, context):
+            if context.translation == "candidate":
+                return (TranslationValidationMatch("custom_error", "candidate", 0, 9),)
+            return ()
+
+        def retry_instruction(self, match_type, language):
+            guidance_calls.append((match_type, language))
+            return instruction
+
+    descriptor = PluginDescriptor("external-retry-plugin", "1", PLUGIN_PROTOCOL_VERSION,
+                                  translation_validators=(ExternalValidator(),))
+    monkeypatch.setattr("app.plugins._load_external_descriptors", lambda: [(descriptor, Path("<fixture-plugin>"))])
+    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
+    config_path = project / "config.toml"
+    config_path.write_text(config_path.read_text().replace('validators = []', 'validators = ["external_retry"]'))
+
+    def respond(request):
+        messages = json.loads(request.content)["messages"]
+        assert [message["role"] for message in messages] == ["system", "user"]
+        payload = json.loads(messages[1]["content"])
+        calls.append(payload)
+        if len(calls) > 1:
+            assert payload.get("validation_repair") == (instruction or None)
+            assert payload["segments"] == calls[0]["segments"]
+        records = [{"type": "segment", "id": item["id"],
+                    "translation": "candidate" if len(calls) == 1 and item["source"] == "First source." else "译文"}
+                   for item in payload["segments"]]
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        if instruction is None:
+            with pytest.raises(ProjectError, match="修复指令"):
+                await run_translation(project, Scope(), http_client=client, prompt_language="en")
+            assert len(calls) == 1
+        else:
+            result = await run_translation(project, Scope(), http_client=client, prompt_language="en")
+            assert result["completed"] == 2
+            assert len(calls) == 2
+    assert guidance_calls == [("custom_error", "en")]

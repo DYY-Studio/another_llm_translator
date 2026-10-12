@@ -49,8 +49,6 @@ def _alias_violation_message(violation: _GroupViolation, language: str) -> str:
         return (f"alias {alias} remains owned by {owner} while added to {receiver}" if language == "en" else f"alias {alias} 已由 {owner} 保留却被新增到 {receiver}")
     if kind == "self_alias":
         return (f"term {values[0]} contains its own source as alias {values[1]}" if language == "en" else f"术语 {values[0]} 将自身原文 {values[1]} 作为 alias")
-    if kind == "non_root_receiver":
-        return (f"alias receiver {values[0]} is not a root term" if language == "en" else f"alias 接收方 {values[0]} 不是组根术语")
     if kind == "disabled_receiver":
         return (f"disabled term {values[0]} cannot receive alias {values[1]}" if language == "en" else f"已禁用术语 {values[0]} 不能接收 alias {values[1]}")
     if kind == "unknown_alias":
@@ -390,15 +388,6 @@ def _alias_violations(
                 for alias_form in sorted(added)
             )
             continue
-        if state.get("group_primary") is not None:
-            violations.extend(
-                (
-                    "non_root_receiver",
-                    (normalized, str(state["group_primary"]), alias_form),
-                )
-                for alias_form in sorted(added)
-            )
-            continue
         for alias_form in sorted(added):
             alias_owners = owners.get(alias_form, set())
             if not alias_owners:
@@ -439,7 +428,6 @@ def _analyze_decisions(
     list[str],
     list[tuple[str, str]],
     list[dict[str, Any]],
-    list[dict[str, Any]],
     bool,
 ]:
     document = parse_jsonl_document(content, record_type="decision")
@@ -460,8 +448,6 @@ def _analyze_decisions(
     ignored_read_only: list[str] = []
     seen_targets: set[str] = set()
     normalized_redundant: list[tuple[str, str]] = []
-    invalid_records: list[dict[str, Any]] = []
-    raw_by_normalized: dict[str, dict[str, Any]] = {}
     visible_forms = {
         str(value)
         for state in visible_states
@@ -478,7 +464,6 @@ def _analyze_decisions(
                 **({"normalized": normalized} if isinstance(normalized, str) else {}),
             }
         )
-        invalid_records.append(deepcopy(value))
 
     for value in document.records:
         normalized = value.get("normalized")
@@ -494,7 +479,6 @@ def _analyze_decisions(
             reject("duplicate_record", f"术语决策重复：{normalized}", value)
             continue
         seen_targets.add(normalized)
-        raw_by_normalized[normalized] = value
         if action not in DECISION_ACTIONS:
             reject("invalid_action", f"术语决策 action 无效：{normalized}", value)
             continue
@@ -732,11 +716,6 @@ def _analyze_decisions(
             }
         )
         decisions.pop(normalized, None)
-        if (
-            normalized in raw_by_normalized
-            and raw_by_normalized[normalized] not in invalid_records
-        ):
-            invalid_records.append(deepcopy(raw_by_normalized[normalized]))
     missing = sorted(set(expected) - seen_targets)
     if missing:
         errors.extend(
@@ -752,7 +731,6 @@ def _analyze_decisions(
         ignored_read_only,
         normalized_redundant,
         errors,
-        invalid_records,
         batch_error,
     )
 
@@ -857,7 +835,7 @@ def _relationship_violation_nodes(
         "unknown_alias",
     }:
         return {values[0]}
-    if kind in {"non_root_receiver", "alias_transfer", "unknown_owner", "group_alias_overlap"}:
+    if kind in {"alias_transfer", "unknown_owner", "group_alias_overlap"}:
         return set(values[:2])
     return set(values)
 

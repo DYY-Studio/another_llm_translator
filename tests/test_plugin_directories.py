@@ -71,6 +71,8 @@ def _validator_body(
         "    label = 'Fixture'\n"
         "    def validate(self, context):\n"
         "        return ()\n"
+        "    def retry_instruction(self, match_type, language):\n"
+        "        return ''\n"
         "\n"
         "def descriptor():\n"
         f"{marker_code}"

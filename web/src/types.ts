@@ -34,7 +34,10 @@ export interface SummaryArtifact {
   error_message?: string | null;
   error?: string | null;
   refs?: string[];
-  source_range: Record<string, unknown>;
+  source_range: {
+    segments: Array<{ segment_id: string; original_segment_id?: string }>;
+    [key: string]: unknown;
+  };
   source_changed: boolean;
   expired: boolean;
   expiry_reason: SummaryExpiryReason | null;
@@ -119,7 +122,18 @@ export interface Segment {
   };
 }
 
+export interface SegmentTermMatch {
+  source: string;
+  preferred_translation: string | null;
+  category: string | null;
+  description: string | null;
+  aliases: string[];
+  primary_source?: string;
+  group_claims?: TermDecisionConflicts["group_claims"];
+}
+
 export interface SegmentDetail extends Segment {
+  matched_terms: SegmentTermMatch[];
   context: {
     before: Segment[];
     after: Segment[];
@@ -995,10 +1009,11 @@ export interface ProjectConfig {
   validation: {
     translation: {
       validators: string[];
-      alignment: { decision_preset: string; confidence_threshold: number; tail_segments: number };
+      alignment: { decision_preset: string; confidence_threshold: number; warning_threshold: number; tail_segments: number };
       decision_enabled: boolean;
       decision_preset: string;
       decision_confidence_threshold: number;
+      decision_warning_threshold: number;
       decision_context_enabled: boolean;
       decision_previous_segments: number;
       max_retry_attempts: number;

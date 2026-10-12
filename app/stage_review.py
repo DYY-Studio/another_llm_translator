@@ -44,7 +44,7 @@ from .sqlite_storage import (
     record_header,
 )
 
-from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _base_results, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _frozen_run_options, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _segment_model_payload_value, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests, _FORMAT_CORRECTION)
+from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _base_results, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _frozen_run_options, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _segment_model_payload_value, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests)
 
 def _parse_review_items(
     content: str, expected_ids: list[str]
@@ -542,14 +542,13 @@ async def run_review(
             list(chunk.segments),
             payload_builder=payload_builder,
             prompt=prompt_for_items(list(chunk.segments)),
+            prompt_language=language,
             config=config,
             llm=state.llm,
             stage=stage,
             accept=accept_result,
             save_error=save_external_error,
             parse=_map_local_review_response,
-            format_correction=_FORMAT_CORRECTION[language],
-            prompt_language=language,
             by_id=by_id,
             segments=segments,
             prompt_partition_key=prompt_partition_key,

@@ -1465,16 +1465,8 @@ async def test_advisory_term_usage_repairs_once_even_when_hard_repairs_are_zero(
     assert summary["failed"] == 0
     assert len(calls) == 2
     assert calls[0]["terms"] == calls[1]["terms"]
-    assert calls[1]["segments"][0]["validation_matches"][0] == {
-        "validator": "preferred_term_usage",
-        "match_type": "preferred_term_missing",
-        "severity": "advisory",
-        "start": None,
-        "end": None,
-        "term_source": "Alice",
-        "matched_source": "Alice",
-        "expected_translation": "爱丽丝",
-    }
+    assert calls[1]["validation_repair"] == "对源文中适用的术语使用本次提供的推荐译名"
+    assert calls[1]["segments"] == calls[0]["segments"]
     record = read_jsonl(project, project / "stages" / "translation.jsonl")[-1]
     assert record["validation_status"] == "passed"
     assert record["validation_findings"] == []
@@ -2321,8 +2313,9 @@ async def test_model_context_error_triggers_runtime_segment_split(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("repair_rounds", [1, 2])
 async def test_validation_repair_context_error_splits_without_part_results(
-    tmp_path: Path,
+    tmp_path: Path, repair_rounds: int,
 ) -> None:
     project = await create_project(tmp_path, "ABCDEFGH")
     config_path = project / "config.toml"
@@ -2333,17 +2326,22 @@ async def test_validation_repair_context_error_splits_without_part_results(
         encoding="utf-8",
     )
 
+    root_repairs = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal root_repairs
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         item = payload["segments"][0]
         if "validation_repair" in payload and len(item["source"]) > 2:
+            if len(item["source"]) == 8:
+                root_repairs += 1
             return httpx.Response(
                 400,
                 text="context_length_exceeded: maximum context tokens",
             )
         translation = (
             "好" * len(item["source"])
-            if "validation_repair" in payload
+            if "validation_repair" in payload and root_repairs >= repair_rounds
             else "カ" * len(item["source"])
         )
         return httpx.Response(
@@ -2379,6 +2377,7 @@ async def test_validation_repair_context_error_splits_without_part_results(
     assert len(completed) == 1
     assert completed[0]["segment_id"] == "F0001-S000001"
     assert completed[0]["text"] == "好" * 8
+    assert root_repairs == repair_rounds
 
 
 @pytest.mark.asyncio
@@ -2594,8 +2593,9 @@ async def test_draft_scan_preserves_existing_translation_until_force(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("crash", [False, True])
-async def test_draft_scan_resume_keeps_successful_results_and_original_scope(
-    tmp_path: Path, crash: bool
+@pytest.mark.parametrize("include_draft", [False, True])
+async def test_scan_resume_keeps_successful_results_and_original_scope(
+    tmp_path: Path, crash: bool, include_draft: bool,
 ) -> None:
     project = await create_project(tmp_path, "Alice entered.\nBob waved.")
     use_llm_preset(tmp_path, target_chunk_input_tokens=1)
@@ -2608,14 +2608,18 @@ async def test_draft_scan_resume_keeps_successful_results_and_original_scope(
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         requests.append(payload)
-        if cancel and "Bob" in payload["segments"][0]["source"]:
+        source = payload["segments"][0]["source"] if include_draft else payload["source_segments"][0]
+        if cancel and "Bob" in source:
             raise ProcessCrash if crash else asyncio.CancelledError
         records = [
             {"type": "segment", "id": item["id"], "translation": "译文"}
-            for item in payload["segments"]
+            for item in payload.get("segments", [])
         ]
-        if payload["response_mode"] != "translation-only":
-            records.insert(0, {"type": "no_terms"})
+        if not include_draft or payload["response_mode"] != "translation-only":
+            records.insert(0, {
+                "type": "term", "source": "Entity", "category": "名称",
+                "description": "z-first" if "Alice" in source else "a-later",
+            })
         return httpx.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
         )
@@ -2623,26 +2627,34 @@ async def test_draft_scan_resume_keeps_successful_results_and_original_scope(
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ProcessCrash if crash else asyncio.CancelledError):
             await run_terminology(
-                project, Scope(), http_client=client, include_draft_translation=True
+                project, Scope(), http_client=client, include_draft_translation=include_draft,
             )
         from app.execution import find_running_runs
 
         running = find_running_runs(project, "terminology")
         run_id = running[0]["run_id"] if crash else None
-        assert len(load_stage_history(project, "translation")) == 1
+        assert len(load_stage_history(project, "translation")) == (1 if include_draft else 0)
         cancel = False
         result = await run_terminology(
             project,
             Scope(only_segment="F0001-S000001") if crash else Scope(),
             http_client=client,
-            include_draft_translation=True,
+            include_draft_translation=include_draft,
             resume_run_id=run_id,
         )
     if crash:
         assert result["run_id"] == run_id
-    assert result["selected"] == 2
-    assert len(load_stage_history(project, "translation")) == 2
-    assert sum("Alice" in payload["segments"][0]["source"] for payload in requests) == 1
+    if include_draft:
+        assert result["selected"] == 2
+    assert len(load_stage_history(project, "translation")) == (2 if include_draft else 0)
+    assert sum("Alice" in (payload["segments"][0]["source"] if include_draft
+                            else payload["source_segments"][0]) for payload in requests) == 1
+    candidates = read_jsonl(project, project / "terminology" / "candidates.jsonl")
+    assert [row["source_order"] for row in candidates] == [
+        {"segment_id": "F0001-S000001", "offset": 0},
+        {"segment_id": "F0001-S000002", "offset": 0},
+    ]
+    assert load_terms(project)["terms"][0]["description"] == "z-first；a-later"
 
 
 @pytest.mark.asyncio
@@ -2848,7 +2860,7 @@ async def test_draft_scan_requires_explicit_term_response_before_saving(
     assert len(requests) == (1 if declaration == {"type": "no_terms"} else 2)
     assert all(request["response_mode"] == "terms+translation" for request in requests)
     if len(requests) == 2:
-        assert "format_correction" in requests[1]
+        assert "format_correction" not in requests[1]
     assert load_stage_history(project, "translation")[0]["text"] == "门开了。"
 
 
@@ -2937,3 +2949,63 @@ async def test_draft_scan_accepts_model_merged_term_and_alias_without_retry(
     assert load_terms(project)["terms"][0]["aliases"] == ["せいが"]
     assert result["draft_progress"]["terminology"]["completed"] == 1
     assert result["draft_progress"]["translation"]["completed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_translation_persists_nonrepairable_warning_before_run_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import stage_translation
+    from app.translation_validation import TranslationValidationMatch
+
+    project = await create_project(tmp_path, "first\nsecond")
+    extra = tmp_path / "extra.txt"
+    extra.write_text("later", encoding="utf-8")
+    add_project_files(project, [str(extra)])
+    validated = asyncio.Event()
+    original_context = stage_translation._project_context
+
+    class WarningValidator:
+        validator_id = "warning_probe"
+        version = "1"
+        label = "warning probe"
+        phase = "alignment"
+        scope = "response"
+
+        async def validate_response(self, contexts):
+            validated.set()
+            return {context.segment_id: (TranslationValidationMatch(
+                "segment_alignment_uncertain", None, None, None,
+                severity="advisory", repairable=False,
+            ),) for context in contexts}
+
+    def project_context(*args, **kwargs):
+        config, *rest = original_context(*args, **kwargs)
+        config["_translation_validator_instances"] = (WarningValidator(),)
+        return config, *rest
+
+    async def handler(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if any(item["source"] == "later" for item in payload["segments"]):
+            await asyncio.Event().wait()
+        return translation_response(request)
+
+    monkeypatch.setattr(stage_translation, "_project_context", project_context)
+    progress = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        task = asyncio.create_task(run_translation(
+            project, Scope(), http_client=client,
+            on_progress=lambda *counts: progress.append(counts),
+        ))
+        try:
+            await asyncio.wait_for(validated.wait(), 5)
+            await asyncio.sleep(0)
+            records = load_stage_history(project, "translation")
+            assert len(records) == 2
+            assert all(record["validation_status"] == "warning" for record in records)
+            assert progress[-1] == (2, 0, 3)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    assert len(load_stage_history(project, "translation")) == 2

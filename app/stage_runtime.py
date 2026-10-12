@@ -25,6 +25,7 @@ from .errors import (
     ExternalError,
     FatalExternalError,
     IncompleteError,
+    ProjectError,
     RequestSizeError,
     StorageError,
     UsageError,
@@ -72,40 +73,6 @@ from .sqlite_storage import (
     resolve_stage_result_texts,
     read_json,
 )
-
-_FORMAT_CORRECTION = {
-    "zh-CN": (
-        "只处理当前待处理内容，并完整覆盖本次内容，遵守固定字段。"
-        "严格 JSONL 结构：每个非空物理行一个紧凑 JSON 对象，仅用换行分隔记录，"
-        '末行精确为 {"type":"end"}。'
-    ),
-    "en": (
-        "Process only the current pending content, cover it completely, and follow "
-        "the fixed fields. Use strict JSONL structure: one compact JSON object per "
-        'non-empty physical line, separated only by newlines, ending exactly with {"type":"end"}.'
-    ),
-}
-
-_VALIDATION_REPAIR = {
-    "zh-CN": (
-        "若 validation_matches 包含 segment_misaligned，整批按各 ID 的原文重新翻译，"
-        "不得交换 ID、只改尾部或沿用错位内容。否则以 failed_candidate 为基准，仅修复 validation_matches 所列问题，"
-        "返回完整且格式合规的译文。对于 advisory 术语建议，先判断推荐译名"
-        "是否适合当前语境；适用时采用，不适用时可以保留候选。"
-        "简称或部分名称应按对应部分修正，保留原文的简称形式。"
-    ),
-    "en": (
-        "Use failed_candidate as the base for ordinary findings; fix only the issues in "
-        "validation_matches, and return a complete, format-compliant translation. "
-        "If validation_matches contains segment_misaligned, instead retranslate the whole batch from each ID’s own source; "
-        "do not swap IDs, fix only the tail, or retain shifted content. "
-        "For advisory terminology suggestions, first decide whether the "
-        "recommended translation fits this context; use it when it does, but "
-        "you may keep the candidate when it does not. For a short form or partial "
-        "name, correct the corresponding part while preserving the source abbreviation."
-    ),
-}
-
 
 def _frozen_run_options(project: Path, run_id: str | None) -> dict[str, dict[str, str]] | None:
     if run_id is None:
@@ -871,6 +838,7 @@ async def _localized_request_loop(
     *,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
     prompt: str,
+    prompt_language: str,
     config: dict[str, Any],
     llm: LLMClient,
     stage: str,
@@ -880,8 +848,6 @@ async def _localized_request_loop(
         [str, dict[str, str]],
         _SegmentParseResult,
     ],
-    format_correction: str,
-    prompt_language: str,
     by_id: dict[str, dict[str, Any]],
     segments: list[dict[str, Any]],
     prompt_partition_key: Callable[[dict[str, Any]], object],
@@ -909,22 +875,30 @@ async def _localized_request_loop(
         if not items:
             payload["segments"] = []
         if repair_candidates is not None:
-            payload["segments"] = [
-                {
-                    "id": item["segment_id"],
-                    "source": segment_model_source(item),
-                    "failed_candidate": segment_model_text(
-                        item,
-                        str(repair_candidates[str(item["segment_id"])]["candidate"]),
-                    ),
-                    "validation_matches": [finding for finding in repair_candidates[str(item["segment_id"])]["findings"]
-                                           if finding.get("repairable", True)],
-                }
+            checks = sorted({
+                (str(finding["validator"]), str(finding["match_type"]))
                 for item in items
-            ]
-            payload["validation_repair"] = _VALIDATION_REPAIR[prompt_language]
-        if format_attempt:
-            payload["format_correction"] = format_correction
+                for finding in repair_candidates[str(item["segment_id"])]["findings"]
+                if finding.get("repairable", True)
+                and (finding["validator"], finding["match_type"]) != ("response_gate", "validation_blocked")
+            })
+            validators = {
+                validator.validator_id: validator
+                for validator in config["_translation_validator_instances"]
+            }
+            instructions = []
+            for validator_id, match_type in checks:
+                try:
+                    instruction = validators[validator_id].retry_instruction(match_type, prompt_language)
+                except Exception as exc:
+                    raise ProjectError(f"翻译校验器修复指令生成失败：{validator_id}") from exc
+                if not isinstance(instruction, str):
+                    raise ProjectError(f"翻译校验器返回了无效修复指令：{validator_id}")
+                if instruction.strip():
+                    instructions.append(instruction.strip())
+            feedback = "\n".join(dict.fromkeys(instructions))
+            if feedback:
+                payload["validation_repair"] = feedback
         payload, id_map = localize_request_ids(payload, items)
         messages = render_messages(prompt, payload)
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
@@ -1354,8 +1328,11 @@ def _replace_with_runtime_parts(
     parts[0]["_source_offset"] = source_offset
     parts[1]["_source_offset"] = source_offset + len(left_source)
     expected = original_parts.setdefault(original_id, [segment_id])
-    index = expected.index(segment_id)
-    expected[index : index + 1] = part_ids
+    if segment_id == original_id:
+        expected[:] = part_ids
+    else:
+        index = expected.index(segment_id)
+        expected[index : index + 1] = part_ids
     for part in parts:
         part_id = str(part["segment_id"])
         part_original[part_id] = original_id

@@ -65,16 +65,20 @@ async def test_alignment_uses_plain_ruby_evidence_and_preserves_finding_offsets(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("choice,confidence,repairs,status", [
-    ("required", 0.9, 1, "passed"),
-    ("acceptable", 0.9, 0, "passed"),
-    ("required", 0.5, 0, "warning"),
-    ("uncertain", 0.9, 0, "warning"),
-    ("still_missing", 0.9, 1, "warning"),
-    ("http_error", 0, 0, "failed"),
-    ("context_error", 0, 0, "failed"),
+@pytest.mark.parametrize("choice,confidence,repairs,status,warning_threshold", [
+    ("required", 0.9, 1, "passed", 0.8),
+    ("acceptable", 0.9, 0, "passed", 0.8),
+    ("required", 0.5, 0, "warning", 0.8),
+    ("uncertain", 0.9, 0, "warning", 0.8),
+    ("still_missing", 0.9, 1, "warning", 0.8),
+    ("http_error", 0, 0, "failed", 0.8),
+    ("context_error", 0, 0, "failed", 0.8),
+    ("uncertain", 0.9, 0, "passed", 0),
+    ("required", 0.5, 0, "passed", 0),
+    ("required", 0.9, 1, "passed", 0),
+    ("acceptable", 0.7, 0, "passed", 0.6),
 ])
-async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypatch, choice, confidence, repairs, status):
+async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypatch, choice, confidence, repairs, status, warning_threshold):
     project = await create_project(tmp_path, "Alice arrived.")
     metadata = read_json(project, project / "project.json")
     write_json(project, project / "terminology" / "terms.json", record_header(
@@ -87,7 +91,7 @@ async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypa
         value.update(context_window_tokens=513, context_safety_margin_tokens=512)
     write_user("decision_presets/local.json").write_text(json.dumps(value), encoding="utf-8")
     config = load_config(project / "config.toml")
-    config["validation"]["translation"].update(validators=["preferred_term_usage"], decision_enabled=True, decision_preset="local")
+    config["validation"]["translation"].update(validators=["preferred_term_usage"], decision_enabled=True, decision_preset="local", decision_warning_threshold=warning_threshold)
     (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
     monkeypatch.setenv("DECISION_TEST_KEY", "test")
     calls = []
@@ -156,12 +160,17 @@ async def test_translation_decision_context_toggle_and_count(tmp_path, monkeypat
     config["validation"]["translation"].update(validators=["preferred_term_usage"], decision_enabled=True,
         decision_preset="local", decision_context_enabled=enabled, decision_previous_segments=count)
     (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+    from app.decision_prompt import get_declaration, prompt_path
+    from app.sqlite_storage import atomic_write_json
+    custom_prompt = {**get_declaration("preferred_term_usage").default, "instructions": "Run-specific nickname policy"}
+    atomic_write_json(prompt_path(project, "preferred_term_usage"), custom_prompt)
     monkeypatch.setenv("DECISION_TEST_KEY", "test")
     calls = []
     def respond(request):
         body = json.loads(request.content)
         if str(request.url) == value["url"]:
             calls.append(body)
+            assert all(question["instructions"].endswith(custom_prompt["instructions"]) for question in body["questions"].values())
             assert body["state"].get("reference_context", []) == expected
             return httpx.Response(200, json=dict(model="decision-test", answers={name: dict(type="choice",
                 choice="acceptable", confidence=0.9,
@@ -180,6 +189,7 @@ async def test_translation_decision_context_toggle_and_count(tmp_path, monkeypat
     store = WebStore(project)
     manual_context = store._translation_validation_context(segment, "她到了。")
     assert list(manual_context.previous_source) == expected
+    assert manual_context.decision_prompts["preferred_term_usage"] == custom_prompt
 
 
 @pytest.mark.asyncio
@@ -231,12 +241,14 @@ def test_decision_presets_inherit_and_override_independently(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("choice,confidence,expected_status,repairs", [
-    ("aligned", 0.9, "passed", 0), ("misaligned", 0.9, "passed", 1),
-    ("uncertain", 0.9, "warning", 0), ("aligned", 0.5, "warning", 0),
-    ("empty_translation", 0.9, "passed", 1),
+@pytest.mark.parametrize("choice,confidence,expected_status,repairs,warning_threshold", [
+    ("aligned", 0.9, "passed", 0, 0.8), ("misaligned", 0.9, "passed", 1, 0.8),
+    ("uncertain", 0.9, "warning", 0, 0.8), ("aligned", 0.5, "warning", 0, 0.8),
+    ("empty_translation", 0.9, "passed", 1, 0.8),
+    ("uncertain", 0.9, "passed", 0, 0), ("aligned", 0.5, "passed", 0, 0),
+    ("misaligned", 0.9, "passed", 1, 0),
 ])
-async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monkeypatch, choice, confidence, expected_status, repairs):
+async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monkeypatch, choice, confidence, expected_status, repairs, warning_threshold):
     diagnostics = Diagnostics(tmp_path / "global.log")
     project = await create_project(tmp_path, "One.\nTwo.\nThree.\nFour.")
     value = preset()
@@ -244,6 +256,7 @@ async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monke
     config = load_config(project / "config.toml")
     config["decision"]["preset"] = "local"
     config["validation"]["translation"]["validators"] = ["segment_alignment"]
+    config["validation"]["translation"]["alignment"]["warning_threshold"] = warning_threshold
     (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
     monkeypatch.setenv("DECISION_TEST_KEY", "test")
     requests, decisions = [], []
@@ -271,6 +284,8 @@ async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monke
     assert {record["validation_status"] for record in records} == {expected_status}
     if repairs:
         assert len(requests[-1]["segments"]) == 4
+        assert requests[-1]["segments"] == requests[0]["segments"]
+        assert requests[-1]["validation_repair"] == "每条译文对应本次同 ID 的源文，保持内容归属"
     repair_logs = [item["message"] for item in diagnostics.logs if item["message"].startswith("validation repair ")]
     assert len(repair_logs) == repairs
     if repairs:
@@ -489,3 +504,179 @@ async def test_alignment_repair_split_does_not_accept_unchecked_partial_candidat
         assert result["completed"] == 1
         assert records[0]["validation_status"] == "warning"
         assert records[0]["validation_findings"][0]["match_type"] == "segment_misaligned"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("warning_threshold,choice,confidence,refused,expected", [
+    (0.6, "aligned", 0.59, False, "advisory"),
+    (0.6, "aligned", 0.6, False, None),
+    (0.6, "misaligned", 0.7, False, None),
+    (0.8, "misaligned", 0.7, False, "advisory"),
+    (0.6, "uncertain", 0.9, False, "advisory"),
+    (0.6, None, 0.9, True, "advisory"),
+    (0, "uncertain", 0.9, False, None),
+    (0, "aligned", 0.1, False, None),
+    (0, None, 0, True, None),
+    (0, "misaligned", 0.9, False, "error"),
+])
+async def test_alignment_warning_threshold_is_independent(
+    warning_threshold, choice, confidence, refused, expected,
+):
+    class Decision:
+        async def choose(self, state, questions, *, segment_id):
+            return {question.name: DecisionAnswer(choice, {}, confidence, refused)
+                    for question in questions}
+
+    validator = SegmentAlignmentValidator(
+        Decision(), confidence_threshold=0.8, warning_threshold=warning_threshold,
+    )
+    findings = await validator.validate_response((
+        TranslationValidationContext("source", "target", segment_id="S1"),
+    ))
+    if expected is None:
+        assert findings == {}
+    else:
+        assert findings["S1"][0].severity == expected
+        assert findings["S1"][0].repairable == (expected == "error")
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, True])
+def test_alignment_warning_threshold_rejects_invalid_config(value) -> None:
+    from app.errors import ConfigError
+
+    config = load_config(Path(__file__).parents[1] / "config/config.toml")
+    config["validation"]["translation"]["alignment"]["warning_threshold"] = value
+    with pytest.raises(ConfigError, match="警告阈值"):
+        dump_config(config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("threshold,choice,confidence,refused,expected", [
+    (0.6, "acceptable", 0.59, False, "preferred_term_uncertain"),
+    (0.6, "acceptable", 0.6, False, None),
+    (0.6, "uncertain", 0.9, False, "preferred_term_uncertain"),
+    (0.6, "required", 0.9, True, "preferred_term_uncertain"),
+    (0, "required", 0.9, True, None),
+])
+async def test_term_warning_threshold_boundary_and_refusal(
+    threshold, choice, confidence, refused, expected,
+):
+    from app.translation_validation import TranslationTermMatch
+    from plugins.term_validation.plugin import PreferredTermUsageValidator
+
+    class Decision:
+        async def choose(self, state, questions, **kwargs):
+            return {question.name: DecisionAnswer(choice, {}, confidence, refused)
+                    for question in questions}
+
+    findings = await PreferredTermUsageValidator().validate(TranslationValidationContext(
+        "Alice arrived.", "她到了。",
+        terms=(TranslationTermMatch("Alice", "Alice", "source", "爱丽丝"),),
+        decision=Decision(), decision_warning_threshold=threshold,
+    ))
+    assert [finding.match_type for finding in findings] == ([] if expected is None else [expected])
+    assert all(not finding.repairable for finding in findings)
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, True])
+def test_term_warning_threshold_rejects_invalid_config(value):
+    from app.errors import ConfigError
+
+    config = load_config(Path("config/config.toml"))
+    config["validation"]["translation"]["decision_warning_threshold"] = value
+    with pytest.raises(ConfigError, match="术语复核警告阈值"):
+        dump_config(config)
+
+
+@pytest.mark.asyncio
+async def test_validation_retry_missing_end_sends_no_empty_feedback(tmp_path):
+    project = await create_project(tmp_path, "One.")
+    config = load_config(project / "config.toml")
+    config["validation"]["translation"]["validators"] = ["japanese_kana"]
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+    requests = []
+
+    def respond(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        records = [{"type": "segment", "id": item["id"],
+                    "translation": "カ" if len(requests) == 1 else "译文"}
+                   for item in payload["segments"]]
+        content = "\n".join(json.dumps(record) for record in records) if len(requests) == 2 else llm_jsonl(records)
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        result = await run_translation(project, Scope(), http_client=client)
+    assert result["completed"] == 1
+    assert len(requests) == 3
+    assert requests[1]["validation_repair"] == "将日语假名译为目标语言"
+    assert requests[2]["segments"] == []
+    assert "validation_repair" not in requests[2]
+    assert all("format_correction" not in request for request in requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,max_parallel", [("parallel", 2), ("ordered_by_file", 1)])
+async def test_validation_repair_uses_current_worker_before_other_translation_finishes(
+    tmp_path, mode, max_parallel,
+):
+    import asyncio
+    from app.project import add_project_files
+    from tests.helpers import use_llm_preset
+
+    project = await create_project(tmp_path, "First source.")
+    extra = tmp_path / "later.txt"
+    extra.write_text("Later source.", encoding="utf-8")
+    add_project_files(project, [str(extra)])
+    config = load_config(project / "config.toml")
+    config["execution"]["scheduling_mode"] = mode
+    config["validation"]["translation"]["validators"] = ["japanese_kana"]
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+    use_llm_preset(tmp_path, max_parallel=max_parallel, max_parallel_per_key=max_parallel)
+    later_started = asyncio.Event()
+    repaired = asyncio.Event()
+    active = peak = 0
+    requests = []
+    repairs = {"First source.": 0, "Later source.": 0}
+
+    async def respond(request):
+        nonlocal active, peak
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        active += 1
+        peak = max(peak, active)
+        try:
+            source = payload["segments"][0]["source"]
+            if "validation_repair" in payload:
+                if source == "First source.":
+                    assert later_started.is_set() == (max_parallel > 1)
+                    repaired.set()
+                repairs[source] += 1
+                translation = "カ" if repairs[source] == 1 else "译文"
+            elif source == "Later source.":
+                later_started.set()
+                await repaired.wait()
+                translation = "カ"
+            else:
+                if max_parallel > 1:
+                    await later_started.wait()
+                translation = "カ"
+            return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+                {"type": "segment", "id": item["id"], "translation": translation}
+                for item in payload["segments"]
+            ])}}]})
+        finally:
+            active -= 1
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        task = asyncio.create_task(run_translation(project, Scope(), http_client=client))
+        try:
+            result = await asyncio.wait_for(task, 5)
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    assert result["completed"] == 2
+    assert len(requests) == 6
+    assert repairs == {"First source.": 2, "Later source.": 2}
+    assert peak == max_parallel

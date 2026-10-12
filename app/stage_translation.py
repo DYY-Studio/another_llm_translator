@@ -5,6 +5,7 @@ import uuid
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 import httpx
@@ -37,6 +38,7 @@ from .plugins import (
 )
 from .sqlite_storage import (
     append_jsonl,
+    append_stage_results,
     latest_stage_states,
     read_content_summaries,
     record_header,
@@ -48,7 +50,7 @@ from .translation_validation import (
     SegmentAlignmentValidator,
 )
 
-from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _frozen_run_options, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _replace_with_runtime_parts, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _segment_model_payload_value, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests, _FORMAT_CORRECTION)
+from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _frozen_run_options, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _replace_with_runtime_parts, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _segment_model_payload_value, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests)
 
 
 def _summary_segment_id(item: dict[str, Any]) -> str:
@@ -638,7 +640,9 @@ async def run_translation(
     translation_validators = tuple(
         SegmentAlignmentValidator(decision_clients[decision_bindings["segment_alignment"]],
             confidence_threshold=alignment_options["confidence_threshold"],
-            tail_segments=alignment_options["tail_segments"])
+            warning_threshold=alignment_options["warning_threshold"],
+            tail_segments=alignment_options["tail_segments"],
+            prompt=config["_decision_prompt_definitions"]["segment_alignment"]["content"])
         if validator.validator_id == "segment_alignment" else validator
         for validator in translation_validators
     )
@@ -646,7 +650,6 @@ async def run_translation(
     result_path = stage_result_path(project, "translation")
     write_lock = asyncio.Lock()
     validation_pending: dict[str, dict[str, Any]] = {}
-    advisory_repair_attempted: set[str] = set()
     failed_ids: set[str] = set()
     failure_counts: Counter[str] = Counter()
     if draft_scan is not None:
@@ -668,7 +671,9 @@ async def run_translation(
             translation=translation,
             terms=term_match_cache.validation_matches_for_item(item),
             decision=decision_client if segment_id not in part_original else None,
+            decision_prompts={key: value["content"] for key, value in config.get("_decision_prompt_definitions", {}).items()},
             decision_confidence_threshold=config["validation"]["translation"]["decision_confidence_threshold"],
+            decision_warning_threshold=config["validation"]["translation"]["decision_warning_threshold"],
             segment_id=original_id or segment_id,
             previous_source=tuple(entry["source"] for entry in context_index.previous(
                 item, config["validation"]["translation"]["decision_previous_segments"],
@@ -696,45 +701,35 @@ async def run_translation(
     report_progress()
 
     async def save_completed(
-        segment_id: str,
-        text: str,
-        request_id: str,
+        completions: list[tuple[str, str, str]],
         *,
         validation_status: str = "passed",
         findings: list[dict[str, Any]] | None = None,
+        findings_by_segment: dict[str, list[dict[str, Any]]] | None = None,
     ) -> None:
-        text = _restore_leading_whitespace(
-            str(by_id[segment_id]["source"]),
-            text,
-        )
+        if not completions:
+            return
+        findings_by_segment = findings_by_segment or {}
+        records = [record_header(
+            "stage_result", str(metadata["project_id"]), stage="translation",
+            segment_id=segment_id, status="completed",
+            text=_restore_leading_whitespace(str(by_id[segment_id]["source"]), text),
+            validation_status="warning" if segment_id in findings_by_segment else validation_status,
+            validation_findings=findings_by_segment.get(segment_id, findings or []),
+            stage_fingerprint=fingerprint, terms_revision=terms_revision,
+            **({"generation_origin": "terminology_draft"} if draft_scan else {}),
+            run_id=run_id, request_id=request_id,
+        ) for segment_id, text, request_id in completions]
         async with write_lock:
-            append_jsonl(
-                project,
-                result_path,
-                record_header(
-                    "stage_result",
-                    str(metadata["project_id"]),
-                    stage="translation",
-                    segment_id=segment_id,
-                    status="completed",
-                    text=text,
-                    validation_status=validation_status,
-                    validation_findings=findings or [],
-                    stage_fingerprint=fingerprint,
-                    terms_revision=terms_revision,
-                    **(
-                        {"generation_origin": "terminology_draft"} if draft_scan else {}
-                    ),
-                    run_id=run_id,
-                    request_id=request_id,
-                ),
-            )
-        completed_ids.add(segment_id)
-        if draft_scan is not None:
-            draft_scan.translation_done.add(segment_id)
-            draft_scan.translation_failed.discard(segment_id)
+            append_stage_results(project, records)
+        for record in records:
+            segment_id = record["segment_id"]
+            completed_ids.add(segment_id)
+            if draft_scan is not None:
+                draft_scan.translation_done.add(segment_id)
+                draft_scan.translation_failed.discard(segment_id)
+            latest_text[segment_id] = record["text"]
         report_progress()
-        latest_text[segment_id] = text
 
     async def save_failed(
         segment_id: str,
@@ -792,7 +787,8 @@ async def run_translation(
     response_groups: list[set[str]] = []
 
     async def accept_response(
-        group: list[dict[str, Any]], candidates: dict[str, tuple[str, Any]], *, complete: bool = True,
+        group: list[dict[str, Any]], candidates: dict[str, tuple[str, Any]], *,
+        complete: bool = True, repair: bool = True,
     ) -> None:
         owners = {part_original.get(str(item["segment_id"]), str(item["segment_id"])) for item in group}
         # A split Segment connects candidate groups until its complete text is available.
@@ -840,6 +836,8 @@ async def run_translation(
                 len(ordered) if blocks_response else len(findings),
                 repairable,
             )
+        completions = []
+        immediate_warnings: dict[str, list[dict[str, Any]]] = {}
         for segment_id in ordered:
             text, request_id = response_candidates.pop(segment_id)
             if segment_id in findings or blocks_response:
@@ -850,11 +848,19 @@ async def run_translation(
                             "start": 0 if hard else None, "end": len(text) if hard else None,
                             **({"matched_text": text} if hard else {}),
                             **({"repairable": False} if not repairable else {})}]
-                validation_pending[segment_id] = {"segment": by_id[segment_id], "candidate": text,
-                                                  "findings": own, "request_id": request_id}
+                if hard or repairable:
+                    validation_pending[segment_id] = {"segment": by_id[segment_id], "candidate": text,
+                                                      "findings": own, "request_id": request_id}
+                else:
+                    validation_pending.pop(segment_id, None)
+                    immediate_warnings[segment_id] = own
+                    completions.append((segment_id, text, request_id))
             else:
                 validation_pending.pop(segment_id, None)
-                await save_completed(segment_id, text, request_id)
+                completions.append((segment_id, text, request_id))
+        await save_completed(completions, findings_by_segment=immediate_warnings)
+        if repair:
+            await repair_validation(owners)
 
     segment_order = {str(item["segment_id"]): index for index, item in enumerate(segments)}
 
@@ -913,6 +919,7 @@ async def run_translation(
             group,
             payload_builder=payload_builder,
             prompt=prompt_for_items(group),
+            prompt_language=language,
             config=config,
             llm=state.llm,
             stage="translation",
@@ -921,8 +928,6 @@ async def run_translation(
             prepare_candidate=prepare_candidate,
             save_error=save_external_error,
             parse=_map_local_translation_response,
-            format_correction=_FORMAT_CORRECTION[language],
-            prompt_language=language,
             by_id=by_id,
             segments=segments,
             prompt_partition_key=prompt_partition_key,
@@ -971,16 +976,15 @@ async def run_translation(
                     if draft_scan
                     else prompt_for_items(group)
                 ),
+                prompt_language=language,
                 config=config,
                 llm=state.llm,
                 stage=run_stage,
                 accept=None,
-                accept_response=accept_response,
+                accept_response=partial(accept_response, repair=False),
                 prepare_candidate=prepare_candidate,
                 save_error=save_external_error,
                 parse=_map_local_translation_response,
-                format_correction=_FORMAT_CORRECTION[language],
-                prompt_language=language,
                 by_id=by_id,
                 segments=segments,
                 prompt_partition_key=prompt_partition_key,
@@ -1126,14 +1130,21 @@ async def run_translation(
                                       "整批译文未完整通过格式校验", candidate=candidate[0] if candidate else None)
         response_groups.clear()
 
-    async def before_finalize() -> None:
-        await fail_incomplete_responses()
-        max_repairs = config["validation"]["translation"]["max_retry_attempts"]
-        hard_repairs = 0
-        while validation_pending:
-            hard_pending = {
+    async def repair_validation(owners: set[str]) -> None:
+        def pending_component() -> dict[str, dict[str, Any]]:
+            return {
                 segment_id: item
                 for segment_id, item in validation_pending.items()
+                if part_original.get(segment_id, segment_id) in owners
+            }
+
+        advisory_repair_attempted: set[str] = set()
+        max_repairs = config["validation"]["translation"]["max_retry_attempts"]
+        hard_repairs = 0
+        while pending := pending_component():
+            hard_pending = {
+                segment_id: item
+                for segment_id, item in pending.items()
                 if _has_hard_validation_findings(item["findings"])
             }
             if hard_pending:
@@ -1170,14 +1181,14 @@ async def run_translation(
 
             advisory_pending = {
                 segment_id: item
-                for segment_id, item in validation_pending.items()
-                if segment_id not in advisory_repair_attempted
+                for segment_id, item in pending.items()
+                if part_original.get(segment_id, segment_id) not in advisory_repair_attempted
                 and any(finding.get("repairable", True) for finding in item["findings"])
             }
             if not advisory_pending:
                 break
             for segment_id in advisory_pending:
-                advisory_repair_attempted.add(segment_id)
+                advisory_repair_attempted.add(part_original.get(segment_id, segment_id))
                 validation_pending.pop(segment_id, None)
             groups = contiguous_groups(
                 (item["segment"] for item in advisory_pending.values()),
@@ -1204,7 +1215,7 @@ async def run_translation(
         exhausted_mode = config["validation"]["translation"]["exhausted_mode"]
         pending_part_originals = {
             part_original[segment_id]
-            for segment_id in validation_pending
+            for segment_id in pending_component()
             if segment_id in part_original
         }
         for original_id in pending_part_originals:
@@ -1227,22 +1238,21 @@ async def run_translation(
                 for part_id in expected:
                     validation_pending.pop(part_id, None)
                 if exhausted_mode == "warning":
-                    await accept_response([by_id[original_id]], {original_id: (request_id, combined)})
+                    await accept_response([by_id[original_id]], {original_id: (request_id, combined)}, repair=False)
                 else:
                     validation_pending[original_id] = {
                         "segment": by_id[original_id], "candidate": combined, "request_id": request_id,
                         "findings": [{**finding, **({"start": 0, "end": len(combined), "matched_text": combined}
                                       if finding["severity"] == "error" else {})} for finding in inherited],
                     }
-        for segment_id, item in validation_pending.items():
+        for segment_id, item in pending_component().items():
+            validation_pending.pop(segment_id)
             if (
                 not _has_hard_validation_findings(item["findings"])
                 or exhausted_mode == "warning"
             ):
                 await save_completed(
-                    segment_id,
-                    item["candidate"],
-                    item["request_id"],
+                    [(segment_id, item["candidate"], item["request_id"])],
                     validation_status="warning",
                     findings=item["findings"],
                 )
@@ -1256,8 +1266,8 @@ async def run_translation(
                     findings=item["findings"],
                 )
 
+    async def before_finalize() -> None:
         await fail_incomplete_responses()
-
         if draft_scan is not None:
             draft_scan.publish(run_id, segments)
             report_progress()

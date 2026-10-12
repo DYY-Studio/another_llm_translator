@@ -698,7 +698,7 @@ def test_web_project_list_reports_repair_for_missing_prompt(
     assert listed.json()["projects"][0]["repair_needed"] is True
 
 
-@pytest.mark.parametrize("schema_version", ["3", "4", "5", None])
+@pytest.mark.parametrize("schema_version", ["3", "4", "5", "6", None])
 def test_web_project_list_checks_schema_read_only_while_project_is_locked(
     tmp_path: Path, schema_version: str | None
 ) -> None:
@@ -1532,11 +1532,17 @@ def test_web_open_project_rejects_unsupported_storage_schema(
     assert "schema_version" in opened.json()["error"]
 
 
-def test_web_lists_and_opens_v5_project_with_silent_upgrade(tmp_path: Path) -> None:
-    from tests.test_sqlite_storage import _seed_v5_summary
+@pytest.mark.parametrize("schema_version", [5, 6])
+def test_web_lists_and_opens_project_with_silent_upgrade(
+    tmp_path: Path, schema_version: int,
+) -> None:
+    from tests.test_sqlite_storage import _seed_v5_summary, _seed_v6_summary
 
     projects_root, project = make_project(tmp_path)
-    _seed_v5_summary(project)
+    if schema_version == 5:
+        _seed_v5_summary(project)
+    else:
+        _seed_v6_summary(project)
     client = TestClient(create_app(projects_root=projects_root))
     backups = project / "snapshots" / "storage_migrations"
 
@@ -3139,6 +3145,7 @@ def test_web_exports_and_publishes_scanned_candidates(tmp_path: Path) -> None:
             str(metadata["project_id"]),
             active_task_id=task_id,
             run_id="RUN-WEB-PARTIAL",
+            source_order={"segment_id": "F0001-S000001", "offset": 0},
             terms=[
                 {
                     "source": "Alice",
@@ -7019,3 +7026,39 @@ async def test_continuous_joint_draft_ends_on_last_executed_stage(
     assert result["status"] == "completed"
     assert result["current_stage"] == "terminology"
     assert result["steps"][-1]["reason"] == "joint_draft_translation"
+
+
+def test_segment_read_keeps_task_status_responsive(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    import threading
+    import httpx
+    from app.web_store import WebStore
+    from tests.test_web_store import create_web_store_project
+
+    project = create_web_store_project(tmp_path)
+    app = create_app(projects_root=project.parent)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_query(self, **kwargs):
+        entered.set()
+        release.wait(2)
+        return {"segments": [], "total": 0}
+
+    monkeypatch.setattr(WebStore, "segment_query", blocked_query)
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            heavy = asyncio.create_task(client.post('/api/v1/projects/web-demo/segments/query', json={"stage": "translation"}))
+            try:
+                assert await asyncio.to_thread(entered.wait, 2)
+                status = await client.get('/api/v1/tasks/active')
+                assert status.status_code == 200
+                assert not heavy.done(), "heavy read blocked task status until it finished"
+            finally:
+                release.set()
+                result = await heavy
+            assert result.status_code == 200
+            assert result.json() == {"segments": [], "total": 0}
+
+    asyncio.run(exercise())

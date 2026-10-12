@@ -33,6 +33,7 @@ from .llm_response import (
 from .sqlite_storage import (
     append_jsonl,
     read_json,
+    read_segments,
     record_exists,
     record_header,
     latest_stage_states,
@@ -43,7 +44,6 @@ from .sqlite_storage import (
     write_summary_run,
 )
 from .stage_runtime import (
-    _FORMAT_CORRECTION,
     _prompt_factory,
     _request_estimate,
     _project_context,
@@ -53,7 +53,12 @@ from .stage_runtime import (
 )
 from .llm_client import empty_response_split_scope
 from .summary_provenance import digest, write_fragment_summary
-from .term_library import _merge_and_publish_terms, load_terms
+from .term_library import (
+    _candidate_source_order,
+    _merge_and_publish_terms,
+    _ordered_term_candidates,
+    load_terms,
+)
 
 
 def draft_run_context(
@@ -211,6 +216,9 @@ class DraftTerminologyScan:
         self.language = language
         self.selected = {str(item["segment_id"]) for item in selected}
         self.selected_items = {str(item["segment_id"]): item for item in selected}
+        self.segment_order = {
+            str(item["segment_id"]): index for index, item in enumerate(read_segments(project))
+        }
         self.translation_done = translation_done
         self.scope = scope
         self.summary_run: dict[str, Any] | None = None
@@ -339,7 +347,10 @@ class DraftTerminologyScan:
                         "_draft_summary": summary,
                     }
                 )
-        if any(item["_draft_terms"] for item in self.work):
+        term_work = any(item["_draft_terms"] for item in self.work)
+        if not create_task and (term_work or self.active.get("status") == "active"):
+            _ordered_term_candidates(project, self.task_id)
+        if term_work:
             self.active = {**self.active, "status": "active"}
         self.prompt_factories = {
             mode: _prompt_factory(
@@ -610,6 +621,9 @@ class DraftTerminologyScan:
                     active_task_id=self.task_id,
                     stage_fingerprint=self.term_fingerprint,
                     segment_ids=[str(item["segment_id"]) for item in items],
+                    source_order=_candidate_source_order(
+                        items, self.segment_order, part_original,
+                    ),
                     terms=terms,
                 ),
             )
@@ -720,8 +734,6 @@ class DraftTerminologyScan:
                     str(index): str(item["segment_id"])
                     for index, item in enumerate(pending, 1)
                 }
-            if attempt:
-                payload["format_correction"] = _FORMAT_CORRECTION[self.language]
             generated_prompt = prompt_builder(pending)
             messages = render_messages(generated_prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"

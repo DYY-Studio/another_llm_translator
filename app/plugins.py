@@ -265,6 +265,7 @@ def _builtin_plugins() -> tuple[plugin_api.PluginDescriptor, ...]:
             plugin_id="builtin-translation-validation",
             version="1",
             protocol_version=plugin_api.PLUGIN_PROTOCOL_VERSION,
+            decision_prompts=(SegmentAlignmentValidator.prompt_declaration(),),
             translation_validators=(
                 JapaneseKanaValidator(),
                 KoreanHangulValidator(),
@@ -503,6 +504,7 @@ def _validate_plugins(
                 or not isinstance(scope, str)
                 or scope not in {"segment", "response"}
                 or not callable(validate)
+                or not callable(getattr(validator, "retry_instruction", None))
             ):
                 raise _descriptor_failure(
                     f"翻译校验器描述不完整：{plugin.plugin_id}.{validator_id}",
@@ -520,6 +522,15 @@ def _validate_plugins(
                     context=context,
                 )
             seen_validators[validator_id] = (plugin.plugin_id, source)
+        from .decision_prompt import validate_declaration
+        if not isinstance(plugin.decision_prompts, tuple):
+            raise _descriptor_failure("Decision 提示词声明必须是 tuple", source)
+        declared = set()
+        for prompt in plugin.decision_prompts:
+            validate_declaration(prompt)
+            if prompt.validator_id not in {v.validator_id for v in validators} or prompt.validator_id in declared:
+                raise _descriptor_failure("Decision 提示词归属或唯一性无效", source)
+            declared.add(prompt.validator_id)
     return tuple(plugins)
 
 

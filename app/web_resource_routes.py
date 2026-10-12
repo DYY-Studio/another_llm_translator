@@ -146,6 +146,9 @@ def register_resource_routes(
     app_root: Path,
     project: Callable[[str], Path],
 ) -> None:
+    from .web_decision_prompt_routes import register_decision_prompt_routes
+    register_decision_prompt_routes(app, project)
+
     SESSION_COOKIE = "another_llm_session"
     _SESSION_TTL_SECONDS = 30 * 24 * 3600
     def valid_session(token: str | None) -> bool:
@@ -481,6 +484,21 @@ def register_resource_routes(
         atomic_write_text(write_user("config/config.toml"), content)
         return {"saved": True}
 
+    @app.get("/api/v1/prompts/{stage}/default")
+    async def get_builtin_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
+        if stage not in PROMPT_RESOURCE_STAGES:
+            raise UsageError(f"未知 Prompt 阶段：{stage}")
+        validate_language(language)
+        def builtin_file(resource: str, value: str) -> Path:
+            return app_root / "prompts" / prompt_file(resource, value)
+        return prompt_view(
+            stage, language,
+            lambda value: builtin_file(stage, value),
+            [value for value in PROMPT_LANGUAGES if builtin_file(stage, value).is_file()],
+            translation_file_for=lambda value: builtin_file("translation", value),
+            fragment_summary_file_for=(lambda value: builtin_file("fragment_summary", value)) if stage == "terminology" else None,
+        )
+
     @app.get("/api/v1/global/prompts/{stage}")
     async def get_global_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
         if stage not in PROMPT_RESOURCE_STAGES:
@@ -527,9 +545,9 @@ def register_resource_routes(
             raise UsageError("config 必须是对象")
         content = dump_config(config)
         root = project(name)
-        resolve_project_config(config, presets_root=app_root)
+        resolve_project_config(config, presets_root=app_root, project=root)
         for stage in LLM_MODEL_STAGES:
-            resolve_project_config(config, stage=stage, presets_root=app_root)
+            resolve_project_config(config, stage=stage, presets_root=app_root, project=root)
         with project_write_lock(root):
             atomic_write_text(root / "config.toml", content)
         return {"saved": True}

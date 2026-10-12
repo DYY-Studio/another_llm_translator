@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -52,6 +54,73 @@ def _prompt_language(language: str | None) -> str | None:
     return str(language)
 
 
+def _summary_view(root: Path) -> dict[str, Any]:
+    selected = {
+        (str(item["file_id"]), str(item["part_id"])): bool(item["selected"])
+        for item in read_summary_participation(root)
+    }
+    boundaries: dict[tuple[str, str], int] = {}
+    current_by_boundary: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for segment in load_segments(root):
+        if segment.get("is_empty"):
+            continue
+        key = (str(segment["file_id"]), str(segment["part_id"]))
+        boundaries[key] = boundaries.get(key, 0) + 1
+        current_by_boundary.setdefault(key, []).append(segment)
+    artifacts = read_content_summaries(root)
+    artifacts_by_boundary: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for artifact in artifacts:
+        boundary = (str(artifact["file_id"]), str(artifact["part_id"]))
+        artifacts_by_boundary.setdefault(boundary, []).append(artifact)
+    visible_artifacts = []
+    for artifact in artifacts:
+        boundary = (str(artifact["file_id"]), str(artifact["part_id"]))
+        assessment = (
+            assess_full_summary(
+                artifact,
+                current_by_boundary.get(boundary, []),
+                artifacts_by_boundary.get(boundary, []),
+            )
+            if artifact.get("kind") == "full"
+            else None
+        )
+        visible_artifacts.append(
+            {
+                **artifact,
+                "source_range": {
+                    **artifact["source_range"],
+                    "segments": [
+                        {key: item[key] for key in ("segment_id", "original_segment_id") if key in item}
+                        for item in artifact["source_range"].get("segments", [])
+                    ],
+                },
+                "expired": assessment.expired if assessment is not None else False,
+                "expiry_reason": (
+                    assessment.expiry_reason if assessment is not None else None
+                ),
+            }
+        )
+    return {
+        "participation": [
+            {
+                "file_id": file_id,
+                "part_id": part_id,
+                "selected": selected.get((file_id, part_id), False),
+            }
+            for file_id, part_id in sorted(boundaries)
+        ],
+        "boundaries": [
+            {
+                "file_id": file_id,
+                "part_id": part_id,
+                "segment_count": count,
+            }
+            for (file_id, part_id), count in sorted(boundaries.items())
+        ],
+        "artifacts": visible_artifacts,
+    }
+
+
 def register_summary_routes(
     *,
     app: FastAPI,
@@ -64,67 +133,7 @@ def register_summary_routes(
     @app.get("/api/v1/projects/{name}/summaries")
     async def summaries(name: str) -> dict[str, Any]:
         root = project(name)
-        selected = {
-            (str(item["file_id"]), str(item["part_id"])): bool(item["selected"])
-            for item in read_summary_participation(root)
-        }
-        boundaries: dict[tuple[str, str], int] = {}
-        for segment in load_segments(root):
-            if segment.get("is_empty"):
-                continue
-            key = (str(segment["file_id"]), str(segment["part_id"]))
-            boundaries[key] = boundaries.get(key, 0) + 1
-        artifacts = read_content_summaries(root)
-        current_by_boundary: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for segment in load_segments(root):
-            if segment.get("is_empty"):
-                continue
-            boundary = (str(segment["file_id"]), str(segment["part_id"]))
-            current_by_boundary.setdefault(boundary, []).append(segment)
-        artifacts_by_boundary: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for artifact in artifacts:
-            boundary = (str(artifact["file_id"]), str(artifact["part_id"]))
-            artifacts_by_boundary.setdefault(boundary, []).append(artifact)
-        visible_artifacts = []
-        for artifact in artifacts:
-            boundary = (str(artifact["file_id"]), str(artifact["part_id"]))
-            assessment = (
-                assess_full_summary(
-                    artifact,
-                    current_by_boundary.get(boundary, []),
-                    artifacts_by_boundary.get(boundary, []),
-                )
-                if artifact.get("kind") == "full"
-                else None
-            )
-            visible_artifacts.append(
-                {
-                    **artifact,
-                    "expired": assessment.expired if assessment is not None else False,
-                    "expiry_reason": (
-                        assessment.expiry_reason if assessment is not None else None
-                    ),
-                }
-            )
-        return {
-            "participation": [
-                {
-                    "file_id": file_id,
-                    "part_id": part_id,
-                    "selected": selected.get((file_id, part_id), False),
-                }
-                for file_id, part_id in sorted(boundaries)
-            ],
-            "boundaries": [
-                {
-                    "file_id": file_id,
-                    "part_id": part_id,
-                    "segment_count": count,
-                }
-                for (file_id, part_id), count in sorted(boundaries.items())
-            ],
-            "artifacts": visible_artifacts,
-        }
+        return await asyncio.to_thread(_summary_view, root)
 
     @app.put("/api/v1/projects/{name}/summaries/participation")
     async def save_participation(

@@ -57,6 +57,7 @@ FastAPI 应用装配、鉴权、生命周期、静态资源和 route 注册。�
 
 - `web_chatgpt_routes.py`：ChatGPT 状态、本机连接管理与 Plan 局域网会话边界。
 - `web_resource_routes.py`：全局配置、Prompt、Adapter、Preset、凭据和服务设置。
+- `web_decision_prompt_routes.py`：插件声明驱动的 Decision 提示词编辑与命名模板。
 - `web_project_routes.py`：项目创建、打开、删除、File 管理与替换。
 - `web_segment_routes.py`：Segment 浏览、编辑和阶段结果重置。
 - `web_term_routes.py`：术语扫描、编辑、交换、发布与自动决策入口。
@@ -79,7 +80,8 @@ Route 只校验 HTTP 输入并调用共享后端。请求模型集中在 `web_pa
 ### `app/sqlite_storage.py`
 
 项目数据库的唯一持久化实现，负责 schema 初始化/迁移、事务、File/Segment、术语、阶段结果、
-Run 索引和内容概括记录；集中保存按摘要值去重的概括源文本快照，读取时还原生成时原文与切片身份。
+Run 索引、请求元数据共享、Adapter 状态无损压缩和内容概括记录；集中保存按摘要值去重的概括源文本快照，读取时还原生成时原文与切片身份。
+维护与源内容、Adapter 状态同事务更新的 Segment 格式计数投影，供 Web 读取，避免还原完整 Adapter 状态。
 批量解析应用正文的精确引用，业务副本与持久化载荷分离。调用者通过明确方法读写，不在 route 或阶段模块中直接拼接 SQL。
 
 ### `app/file_replacement.py`
@@ -118,11 +120,11 @@ Run 索引和内容概括记录；集中保存按摘要值去重的概括源文�
 ### `app/stage_runtime.py`
 
 模型阶段共享运行逻辑，包括前置检查、设置差异处理、Prompt 装配、请求执行、响应归属和结果提交。Document Adapter 状态、运行选项和 Prompt 要求的读取由运行及项目设置预览共享。
-具体阶段规则不得堆回此模块。
+翻译修复指令由校验器提供，此模块只按本次目标收集和去重。具体阶段规则不得堆回此模块。
 
 ### 具体阶段模块
 
-- `stage_translation.py`：翻译 payload、完整候选批次验收、拆分 Segment 重组、翻译校验与修复。
+- `stage_translation.py`：翻译 payload、完整候选批次验收、拆分 Segment 重组、组件内即时校验修复与预算耗尽处理。
 - `stage_review.py`：校对/润色的基准选择、accepted/suggested 结果，以及建议应用。
 - `stage_terminology.py`：术语扫描、候选任务、联合片段概括和发布，分别跟踪术语与概括的切片覆盖。
 - `stage_terminology_draft.py`：实验粗翻及联合概括的扫描状态、合并请求与独立结果恢复，分别跟踪各类结果的切片覆盖，按本次响应模式选择 Document Adapter 要求；复用翻译执行器进行译文校验和保存。
@@ -190,7 +192,7 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 
 ### `app/translation_validation.py`
 
-翻译校验协议、内置机械与错位校验、分层门控和 finding 规范化。校验器不拥有 HTTP 重试或结果提交。
+翻译校验协议、内置机械与错位校验、各校验器的修复指令、分层门控和 finding 规范化。校验器不拥有 HTTP 重试或结果提交。
 
 ### `app/decision.py`
 
@@ -253,3 +255,7 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 - 新增或移动职责时更新本文，并从其他文档删除重复模块清单。
 - 精确字段和算法优先由类型、迁移和测试表达；只有影响跨模块依赖时才在本文记录。
 - 工程取舍和提交要求统一见 [`AGENTS.md`](../AGENTS.md)，不在本文重复。
+
+### `app/decision_prompt.py`
+
+声明并校验插件拥有的 Decision 提示词，解析项目／全局覆盖与插件默认内容，加载运行快照。固定选项来自插件声明；动态问题定位与结果处理属于校验器。

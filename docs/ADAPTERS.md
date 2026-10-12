@@ -558,7 +558,7 @@ schema = 1
 [plugin]
 id = "my-documents"
 version = "1.0.0"
-protocol = 14
+protocol = 17
 entrypoint = "plugin:descriptor"
 ```
 
@@ -579,7 +579,7 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=14,
+        protocol_version=17,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```
@@ -588,15 +588,21 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `14`；每个校验器声明唯一的 `validator_id`、`version`、`label`、`phase`、`scope`，并按执行粒度实现同步或异步校验。
+翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `17`；每个校验器声明唯一的 `validator_id`、`version`、`label`、`phase`、`scope`，并按执行粒度实现同步或异步校验。
 
-上下文包含当前 Segment 的 ID、源文、候选译文、逐 Segment 术语命中，以及可选的宿主 `DecisionService` 和置信度门槛。术语命中包含分类和说明；上下文不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
+上下文包含当前 Segment 的 ID、源文、候选译文、逐 Segment 术语命中，以及可选的宿主 `DecisionService` 和独立的修复置信度门槛、警告阈值（`decision_warning_threshold`）。术语命中包含分类和说明；上下文不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
 
 `phase` 为 `mechanical`、`alignment` 或 `terminology`，宿主按此顺序执行；同层按 ID 排序，完成整层后存在任何 finding 就阻挡后续层。`scope=segment` 使用 `validate(context)`；`scope=response` 使用 `validate_response(contexts)`，输入为按请求顺序排列的完整 Segment 上下文元组，返回以输入 Segment ID 为键、finding 元组为值的字典。手动编辑只执行逐 Segment 校验。
 
 `TranslationValidationMatch.severity` 为 `error` 或 `advisory`。
 
 `error` 必须指向候选译文中的非空范围；候选译文为空时使用空文本和 `start=end=0`。硬错误使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为 warning。advisory 的 `repairable` 默认 `true`，设为 `false` 时只保存 warning，不进入修复请求；error 必须可修复。
+
+每个校验器必须实现同步方法 `retry_instruction(match_type: str, language: str) -> str`。
+`match_type` 为该校验器产生的错误类型，`language` 为本次 Prompt 语言（`zh-CN` 或 `en`）。
+返回值是只依赖当前请求的简短指令，不引用旧响应，不重复源文、术语数据或完整协议；空字符串明确表示不附加指令。
+宿主只对本次重试目标的可修复 finding 调用该方法，按校验器和错误类型去重调用，再按指令文本去重写入 `validation_repair`。
+缺少方法、返回非字符串或方法执行失败时明确失败，不回落到错误标记。旧协议插件须更新 manifest 和描述符版本，不保留兼容路径。
 
 首个真实外部示例是可选的 `plugins/term_validation/` 目录插件，提供
 `preferred_term_usage`；它先检查实际命中的推荐译名是否缺失，可显式启用 Decision 语义复核。
@@ -616,6 +622,9 @@ class MyValidator:
 
     def validate(self, context: TranslationValidationContext):
         return ()
+
+    def retry_instruction(self, match_type: str, language: str) -> str:
+        return ""
 ```
 
 导入选项只支持上述类型明确的单层 choice 声明；插件不得把它当作通用配置或
@@ -711,13 +720,13 @@ OpenAI Decisions 将共享证据编码为 JSON 字符串写入 `input`，问题�
 空响应、JSON 解析失败、回答缺失或重复、选项错误及非法概率，与网络异常、HTTP 429 和 5xx 共用 `retry.http_max_attempts` 及指数退避；预算耗尽后明确失败。每次尝试记录到诊断及已启用的 Debug 保存中。明确拒答返回 `refused=True`。
 
 `validation.translation` 的 `decision_enabled` 默认 false，`decision_preset` 默认空字符串，
-`decision_confidence_threshold` 默认 0.8；`decision_context_enabled` 默认 false，
+`decision_confidence_threshold` 与 `decision_warning_threshold` 默认均为 0.8，后者为 0 时关闭不确定警告；`decision_context_enabled` 默认 false，
 `decision_previous_segments` 默认 1，为非负整数。启用上文时，
 `TranslationValidationContext.previous_source` 提供同一 File、同一分区内前序非空 Segment 的原文。
 推荐译名复核的 `terms` 列出本次提问的术语，`matched_terms` 只保留未提问的其他命中术语，供重叠关系判断。
 推荐译名复核需要安装并选择 `preferred_term_usage`。`decision.preset` 提供通用连接；校验器的 `decision_preset` 为空时继承通用连接，非空时独立覆盖。置信度及上下文设置按校验器独立配置。Run 在 `decision_presets/<preset_id>.json` 保存所有实际使用的连接；同一 Preset 共用客户端与限流。实际连接、校验器绑定、置信度门槛及上文设置参与翻译指纹。
 
-错位校验器 `segment_alignment` 为内置响应级校验器，通过 `validation.translation.validators` 显式启用。`validation.translation.alignment` 的 `decision_preset` 默认空字符串、`confidence_threshold` 默认 0.8、`tail_segments` 默认 3 且必须为正整数。宿主将拆分片段重组后，按请求顺序抽取尾部完整 Segment；证据为 `segments` 配对列表；其中原文和译文均去除 Ruby 标记及注音、保留正文，持久化文本和 finding 定位保持原样。问题按配对顺序命名，选项为 `aligned`、`misaligned`、`uncertain`。不携带历史上文，也不在超限时缩减抽查数量。错位 findings 为 `segment_misaligned`，不确定为不可修复的 advisory `segment_alignment_uncertain`；`matched_source` 记录抽查 Segment ID。两者都覆盖整批，具体保存和修复语义见 [翻译阶段](MINIMAL.md#53-翻译)。
+错位校验器 `segment_alignment` 为内置响应级校验器，通过 `validation.translation.validators` 显式启用。`validation.translation.alignment` 的 `decision_preset` 默认空字符串、`confidence_threshold` 和 `warning_threshold` 默认均为 0.8（后者为 0 时关闭不确定警告）、`tail_segments` 默认 3 且必须为正整数。宿主将拆分片段重组后，按请求顺序抽取尾部完整 Segment；证据为 `segments` 配对列表；其中原文和译文均去除 Ruby 标记及注音、保留正文，持久化文本和 finding 定位保持原样。问题按配对顺序命名，选项为 `aligned`、`misaligned`、`uncertain`。不携带历史上文，也不在超限时缩减抽查数量。错位 findings 为 `segment_misaligned`，不确定为不可修复的 advisory `segment_alignment_uncertain`；`matched_source` 记录抽查 Segment ID。两者都覆盖整批，具体保存和修复语义见 [翻译阶段](MINIMAL.md#53-翻译)。
 
 术语插件将同一 Segment 的推荐译名缺失项合并请求，输出 required（需要术语修复）、
 acceptable（无需修复，包括无关日常含义、正确译名及写法一致的合理简称）或 uncertain。请求同时携带本句全部命中术语作为只读参照，
@@ -725,3 +734,13 @@ acceptable（无需修复，包括无关日常含义、正确译名及写法一�
 处理语义见 [翻译阶段](MINIMAL.md#53-翻译)。Run 的 `decision_validation` 保存判断、
 Segment ID、证据摘要、耗时和用量；生成与校验用量合并汇总。人工保存译文只校验、不自动修复，
 判断记录随结果保存。
+
+### Decision 提示词声明
+
+插件可通过 `PluginDescriptor.decision_prompts` 声明 `DecisionPromptDeclaration(validator_id, choice_ids, default)`；未声明的插件不提供编辑入口。声明必须属于本插件的校验器且不重复，固定选项为 2 至 255 个唯一非空 ID。`default` 提供一份默认内容，只含非空 `instructions` 和按固定 ID 填写非空描述的 `criteria`。宿主不允许用户增删选项。逐段校验器从 `context.decision_prompts[validator_id]` 取得运行时冻结内容，动态问题定位由校验器附加。
+
+Decision 提示词资源接口使用 `/api/v1/global/decision-prompts/{validator_id}` 与 `/api/v1/projects/{name}/decision-prompts/{validator_id}`：GET 读取有效内容，项目响应附 `global_sync`（available、same；全局无效时附 error），PUT 接收 `{content}`，项目 DELETE 删除覆盖。`/api/v1/decision-prompts` 列举已加载声明。命名模板由 `/api/v1/decision-prompt-library/{validator_id}` 列举，其 `/{prompt_id}` 提供 GET、PUT `{content}` 和 DELETE。
+
+`/api/v1/decision-prompts/{validator_id}/default` GET 读取插件默认内容，供用户显式加载草稿，便于修正无效覆盖。Run 在 `decision_prompts/{validator_id}.json` 保存 `{choice_ids, content}` 快照，加载时检查与已安装声明一致。
+
+LLM Prompt 的 `/api/v1/prompts/{stage}/default?language=...` GET 直接读取程序分发的原始 Prompt，组合预览也只使用内置资源，不读取用户全局覆盖。资源缺失时明确失败。

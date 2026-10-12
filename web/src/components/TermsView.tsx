@@ -99,6 +99,8 @@ export function TermsView({
   focusFailures = false,
   language,
   onFindSegment,
+  pendingTermSource,
+  onTermJumpConsumed,
   task,
   onTask,
   onSubpageChange,
@@ -109,6 +111,8 @@ export function TermsView({
   focusFailures?: boolean;
   language: Language;
   onFindSegment: (source: string, segmentId: string) => void;
+  pendingTermSource?: string | null;
+  onTermJumpConsumed?: () => void;
   task: TaskState | null;
   onTask: (task: TaskState) => void;
   onSubpageChange?: (subpage: TermsSubpage) => void;
@@ -231,6 +235,21 @@ export function TermsView({
     setForm(emptyForm);
     setMessage("");
   }, [projectId]);
+
+  useEffect(() => {
+    if (!pendingTermSource || !data) return;
+    const term = data.terms.find((item) => item.source === pendingTermSource);
+    suppressFocusScrollForDataRef.current = null;
+    restoredScrollRef.current = null;
+    setSearch("");
+    setOnlyConflicts(false);
+    setShowDisabled(Boolean(term?.disabled));
+    setEditorTab("edit");
+    selection.reset(term?.normalized ?? "");
+    setForm(term ? formFor(term) : emptyForm);
+    setMessage(term ? "" : translate("terms.jumpMissing", language, { source: pendingTermSource }));
+    onTermJumpConsumed?.();
+  }, [data, pendingTermSource, onTermJumpConsumed, language]);
 
   useEffect(() => {
     setManualReview(emptyManualReview);

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
@@ -300,6 +301,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             3,
             4,
             5,
+            6,
             SCHEMA_VERSION,
         }:
             raise UsageError(
@@ -555,12 +557,13 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             raise UsageError("Segment 窗口参数必须是整数") from exc
         if offset < 0 or limit < 1:
             raise UsageError("Segment 窗口参数无效")
+        root = project(name)
         try:
-            return WebStore(project(name)).overview(
+            return await asyncio.to_thread(lambda: WebStore(root).overview(
                 offset=offset,
                 limit=limit,
                 stage=params.get("stage", "translation"),
-            )
+            ))
         except ValueError as exc:
             raise UsageError(str(exc)) from exc
 

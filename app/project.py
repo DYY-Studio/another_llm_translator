@@ -41,6 +41,8 @@ from .sqlite_storage import (
     record_exists,
     record_header,
     replace_source,
+    reorder_files,
+    write_adapter_states,
     utc_now,
     write_json,
 )
@@ -773,9 +775,10 @@ def _next_file_sequence(
 
 
 def _running_run_ids(project: Path) -> list[str]:
-    from .sqlite_storage import list_runs
+    from .sqlite_storage import ensure_supported, read_run_states
 
-    return [str(item["run_id"]) for item in list_runs(project, status="running")]
+    ensure_supported(project)
+    return [str(item["run_id"]) for item in read_run_states(project) if item["status"] == "running"]
 
 
 def _source_records(
@@ -1044,51 +1047,41 @@ def _adapter_opaque_state(
     return nested if isinstance(nested, dict) else None
 
 
-def file_run_options(project: Path, file_id: str) -> dict[str, str]:
-    """Return the complete, validated host-owned run options for one File."""
-    file_record = next(
-        (item for item in load_source_files(project) if str(item["file_id"]) == file_id),
-        None,
-    )
-    if file_record is None:
-        raise UsageError(f"未知文件 ID：{file_id}")
-    from .plugins import get_document_adapter, validate_document_run_options
-    adapter = get_document_adapter(str(file_record["document_adapter_id"]))
-    state = read_adapter_state(project, file_id)
+def _adapter_run_options(
+    adapter: DocumentAdapter, state: dict[str, Any] | None, file_id: str,
+) -> dict[str, str]:
+    from .plugins import validate_document_run_options
+
     if state is None and not adapter.run_options:
         return {}
     if not isinstance(state, dict) or not isinstance(state.get("run_options"), dict):
         raise ConfigError(f"Document Adapter 状态缺少 run_options：{file_id}")
     try:
-        return validate_document_run_options(
-            adapter, state["run_options"], use_defaults=False
-        )
+        return validate_document_run_options(adapter, state["run_options"], use_defaults=False)
     except UsageError as exc:
-        raise ConfigError(
-            f"Document Adapter run_options 无效：{file_id}"
-        ) from exc
+        raise ConfigError(f"Document Adapter run_options 无效：{file_id}") from exc
+
+
+def file_run_options(project: Path, file_id: str) -> dict[str, str]:
+    """Return the complete, validated host-owned run options for one File."""
+    record = _replacement_file(load_source_files(project), file_id)
+    adapter = get_document_adapter(str(record["document_adapter_id"]))
+    return _adapter_run_options(adapter, read_adapter_state(project, file_id), file_id)
 
 
 def update_file_run_options(
     project: Path, file_id: str, options: dict[str, str]
 ) -> dict[str, str]:
     """Partially update one File without touching adapter-private state or segments."""
-    metadata, files, segments = _source_records(project)
-    record = _replacement_file(files, file_id)
-    current = file_run_options(project, file_id)
-    from .plugins import get_document_adapter, validate_document_run_options
+    from .plugins import validate_document_run_options
 
+    record = _replacement_file(load_source_files(project), file_id)
     adapter = get_document_adapter(str(record["document_adapter_id"]))
+    state = read_adapter_state(project, file_id)
+    current = _adapter_run_options(adapter, state, file_id)
     resolved = validate_document_run_options(adapter, {**current, **options})
-    states: list[dict[str, Any]] = []
-    for item in files:
-        state = read_adapter_state(project, str(item["file_id"]))
-        if state is None:
-            continue
-        if str(item["file_id"]) == file_id:
-            state = {**state, "run_options": resolved}
-        states.append(state)
-    replace_source(project, files, segments, metadata, states)
+    if state is not None and resolved != current:
+        write_adapter_states(project, [{**state, "run_options": resolved}])
     return resolved
 
 
@@ -1096,31 +1089,25 @@ def update_adapter_run_options(
     project: Path, adapter_id: str, options: dict[str, str]
 ) -> dict[str, dict[str, str]]:
     """Apply one partial map to every current File of an Adapter."""
-    metadata, files, segments = _source_records(project)
-    targets = [str(item["file_id"]) for item in files if str(item["document_adapter_id"]) == adapter_id]
+    from .plugins import validate_document_run_options
+
+    targets = [item for item in load_source_files(project) if str(item["document_adapter_id"]) == adapter_id]
     if not targets:
         raise UsageError(f"项目没有使用 Document Adapter：{adapter_id}")
-    from .plugins import get_document_adapter, validate_document_run_options
-
     adapter = get_document_adapter(adapter_id)
-    states: list[dict[str, Any]] = []
-    result: dict[str, dict[str, str]] = {}
-    for item in files:
+    states = []
+    result = {}
+    for item in targets:
         file_id = str(item["file_id"])
         state = read_adapter_state(project, file_id)
-        if file_id in targets:
-            current = file_run_options(project, file_id)
-            current = validate_document_run_options(adapter, {**current, **options})
-            if state is None:
-                if adapter.run_options:
-                    raise ConfigError(f"Document Adapter 状态缺失：{file_id}")
-                continue
-            state = {**state, "run_options": current}
-            result[file_id] = current
-        elif state is None:
-            continue
-        states.append(state)
-    replace_source(project, files, segments, metadata, states)
+        current = _adapter_run_options(adapter, state, file_id)
+        resolved = validate_document_run_options(adapter, {**current, **options})
+        if state is not None:
+            result[file_id] = resolved
+            if resolved != current:
+                states.append({**state, "run_options": resolved})
+    if states:
+        write_adapter_states(project, states)
     return result
 
 
@@ -1578,33 +1565,16 @@ def reorder_project_files(
         raise UsageError(
             f"存在未完成 Run，不能重排文件：{', '.join(running)}"
         )
-    metadata, files, segments = _source_records(project)
+    files = load_source_files(project)
     known = {str(item["file_id"]): item for item in files}
     requested = set(file_ids)
     if len(file_ids) != len(files) or requested != set(known):
         raise UsageError("文件顺序必须且仅包含全部活动 File ID")
 
-    reordered_files: list[dict[str, Any]] = []
-    for file_order, file_id in enumerate(file_ids, start=1):
-        file_record = dict(known[file_id])
-        file_record["file_order"] = file_order
-        reordered_files.append(file_record)
-    retained_states = [
-        state
-        for file_record in files
-        if (state := read_adapter_state(project, str(file_record["file_id"])))
-        is not None
-    ]
-    replace_source(
-        project,
-        reordered_files,
-        segments,
-        metadata,
-        retained_states,
-    )
+    reorder_files(project, file_ids)
     return {
         "reordered_file_ids": file_ids,
-        "file_count": len(reordered_files),
+        "file_count": len(files),
     }
 
 

@@ -13,7 +13,6 @@ from .errors import ProjectError, TermGroupError, UsageError
 from .execution import stage_fingerprint, stage_result_path
 from .locking import project_write_lock
 from .plugins import (
-    document_adapter_segment_format_count,
     get_document_adapter,
     normalize_model_text,
     validate_document_run_options,
@@ -32,6 +31,7 @@ from .sqlite_storage import (
     query_segment_neighbors,
     query_segments,
     read_adapter_state,
+    read_segment_format_counts,
     read_json,
     read_jsonl,
     read_segment_sources,
@@ -198,7 +198,9 @@ class WebStore:
             translation=text,
             terms=terms,
             decision=DecisionClient(self.config["_decision_preset_definitions"][self.config["_decision_validator_presets"]["preferred_term_usage"]], retry=self.config["retry"]) if "preferred_term_usage" in self.config.get("_decision_validator_presets", {}) else None,
+            decision_prompts={key: value["content"] for key, value in self.config.get("_decision_prompt_definitions", {}).items()},
             decision_confidence_threshold=self.config["validation"]["translation"]["decision_confidence_threshold"],
+            decision_warning_threshold=self.config["validation"]["translation"]["decision_warning_threshold"],
             segment_id=str(segment["segment_id"]),
             previous_source=tuple(str(entry["source"]) for entry in previous),
         )
@@ -226,7 +228,7 @@ class WebStore:
         segment_id: object,
         *,
         files: list[dict[str, Any]] | None = None,
-        contexts: dict[str, tuple[DocumentAdapter, dict[str, Any] | None, dict[str, str]]] | None = None,
+        with_adapter_state: bool = True,
     ) -> dict[str, Any]:
         if not isinstance(segment_id, str):
             raise UsageError(f"未知或空 Segment：{segment_id}")
@@ -244,44 +246,14 @@ class WebStore:
         )
         if file_record is None:
             raise ProjectError(f"Segment 引用了未知 File：{segment['file_id']}")
-        file_id = str(file_record["file_id"])
-        if contexts is not None and file_id in contexts:
-            _, opaque_state, run_options = contexts[file_id]
-        else:
-            adapter, opaque_state, run_options = _read_adapter_context(self.project, file_record)
-            if contexts is not None:
-                contexts[file_id] = (adapter, opaque_state, run_options)
-        segment["_adapter_state"] = opaque_state
-        segment["_adapter_run_options"] = dict(run_options)
+        if with_adapter_state:
+            _, opaque_state, run_options = _read_adapter_context(self.project, file_record)
+            segment["_adapter_state"] = opaque_state
+            segment["_adapter_run_options"] = dict(run_options)
         return segment
 
-    def _format_counts(
-        self, segments: list[dict[str, Any]], *,
-        files: list[dict[str, Any]] | None = None, contexts: dict[str, tuple[DocumentAdapter, dict[str, Any] | None, dict[str, str]]] | None = None,
-    ) -> dict[str, int]:
-        current_files = files if files is not None else load_source_files(self.project)
-        files_by_id = {str(item["file_id"]): item for item in current_files}
-        contexts = {} if contexts is None else contexts
-        counts: dict[str, int] = {}
-        for segment in segments:
-            file_id = str(segment["file_id"])
-            file_record = files_by_id.get(file_id)
-            if file_record is None:
-                raise ProjectError(f"Segment 引用了未知 File：{file_id}")
-            if file_id not in contexts:
-                adapter, opaque_state, run_options = _read_adapter_context(
-                    self.project, file_record
-                )
-                contexts[file_id] = (adapter, opaque_state, run_options)
-            adapter, opaque_state, _ = contexts[file_id]
-            counts[str(segment["segment_id"])] = (
-                document_adapter_segment_format_count(
-                    adapter,
-                    segment=segment,
-                    opaque_state=opaque_state,
-                )
-            )
-        return counts
+    def _format_counts(self, segments: list[dict[str, Any]]) -> dict[str, int]:
+        return read_segment_format_counts(self.project, (str(item["segment_id"]) for item in segments))
 
     def _base_results(
         self, stage: str, segment_ids_filter: list[str] | None = None
@@ -595,8 +567,7 @@ class WebStore:
 
     def segment_detail(self, segment_id: str) -> dict[str, Any]:
         files = load_source_files(self.project)
-        contexts: dict[str, tuple[DocumentAdapter, dict[str, Any] | None, dict[str, str]]] = {}
-        segment = self._require_segment(segment_id, files=files, contexts=contexts)
+        segment = self._require_segment(segment_id, files=files, with_adapter_state=False)
         before_segments, after_segments = query_segment_neighbors(
             self.project,
             file_id=str(segment["file_id"]),
@@ -604,7 +575,7 @@ class WebStore:
             line_index=int(segment["line_index"]),
         )
         context_segments = [*before_segments, *after_segments]
-        format_counts = self._format_counts([segment, *context_segments], files=files, contexts=contexts)
+        format_counts = self._format_counts([segment, *context_segments])
         segment_filter = [
             segment_id,
             *(str(item["segment_id"]) for item in context_segments),
@@ -621,6 +592,13 @@ class WebStore:
         }
         detail = self._segment_detail_view(
             segment, histories, format_count=format_counts[str(segment["segment_id"])]
+        )
+        library = load_terms(self.project)
+        detail["matched_terms"] = match_terms(
+            str(segment["source"]),
+            library,
+            len(library["terms"]) if library else 0,
+            term_normalization(self.config),
         )
         detail["context"] = {
             "before": [

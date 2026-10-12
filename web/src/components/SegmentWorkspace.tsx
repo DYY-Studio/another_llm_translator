@@ -11,7 +11,6 @@ import type {
 import {
   clearSegmentReadError,
   emptySegmentReadErrors,
-  firstSegmentReadError,
   setSegmentReadError,
 } from "../segmentReadState";
 import { useClassicSelection } from "../useClassicSelection";
@@ -30,7 +29,16 @@ interface WorkspaceCacheEntry {
 // changes so cached data never leaks across projects.
 const workspaceCache = new Map<string, WorkspaceCacheEntry>();
 const workspaceProjectRef = { current: "" };
+let workspacePrefetchGeneration = 0;
 const pageSize = 100;
+
+function selectWorkspaceProject(projectId: string) {
+  if (workspaceProjectRef.current === projectId) return;
+  workspaceProjectRef.current = projectId;
+  for (const key of workspaceCache.keys()) {
+    if ((JSON.parse(key) as string[])[0] !== projectId) workspaceCache.delete(key);
+  }
+}
 
 interface SegmentBoundaryOption {
   file_id: string;
@@ -50,33 +58,37 @@ function boundaryKey(fileId: string, partId: string): string {
 // workspace's initial default-filter query, and focusedId is the first
 // segment so the mount-time index refresh preserves the restored window.
 export function prefetchWorkspace(project: string, projectId: string) {
-  for (const stage of ["translation", "proofreading", "polishing"] as const) {
-    const key = JSON.stringify([projectId, stage, "all", "all", ""]);
-    if (workspaceCache.has(key)) continue;
-    void Promise.all([
-      api<{ segment_ids: string[]; total: number }>(
-        `/api/v1/projects/${project}/segments/ids`,
-        { method: "POST", body: JSON.stringify({ stage }) },
-      ),
-      api<SegmentQueryResponse>(
-        `/api/v1/projects/${project}/segments/query`,
-        { method: "POST", body: JSON.stringify({ stage, offset: 0, limit: pageSize }) },
-      ),
-    ])
-      .then(([index, page]) => {
-        if (workspaceCache.has(key)) return;
+  const generation = ++workspacePrefetchGeneration;
+  selectWorkspaceProject(projectId);
+  const keys = (["translation", "proofreading", "polishing"] as const)
+    .map((stage) => JSON.stringify([projectId, stage, "all", "all", ""]));
+  if (keys.every((key) => workspaceCache.has(key))) return;
+  void Promise.all([
+    api<{ segment_ids: string[]; total: number }>(
+      `/api/v1/projects/${project}/segments/ids`,
+      { method: "POST", body: JSON.stringify({ stage: "translation" }) },
+    ),
+    api<SegmentQueryResponse>(
+      `/api/v1/projects/${project}/segments/query`,
+      { method: "POST", body: JSON.stringify({ stage: "translation", offset: 0, limit: pageSize }) },
+    ),
+  ])
+    .then(([index, page]) => {
+      if (workspaceProjectRef.current !== projectId || generation !== workspacePrefetchGeneration) return;
+      for (const key of keys) {
+        if (workspaceCache.has(key)) continue;
         const records: Record<string, Segment> = {};
         for (const item of page.segments) records[item.segment_id] = item;
         workspaceCache.set(key, {
-          orderedIds: index.segment_ids,
+          orderedIds: [...index.segment_ids],
           total: index.total,
           records,
           focusedId: index.segment_ids[0] ?? "",
           scrollTop: 0,
         });
-      })
-      .catch(() => {});
-  }
+      }
+    })
+    .catch(() => {});
 }
 
 function resultFor(segment: Segment, stage: "translation" | "proofreading" | "polishing") {
@@ -111,6 +123,7 @@ export function SegmentWorkspace({
   language,
   pendingJump,
   onJumpConsumed,
+  onFindTerm,
 }: {
   project: string;
   projectId: string;
@@ -121,6 +134,7 @@ export function SegmentWorkspace({
   language: Language;
   pendingJump?: { search: string; segmentId: string } | null;
   onJumpConsumed?: () => void;
+  onFindTerm: (source: string) => void;
 }) {
   const statusLabels: Record<string, string> = Object.fromEntries(
     (stage === "translation"
@@ -138,6 +152,7 @@ export function SegmentWorkspace({
   const [total, setTotal] = useState(0);
   const [readErrors, setReadErrors] = useState(emptySegmentReadErrors);
   const [readRetry, setReadRetry] = useState(0);
+  const [detailRetry, setDetailRetry] = useState(0);
   const [loading, setLoading] = useState(true);
   const listRef = useRef<HTMLDivElement>(null);
   const indexRequestRef = useRef(0);
@@ -217,17 +232,8 @@ export function SegmentWorkspace({
   }, []);
 
   useEffect(() => {
-    if (workspaceProjectRef.current !== projectId) {
-      workspaceProjectRef.current = projectId;
-      // Drop only entries of other projects. Entries are keyed by project, so
-      // nothing leaks across projects, while the current project's prefetched
-      // entries for unvisited stages survive for the first mount.
-      for (const key of [...workspaceCache.keys()]) {
-        if ((JSON.parse(key) as string[])[0] !== projectId) {
-          workspaceCache.delete(key);
-        }
-      }
-    }
+    // Preserve this project's prefetched stages while dropping other projects.
+    selectWorkspaceProject(projectId);
   }, [projectId]);
 
   // Restore a cached window synchronously during render so the browser never
@@ -267,7 +273,7 @@ export function SegmentWorkspace({
   useEffect(() => {
     if (readErrorQueryRef.current === pageQueryKey) return;
     readErrorQueryRef.current = pageQueryKey;
-    setReadErrors(emptySegmentReadErrors());
+    setReadErrors((current) => ({ ...emptySegmentReadErrors(), detail: current.detail }));
   }, [pageQueryKey]);
 
   useLayoutEffect(() => {
@@ -306,6 +312,7 @@ export function SegmentWorkspace({
         resetPageCache();
         setRecords({});
         setFocusedDetail(null);
+        setDetailRetry((current) => current + 1);
         selection.reset(index.segment_ids[0] ?? "");
         listRef.current?.scrollTo({ top: 0 });
       } else {
@@ -442,25 +449,20 @@ export function SegmentWorkspace({
       setFocusedDetail(null);
       return;
     }
-    if (!showContext && records[focusedId]) {
-      setReadErrors((current) => clearSegmentReadError(current, "detail"));
-      setFocusedDetail(null);
-      return;
-    }
     let active = true;
+    setReadErrors((current) => clearSegmentReadError(current, "detail"));
     setFocusedDetail(null);
     void api<SegmentDetail>(`/api/v1/projects/${project}/segments/${focusedId}`)
       .then((item) => {
         if (!active) return;
         setReadErrors((current) => clearSegmentReadError(current, "detail"));
-        setRecords((current) => ({ ...current, [item.segment_id]: item }));
         setFocusedDetail(item);
       })
       .catch((value) => {
         if (active) setReadErrors((current) => setSegmentReadError(current, "detail", errorMessage(value, language)));
       });
     return () => { active = false; };
-  }, [project, focusedId, showContext, readRetry]);
+  }, [project, focusedId, readRetry, detailRetry]);
 
   useLayoutEffect(() => {
     if (!selected) return;
@@ -478,7 +480,7 @@ export function SegmentWorkspace({
   const selectedVisibleIds = visibleKeys.filter((segmentId) => (
     selection.selectedKeys.has(segmentId)
   ));
-  const readError = firstSegmentReadError(readErrors);
+  const readError = readErrors.index || Object.values(readErrors.pages)[0] || "";
 
   const retryReads = useCallback(() => {
     setReadErrors(emptySegmentReadErrors());
@@ -667,6 +669,28 @@ export function SegmentWorkspace({
           <>
             <h2 className="source-heading">{translate("workspace.source", language)}{selected.format_count ? <small>{translate("workspace.formatRanges", language, { count: selected.format_count })}</small> : null}</h2>
             <div className="source-box">{selected.source}</div>
+            <details className="segment-terms" key={selected.segment_id}>
+              <summary>{translate("workspace.segmentTerms", language)}{focusedDetail?.segment_id === selected.segment_id ? ` (${focusedDetail.matched_terms.length})` : ""}{readErrors.detail && <> <span className="error-text">{translate("status.error", language)}</span></>}</summary>
+              {readErrors.detail ? (
+                <div className="error-text"><span>{readErrors.detail}</span><button className="quiet-button" type="button" onClick={() => setDetailRetry((current) => current + 1)}>{translate("common.retry", language)}</button></div>
+              ) : focusedDetail?.segment_id !== selected.segment_id ? (
+                <p>{translate("terms.loading", language)}</p>
+              ) : focusedDetail.matched_terms.length === 0 ? (
+                <p>{translate("workspace.segmentTermsEmpty", language)}</p>
+              ) : (
+                <div className="segment-term-list">
+                  {focusedDetail.matched_terms.map((term) => (
+                    <button className="segment-term" type="button" key={term.source} aria-label={term.source} onClick={() => onFindTerm(term.source)}>
+                      <span className="segment-term-heading"><strong>{term.source}</strong><span>{term.preferred_translation || translate("workspace.noPreferredTranslation", language)}</span>{term.category && <small>{term.category}</small>}</span>
+                      {term.aliases.length > 0 && <span className="segment-term-detail">{translate("workspace.matchedAliases", language, { aliases: term.aliases.join(", ") })}</span>}
+                      {term.primary_source && <span className="segment-term-detail">{translate("terms.groupPrimaryBadge", language, { source: term.primary_source })}</span>}
+                      {term.group_claims?.map((claim) => <span className="segment-term-detail warning-text" key={JSON.stringify(claim)}>{translate("workspace.termClaim", language, { alias: claim.alias, entry: claim.entry, owner: claim.claimed_by })}</span>)}
+                      {term.description && <span className="segment-term-description">{term.description}</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </details>
             {selected.model_source && selected.model_source !== selected.source && (
               <details className="source-model-preview"><summary>{translate("workspace.modelText", language)}</summary><div className="source-box">{selected.model_source}</div></details>
             )}

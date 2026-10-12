@@ -12,6 +12,187 @@ from tests.test_terminology_translation import create_project, llm_jsonl
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_draft", [False, True])
+@pytest.mark.parametrize("include_summaries", [False, True])
+async def test_completed_legacy_scan_allows_other_outputs(
+    tmp_path: Path, include_draft: bool, include_summaries: bool,
+) -> None:
+    import sqlite3
+    from app.sqlite_storage import database_path, read_jsonl
+    from app.term_library import load_terms
+
+    project = await create_project(tmp_path, "Alice entered.")
+    modes = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        mode = payload.get("response_mode", "summary-only" if modes else "terms-only")
+        modes.append(mode)
+        kinds = response_record_types(mode)
+        if len(modes) > 1:
+            assert "term" not in kinds
+        records = []
+        if "summary" in kinds:
+            records.append({"type": "summary", "text": "爱丽丝进来了"})
+        if "term" in kinds:
+            records.append({"type": "term", "source": "Alice", "category": "人物"})
+        if "segment" in kinds:
+            records.extend({"type": "segment", "id": item["id"], "translation": "爱丽丝进来了"}
+                           for item in payload["segments"])
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await run_terminology(project, Scope(), http_client=client)
+        # Represent a completed scan created before candidate ordering existed.
+        with sqlite3.connect(database_path(project)) as connection:
+            connection.execute("UPDATE terminology_candidates SET payload_json = json_remove(payload_json, '$.source_order')")
+        library = load_terms(project)
+        candidates = read_jsonl(project, project / "terminology" / "candidates.jsonl")
+        if include_summaries:
+            write_summary_participation(
+                project, [{"file_id": "F0001", "part_id": "document", "selected": True}],
+            )
+        result = await run_terminology(
+            project, Scope(), http_client=client, reuse_mixed_fingerprints=True,
+            include_draft_translation=include_draft, include_summaries=include_summaries,
+        )
+    assert result["failed"] == 0
+    assert len(modes) == (2 if include_draft or include_summaries else 1)
+    assert load_terms(project) == library
+    assert read_jsonl(project, project / "terminology" / "candidates.jsonl") == candidates
+    assert len(read_content_summaries(project, kind="fragment", status="completed")) == int(include_summaries)
+    assert len(load_stage_history(project, "translation")) == int(include_draft)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_draft", [False, True])
+async def test_scan_publication_uses_current_file_order(tmp_path: Path, include_draft: bool) -> None:
+    from app.project import add_project_files, reorder_project_files
+    from app.term_library import load_terms
+
+    project = await create_project(tmp_path, "First file.")
+    second = tmp_path / "second.txt"
+    second.write_text("Second file.", encoding="utf-8")
+    add_project_files(project, [str(second)])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        source = payload["segments"][0]["source"] if include_draft else payload["source_segments"][0]
+        records = [{"type": "term", "source": "Entity", "category": "名称",
+                    "description": "z-first" if "First" in source else "a-later"}]
+        if include_draft:
+            records.append({"type": "segment", "id": payload["segments"][0]["id"], "translation": "译文"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await run_terminology(project, Scope(only_file="F0001"), http_client=client,
+                              include_draft_translation=include_draft)
+        assert load_terms(project) is None
+        reorder_project_files(project, ["F0002", "F0001"])
+        result = await run_terminology(project, Scope(), http_client=client,
+                                       include_draft_translation=include_draft)
+    assert result["failed"] == 0
+    assert load_terms(project)["terms"][0]["description"] == "a-later；z-first"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_draft", [False, True])
+@pytest.mark.parametrize("include_summaries", [False, True])
+async def test_scan_descriptions_follow_source_order_despite_completion_order(
+    tmp_path: Path, include_draft: bool, include_summaries: bool,
+) -> None:
+    import asyncio
+    from app.sqlite_storage import read_jsonl
+    from app.term_library import load_terms
+    from tests.helpers import use_llm_preset
+
+    project = await create_project(tmp_path, "Alice first.\nAlice later.")
+    use_llm_preset(tmp_path, target_chunk_input_tokens=1)
+    config_path = project / "config.toml"
+    config_path.write_text(config_path.read_text(encoding="utf-8").replace(
+        'scheduling_mode = "ordered_by_file"', 'scheduling_mode = "parallel"',
+    ), encoding="utf-8")
+    if include_summaries:
+        write_summary_participation(
+            project, [{"file_id": "F0001", "part_id": "document", "selected": True}],
+        )
+    later_completed = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        items = payload["segments"] if include_draft else payload["source_segments"]
+        source = items[0]["source"] if include_draft else items[0]
+        if isinstance(source, dict):
+            source = source["text"]
+        first = "first" in source
+        if first:
+            await asyncio.wait_for(later_completed.wait(), timeout=5)
+        else:
+            later_completed.set()
+        records = [{
+            "type": "term", "source": "Alice", "category": "人物",
+            "description": "z-first" if first else "a-later",
+            "preferred_translation": "爱丽丝", "aliases": [],
+        }]
+        if include_draft:
+            records.extend({"type": "segment", "id": item["id"], "translation": "爱丽丝"}
+                           for item in items)
+        if include_summaries:
+            records.insert(0, {"type": "summary", "text": "爱丽丝出现"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(
+            project, Scope(), http_client=client,
+            include_draft_translation=include_draft, include_summaries=include_summaries,
+        )
+        assert result["failed"] == 0
+        candidates = read_jsonl(project, project / "terminology" / "candidates.jsonl")
+        assert [row["terms"][0]["description"] for row in candidates] == ["a-later", "z-first"]
+        assert load_terms(project)["terms"][0]["description"] == "z-first；a-later"
+        assert [row["source_order"] for row in candidates] == [
+            {"segment_id": "F0001-S000002", "offset": 0},
+            {"segment_id": "F0001-S000001", "offset": 0},
+        ]
+        await run_terminology(
+            project, Scope(force=True), http_client=client,
+            include_draft_translation=include_draft, include_summaries=include_summaries,
+        )
+    assert load_terms(project)["terms"][0]["description"] == "z-first；a-later"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_draft", [False, True])
+async def test_scan_runtime_slices_persist_source_offsets(tmp_path: Path, include_draft: bool) -> None:
+    from app.sqlite_storage import read_jsonl
+    from app.term_library import load_terms
+
+    project = await create_project(tmp_path, "ABCDEFGH")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        source = payload["segments"][0]["source"] if include_draft else payload["source_segments"][0]
+        if len(source) > 4:
+            return httpx.Response(400, text="context_length_exceeded: maximum context tokens")
+        records = [{"type": "term", "source": "Entity", "category": "名称",
+                    "description": "z-first" if source == "ABCD" else "a-later"}]
+        if include_draft:
+            records.append({"type": "segment", "id": payload["segments"][0]["id"], "translation": "译文"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(project, Scope(), http_client=client,
+                                       include_draft_translation=include_draft)
+    assert result["failed"] == 0
+    candidates = read_jsonl(project, project / "terminology" / "candidates.jsonl")
+    assert [row["source_order"] for row in candidates] == [
+        {"segment_id": "F0001-S000001", "offset": 0},
+        {"segment_id": "F0001-S000001", "offset": 4},
+    ]
+    assert load_terms(project)["terms"][0]["description"] == "z-first；a-later"
+
+
+@pytest.mark.asyncio
 async def test_triple_scan_retries_missing_summary_and_preserves_draft(
     tmp_path: Path,
 ) -> None:

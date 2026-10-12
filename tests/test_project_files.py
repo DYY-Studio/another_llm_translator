@@ -1178,6 +1178,27 @@ def test_empty_project_can_open_inspect_and_add_txt_files(
     assert read_json(project, project / "project.json")["next_file_sequence"] == 3
 
 
+def test_file_reorder_upgrades_unopened_v6_project(tmp_path: Path) -> None:
+    from app import sqlite_storage
+
+    project = init_empty(tmp_path)
+    source = tmp_path / "chapter.txt"
+    source.write_text("one", encoding="utf-8")
+    add_project_files(project, [str(source)])
+    with sqlite3.connect(project / "project.sqlite") as database:
+        database.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
+    sqlite_storage._SUPPORTED_CACHE.discard(project / "project.sqlite")
+
+    result = reorder_project_files(project, ["F0001"])
+
+    assert result["reordered_file_ids"] == ["F0001"]
+    with sqlite3.connect(project / "project.sqlite") as database:
+        assert database.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == "7"
+    assert len(list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))) == 1
+
+
 def test_reorder_project_files_preserves_ids_history_and_adapter_state(
     tmp_path: Path,
 ) -> None:
