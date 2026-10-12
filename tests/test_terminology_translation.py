@@ -2593,8 +2593,9 @@ async def test_draft_scan_preserves_existing_translation_until_force(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("crash", [False, True])
-async def test_draft_scan_resume_keeps_successful_results_and_original_scope(
-    tmp_path: Path, crash: bool
+@pytest.mark.parametrize("include_draft", [False, True])
+async def test_scan_resume_keeps_successful_results_and_original_scope(
+    tmp_path: Path, crash: bool, include_draft: bool,
 ) -> None:
     project = await create_project(tmp_path, "Alice entered.\nBob waved.")
     use_llm_preset(tmp_path, target_chunk_input_tokens=1)
@@ -2607,14 +2608,18 @@ async def test_draft_scan_resume_keeps_successful_results_and_original_scope(
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         requests.append(payload)
-        if cancel and "Bob" in payload["segments"][0]["source"]:
+        source = payload["segments"][0]["source"] if include_draft else payload["source_segments"][0]
+        if cancel and "Bob" in source:
             raise ProcessCrash if crash else asyncio.CancelledError
         records = [
             {"type": "segment", "id": item["id"], "translation": "译文"}
-            for item in payload["segments"]
+            for item in payload.get("segments", [])
         ]
-        if payload["response_mode"] != "translation-only":
-            records.insert(0, {"type": "no_terms"})
+        if not include_draft or payload["response_mode"] != "translation-only":
+            records.insert(0, {
+                "type": "term", "source": "Entity", "category": "名称",
+                "description": "z-first" if "Alice" in source else "a-later",
+            })
         return httpx.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
         )
@@ -2622,26 +2627,31 @@ async def test_draft_scan_resume_keeps_successful_results_and_original_scope(
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ProcessCrash if crash else asyncio.CancelledError):
             await run_terminology(
-                project, Scope(), http_client=client, include_draft_translation=True
+                project, Scope(), http_client=client, include_draft_translation=include_draft,
             )
         from app.execution import find_running_runs
 
         running = find_running_runs(project, "terminology")
         run_id = running[0]["run_id"] if crash else None
-        assert len(load_stage_history(project, "translation")) == 1
+        assert len(load_stage_history(project, "translation")) == (1 if include_draft else 0)
         cancel = False
         result = await run_terminology(
             project,
             Scope(only_segment="F0001-S000001") if crash else Scope(),
             http_client=client,
-            include_draft_translation=True,
+            include_draft_translation=include_draft,
             resume_run_id=run_id,
         )
     if crash:
         assert result["run_id"] == run_id
-    assert result["selected"] == 2
-    assert len(load_stage_history(project, "translation")) == 2
-    assert sum("Alice" in payload["segments"][0]["source"] for payload in requests) == 1
+    if include_draft:
+        assert result["selected"] == 2
+    assert len(load_stage_history(project, "translation")) == (2 if include_draft else 0)
+    assert sum("Alice" in (payload["segments"][0]["source"] if include_draft
+                            else payload["source_segments"][0]) for payload in requests) == 1
+    candidates = read_jsonl(project, project / "terminology" / "candidates.jsonl")
+    assert [row["source_order"] for row in candidates] == [[0, 0], [1, 0]]
+    assert load_terms(project)["terms"][0]["description"] == "z-first；a-later"
 
 
 @pytest.mark.asyncio

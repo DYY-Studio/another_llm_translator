@@ -3145,6 +3145,7 @@ def test_web_exports_and_publishes_scanned_candidates(tmp_path: Path) -> None:
             str(metadata["project_id"]),
             active_task_id=task_id,
             run_id="RUN-WEB-PARTIAL",
+            source_order=[0, 0],
             terms=[
                 {
                     "source": "Alice",
