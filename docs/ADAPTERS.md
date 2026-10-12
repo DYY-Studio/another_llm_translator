@@ -17,7 +17,8 @@
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
+  "response_format": "json-pointer",
   "adapter_id": "openai-compatible",
   "endpoint": "/chat/completions",
   "headers": {
@@ -45,7 +46,7 @@
 }
 ```
 
-该字段可省略；内置 OpenAI-compatible 定义按上述顺序兼容两种字段。已有配置仍可
+该字段用于 JSON Pointer 模式；原生 Chat Completions 模式按上述顺序读取两种字段。JSON Pointer 定义可
 使用单数的 `response_reasoning_content_pointer`，但单数与复数不能同时配置。候选
 路径只在前一路径缺失时继续尝试；首个存在的 `null` 表示没有 reasoning，多个字段
 不会拼接。
@@ -120,7 +121,7 @@ ID Token 验证签名、issuer、audience、expiry 和 nonce，授权以返回 s
 
 ### SSE 流式规则（可选）
 
-schema 3 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter 摘要中以
+schema 4 的 JSON Pointer Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter 摘要中以
 `streaming_supported` 报告该能力。当前唯一支持的传输是 SSE：
 
 ```json
@@ -180,9 +181,11 @@ schema 3 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
 
 ### 响应边界
 
-`response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串或 null；null 规范化为空正文。只有明确命中声明的截断或拒绝结束原因时，正文路径缺失才规范化为空正文。JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`-1` 为最后一个元素、`-2` 为倒数第二。
+JSON Pointer 模式的 `response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串或 null；null 规范化为空正文。只有明确命中声明的截断或拒绝结束原因时，正文路径缺失才规范化为空正文。JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`-1` 为最后一个元素、`-2` 为倒数第二。
 
-当思考块总是排在最前、文本块在最后时 （Anthropic `content`、Gemini `parts`），负索引可稳定取到最后文本块。未命中已声明的截断或拒绝结束原因时，越界、空数组与普通缺失路径同样快速失败。可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。
+原生 `response_format` 可选 `chat-completions`、`responses`、`anthropic`、`gemini`；宿主聚合各协议的全部正文文本，Gemini 仅取首个 candidate 并排除 thought。原生模式不能同时声明正文、思考正文、结束原因或 usage 映射。原生 streaming 只声明 `transport`、`endpoint`、可选 `request_body` 和 `allow_clean_eof`，事件解析由响应格式决定。
+
+Chat Completions 使用 `[DONE]`，Responses 使用 completed/incomplete，Anthropic 使用 message_stop，Gemini 收到 finishReason 后继续读到自然 EOF，以收集后续 usage。拒绝响应优先失败，即使已经收到部分正文，也不触发空正文重试。截断响应进入已有的有界截断重试策略。
 
 也可使用非空的 `response_reasoning_content_pointers` 数组声明有序候选路径：路径缺失时继续尝试，首个存在的 `null` 规范化为 null，字段存在但类型错误时当前请求失败，不猜测或拼接多个字段。
 
@@ -267,28 +270,18 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
 
 ### 内置 Adapter 定义
 
-- `openai-compatible`：
-  - 使用 Bearer API Key 和 Chat Completions body。
-  - 正文 pointer 为 `/choices/0/message/content`。
-  - 推理 pointers 为 `/choices/0/message/reasoning_content` 和
-    `/choices/0/message/reasoning`。
-  - SSE 推理增量对应 `/choices/0/delta/reasoning_content` 和
-    `/choices/0/delta/reasoning`。
-- `anthropic`：`x-api-key` 与 `anthropic-version: 2023-06-01`，body 顶层 `system`，pointer `/content/-1/text`。
+| Adapter | 请求协议 | 原生响应格式 | 输出上限字段 |
+| --- | --- | --- | --- |
+| `openai-compatible` | Chat Completions | `chat-completions` | `max_tokens` |
+| `openai-chat` | OpenAI Chat Completions | `chat-completions` | `max_completion_tokens` |
+| `openai-responses` | Responses | `responses` | `max_output_tokens` |
+| `chatgpt-plan` | Responses，固定授权连接 | `responses` | 仅用于本地预算 |
+| `anthropic` | Messages | `anthropic` | `max_tokens`，最小值 1 |
+| `google-gemini` | generateContent | `gemini` | `generationConfig.maxOutputTokens` |
 
-  未启用 thinking 时 content 首块即文本；负索引使 `extra_body` 日后启用 thinking 时仍可稳定取到最后文本块。不配置 reasoning 指针；需要思考正文时可复制定义并设 `/content/-2/thinking`。
+Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由实际输入和输出相加；流式 usage 使用最终累计值。Gemini 保留官方 totalTokenCount，不以可见正文 token 重算。原生拒绝、promptFeedback 拦截和流内失败保持显式，供应商错误消息不会变成通用缺少正文路径。
 
-  未启用 thinking 或思考块缺失时结果为 null；字段存在但不是字符串或 null 时快速失败。
-- `google-gemini`：`x-goog-api-key`（密钥不进入 URL），model 由 Adapter `endpoint` 的 `${model}` 占位符进入请求路径，pointer `/candidates/0/content/parts/-1/text`。
-
-  不内置 thinkingConfig，思考模型默认思考开启时 text 块仍恒为最后一个 part。不配置 reasoning 指针；可自配 `/candidates/0/content/parts/-2/text`，缺失路径结果为 null，字段存在但不是字符串或 null 时快速失败。
-- `openai-responses`：`input` 原样接收规范化消息（system/user/assistant），body 含 `"store": false`，pointer `/output/-1/content/-1/text`。
-
-  宿主直接解析 REST JSON，不使用 SDK 才提供的 `output_text` 便利属性；当前请求不声明 tool，因此最终 message 是最后一个 output，正文是其最后一个 content。响应缺少该结构时快速失败。
-
-四个内置定义都声明 `streaming`、`models` 与 `usage` 映射；示例 Preset 见 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与 `openai-responses.json`。
-
-Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置 Adapter 的主请求、流式和 `models` 端点都不含版本前缀；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
+版本前缀 `/v1`、`/v1beta` 写在 Preset `base_url` 中。普通和流式 endpoint 仍由 Adapter 声明。
 
 ### 术语提取实验响应
 

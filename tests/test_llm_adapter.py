@@ -17,7 +17,8 @@ def write_adapter(tmp_path: Path, value: dict[str, object]) -> Path:
 
 def definition() -> dict[str, object]:
     return {
-        "schema_version": 3,
+        "schema_version": 4,
+        "response_format": "json-pointer",
         "adapter_id": "custom-json",
         "endpoint": "/generate",
         "headers": {
@@ -83,7 +84,7 @@ def test_adapter_rejects_legacy_schema_without_endpoints(tmp_path: Path) -> None
     value = definition()
     value["schema_version"] = 2
     value.pop("endpoint")
-    with pytest.raises(ConfigError, match="schema_version 必须是 3"):
+    with pytest.raises(ConfigError, match="schema_version 必须是 4"):
         load_json_adapter(write_adapter(tmp_path, value))
 
 
@@ -547,15 +548,6 @@ def test_json_adapter_rejects_malformed_index_tokens(
     adapter = load_json_adapter(write_adapter(tmp_path, value))
     with pytest.raises(ExternalError, match="正文路径"):
         adapter.parse_response({"result": [{"text": "x"}]})
-
-
-def test_json_adapter_negative_index_replace_content(tmp_path: Path) -> None:
-    value = definition()
-    value["response_content_pointer"] = "/result/-1/text"
-    adapter = load_json_adapter(write_adapter(tmp_path, value))
-    response = {"result": [{"text": "old"}, {"text": "target"}]}
-    adapter.replace_content(response, "new")
-    assert response == {"result": [{"text": "old"}, {"text": "new"}]}
 
 
 def models_definition() -> dict[str, object]:

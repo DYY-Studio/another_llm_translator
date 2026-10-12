@@ -279,9 +279,9 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
     adapter_snapshot = json.loads(adapter_snapshot_path.read_text("utf-8"))
     adapter_snapshot["schema_version"] = 2
     adapter_snapshot_path.write_text(json.dumps(adapter_snapshot), encoding="utf-8")
-    with pytest.raises(ConfigError, match="Adapter schema_version 必须是 3"):
+    with pytest.raises(ConfigError, match="Adapter schema_version 必须是 4"):
         load_run_config(run_dir)
-    adapter_snapshot["schema_version"] = 3
+    adapter_snapshot["schema_version"] = 4
     adapter_snapshot_path.write_text(json.dumps(adapter_snapshot), encoding="utf-8")
 
     (run_dir / "llm_preset.json").unlink()

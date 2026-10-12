@@ -149,6 +149,10 @@ Run 索引、请求元数据共享、Adapter 状态无损压缩和内容概括�
 声明式 JSON LLM Adapter 的加载、严格校验、模板渲染、能力摘要、固定连接约束、响应指针和 SSE 规则。协议字段以
 [Adapter 契约](ADAPTERS.md)为准。
 
+### `app/llm_native.py`
+
+原生供应商响应协议：正文聚合、结束原因、流内错误和精确用量计数。由 Adapter 的响应格式选择，不拥有 HTTP 请求、调度或阶段状态。
+
 ### `app/llm_preset.py` 与 `app/llm_keys.py`
 
 `llm_preset.py` 解析 Base URL、模型、限流和凭据引用；`llm_keys.py` 管理一次执行中的多 Key 选择、

@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 from .errors import ConfigError, ExternalError
 
-ADAPTER_SCHEMA_VERSION = 3
+ADAPTER_SCHEMA_VERSION = 4
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([a-z_][a-z0-9_]*)\}")
 _BODY_PLACEHOLDERS = frozenset(
@@ -25,11 +25,12 @@ _REQUIRED_ADAPTER_KEYS = frozenset(
         "endpoint",
         "headers",
         "body",
-        "response_content_pointer",
+        "response_format",
     }
 )
 _OPTIONAL_ADAPTER_KEYS = frozenset(
     {
+        "response_content_pointer",
         "messages_format",
         "models",
         "response_finish_reason_pointer",
@@ -107,7 +108,7 @@ class JSONLLMAdapter:
     endpoint: str
     headers_template: dict[str, str]
     body_template: dict[str, Any]
-    response_content_pointer: str
+    response_content_pointer: str | None
     response_reasoning_content_pointers: tuple[str, ...] | None
     messages_format: str
     models_spec: dict[str, Any] | None
@@ -212,6 +213,43 @@ class JSONLLMAdapter:
         return headers, body
 
     @property
+    def response_format(self) -> str:
+        return self.definition["response_format"]
+
+    @property
+    def usage_supported(self) -> bool:
+        return self.response_format != "json-pointer" or self.usage_pointers is not None
+
+    @property
+    def truncated_finish_reasons(self) -> list[str]:
+        if self.response_format != "json-pointer":
+            from .llm_native import FINISH_REASONS
+            return FINISH_REASONS[self.response_format][0]
+        return self.definition.get("truncated_finish_reasons", [])
+
+    @property
+    def blocked_finish_reasons(self) -> list[str]:
+        if self.response_format != "json-pointer":
+            from .llm_native import FINISH_REASONS
+            return FINISH_REASONS[self.response_format][1]
+        return self.definition.get("blocked_finish_reasons", [])
+
+    @property
+    def stream_sentinel(self) -> str | None:
+        if self.response_format == "chat-completions":
+            return "[DONE]"
+        return (self.streaming_spec or {}).get("terminal", {}).get("sentinel")
+
+    def complete_stream_usage(self, values: dict[str, int]) -> dict[str, int]:
+        if self.response_format != "json-pointer":
+            from .llm_native import complete_usage
+            return complete_usage(self.response_format, values)
+        return values
+
+    def stream_completed_at_eof(self, reason: str | None) -> bool:
+        return self.response_format == "gemini" and reason is not None
+
+    @property
     def streaming_supported(self) -> bool:
         return self.streaming_spec is not None
 
@@ -249,6 +287,9 @@ class JSONLLMAdapter:
             raise ConfigError("该 Adapter 要求流式请求")
 
     def stream_content_deltas(self, event: dict[str, Any]) -> list[str]:
+        if self.response_format != "json-pointer":
+            from .llm_native import content_deltas
+            return content_deltas(self.response_format, event)
         if self.streaming_spec is None:
             raise ExternalError("LLM Adapter 未声明 streaming 规则")
         return _stream_deltas(
@@ -258,6 +299,9 @@ class JSONLLMAdapter:
         )
 
     def stream_reasoning_deltas(self, event: dict[str, Any]) -> list[str]:
+        if self.response_format != "json-pointer":
+            from .llm_native import reasoning_deltas
+            return reasoning_deltas(self.response_format, event)
         if self.streaming_spec is None:
             raise ExternalError("LLM Adapter 未声明 streaming 规则")
         return _stream_deltas(
@@ -269,6 +313,9 @@ class JSONLLMAdapter:
     def stream_error_details(
         self, event: dict[str, Any]
     ) -> StreamErrorDetails | None:
+        if self.response_format != "json-pointer":
+            from .llm_native import stream_error
+            return stream_error(self.response_format, event)
         if self.streaming_spec is None:
             raise ExternalError("LLM Adapter 未声明 streaming 规则")
         for rule in self.streaming_spec["error_events"]:
@@ -310,6 +357,9 @@ class JSONLLMAdapter:
         return None
 
     def stream_finish_reason(self, event: dict[str, Any]) -> str | None:
+        if self.response_format != "json-pointer":
+            from .llm_native import finish_reason
+            return finish_reason(self.response_format, event, stream=True)
         if self.streaming_spec is None:
             raise ExternalError("LLM Adapter 未声明 streaming 规则")
         values = _stream_deltas(
@@ -318,6 +368,9 @@ class JSONLLMAdapter:
         return values[-1] if values else None
 
     def stream_terminal(self, event: dict[str, Any]) -> bool:
+        if self.response_format != "json-pointer":
+            from .llm_native import terminal
+            return terminal(self.response_format, event)
         if self.streaming_spec is None:
             raise ExternalError("LLM Adapter 未声明 streaming 规则")
         terminal = self.streaming_spec["terminal"]
@@ -326,6 +379,9 @@ class JSONLLMAdapter:
         return _stream_condition_matches(event, terminal["when"])
 
     def extract_stream_usage(self, event: dict[str, Any]) -> dict[str, int]:
+        if self.response_format != "json-pointer":
+            from .llm_native import usage_values
+            return usage_values(self.response_format, event, stream=True)
         if self.streaming_spec is None:
             return {}
         values: dict[str, int] = {}
@@ -349,6 +405,9 @@ class JSONLLMAdapter:
         return values
 
     def parse_response(self, response: Any) -> LLMResponse:
+        if self.response_format != "json-pointer":
+            from .llm_native import parse_response
+            return parse_response(self.response_format, response)
         finish_reason = None
         reason_pointer = self.definition.get("response_finish_reason_pointer")
         if reason_pointer:
@@ -390,28 +449,6 @@ class JSONLLMAdapter:
             reasoning_content=reasoning_content,
             finish_reason=finish_reason,
         )
-
-    def replace_content(self, response: Any, content: str) -> None:
-        tokens = _parse_json_pointer(self.response_content_pointer)
-        if not tokens:
-            raise ExternalError("LLM 响应正文路径不能指向整个响应")
-        parent = _resolve_json_pointer_tokens(response, tokens[:-1])
-        token = tokens[-1]
-        try:
-            if isinstance(parent, list):
-                if not _is_index(token):
-                    raise KeyError(token)
-                parent[int(token)] = content
-            elif isinstance(parent, dict):
-                if token not in parent:
-                    raise KeyError(token)
-                parent[token] = content
-            else:
-                raise KeyError(token)
-        except (KeyError, IndexError) as exc:
-            raise ExternalError(
-                f"LLM 响应缺少正文路径：{self.response_content_pointer}"
-            ) from exc
 
     def build_models_request(
         self, *, api_key: str
@@ -457,6 +494,9 @@ class JSONLLMAdapter:
         return result
 
     def extract_usage(self, response: Any) -> Usage | None:
+        if self.response_format != "json-pointer":
+            from .llm_native import extract_usage
+            return extract_usage(self.response_format, response)
         if self.usage_pointers is None:
             return None
         values: list[int] = []
@@ -524,10 +564,19 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
     if not isinstance(body, dict):
         raise ConfigError("LLM Adapter body 必须是 JSON 对象")
     _validate_body(body)
-    pointer = value["response_content_pointer"]
-    if not isinstance(pointer, str) or not pointer.startswith("/"):
-        raise ConfigError("LLM Adapter response_content_pointer 必须是 JSON Pointer")
-    _parse_json_pointer(pointer)
+    from .llm_native import FORMATS
+    response_format = value["response_format"]
+    if not isinstance(response_format, str) or response_format not in FORMATS | {"json-pointer"}:
+        raise ConfigError("LLM Adapter response_format 无效")
+    native = response_format != "json-pointer"
+    mapping_fields = {"response_content_pointer", "response_finish_reason_pointer", "response_reasoning_content_pointer", "response_reasoning_content_pointers", "truncated_finish_reasons", "blocked_finish_reasons", "usage"}
+    if native and mapping_fields & value.keys():
+        raise ConfigError("原生 response_format 不允许声明响应解析映射")
+    pointer = value.get("response_content_pointer")
+    if not native:
+        if not isinstance(pointer, str) or not pointer.startswith("/"):
+            raise ConfigError("LLM Adapter response_content_pointer 必须是 JSON Pointer")
+        _parse_json_pointer(pointer)
     reasoning_pointer = value.get("response_reasoning_content_pointer")
     if "response_reasoning_content_pointers" in value:
         if reasoning_pointer is not None:
@@ -565,7 +614,7 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         value.get("blocked_finish_reasons", [])
     ):
         raise ConfigError("LLM Adapter 截断与拒绝的结束原因不能重叠")
-    streaming_spec = _validate_streaming_spec(value.get("streaming"))
+    streaming_spec = _validate_streaming_spec(value.get("streaming"), native=native)
     connection = value.get("connection")
     if connection is not None:
         if not isinstance(connection, dict) or set(connection) != {"base_url", "credential", "proxy_source"}:
@@ -708,7 +757,17 @@ def _validate_usage_mapping(
     return (pointers[0], pointers[1], pointers[2])
 
 
-def _validate_streaming_spec(value: Any) -> dict[str, Any] | None:
+def _validate_streaming_spec(value: Any, *, native: bool = False) -> dict[str, Any] | None:
+    if native and value is not None:
+        allowed = {"transport", "endpoint", "request_body", "allow_clean_eof"}
+        if not isinstance(value, dict) or set(value) - allowed or value.get("transport") != "sse":
+            raise ConfigError("原生 streaming 仅声明 SSE、endpoint、request_body 和 allow_clean_eof")
+        endpoint = _validate_endpoint(value.get("endpoint"), "streaming.endpoint")
+        body = value.get("request_body", {})
+        if not isinstance(body, dict) or type(value.get("allow_clean_eof", False)) is not bool:
+            raise ConfigError("原生 streaming 请求体或 EOF 声明无效")
+        _validate_body(body)
+        return {"transport": "sse", "endpoint": endpoint, "request_body": deepcopy(body), "allow_clean_eof": value.get("allow_clean_eof", False)}
     if value is None:
         return None
     if not isinstance(value, dict):
