@@ -91,6 +91,7 @@ export default function App() {
     search: string;
     segmentId: string;
   } | null>(null);
+  const [pendingTermSource, setPendingTermSource] = useState<string | null>(null);
   const [tasks, setTasks] = useState<Record<string, TaskState>>({});
   const [failureFocus, setFailureFocus] = useState<LLMStage | null>(null);
   const [settingsField, setSettingsField] = useState<SettingsField | null>(null);
@@ -177,6 +178,7 @@ export default function App() {
 
   const selectProject = useCallback((summary: ProjectSummary) => {
     rememberProjectPath(summary.path);
+    setPendingTermSource(null);
     setProject(summary.selector);
   }, []);
 
@@ -564,6 +566,7 @@ export default function App() {
   }
 
   function navigateStage(value: Stage) {
+    if (value !== "terminology") setPendingTermSource(null);
     if (value !== "settings") setSettingsField(null);
     setStage(value);
     setFailureFocus(null);
@@ -583,6 +586,12 @@ export default function App() {
     if (!target) return;
     setFailureFocus(target);
     setStage(target as Stage);
+  }
+
+  function jumpToTerm(source: string) {
+    setPendingTermSource(source);
+    openTermsSubpage(selectedProjectId, "library");
+    navigateStage("terminology");
   }
 
   function jumpToSegment(source: string, segmentId: string) {
@@ -611,9 +620,9 @@ export default function App() {
     />
   );
   else if (project && overview) {
-    if (stage === "terminology") content = <TermsView key={`terms:${selectedProjectId}`} project={project} projectId={selectedProjectId} overview={overview} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} task={task} onTask={updateTask} onSubpageChange={setTermsSubpage} />;
+    if (stage === "terminology") content = <TermsView key={`terms:${selectedProjectId}`} project={project} projectId={selectedProjectId} overview={overview} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} pendingTermSource={pendingTermSource} onTermJumpConsumed={() => setPendingTermSource(null)} task={task} onTask={updateTask} onSubpageChange={setTermsSubpage} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
-      content = <SegmentWorkspace key={`${stage}:${selectedProjectId}`} project={project} projectId={selectedProjectId} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} pendingJump={pendingJump} onJumpConsumed={() => setPendingJump(null)} />;
+      content = <SegmentWorkspace key={`${stage}:${selectedProjectId}`} project={project} projectId={selectedProjectId} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} pendingJump={pendingJump} onJumpConsumed={() => setPendingJump(null)} onFindTerm={jumpToTerm} />;
     } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} onNavigateStage={navigateStage} onOpenSettings={openSettingsField} />;
   }
 
