@@ -135,13 +135,13 @@ def test_retry_feedback_filters_scope_and_omits_protocol_errors() -> None:
         {"code": "invalid_relationship", "normalized": "alice"},
         {"code": "invisible_alias", "normalized": "bob"},
     ]
-    assert validation_feedback(errors, {"alice"}) == "invalid_relationship"
-    assert validation_feedback(errors, {"bob"}) == "invisible_alias"
-    assert validation_feedback(errors, {"other"}) == ""
+    assert validation_feedback(errors, {"alice"}, language="zh-CN") == "依据本次 terms/anchors 联合检查组关系和 alias 归属"
+    assert validation_feedback(errors, {"bob"}, language="zh-CN") == "aliases 仅使用本次 terms/anchors 中可见的 source/alias 原文"
+    assert validation_feedback(errors, {"other"}, language="zh-CN") == ""
     assert validation_feedback([
         {"code": "invalid_document", "_document_error_code": "invalid_json"},
         *errors,
-    ], {"alice"}) == ""
+    ], {"alice"}, language="zh-CN") == ""
 
 
 def write_pending_decision_draft(
@@ -2101,7 +2101,7 @@ async def test_decision_group_violation_enters_format_repair(
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         if "validation_repair" in payload:
             repairs += 1
-            assert payload["validation_repair"] == "invalid_relationship"
+            assert payload["validation_repair"] == "依据本次 terms/anchors 联合检查组关系和 alias 归属"
             content = llm_jsonl(decision_response(payload))
         elif not sent_invalid and payload["terms"][0]["normalized"] == "alice":
             sent_invalid = True
@@ -5199,7 +5199,7 @@ async def test_containment_repair_cannot_create_new_unreviewed_conflict(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_isolated_content_retries_send_only_current_error_types(tmp_path: Path) -> None:
+async def test_isolated_content_retries_send_only_current_guidance(tmp_path: Path) -> None:
     project = create_decision_project(tmp_path)
     config = load_project_config(project, stage="terminology_decision")
     config["retry"]["format_max_attempts"] = 3
@@ -5238,7 +5238,10 @@ async def test_isolated_content_retries_send_only_current_error_types(tmp_path: 
     )
     assert set(result) == {"alice", "bob"}
     assert [payload.get("validation_repair") for payload in llm.payloads] == [
-        None, "invalid_relationship, invisible_alias", "invalid_relationship", "invisible_alias",
+        None, "依据本次 terms/anchors 联合检查组关系和 alias 归属\n"
+        "aliases 仅使用本次 terms/anchors 中可见的 source/alias 原文",
+        "依据本次 terms/anchors 联合检查组关系和 alias 归属",
+        "aliases 仅使用本次 terms/anchors 中可见的 source/alias 原文",
     ]
     assert [[term["normalized"] for term in payload["terms"]]
             for payload in llm.payloads] == [["alice", "bob"], ["alice", "bob"], ["alice"], ["bob"]]
@@ -5294,4 +5297,4 @@ async def test_decision_rechecks_complete_request_limit_before_sending(
         payload = estimated_payloads[-1]
         assert [term["normalized"] for term in payload["terms"]] == ["bob"]
         assert "alice" in {term["normalized"] for term in payload["anchors"]}
-        assert payload["validation_repair"] == "invalid_relationship"
+        assert payload["validation_repair"] == "依据本次 terms/anchors 联合检查组关系和 alias 归属"
