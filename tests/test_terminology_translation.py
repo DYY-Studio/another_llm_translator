@@ -2650,7 +2650,10 @@ async def test_scan_resume_keeps_successful_results_and_original_scope(
     assert sum("Alice" in (payload["segments"][0]["source"] if include_draft
                             else payload["source_segments"][0]) for payload in requests) == 1
     candidates = read_jsonl(project, project / "terminology" / "candidates.jsonl")
-    assert [row["source_order"] for row in candidates] == [[0, 0], [1, 0]]
+    assert [row["source_order"] for row in candidates] == [
+        {"segment_id": "F0001-S000001", "offset": 0},
+        {"segment_id": "F0001-S000002", "offset": 0},
+    ]
     assert load_terms(project)["terms"][0]["description"] == "z-first；a-later"
 
 

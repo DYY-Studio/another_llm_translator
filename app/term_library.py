@@ -13,6 +13,7 @@ from .sqlite_storage import (
     list_runs,
     read_json,
     read_jsonl,
+    read_segments,
     record_exists,
     record_header,
     write_json,
@@ -344,24 +345,35 @@ def _candidate_source_order(
     items: list[dict[str, Any]],
     segment_order: dict[str, int],
     part_original: dict[str, str],
-) -> list[int]:
-    positions = (
-        (
+) -> dict[str, Any]:
+    first = min(
+        items,
+        key=lambda item: (
             segment_order[part_original.get(str(item["segment_id"]), str(item["segment_id"]))],
             int(item.get("_source_offset", 0)),
-        )
-        for item in items
+        ),
     )
-    return list(min(positions))
+    segment_id = str(first["segment_id"])
+    return {
+        "segment_id": part_original.get(segment_id, segment_id),
+        "offset": int(first.get("_source_offset", 0)),
+    }
 
 
 def _ordered_term_candidates(project: Path, task_id: str) -> list[dict[str, Any]]:
     candidates = read_jsonl(
         project, project / "terminology" / "candidates.jsonl", task_id=task_id,
     )
-    if any("source_order" not in record for record in candidates):
+    if any(not isinstance(record.get("source_order"), dict) for record in candidates):
         raise UsageError("旧术语扫描缺少源文排序信息，请结束旧扫描并重新扫描")
-    return sorted(candidates, key=lambda record: record["source_order"])
+    segment_order = {
+        str(item["segment_id"]): index for index, item in enumerate(read_segments(project))
+    }
+    if any(record["source_order"]["segment_id"] not in segment_order for record in candidates):
+        raise UsageError("术语候选对应的源文已移除或替换，请重新扫描")
+    return sorted(candidates, key=lambda record: (
+        segment_order[record["source_order"]["segment_id"]], record["source_order"]["offset"],
+    ))
 
 
 def _merge_and_publish_terms(

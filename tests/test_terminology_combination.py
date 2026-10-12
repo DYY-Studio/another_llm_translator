@@ -66,6 +66,37 @@ async def test_completed_legacy_scan_allows_other_outputs(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("include_draft", [False, True])
+async def test_scan_publication_uses_current_file_order(tmp_path: Path, include_draft: bool) -> None:
+    from app.project import add_project_files, reorder_project_files
+    from app.term_library import load_terms
+
+    project = await create_project(tmp_path, "First file.")
+    second = tmp_path / "second.txt"
+    second.write_text("Second file.", encoding="utf-8")
+    add_project_files(project, [str(second)])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        source = payload["segments"][0]["source"] if include_draft else payload["source_segments"][0]
+        records = [{"type": "term", "source": "Entity", "category": "名称",
+                    "description": "z-first" if "First" in source else "a-later"}]
+        if include_draft:
+            records.append({"type": "segment", "id": payload["segments"][0]["id"], "translation": "译文"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await run_terminology(project, Scope(only_file="F0001"), http_client=client,
+                              include_draft_translation=include_draft)
+        assert load_terms(project) is None
+        reorder_project_files(project, ["F0002", "F0001"])
+        result = await run_terminology(project, Scope(), http_client=client,
+                                       include_draft_translation=include_draft)
+    assert result["failed"] == 0
+    assert load_terms(project)["terms"][0]["description"] == "a-later；z-first"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_draft", [False, True])
 @pytest.mark.parametrize("include_summaries", [False, True])
 async def test_scan_descriptions_follow_source_order_despite_completion_order(
     tmp_path: Path, include_draft: bool, include_summaries: bool,
@@ -119,7 +150,10 @@ async def test_scan_descriptions_follow_source_order_despite_completion_order(
         candidates = read_jsonl(project, project / "terminology" / "candidates.jsonl")
         assert [row["terms"][0]["description"] for row in candidates] == ["a-later", "z-first"]
         assert load_terms(project)["terms"][0]["description"] == "z-first；a-later"
-        assert [row["source_order"] for row in candidates] == [[1, 0], [0, 0]]
+        assert [row["source_order"] for row in candidates] == [
+            {"segment_id": "F0001-S000002", "offset": 0},
+            {"segment_id": "F0001-S000001", "offset": 0},
+        ]
         await run_terminology(
             project, Scope(force=True), http_client=client,
             include_draft_translation=include_draft, include_summaries=include_summaries,
@@ -151,7 +185,10 @@ async def test_scan_runtime_slices_persist_source_offsets(tmp_path: Path, includ
                                        include_draft_translation=include_draft)
     assert result["failed"] == 0
     candidates = read_jsonl(project, project / "terminology" / "candidates.jsonl")
-    assert [row["source_order"] for row in candidates] == [[0, 0], [0, 4]]
+    assert [row["source_order"] for row in candidates] == [
+        {"segment_id": "F0001-S000001", "offset": 0},
+        {"segment_id": "F0001-S000001", "offset": 4},
+    ]
     assert load_terms(project)["terms"][0]["description"] == "z-first；a-later"
 
 

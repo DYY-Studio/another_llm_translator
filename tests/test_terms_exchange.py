@@ -165,7 +165,7 @@ def test_scanned_terms_can_be_exported_and_published_without_complete_task(
             str(metadata["project_id"]),
             active_task_id=task_id,
             run_id="RUN-PARTIAL",
-            source_order=[0, 0],
+            source_order={"segment_id": "F0001-S000001", "offset": 0},
             terms=[
                 {
                     "source": "recover",
@@ -209,10 +209,11 @@ def test_publication_orders_slices_and_preserves_published_descriptions(tmp_path
     write_json(project, project / "terminology" / "active_task.json", record_header(
         "terminology_task", project_id, active_task_id="TASK", status="active",
     ))
-    for position, description in [([0, 20], "a-later"), ([0, 0], "z-first"), ([0, 10], "z-first")]:
+    for offset, description in [(20, "a-later"), (0, "z-first"), (10, "z-first")]:
         append_jsonl(project, project / "terminology" / "candidates.jsonl", record_header(
             "terminology_candidates", project_id, active_task_id="TASK",
-            source_order=position, terms=[{**term("Alpha"), "description": description}],
+            source_order={"segment_id": "F0001-S000001", "offset": offset},
+            terms=[{**term("Alpha"), "description": description}],
         ))
     library = _merge_and_publish_terms(project, task_id="TASK", project_id=project_id, published_run_id="RUN")
     assert library["terms"][0]["description"] == "z-old；a-old；z-first；a-later"
@@ -587,7 +588,8 @@ def test_automatic_group_alias_removal_survives_later_manual_edits(tmp_path, cre
             status="active", initial_stage_fingerprint="test"))
         append_jsonl(project, project / "terminology" / "candidates.jsonl", record_header(
             "terminology_candidates", metadata["project_id"], active_task_id=task_id,
-            run_id="RUN-BETA", source_order=[0, 0], terms=[term("Beta")]))
+            run_id="RUN-BETA", source_order={"segment_id": "F0001-S000001", "offset": 0},
+            terms=[term("Beta")]))
         publish_partial_terms(project)
     store.save_term(term("Gamma"))
     rows = {item["source"]: item for item in load_terms(project)["terms"]}
