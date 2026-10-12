@@ -5074,7 +5074,7 @@ async def test_group_alias_conflict_does_not_modify_protected_root(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('outcome', ['repair', 'independent', 'review'])
+@pytest.mark.parametrize('outcome', ['repair', 'independent', 'review', 'grammar'])
 @pytest.mark.parametrize('final_review', [False, True])
 async def test_containment_review_uses_final_spelling_and_keeps_changes_atomic(tmp_path, outcome, final_review):
     project = create_decision_project(tmp_path, 'Alice\nAlice Show')
@@ -5097,8 +5097,8 @@ async def test_containment_review_uses_final_spelling_and_keeps_changes_atomic(t
             if phase == 'consistency' and term['normalized'] == 'alice':
                 record.update(action='update', changes={'preferred_translation': '艾丽丝'})
             if phase == 'containment':
-                if outcome == 'repair' and term['normalized'] == 'alice show':
-                    record.update(action='update', changes={'preferred_translation': '艾丽丝节目'})
+                if outcome in {'repair', 'grammar'} and term['normalized'] == 'alice show':
+                    record.update(action='update', changes={'preferred_translation': '艾丽丝节目' if outcome == 'repair' else '艾丽·丝的节目'})
                 elif outcome == 'review':
                     record.update(action='needs_review', reason='缺乏可靠证据')
                 elif outcome == 'independent':
@@ -5113,12 +5113,12 @@ async def test_containment_review_uses_final_spelling_and_keeps_changes_atomic(t
     draft = current_decision_draft(project)
     if outcome == 'review':
         assert result['needs_review'] == 2
-        assert draft['proposals'] == []
-    elif outcome == 'repair':
+        assert draft['proposals'][0]['after'][0]['preferred_translation'] == '艾丽丝'
+    elif outcome in {'repair', 'grammar'}:
         assert result['needs_review'] == 0
         assert len(draft['proposals']) == 1
         assert draft['proposals'][0]['normalized'] == ['alice', 'alice show']
-        assert [t['preferred_translation'] for t in draft['proposals'][0]['after']] == ['艾丽丝', '艾丽丝节目']
+        assert [t['preferred_translation'] for t in draft['proposals'][0]['after']] == ['艾丽丝', '艾丽丝节目' if outcome == 'repair' else '艾丽·丝的节目']
         checkpoint = json.loads((project / 'runs' / result['run_id'] / CHECKPOINT_FILE).read_text())
         assert set(checkpoint['phases']['containment']) == {'alice', 'alice show'}
     else:

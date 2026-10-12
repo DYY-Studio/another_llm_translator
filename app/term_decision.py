@@ -1178,10 +1178,7 @@ async def run_terminology_decision(
             # explicitly kept as independent translations; containment is not a hard invariant.
             unresolved_pairs = [
                 pair for pair in _containment_pairs(final, spec)
-                if pair not in pairs or (
-                    pair[1] in containment_decisions
-                    and containment_decisions[pair[1]]["action"] == "update"
-                )
+                if pair not in pairs
             ]
             for left, right in unresolved_pairs:
                 graph[left].add(right)
@@ -1198,7 +1195,7 @@ async def run_terminology_decision(
                 if unresolved:
                     reason = "；".join(dict.fromkeys(decisions[key]["reason"] for key in unresolved))
                     for key in component & eligible_terms:
-                        final[key] = deepcopy(states[key])
+                        final[key] = deepcopy(containment_base[key])
                         decisions[key] = {"action": "needs_review", "reason": reason}
             usage = llm.usage_summary()
         if not final_review:

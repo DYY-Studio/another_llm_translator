@@ -104,10 +104,15 @@ _PHASE_PROTOCOL = {
     },
     "containment": {
         "zh-CN": (
-            "keep 保留此前阶段的有效裁决。空 changes 仅用于重新启用当前 disabled 术语。"
+            "keep 保留此前阶段的有效裁决。keep、update、disable 均确认本次复核关系的最终状态，"
+            "合理语法差异或独立译名不要求连续子串包含。update 应确认修改后的全部可见关系；"
+            "无法确认时使用 needs_review。空 changes 仅用于重新启用当前 disabled 术语。"
         ),
         "en": (
-            "keep preserves the effective decision from preceding phases. Empty changes are allowed "
+            "keep preserves the effective decision from preceding phases. keep, update and disable confirm "
+            "the final state of reviewed relationships; grammatical differences and independent names "
+            "need not retain literal substring containment. For update, confirm all visible relationships "
+            "after the change; use needs_review when unable to confirm. Empty changes are allowed "
             "only to re-enable a currently disabled term."
         ),
     },
