@@ -791,7 +791,7 @@ async def _request_batch(
                 evidence=_compact_anchor_evidence(evidence, request_anchors),
                 conflicts=conflicts,
             )
-            feedback = validation_feedback(previous_errors, target_ids)
+            feedback = validation_feedback(previous_errors, target_ids, language=prompt_language)
             if feedback:
                 payload["validation_repair"] = feedback
             messages = render_messages(prompt, payload)

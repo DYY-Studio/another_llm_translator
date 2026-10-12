@@ -504,6 +504,7 @@ def _validate_plugins(
                 or not isinstance(scope, str)
                 or scope not in {"segment", "response"}
                 or not callable(validate)
+                or not callable(getattr(validator, "retry_instruction", None))
             ):
                 raise _descriptor_failure(
                     f"翻译校验器描述不完整：{plugin.plugin_id}.{validator_id}",

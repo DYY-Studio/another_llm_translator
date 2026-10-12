@@ -558,7 +558,7 @@ schema = 1
 [plugin]
 id = "my-documents"
 version = "1.0.0"
-protocol = 16
+protocol = 17
 entrypoint = "plugin:descriptor"
 ```
 
@@ -579,7 +579,7 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="my-documents",
         version="1.0.0",
-        protocol_version=16,
+        protocol_version=17,
         document_adapters=(MyDocumentAdapter(),),
     )
 ```
@@ -588,7 +588,7 @@ def descriptor() -> PluginDescriptor:
 版本和不完整声明。插件代码与宿主同进程运行，拥有当前进程权限；安装即表示
 信任。插件不得自行操作 Run、限速器、项目 JSONL 或正式输出目录。
 
-翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `16`；每个校验器声明唯一的 `validator_id`、`version`、`label`、`phase`、`scope`，并按执行粒度实现同步或异步校验。
+翻译校验器通过 `translation_validators` 注册。共享插件协议当前为版本 `17`；每个校验器声明唯一的 `validator_id`、`version`、`label`、`phase`、`scope`，并按执行粒度实现同步或异步校验。
 
 上下文包含当前 Segment 的 ID、源文、候选译文、逐 Segment 术语命中，以及可选的宿主 `DecisionService` 和独立的修复置信度门槛、警告阈值（`decision_warning_threshold`）。术语命中包含分类和说明；上下文不包含项目路径、术语库对象或 Run。宿主会校验 finding 的译文边界，并把校验器及插件版本写入翻译阶段指纹。
 
@@ -597,6 +597,12 @@ def descriptor() -> PluginDescriptor:
 `TranslationValidationMatch.severity` 为 `error` 或 `advisory`。
 
 `error` 必须指向候选译文中的非空范围；候选译文为空时使用空文本和 `start=end=0`。硬错误使用现有修复与 `exhausted_mode`；`advisory` 可以表示缺失的建议而没有译文范围，宿主最多为每个 Segment 发起一次定向修复，仍未通过时保存为 warning。advisory 的 `repairable` 默认 `true`，设为 `false` 时只保存 warning，不进入修复请求；error 必须可修复。
+
+每个校验器必须实现同步方法 `retry_instruction(match_type: str, language: str) -> str`。
+`match_type` 为该校验器产生的错误类型，`language` 为本次 Prompt 语言（`zh-CN` 或 `en`）。
+返回值是只依赖当前请求的简短指令，不引用旧响应，不重复源文、术语数据或完整协议；空字符串明确表示不附加指令。
+宿主只对本次重试目标的可修复 finding 调用该方法，按校验器和错误类型去重调用，再按指令文本去重写入 `validation_repair`。
+缺少方法、返回非字符串或方法执行失败时明确失败，不回落到错误标记。旧协议插件须更新 manifest 和描述符版本，不保留兼容路径。
 
 首个真实外部示例是可选的 `plugins/term_validation/` 目录插件，提供
 `preferred_term_usage`；它先检查实际命中的推荐译名是否缺失，可显式启用 Decision 语义复核。
@@ -616,6 +622,9 @@ class MyValidator:
 
     def validate(self, context: TranslationValidationContext):
         return ()
+
+    def retry_instruction(self, match_type: str, language: str) -> str:
+        return ""
 ```
 
 导入选项只支持上述类型明确的单层 choice 声明；插件不得把它当作通用配置或

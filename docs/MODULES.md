@@ -120,11 +120,11 @@ Run 索引、请求元数据共享、Adapter 状态无损压缩和内容概括�
 ### `app/stage_runtime.py`
 
 模型阶段共享运行逻辑，包括前置检查、设置差异处理、Prompt 装配、请求执行、响应归属和结果提交。Document Adapter 状态、运行选项和 Prompt 要求的读取由运行及项目设置预览共享。
-具体阶段规则不得堆回此模块。
+翻译修复指令由校验器提供，此模块只按本次目标收集和去重。具体阶段规则不得堆回此模块。
 
 ### 具体阶段模块
 
-- `stage_translation.py`：翻译 payload、完整候选批次验收、拆分 Segment 重组、翻译校验与修复。
+- `stage_translation.py`：翻译 payload、完整候选批次验收、拆分 Segment 重组、组件内即时校验修复与预算耗尽处理。
 - `stage_review.py`：校对/润色的基准选择、accepted/suggested 结果，以及建议应用。
 - `stage_terminology.py`：术语扫描、候选任务、联合片段概括和发布，分别跟踪术语与概括的切片覆盖。
 - `stage_terminology_draft.py`：实验粗翻及联合概括的扫描状态、合并请求与独立结果恢复，分别跟踪各类结果的切片覆盖，按本次响应模式选择 Document Adapter 要求；复用翻译执行器进行译文校验和保存。
@@ -192,7 +192,7 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 
 ### `app/translation_validation.py`
 
-翻译校验协议、内置机械与错位校验、分层门控和 finding 规范化。校验器不拥有 HTTP 重试或结果提交。
+翻译校验协议、内置机械与错位校验、各校验器的修复指令、分层门控和 finding 规范化。校验器不拥有 HTTP 重试或结果提交。
 
 ### `app/decision.py`
 

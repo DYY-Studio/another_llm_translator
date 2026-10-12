@@ -542,7 +542,7 @@ async def test_english_format_retry_does_not_add_instructions(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_english_validation_repair_sends_only_error_type(
+async def test_english_validation_repair_sends_self_contained_guidance(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path)
@@ -561,7 +561,7 @@ async def test_english_validation_repair_sends_only_error_type(
         if "validation_repair" in payload:
             repairs += 1
             instruction = payload["validation_repair"]
-            assert instruction == "japanese_kana"
+            assert instruction == "Translate Japanese kana into the target language."
             assert all(set(item) == {"id", "source"} for item in payload["segments"])
             prefix = "repaired:"
         else:

@@ -25,6 +25,7 @@ from .errors import (
     ExternalError,
     FatalExternalError,
     IncompleteError,
+    ProjectError,
     RequestSizeError,
     StorageError,
     UsageError,
@@ -837,6 +838,7 @@ async def _localized_request_loop(
     *,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
     prompt: str,
+    prompt_language: str,
     config: dict[str, Any],
     llm: LLMClient,
     stage: str,
@@ -873,12 +875,28 @@ async def _localized_request_loop(
         if not items:
             payload["segments"] = []
         if repair_candidates is not None:
-            feedback = ", ".join(sorted({
-                str(finding["validator"] if finding["match_type"] == "character" else finding["match_type"])
+            checks = sorted({
+                (str(finding["validator"]), str(finding["match_type"]))
                 for item in items
                 for finding in repair_candidates[str(item["segment_id"])]["findings"]
                 if finding.get("repairable", True)
-            }))
+                and (finding["validator"], finding["match_type"]) != ("response_gate", "validation_blocked")
+            })
+            validators = {
+                validator.validator_id: validator
+                for validator in config["_translation_validator_instances"]
+            }
+            instructions = []
+            for validator_id, match_type in checks:
+                try:
+                    instruction = validators[validator_id].retry_instruction(match_type, prompt_language)
+                except Exception as exc:
+                    raise ProjectError(f"翻译校验器修复指令生成失败：{validator_id}") from exc
+                if not isinstance(instruction, str):
+                    raise ProjectError(f"翻译校验器返回了无效修复指令：{validator_id}")
+                if instruction.strip():
+                    instructions.append(instruction.strip())
+            feedback = "\n".join(dict.fromkeys(instructions))
             if feedback:
                 payload["validation_repair"] = feedback
         payload, id_map = localize_request_ids(payload, items)
@@ -1310,8 +1328,11 @@ def _replace_with_runtime_parts(
     parts[0]["_source_offset"] = source_offset
     parts[1]["_source_offset"] = source_offset + len(left_source)
     expected = original_parts.setdefault(original_id, [segment_id])
-    index = expected.index(segment_id)
-    expected[index : index + 1] = part_ids
+    if segment_id == original_id:
+        expected[:] = part_ids
+    else:
+        index = expected.index(segment_id)
+        expected[index : index + 1] = part_ids
     for part in parts:
         part_id = str(part["segment_id"])
         part_original[part_id] = original_id

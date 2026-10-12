@@ -285,7 +285,7 @@ async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monke
     if repairs:
         assert len(requests[-1]["segments"]) == 4
         assert requests[-1]["segments"] == requests[0]["segments"]
-        assert requests[-1]["validation_repair"] == "segment_misaligned"
+        assert requests[-1]["validation_repair"] == "每条译文对应本次同 ID 的源文，保持内容归属"
     repair_logs = [item["message"] for item in diagnostics.logs if item["message"].startswith("validation repair ")]
     assert len(repair_logs) == repairs
     if repairs:
@@ -609,7 +609,74 @@ async def test_validation_retry_missing_end_sends_no_empty_feedback(tmp_path):
         result = await run_translation(project, Scope(), http_client=client)
     assert result["completed"] == 1
     assert len(requests) == 3
-    assert requests[1]["validation_repair"] == "japanese_kana"
+    assert requests[1]["validation_repair"] == "将日语假名译为目标语言"
     assert requests[2]["segments"] == []
     assert "validation_repair" not in requests[2]
     assert all("format_correction" not in request for request in requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,max_parallel", [("parallel", 2), ("ordered_by_file", 1)])
+async def test_validation_repair_uses_current_worker_before_other_translation_finishes(
+    tmp_path, mode, max_parallel,
+):
+    import asyncio
+    from app.project import add_project_files
+    from tests.helpers import use_llm_preset
+
+    project = await create_project(tmp_path, "First source.")
+    extra = tmp_path / "later.txt"
+    extra.write_text("Later source.", encoding="utf-8")
+    add_project_files(project, [str(extra)])
+    config = load_config(project / "config.toml")
+    config["execution"]["scheduling_mode"] = mode
+    config["validation"]["translation"]["validators"] = ["japanese_kana"]
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
+    use_llm_preset(tmp_path, max_parallel=max_parallel, max_parallel_per_key=max_parallel)
+    later_started = asyncio.Event()
+    repaired = asyncio.Event()
+    active = peak = 0
+    requests = []
+    repairs = {"First source.": 0, "Later source.": 0}
+
+    async def respond(request):
+        nonlocal active, peak
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        requests.append(payload)
+        active += 1
+        peak = max(peak, active)
+        try:
+            source = payload["segments"][0]["source"]
+            if "validation_repair" in payload:
+                if source == "First source.":
+                    assert later_started.is_set() == (max_parallel > 1)
+                    repaired.set()
+                repairs[source] += 1
+                translation = "カ" if repairs[source] == 1 else "译文"
+            elif source == "Later source.":
+                later_started.set()
+                await repaired.wait()
+                translation = "カ"
+            else:
+                if max_parallel > 1:
+                    await later_started.wait()
+                translation = "カ"
+            return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+                {"type": "segment", "id": item["id"], "translation": translation}
+                for item in payload["segments"]
+            ])}}]})
+        finally:
+            active -= 1
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        task = asyncio.create_task(run_translation(project, Scope(), http_client=client))
+        try:
+            result = await asyncio.wait_for(task, 5)
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    assert result["completed"] == 2
+    assert len(requests) == 6
+    assert repairs == {"First source.": 2, "Later source.": 2}
+    assert peak == max_parallel

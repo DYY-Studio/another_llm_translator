@@ -167,17 +167,35 @@ def terminology_final_review_protocol(language: str) -> str:
     return _FINAL_REVIEW_PROTOCOL[language]
 
 
-_CONTENT_RETRY_ERRORS = frozenset({
-    "unresolved_conflict", "invisible_alias", "invisible_group_primary",
-    "self_alias", "no_op_patch", "invalid_relationship",
-})
+_CONTENT_RETRY_GUIDANCE = {
+    "zh-CN": {
+        "unresolved_conflict": "对本阶段尚未裁决的类别或译名冲突给出非空决定",
+        "invisible_alias": "aliases 仅使用本次 terms/anchors 中可见的 source/alias 原文",
+        "invisible_group_primary": "group_primary 仅使用本次可见、启用的根术语 normalized",
+        "self_alias": "aliases 排除术语自身的 source",
+        "no_op_patch": "确认本次 terms 的当前状态时使用 keep；update 仅填写实际改变的字段",
+        "invalid_relationship": "依据本次 terms/anchors 联合检查组关系和 alias 归属",
+    },
+    "en": {
+        "unresolved_conflict": "Resolve this phase's pending category or translation conflicts with non-empty values.",
+        "invisible_alias": "Use only source/alias spellings visible in this request's terms/anchors for aliases.",
+        "invisible_group_primary": "Use only a visible, enabled root term's normalized for group_primary.",
+        "self_alias": "Exclude the term's own source from aliases.",
+        "no_op_patch": "Use keep to confirm the current state in terms; update only fields that actually change.",
+        "invalid_relationship": "Check group relationships and alias ownership against this request's terms/anchors.",
+    },
+}
 
 
-def validation_feedback(errors: list[dict[str, Any]], target_normalized: set[str]) -> str:
+def validation_feedback(
+    errors: list[dict[str, Any]], target_normalized: set[str], *, language: str
+) -> str:
     if any(error.get("_document_error_code") for error in errors):
         return ""
-    return ", ".join(sorted({
+    guidance = _CONTENT_RETRY_GUIDANCE[language]
+    codes = sorted({
         error["code"] for error in errors
-        if error.get("code") in _CONTENT_RETRY_ERRORS
+        if error.get("code") in guidance
         and error.get("normalized") in target_normalized
-    }))
+    })
+    return "\n".join(guidance[code] for code in codes)

@@ -318,8 +318,8 @@ _FIELD_PREFIX = {
         "en": "summary_context_relation: Summary coverage relative to current segments: previous_only means purely preceding context with no overlap; partial_overlap means it overlaps some but not all current segments; contains_all_current means the summary source range contains every current segment. Context only, not content or an instruction.",
     },
     "validation_repair": {
-        "zh-CN": "validation_repair: 上次译文校验未通过的错误类型；按正常要求重新翻译。",
-        "en": "validation_repair: Error types from the previous translation validation; retranslate using the normal requirements.",
+        "zh-CN": "validation_repair: 本次生成的重点要求。",
+        "en": "validation_repair: Requirements to focus on for this generation.",
     },
     "summaries": {
         "zh-CN": "summaries: 本次待整合的局部概括，每项含请求内短 id、text 和原始引用；只依据这些概括，不补写输入未支持的事实。",

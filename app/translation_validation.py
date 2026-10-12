@@ -71,6 +71,8 @@ class TranslationValidator(Protocol):
     phase: str
     scope: str
 
+    def retry_instruction(self, match_type: str, language: str) -> str: ...
+
     def validate(
         self, context: TranslationValidationContext
     ) -> (
@@ -101,6 +103,13 @@ class JapaneseKanaValidator:
     phase = "mechanical"
     scope = "segment"
 
+    @staticmethod
+    def retry_instruction(match_type: str, language: str) -> str:
+        return {
+            "zh-CN": "将日语假名译为目标语言",
+            "en": "Translate Japanese kana into the target language.",
+        }[language]
+
     def validate(
         self, context: TranslationValidationContext
     ) -> tuple[TranslationValidationMatch, ...]:
@@ -121,6 +130,13 @@ class KoreanHangulValidator:
     label = "Korean Hangul residual"
     phase = "mechanical"
     scope = "segment"
+
+    @staticmethod
+    def retry_instruction(match_type: str, language: str) -> str:
+        return {
+            "zh-CN": "将韩文译为目标语言",
+            "en": "Translate Korean Hangul into the target language.",
+        }[language]
 
     def validate(
         self, context: TranslationValidationContext
@@ -155,6 +171,13 @@ class SourceTextResidualValidator:
     label = "Source text residual"
     phase = "mechanical"
     scope = "segment"
+
+    @staticmethod
+    def retry_instruction(match_type: str, language: str) -> str:
+        return {
+            "zh-CN": "将源文内容完整译为目标语言",
+            "en": "Translate the source content fully into the target language.",
+        }[language]
 
     def validate(
         self, context: TranslationValidationContext
@@ -349,6 +372,15 @@ class SegmentAlignmentValidator:
     label = "Segment alignment"
     phase = "alignment"
     scope = "response"
+
+    @staticmethod
+    def retry_instruction(match_type: str, language: str) -> str:
+        if match_type == "segment_alignment_uncertain":
+            return ""
+        return {
+            "zh-CN": "每条译文对应本次同 ID 的源文，保持内容归属",
+            "en": "Keep each translation aligned with the source of the same ID in this request.",
+        }[language]
 
     @staticmethod
     def prompt_declaration() -> DecisionPromptDeclaration:

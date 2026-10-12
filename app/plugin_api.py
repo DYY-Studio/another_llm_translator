@@ -22,7 +22,7 @@ from .translation_validation import (
     TranslationValidator,
 )
 
-PLUGIN_PROTOCOL_VERSION = 16
+PLUGIN_PROTOCOL_VERSION = 17
 
 
 @dataclass(frozen=True)
