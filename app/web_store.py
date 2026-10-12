@@ -593,6 +593,13 @@ class WebStore:
         detail = self._segment_detail_view(
             segment, histories, format_count=format_counts[str(segment["segment_id"])]
         )
+        library = load_terms(self.project)
+        detail["matched_terms"] = match_terms(
+            str(segment["source"]),
+            library,
+            len(library["terms"]) if library else 0,
+            term_normalization(self.config),
+        )
         detail["context"] = {
             "before": [
                 self._segment_detail_view(
