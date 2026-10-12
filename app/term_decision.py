@@ -23,7 +23,7 @@ import httpx
 from .config import load_project_config
 
 
-from .errors import StorageError, UsageError
+from .errors import AppError, StorageError, UsageError, app_error_payload
 
 from .execution import (
     Scope,
@@ -202,6 +202,8 @@ def decision_resume_compatibility(
         return False, "旧 Run 缺少有效的术语库 revision"
     if manifest_revision != source_terms_revision:
         return False, "术语库 revision 已变化，不能续用自动决策 Run"
+    if manifest.get("decision_status") not in {"generating", "pending"}:
+        return False, "旧 Run 的草案已处理，不能续用自动决策 Run"
     path = _checkpoint_path(project, run_id)
     if not path.is_file():
         return False, "旧 Run 缺少术语决策检查点规则版本"
@@ -613,7 +615,7 @@ async def run_terminology_decision(
     final_review: bool = False,
 ) -> dict[str, Any]:
     existing = _drafts.current_decision_draft(project)
-    if existing is not None and not replace_draft:
+    if existing is not None and existing["run_id"] != resume_run_id and not replace_draft:
         raise UsageError("已有待处理术语决策草案；必须明确替换")
     if plan is None:
         plan = decision_plan(project, prompt_language, final_review=final_review)
@@ -750,6 +752,62 @@ async def run_terminology_decision(
     usage: dict[str, Any] | None = None
     active_llm: LLMClient | None = None
 
+    review_base: dict[str, dict[str, Any]] | None = None
+    containment_base: dict[str, dict[str, Any]] | None = None
+    review_target_ids: set[str] = set()
+    final_responses_complete = False
+
+    def save_draft(failure: AppError | None = None) -> dict[str, Any]:
+        draft_conflicts = _merge_conflict_evidence(
+            source_conflicts,
+            phase_two_conflicts,
+            final_conflicts,
+        )
+        draft = _drafts._build_draft(
+            project_id=str(metadata["project_id"]),
+            run_id=run_id,
+            revision=int(library["terms_revision"]),
+            original=states,
+            final=final,
+            decisions=decisions,
+            protected=protected,
+            evidence=evidence,
+            conflicts=draft_conflicts,
+            fingerprint=_composite_fingerprint(checkpoint, "decision_fingerprint"),
+            source_library=deepcopy(library),
+            source_overrides=deepcopy(overrides_document),
+            model_fingerprint=_composite_fingerprint(checkpoint, "model_fingerprint"),
+            prompt_fingerprint=_composite_fingerprint(checkpoint, "prompt_fingerprint"),
+            spec=spec,
+            reviewed_components=containment_components,
+        )
+        atomic_write_json(_drafts._draft_path(project, run_id), draft)
+        manifest = read_json(project, run_dir / "manifest.json")
+        manifest.update(
+            decision_status="pending",
+            rejected_proposal_ids=[value for value in manifest.get("rejected_proposal_ids", [])
+                                   if value in {proposal["proposal_id"] for proposal in draft["proposals"]}],
+            proposal_count=len(draft["proposals"]),
+            needs_review_count=len(draft["needs_review"]),
+            protected_term_count=len(protected_states),
+            final_review=final_review,
+            final_review_target_count=final_review_target_count,
+            total_steps=total,
+        )
+        if failure is None:
+            manifest.pop("final_review_error", None)
+        else:
+            manifest["final_review_error"] = app_error_payload(failure)
+        write_json(project, run_dir / "manifest.json", manifest)
+        if existing is not None and existing["run_id"] != run_id:
+            old_path = project / "runs" / str(existing["run_id"]) / "manifest.json"
+            old_manifest = read_json(project, old_path)
+            old_manifest.update(decision_status="superseded", superseded_by_run_id=run_id)
+            if "final_review_error" in old_manifest:
+                old_manifest.update(status="completed", completed_at=utc_now())
+            write_json(project, old_path, old_manifest)
+        return draft
+
     def append_llm_warnings(manifest: dict[str, Any]) -> None:
         if active_llm is None or not active_llm.warnings:
             return
@@ -782,7 +840,7 @@ async def run_terminology_decision(
             interruption["request_id"] = request_id
         manifest.update(
             status="running",
-            decision_status="generating",
+            decision_status=("pending" if _drafts._draft_path(project, run_id).is_file() else "generating"),
             completed_segment_count=completed,
             failed_segment_count=0,
             failure_counts={},
@@ -988,6 +1046,7 @@ async def run_terminology_decision(
                 language=language,
             )
             if final_review:
+                review_base = deepcopy(final)
                 _recover_invalid_relationship_components(
                     original=states,
                     final=final,
@@ -1009,6 +1068,7 @@ async def run_terminology_decision(
                 review_conflicts = _effective_conflicts(
                     project, final, source_conflicts
                 )
+                review_base = deepcopy(final)
                 review_focus = _final_review_targets(
                     eligible=eligible,
                     protected=protected,
@@ -1168,6 +1228,7 @@ async def run_terminology_decision(
                     on_progress(completed, 0, total)
 
             await run_bounded(batches, review_containment, max_parallel=int(config["execution"]["max_parallel"]))
+            final_responses_complete = True
             _apply_tentative(final, containment_decisions)
             for key, decision in containment_decisions.items():
                 if decision["action"] != "keep":
@@ -1233,40 +1294,8 @@ async def run_terminology_decision(
                 conflicts=final_conflicts,
             )
         _validate_final_states(project, final, original=states, spec=spec)
-        draft_conflicts = _merge_conflict_evidence(
-            source_conflicts,
-            phase_two_conflicts,
-            final_conflicts,
-        )
-        draft = _drafts._build_draft(
-            project_id=str(metadata["project_id"]),
-            run_id=run_id,
-            revision=int(library["terms_revision"]),
-            original=states,
-            final=final,
-            decisions=decisions,
-            protected=protected,
-            evidence=evidence,
-            conflicts=draft_conflicts,
-            fingerprint=_composite_fingerprint(checkpoint, "decision_fingerprint"),
-            source_library=deepcopy(library),
-            source_overrides=deepcopy(overrides_document),
-            model_fingerprint=_composite_fingerprint(checkpoint, "model_fingerprint"),
-            prompt_fingerprint=_composite_fingerprint(checkpoint, "prompt_fingerprint"),
-            spec=spec,
-            reviewed_components=containment_components,
-        )
-        atomic_write_json(_drafts._draft_path(project, run_id), draft)
+        draft = save_draft()
         manifest = read_json(project, run_dir / "manifest.json")
-        manifest.update(
-            decision_status="pending",
-            proposal_count=len(draft["proposals"]),
-            needs_review_count=len(draft["needs_review"]),
-            protected_term_count=len(protected_states),
-            final_review=final_review,
-            final_review_target_count=final_review_target_count,
-            total_steps=total,
-        )
         manifest.pop("last_interruption", None)
         append_llm_warnings(manifest)
         write_json(project, run_dir / "manifest.json", manifest)
@@ -1285,15 +1314,6 @@ async def run_terminology_decision(
                 else None
             ),
         )
-        if existing is not None:
-            old_run_id = str(existing["run_id"])
-            old_path = project / "runs" / old_run_id / "manifest.json"
-            old_manifest = read_json(project, old_path)
-            old_manifest.update(
-                decision_status="superseded",
-                superseded_by_run_id=run_id,
-            )
-            write_json(project, old_path, old_manifest)
         return {
             "stage": STAGE,
             "run_id": run_id,
@@ -1311,4 +1331,61 @@ async def run_terminology_decision(
         if active_llm is not None:
             usage = active_llm.usage_summary()
         record_resumable_interruption(usage, exc)
+        if final_review and review_base is not None and isinstance(exc, AppError) and not isinstance(exc, StorageError):
+            # Rebuild from completed dependency components, never partial relationship patches.
+            if not final_responses_complete:
+                final = deepcopy(review_base)
+                for phase_base, results, targets, reviewed in (
+                    (review_base, review_decisions, review_target_ids, []),
+                    (containment_base, containment_decisions, set(containment_decisions) | {
+                        str(item["normalized"]) for item in containment_focus
+                    } if containment_base is not None else set(), containment_components),
+                ):
+                    if phase_base is None:
+                        continue
+                    candidate = deepcopy(phase_base)
+                    _apply_tentative(candidate, results)
+                    graph = _decision_dependency_graph(phase_base, candidate, spec)
+                    unreviewed_pairs = (
+                        [pair for pair in _containment_pairs(candidate, spec) if pair not in pairs]
+                        if phase_base is containment_base else []
+                    )
+                    for left, right in unreviewed_pairs:
+                        graph[left].add(right)
+                        graph[right].add(left)
+                    for component in reviewed:
+                        keys = sorted(component)
+                        for left, right in zip(keys, keys[1:]):
+                            graph[left].add(right)
+                            graph[right].add(left)
+                    for component in _dependency_components(graph, targets):
+                        complete = all(key in results and results[key]["action"] != "needs_review"
+                                       for key in component & targets) and not any(
+                                       left in component for left, _ in unreviewed_pairs
+                                   )
+                        for key in component & decisions.keys():
+                            if complete:
+                                final[key] = deepcopy(candidate[key])
+                                if key in results and results[key]["action"] != "keep":
+                                    decisions[key] = deepcopy(results[key])
+                                elif key in results and decisions[key]["action"] == "needs_review":
+                                    decisions[key] = deepcopy(results[key])
+                            else:
+                                final[key] = deepcopy(phase_base[key])
+                                decisions[key] = {"action": "needs_review", "reason": str(exc)}
+            final_conflicts = _effective_conflicts(project, final, source_conflicts)
+            _recover_invalid_relationship_components(
+                original=states, final=final, decisions=decisions, language=language,
+                spec=spec, conflicts=final_conflicts,
+            )
+            final_conflicts = _effective_conflicts(project, final, source_conflicts)
+            unresolved = {key for key, conflicts in final_conflicts.items() if _has_conflicts(conflicts)}
+            graph = _decision_dependency_graph(states, final, spec)
+            for component in _dependency_components(graph, unresolved):
+                for key in component & decisions.keys():
+                    final[key] = deepcopy(states[key])
+                    decisions[key] = {"action": "needs_review", "reason": str(exc)}
+            final_conflicts = _effective_conflicts(project, final, source_conflicts)
+            _validate_final_states(project, final, original=states, spec=spec)
+            save_draft(exc)
         raise

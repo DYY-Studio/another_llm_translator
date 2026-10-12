@@ -142,6 +142,8 @@ def current_decision_draft(project: Path) -> dict[str, Any] | None:
             raise StorageError(f"术语决策 Run 缺少草案：{manifest['run_id']}")
         draft = json.loads(path.read_text(encoding="utf-8"))
         draft["rejected_proposal_ids"] = list(manifest.get("rejected_proposal_ids", []))
+        if "final_review_error" in manifest:
+            draft["final_review_error"] = deepcopy(manifest["final_review_error"])
         return draft
     return None
 
@@ -306,6 +308,8 @@ def discard_decision_draft(project: Path, *, confirm: bool) -> dict[str, Any]:
     path = project / "runs" / run_id / "manifest.json"
     manifest = _pending_manifest(project, run_id)
     manifest.update(decision_status="discarded", discarded_at=utc_now())
+    if "final_review_error" in manifest:
+        manifest.update(status="completed", completed_at=utc_now())
     write_json(project, path, manifest)
     return {"discarded": True, "run_id": run_id}
 
@@ -348,6 +352,8 @@ def apply_decision_draft(
             manual_review_replaces_previous=True,
             applied_at=utc_now(),
         )
+        if "final_review_error" in manifest:
+            manifest.update(status="completed", completed_at=utc_now())
         write_json(project, manifest_path, manifest)
         return {
             "run_id": run_id,
@@ -432,6 +438,8 @@ def apply_decision_draft(
         applied_terms_revision=revision,
         applied_at=utc_now(),
     )
+    if "final_review_error" in manifest:
+        manifest.update(status="completed", completed_at=utc_now())
     write_terminology_decision_state(
         project,
         terms=term_record,

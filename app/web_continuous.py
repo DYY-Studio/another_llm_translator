@@ -617,7 +617,15 @@ def inspect_continuous(
                     stage="terminology_decision",
                 )
             )
-        if current_decision_draft(project) is not None:
+        draft = current_decision_draft(project)
+        decision_runs = running_runs.get("terminology_decision", [])
+        resumes_draft = (
+            draft is not None
+            and actions.get("terminology_decision") == "resume"
+            and bool(decision_runs)
+            and draft["run_id"] == decision_runs[0]["run_id"]
+        )
+        if draft is not None and not resumes_draft:
             blocking.append(
                 _blocking(
                     "pending_decision_draft",

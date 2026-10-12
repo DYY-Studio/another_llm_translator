@@ -849,6 +849,7 @@ export interface TermDecisionProposal {
 }
 
 export interface TermDecisionDraft {
+  final_review_error?: { error: string; code: string; params: Record<string, unknown> };
   run_id: string;
   source_terms_revision: number;
   proposals: TermDecisionProposal[];

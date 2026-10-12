@@ -2785,7 +2785,7 @@ async def test_final_review_cancel_resumes_with_same_option_and_checkpoint(
 
 
 @pytest.mark.asyncio
-async def test_final_review_failure_keeps_previous_pending_draft(
+async def test_final_review_failure_saves_draft_and_resumes_same_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = create_decision_project(tmp_path)
@@ -2824,7 +2824,23 @@ async def test_final_review_failure_keeps_previous_pending_draft(
 
     current = current_decision_draft(project)
     assert current is not None
-    assert current["run_id"] == old_run_id
+    assert current["run_id"] != old_run_id
+    assert current["final_review_error"]["error"] == "终审模型失败"
+    assert current["needs_review"][0]["normalized"] == "alice"
+    failed_run_id = current["run_id"]
+    assert read_json(project, project / "runs" / old_run_id / "manifest.json")["decision_status"] == "superseded"
+    resumed = []
+
+    async def finish_review(*_: object, **kwargs: object) -> dict[str, dict]:
+        resumed.append(kwargs["phase"])
+        return {str(item["normalized"]): {"action": "keep", "reason": "确认"} for item in kwargs["focus"]}
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", finish_review)
+    async with httpx.AsyncClient() as client:
+        result = await run_terminology_decision(project, final_review=True, resume_run_id=failed_run_id, http_client=client)
+    assert resumed == ["final_review"]
+    assert result["run_id"] == failed_run_id
+    assert "final_review_error" not in current_decision_draft(project)
 
 
 @pytest.mark.asyncio
@@ -5298,3 +5314,203 @@ async def test_decision_rechecks_complete_request_limit_before_sending(
         assert [term["normalized"] for term in payload["terms"]] == ["bob"]
         assert "alice" in {term["normalized"] for term in payload["anchors"]}
         assert payload["validation_repair"] == "依据本次 terms/anchors 联合检查组关系和 alias 归属"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["http", "format", "validation"])
+async def test_failed_final_review_retains_safe_proposals_for_manual_apply(tmp_path, monkeypatch, failure):
+    project = create_decision_project(tmp_path)
+    plan = decision_plan(project, final_review=True)
+    plan["config"]["retry"]["http_max_attempts"] = 1
+    plan["config"]["retry"]["format_max_attempts"] = 1
+    original_validate = __import__("app.term_decision", fromlist=["_validate_final_states"])._validate_final_states
+    validations = 0
+
+    def validate(*args, **kwargs):
+        nonlocal validations
+        validations += 1
+        if failure == "validation" and validations == 1:
+            raise UsageError("最终校验失败")
+        return original_validate(*args, **kwargs)
+
+    monkeypatch.setattr("app.term_decision._validate_final_states", validate)
+    phases = []
+
+    def handler(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        phase = payload["phase"]
+        phases.append(phase)
+        if phase == "final_review" and failure == "http":
+            return httpx.Response(503, json={"error": "unavailable"})
+        records = []
+        for term in payload["terms"]:
+            record = dict(type="decision", normalized=term["normalized"], action="keep", reason="确认")
+            if phase == "adjudication" and term["normalized"] == "bob":
+                record.update(action="update", changes={"description": "源文中的 Bob"})
+            if phase == "consistency" and term["normalized"] == "alice":
+                record.update(action="needs_review", reason="待终审")
+            if phase == "final_review" and failure == "format":
+                record["action"] = "needs_review"
+            records.append(record)
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+
+    from app.errors import AppError
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AppError):
+            await run_terminology_decision(project, final_review=True, plan=plan, http_client=client)
+    draft = current_decision_draft(project)
+    assert draft["final_review_error"]["error"]
+    assert any("bob" in proposal["normalized"] for proposal in draft["proposals"])
+    if failure != "validation":
+        assert [item["normalized"] for item in draft["needs_review"]] == ["alice"]
+    manifest = read_json(project, project / "runs" / draft["run_id"] / "manifest.json")
+    assert manifest["status"] == "running"
+    assert manifest["decision_status"] == "pending"
+    from app.web_continuous import inspect_continuous
+    preflight = inspect_continuous(project, ["terminology", "terminology_decision"],
+                                   run_actions={"terminology_decision": "resume"}, final_review=True)
+    assert "pending_decision_draft" not in {item["code"] for item in preflight["blocking"]}
+    applied = apply_decision_draft(project, confirm_all=True)
+    assert applied["applied"] > 0
+    assert next(term for term in load_terms(project)["terms"] if term["normalized"] == "bob")["description"] == "源文中的 Bob"
+    manifest = read_json(project, project / "runs" / draft["run_id"] / "manifest.json")
+    assert manifest["status"] == "completed"
+    from app.term_decision import decision_resume_compatibility
+    compatible, _ = decision_resume_compatibility(project, draft["run_id"], source_terms_revision=applied["terms_revision"], final_review=True)
+    assert not compatible
+
+
+@pytest.mark.asyncio
+async def test_final_review_failure_does_not_apply_partial_relationship_component(tmp_path, monkeypatch):
+    project = create_decision_project(tmp_path)
+    library = load_terms(project)
+    library["terms"][0].update(aliases=[], preferred_translation="爱丽丝")
+    library["terms"][1]["group_primary"] = "alice"
+    write_json(project, project / "terminology" / "terms.json", library)
+    monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
+    alice_finished = asyncio.Event()
+
+    async def respond(*_, **kwargs):
+        key = kwargs["focus"][0]["normalized"]
+        phase = kwargs["phase"]
+        if phase == "consistency":
+            return {key: {"action": "needs_review", "reason": "需终审"}}
+        if phase == "final_review":
+            if key == "bob":
+                await alice_finished.wait()
+                raise UsageError("成员终审失败")
+            after = deepcopy(kwargs["known_states"][key])
+            after["preferred_translation"] = "艾丽丝"
+            alice_finished.set()
+            return {key: {"action": "update", "reason": "修改", "after": after}}
+        return {key: {"action": "keep", "reason": "保持"}}
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", respond)
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(UsageError, match="成员终审失败"):
+            await run_terminology_decision(project, final_review=True, http_client=client)
+    draft = current_decision_draft(project)
+    assert draft["proposals"] == []
+    assert {item["normalized"] for item in draft["needs_review"]} == {"alice", "bob"}
+    checkpoint = json.loads((project / "runs" / draft["run_id"] / CHECKPOINT_FILE).read_text())
+    assert set(checkpoint["phases"]["final_review"]) == {"alice"}
+
+
+@pytest.mark.asyncio
+async def test_containment_request_failure_keeps_prior_changes_and_resumes(tmp_path):
+    project = create_decision_project(tmp_path, 'Alice\nAlice Show')
+    library = load_terms(project)
+    library['terms'][0].update(preferred_translation='爱丽丝', aliases=[])
+    library['terms'][1].update(source='Alice Show', normalized='alice show', preferred_translation='爱丽丝节目')
+    write_json(project, project / 'terminology' / 'terms.json', library)
+    plan = decision_plan(project, final_review=True)
+    plan['config']['retry']['http_max_attempts'] = 1
+    phases = []
+    fail = True
+
+    def handler(request):
+        payload = json.loads(json.loads(request.content)['messages'][1]['content'])
+        phase = payload['phase']
+        phases.append(phase)
+        if phase == 'containment' and fail:
+            return httpx.Response(503, json={'error': 'unavailable'})
+        records = []
+        for term in payload['terms']:
+            record = dict(type='decision', normalized=term['normalized'], action='keep', reason='确认')
+            if phase == 'consistency' and term['normalized'] == 'alice':
+                record.update(action='update', changes={'preferred_translation': '艾丽丝'})
+            records.append(record)
+        return httpx.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}]})
+
+    from app.errors import ExternalError
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ExternalError):
+            await run_terminology_decision(project, final_review=True, plan=plan, http_client=client)
+        draft = current_decision_draft(project)
+        assert draft['proposals'][0]['after'][0]['preferred_translation'] == '艾丽丝'
+        assert len(draft['needs_review']) == 2
+        phases.clear()
+        fail = False
+        await run_terminology_decision(project, final_review=True, resume_run_id=draft['run_id'], http_client=client)
+    assert phases == ['containment']
+    manifest = read_json(project, project / 'runs' / draft['run_id'] / 'manifest.json')
+    assert manifest['usage_invocation_count'] == 2
+    assert 'final_review_error' not in current_decision_draft(project)
+
+
+@pytest.mark.asyncio
+async def test_replacing_failed_final_review_draft_retires_old_run(tmp_path, monkeypatch):
+    project = create_decision_project(tmp_path)
+    fail = True
+
+    async def respond(*_, **kwargs):
+        if fail and kwargs['phase'] == 'final_review':
+            raise UsageError('终审失败')
+        return {item['normalized']: {
+            'action': 'needs_review' if fail and kwargs['phase'] == 'consistency' else 'keep',
+            'reason': '等待终审' if fail else '确认',
+        } for item in kwargs['focus']}
+
+    monkeypatch.setattr('app.term_decision_batches._request_batch', respond)
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(UsageError, match='终审失败'):
+            await run_terminology_decision(project, final_review=True, http_client=client)
+        failed_draft = current_decision_draft(project)
+        fail = False
+        result = await run_terminology_decision(project, replace_draft=True, http_client=client)
+    old_manifest = read_json(project, project / 'runs' / failed_draft['run_id'] / 'manifest.json')
+    assert old_manifest['decision_status'] == 'superseded'
+    assert old_manifest['status'] == 'completed'
+    from app.execution import find_running_runs
+    assert find_running_runs(project, 'terminology_decision') == []
+    assert current_decision_draft(project)['run_id'] == result['run_id']
+
+
+@pytest.mark.asyncio
+async def test_final_scalar_conflict_is_excluded_from_failed_draft_proposals(tmp_path):
+    project = create_decision_project(tmp_path)
+    library = load_terms(project)
+    library['terms'][0]['conflicts']['preferred_translations'] = ['爱丽丝', '艾丽丝']
+    write_json(project, project / 'terminology' / 'terms.json', library)
+
+    def handler(request):
+        payload = json.loads(json.loads(request.content)['messages'][1]['content'])
+        records = []
+        for term in payload['terms']:
+            record = dict(type='decision', normalized=term['normalized'], action='keep', reason='确认')
+            if payload['phase'] == 'adjudication':
+                changes = ({'preferred_translation': '艾丽丝', 'category': '人名'}
+                           if term['normalized'] == 'alice' else {'description': '源文中的 Bob'})
+                record.update(action='update', changes=changes)
+            elif payload['phase'] == 'consistency' and term['normalized'] == 'alice':
+                record.update(action='update', changes={'preferred_translation': None})
+            records.append(record)
+        return httpx.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(UsageError, match='终审后仍有未解决冲突'):
+            await run_terminology_decision(project, final_review=True, http_client=client)
+    draft = current_decision_draft(project)
+    assert [proposal['normalized'] for proposal in draft['proposals']] == [['bob']]
+    assert [item['normalized'] for item in draft['needs_review']] == ['alice']
+    assert apply_decision_draft(project, confirm_all=True)['applied'] == 1

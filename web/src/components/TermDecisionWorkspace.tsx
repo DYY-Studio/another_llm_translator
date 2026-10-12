@@ -139,7 +139,7 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
   const decisionRequestRef = useRef(0);
   const activeProjectRef = useRef(projectId);
   activeProjectRef.current = projectId;
-  const running = Boolean(task && task.stage === "terminology_decision" && ["queued", "running", "cancelling"].includes(task.status));
+  const running = Boolean(task && (task.stage === "terminology_decision" || (task.stage === "continuous" && task.current_stage === "terminology_decision")) && ["queued", "running", "cancelling"].includes(task.status));
 
   async function load(): Promise<TermDecisionReviewState | null> {
     const requestId = ++decisionRequestRef.current;
@@ -182,10 +182,10 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
     return () => { decisionRequestRef.current += 1; };
   }, [project, projectId]);
   useEffect(() => {
-    if (task?.stage !== "terminology_decision") return;
+    if (task?.stage !== "terminology_decision" && !(task?.stage === "continuous" && task.current_stage === "terminology_decision")) return;
     if (["completed", "cancelled", "failed"].includes(task.status)) void load();
     if (task.status === "failed") setMessage(errorMessage(task.error, language));
-  }, [task?.task_id, task?.status, language]);
+  }, [task?.task_id, task?.status, task?.current_stage, language]);
 
   useEffect(() => {
     decisionWorkspaceCache.set(projectId, updateTermDecisionWorkspaceState(createTermDecisionWorkspaceState(), {
@@ -303,16 +303,17 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
         <div><p className="term-decision-back"><button className="link-button" onClick={onClose}>← {translate("terms.decisionBackToLibrary", language)}</button></p><h1>{translate("terms.decisionTitle", language)}</h1><p>{translate("terms.decisionHint", language)}</p></div>
         <div className="button-group">
           {review?.draft && <button className="danger-button" disabled={busy || running} onClick={() => mutate("discard", translate("terms.decisionDiscardConfirm", language))}>{translate("terms.decisionDiscard", language)}</button>}
-          {review?.draft && <button className="quiet-button" disabled={busy || running || !options} onClick={() => openRunDialog(true)}>{translate("terms.decisionRegenerate", language)}</button>}
+          {review?.draft && <button className="quiet-button" disabled={busy || running || !options} onClick={() => openRunDialog(true)}>{translate(review.draft?.final_review_error ? "terms.decisionResume" : "terms.decisionRegenerate", language)}</button>}
           {review?.draft && <button className="primary-button" disabled={busy || running} onClick={() => mutate("apply", translate("terms.decisionApplyConfirm", language, summary))}>{translate("terms.decisionApply", language)}</button>}
           {!review?.draft && <button className="primary-button" disabled={busy || running || !options || options.selected === 0} onClick={() => openRunDialog(false)}>{translate("terms.decisionGenerate", language)}</button>}
           {!review?.draft && review?.rollback && <button disabled={busy || running} onClick={() => mutate("rollback", translate("terms.decisionRollbackConfirm", language))}>{translate("terms.decisionRollback", language)}</button>}
         </div>
       </header>
       {review?.draft && <div className="term-decision-warning"><strong>{translate("terms.decisionRevisionWarning", language)}</strong><span>{translate("terms.decisionRevisionWarningHint", language)}</span></div>}
-      {message && <p className="inline-message error-text">{message}</p>}
+      {message && !(review?.draft?.final_review_error && message === errorMessage(review.draft.final_review_error, language)) && <p className="inline-message error-text">{message}</p>}
       {loadError && <p className="inline-message error-text"><span>{loadError}</span><button className="quiet-button" type="button" onClick={retryLoad}>{translate("common.retry", language)}</button></p>}
       {reviewLoading ? <p className="diagnostics-empty">{translate("terms.decisionLoading", language)}</p> : <>
+        {review?.draft?.final_review_error && <div className="warning-banner"><strong>{translate("terms.decisionFinalReviewFailed", language)}</strong><p>{errorMessage(review.draft.final_review_error, language)}</p></div>}
         {running && <div className="term-decision-running"><strong>{translate("terms.decisionRunning", language)} {task?.completed_segments ?? 0} / {task?.total_segments ?? 0}</strong><span>{translate("terms.decisionCloseHint", language)}</span></div>}
         {(review?.draft || showManualTab) && <div className="term-decision-tabs" role="tablist" aria-label={translate("terms.decisionTabs", language)}><button type="button" role="tab" id="decision-proposals-tab" aria-selected={tab === "proposals"} aria-controls="decision-proposals-panel" className={tab === "proposals" ? "active" : ""} onClick={() => changeTab("proposals")}>{translate("terms.decisionProposalTab", language)} {review?.draft?.proposals.length ?? 0}</button>{showManualTab && <button type="button" role="tab" id="decision-manual-tab" aria-selected={tab === "manual"} aria-controls="decision-manual-panel" className={tab === "manual" ? "active" : ""} onClick={() => changeTab("manual")}>{translate("terms.decisionManualTab", language)} {progress.remaining}/{progress.total}</button>}</div>}
         <div className="term-decision-content" id={`decision-${tab}-panel`} role="tabpanel" aria-labelledby={`decision-${tab}-tab`} ref={contentRef} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>

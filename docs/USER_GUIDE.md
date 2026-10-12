@@ -694,7 +694,7 @@ python -m app.main terms-decide-apply novel --all --reject TDP-EXAMPLE
 python -m app.main terms-decide-rollback novel --confirm
 ```
 
-术语导入会先完整校验再合并，不会删除文件中未出现的条目。人工 override 优先于自动扫描结果，冲突不会被静默裁决。`terms-decide` 不会加入 `run-all`，也不会自动应用。存在待处理草案时必须使用 `--replace-draft` 才能生成替代草案；替代生成失败时旧草案保持不变。
+术语导入会先完整校验再合并，不会删除文件中未出现的条目。人工 override 优先于自动扫描结果，冲突不会被静默裁决。`terms-decide` 不会加入 `run-all`，也不会自动应用。存在待处理草案时必须使用 `--replace-draft` 才能生成替代草案；新草案成功保存后才替换旧草案。终审失败时会保留本次安全建议和人工待办，可查看失败原因并手动应用建议；连续运行会停止。未处理草案时可选择续用原 Run，补做未完成请求。
 
 `terms-decide-apply` 必须提供 `--all`，可重复使用 `--reject` 排除建议。撤销只接受最近一次
 仍可撤销的应用；术语库之后发生变化时会明确拒绝。自动决策遵守当前 Preset 的并发限制，
