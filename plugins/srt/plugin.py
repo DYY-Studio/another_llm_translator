@@ -9,6 +9,6 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="srt-documents",
         version="0.1.0",
-        protocol_version=16,
+        protocol_version=17,
         document_adapters=(SRTDocumentAdapter(),),
     )

@@ -179,6 +179,8 @@ def test_optional_plugin_custom_choices_uninstall_and_reinstall(tmp_path, monkey
         scope = "segment"
         def validate(self, context):
             return ()
+        def retry_instruction(self, match_type, language):
+            return ""
     content = {"instructions": "Custom rule", "criteria": {"yes": "Yes", "no": "No"}}
     declaration = DecisionPromptDeclaration("custom_validator", ("yes", "no"), content)
     plugin = PluginDescriptor("custom", "1", PLUGIN_PROTOCOL_VERSION, translation_validators=(Validator(),), decision_prompts=(declaration,))

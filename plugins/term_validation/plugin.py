@@ -27,6 +27,15 @@ class PreferredTermUsageValidator:
     scope = "segment"
 
     @staticmethod
+    def retry_instruction(match_type: str, language: str) -> str:
+        if match_type == "preferred_term_uncertain":
+            return ""
+        return {
+            "zh-CN": "对源文中适用的术语使用本次提供的推荐译名",
+            "en": "Use the provided preferred translations for terms applicable to the source.",
+        }[language]
+
+    @staticmethod
     def prompt_declaration() -> DecisionPromptDeclaration:
         from pathlib import Path
         from app.decision_prompt import declaration_from_file
@@ -102,7 +111,7 @@ def descriptor() -> PluginDescriptor:
     return PluginDescriptor(
         plugin_id="term-validation",
         version="0.7.0",
-        protocol_version=16,
+        protocol_version=17,
         translation_validators=(PreferredTermUsageValidator(),),
         decision_prompts=(PreferredTermUsageValidator.prompt_declaration(),),
     )

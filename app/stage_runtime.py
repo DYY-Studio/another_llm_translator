@@ -25,6 +25,7 @@ from .errors import (
     ExternalError,
     FatalExternalError,
     IncompleteError,
+    ProjectError,
     RequestSizeError,
     StorageError,
     UsageError,
@@ -832,26 +833,6 @@ async def _execute_stage_run(
     )
 
 
-_GENERATION_RETRY_GUIDANCE = {
-    "zh-CN": {
-        "segment_misaligned": "每条译文对应本次同 ID 的源文，保持内容归属",
-        "preferred_term_missing": "对源文中适用的术语使用本次提供的推荐译名",
-        "japanese_kana": "将日语假名译为目标语言",
-        "korean_hangul": "将韩文译为目标语言",
-        "source_full": "将源文内容完整译为目标语言",
-        "source_span": "将源文内容完整译为目标语言",
-    },
-    "en": {
-        "segment_misaligned": "Keep each translation aligned with the source of the same ID in this request.",
-        "preferred_term_missing": "Use the provided preferred translations for terms applicable to the source.",
-        "japanese_kana": "Translate Japanese kana into the target language.",
-        "korean_hangul": "Translate Korean Hangul into the target language.",
-        "source_full": "Translate the source content fully into the target language.",
-        "source_span": "Translate the source content fully into the target language.",
-    },
-}
-
-
 async def _localized_request_loop(
     group: list[dict[str, Any]],
     *,
@@ -894,14 +875,27 @@ async def _localized_request_loop(
         if not items:
             payload["segments"] = []
         if repair_candidates is not None:
-            codes = sorted({
-                str(finding["validator"] if finding["match_type"] == "character" else finding["match_type"])
+            checks = sorted({
+                (str(finding["validator"]), str(finding["match_type"]))
                 for item in items
                 for finding in repair_candidates[str(item["segment_id"])]["findings"]
                 if finding.get("repairable", True)
             })
-            guidance = _GENERATION_RETRY_GUIDANCE[prompt_language]
-            feedback = "\n".join(dict.fromkeys(guidance.get(code, code) for code in codes))
+            validators = {
+                validator.validator_id: validator
+                for validator in config["_translation_validator_instances"]
+            }
+            instructions = []
+            for validator_id, match_type in checks:
+                try:
+                    instruction = validators[validator_id].retry_instruction(match_type, prompt_language)
+                except Exception as exc:
+                    raise ProjectError(f"翻译校验器修复指令生成失败：{validator_id}") from exc
+                if not isinstance(instruction, str):
+                    raise ProjectError(f"翻译校验器返回了无效修复指令：{validator_id}")
+                if instruction.strip():
+                    instructions.append(instruction.strip())
+            feedback = "\n".join(dict.fromkeys(instructions))
             if feedback:
                 payload["validation_repair"] = feedback
         payload, id_map = localize_request_ids(payload, items)
