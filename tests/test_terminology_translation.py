@@ -2313,8 +2313,9 @@ async def test_model_context_error_triggers_runtime_segment_split(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("repair_rounds", [1, 2])
 async def test_validation_repair_context_error_splits_without_part_results(
-    tmp_path: Path,
+    tmp_path: Path, repair_rounds: int,
 ) -> None:
     project = await create_project(tmp_path, "ABCDEFGH")
     config_path = project / "config.toml"
@@ -2325,17 +2326,22 @@ async def test_validation_repair_context_error_splits_without_part_results(
         encoding="utf-8",
     )
 
+    root_repairs = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal root_repairs
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         item = payload["segments"][0]
         if "validation_repair" in payload and len(item["source"]) > 2:
+            if len(item["source"]) == 8:
+                root_repairs += 1
             return httpx.Response(
                 400,
                 text="context_length_exceeded: maximum context tokens",
             )
         translation = (
             "好" * len(item["source"])
-            if "validation_repair" in payload
+            if "validation_repair" in payload and root_repairs >= repair_rounds
             else "カ" * len(item["source"])
         )
         return httpx.Response(
@@ -2371,6 +2377,7 @@ async def test_validation_repair_context_error_splits_without_part_results(
     assert len(completed) == 1
     assert completed[0]["segment_id"] == "F0001-S000001"
     assert completed[0]["text"] == "好" * 8
+    assert root_repairs == repair_rounds
 
 
 @pytest.mark.asyncio

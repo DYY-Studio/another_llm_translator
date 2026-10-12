@@ -1328,8 +1328,11 @@ def _replace_with_runtime_parts(
     parts[0]["_source_offset"] = source_offset
     parts[1]["_source_offset"] = source_offset + len(left_source)
     expected = original_parts.setdefault(original_id, [segment_id])
-    index = expected.index(segment_id)
-    expected[index : index + 1] = part_ids
+    if segment_id == original_id:
+        expected[:] = part_ids
+    else:
+        index = expected.index(segment_id)
+        expected[index : index + 1] = part_ids
     for part in parts:
         part_id = str(part["segment_id"])
         part_original[part_id] = original_id
