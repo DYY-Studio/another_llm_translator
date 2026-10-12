@@ -453,7 +453,7 @@ async def test_external_validator_controls_retry_instruction(tmp_path, monkeypat
             assert payload.get("validation_repair") == (instruction or None)
             assert payload["segments"] == calls[0]["segments"]
         records = [{"type": "segment", "id": item["id"],
-                    "translation": "candidate" if len(calls) == 1 else "译文"}
+                    "translation": "candidate" if len(calls) == 1 and item["source"] == "First source." else "译文"}
                    for item in payload["segments"]]
         return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
 

@@ -880,6 +880,7 @@ async def _localized_request_loop(
                 for item in items
                 for finding in repair_candidates[str(item["segment_id"])]["findings"]
                 if finding.get("repairable", True)
+                and (finding["validator"], finding["match_type"]) != ("response_gate", "validation_blocked")
             })
             validators = {
                 validator.validator_id: validator
