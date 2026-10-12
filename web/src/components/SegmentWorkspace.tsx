@@ -11,7 +11,6 @@ import type {
 import {
   clearSegmentReadError,
   emptySegmentReadErrors,
-  firstSegmentReadError,
   setSegmentReadError,
 } from "../segmentReadState";
 import { useClassicSelection } from "../useClassicSelection";
@@ -151,6 +150,7 @@ export function SegmentWorkspace({
   const [total, setTotal] = useState(0);
   const [readErrors, setReadErrors] = useState(emptySegmentReadErrors);
   const [readRetry, setReadRetry] = useState(0);
+  const [detailRetry, setDetailRetry] = useState(0);
   const [loading, setLoading] = useState(true);
   const listRef = useRef<HTMLDivElement>(null);
   const indexRequestRef = useRef(0);
@@ -446,25 +446,20 @@ export function SegmentWorkspace({
       setFocusedDetail(null);
       return;
     }
-    if (!showContext && records[focusedId]) {
-      setReadErrors((current) => clearSegmentReadError(current, "detail"));
-      setFocusedDetail(null);
-      return;
-    }
     let active = true;
+    setReadErrors((current) => clearSegmentReadError(current, "detail"));
     setFocusedDetail(null);
     void api<SegmentDetail>(`/api/v1/projects/${project}/segments/${focusedId}`)
       .then((item) => {
         if (!active) return;
         setReadErrors((current) => clearSegmentReadError(current, "detail"));
-        setRecords((current) => ({ ...current, [item.segment_id]: item }));
         setFocusedDetail(item);
       })
       .catch((value) => {
         if (active) setReadErrors((current) => setSegmentReadError(current, "detail", errorMessage(value, language)));
       });
     return () => { active = false; };
-  }, [project, focusedId, showContext, readRetry]);
+  }, [project, focusedId, readRetry, detailRetry]);
 
   useLayoutEffect(() => {
     if (!selected) return;
@@ -482,7 +477,7 @@ export function SegmentWorkspace({
   const selectedVisibleIds = visibleKeys.filter((segmentId) => (
     selection.selectedKeys.has(segmentId)
   ));
-  const readError = firstSegmentReadError(readErrors);
+  const readError = readErrors.index || Object.values(readErrors.pages)[0] || "";
 
   const retryReads = useCallback(() => {
     setReadErrors(emptySegmentReadErrors());
@@ -671,6 +666,28 @@ export function SegmentWorkspace({
           <>
             <h2 className="source-heading">{translate("workspace.source", language)}{selected.format_count ? <small>{translate("workspace.formatRanges", language, { count: selected.format_count })}</small> : null}</h2>
             <div className="source-box">{selected.source}</div>
+            <details className="segment-terms" key={selected.segment_id}>
+              <summary>{translate("workspace.segmentTerms", language)}{focusedDetail?.segment_id === selected.segment_id ? ` (${focusedDetail.matched_terms.length})` : ""}</summary>
+              {readErrors.detail ? (
+                <div className="error-text"><span>{readErrors.detail}</span><button className="quiet-button" type="button" onClick={() => setDetailRetry((current) => current + 1)}>{translate("common.retry", language)}</button></div>
+              ) : focusedDetail?.segment_id !== selected.segment_id ? (
+                <p>{translate("terms.loading", language)}</p>
+              ) : focusedDetail.matched_terms.length === 0 ? (
+                <p>{translate("workspace.segmentTermsEmpty", language)}</p>
+              ) : (
+                <div className="segment-term-list">
+                  {focusedDetail.matched_terms.map((term) => (
+                    <div className="segment-term" key={term.source}>
+                      <div className="segment-term-heading"><strong>{term.source}</strong><span>{term.preferred_translation || translate("workspace.noPreferredTranslation", language)}</span>{term.category && <small>{term.category}</small>}</div>
+                      {term.aliases.length > 0 && <div>{translate("workspace.matchedAliases", language, { aliases: term.aliases.join(", ") })}</div>}
+                      {term.primary_source && <div>{translate("terms.groupPrimaryBadge", language, { source: term.primary_source })}</div>}
+                      {term.group_claims?.map((claim) => <div className="warning-text" key={JSON.stringify(claim)}>{translate("workspace.termClaim", language, { alias: claim.alias, entry: claim.entry, owner: claim.claimed_by })}</div>)}
+                      {term.description && <p>{term.description}</p>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </details>
             {selected.model_source && selected.model_source !== selected.source && (
               <details className="source-model-preview"><summary>{translate("workspace.modelText", language)}</summary><div className="source-box">{selected.model_source}</div></details>
             )}
