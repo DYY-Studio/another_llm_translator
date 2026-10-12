@@ -557,3 +557,30 @@ def test_maintenance_preserves_overrides_independent_of_record_order(tmp_path: P
     applied = storage.read_jsonl(project, project / "stages" / "proofreading_applied.jsonl")
     polished = storage.read_jsonl(project, project / "stages" / "polishing_applied.jsonl")
     assert [r["text"] for r in storage.resolve_stage_result_texts(project, [*applied, *polished])] == ["override", "body"]
+
+
+@pytest.mark.parametrize("name", ["project.sqlite-shm", "project.sqlite-wal", "source.bin"])
+def test_storage_size_handles_only_disappearing_sqlite_sidecars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str,
+) -> None:
+    _, _, project = make_storage_project(tmp_path)
+    path = project / name
+    path.write_bytes(b"temporary")
+    original_size = storage_management._file_size
+
+    def remove_before_stat(candidate: Path) -> int:
+        if candidate == path:
+            candidate.unlink()
+        return original_size(candidate)
+
+    monkeypatch.setattr(storage_management, "_file_size", remove_before_stat)
+    if name == "source.bin":
+        with pytest.raises(StorageError, match="source.bin"):
+            lightweight_project_storage(project)
+    else:
+        totals = lightweight_project_storage(project)
+        assert totals["total_bytes"] == sum(
+            item.stat().st_size for item in project.rglob("*")
+            if item.is_file() and not item.is_symlink()
+        )
+        assert totals["sqlite_bytes"] == (project / "project.sqlite").stat().st_size
