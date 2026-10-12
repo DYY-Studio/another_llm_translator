@@ -650,9 +650,6 @@ async def run_terminology(
         task_id = str(active["active_task_id"])
     else:
         task_id = str(active.get("active_task_id", "none")) if active else "none"
-    if not create_task:
-        _ordered_term_candidates(project, task_id)
-
     # A forced terminology run rescans the full project and merges at publish.
     (
         selected,
@@ -672,6 +669,8 @@ async def run_terminology(
         if include_summaries and partial_published and not scope.force
         else [segment for segment in selected if segment_needs_terms(segment)]
     )
+    if not create_task and (term_work or active and active.get("status") == "active"):
+        _ordered_term_candidates(project, task_id)
     summary_selection = (
         _summary_participation(project, selected) if include_summaries else set()
     )

@@ -300,8 +300,6 @@ class DraftTerminologyScan:
             if create_task
             else str(active["active_task_id"])
         )
-        if not create_task:
-            _ordered_term_candidates(project, self.task_id)
         self.term_done, self.term_fingerprints = terminology_scan_state(
             project, self.task_id, self.selected
         )
@@ -349,7 +347,10 @@ class DraftTerminologyScan:
                         "_draft_summary": summary,
                     }
                 )
-        if any(item["_draft_terms"] for item in self.work):
+        term_work = any(item["_draft_terms"] for item in self.work)
+        if not create_task and (term_work or self.active.get("status") == "active"):
+            _ordered_term_candidates(project, self.task_id)
+        if term_work:
             self.active = {**self.active, "status": "active"}
         self.prompt_factories = {
             mode: _prompt_factory(
