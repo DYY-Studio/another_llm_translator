@@ -69,3 +69,63 @@ async def test_gemini_stream_collects_all_parts_and_usage_after_finish(tmp_path)
     await client.aclose()
     assert response.content == "firstsecond"
     assert llm.usage_summary()["total_tokens"] == 5
+
+
+@pytest.mark.parametrize("name", ["anthropic", "google-gemini"])
+def test_model_discovery_fetches_all_pages_and_filters_generation(tmp_path, monkeypatch, name):
+    import json
+    import httpx
+    from fastapi.testclient import TestClient
+    from app.web import create_app
+    from tests.test_web import make_project
+    root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=root))
+    preset = json.loads((ROOT / "llm_presets/default.json").read_text())
+    preset.update(adapter_id=name, base_url="https://models.invalid/v1")
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    calls = []
+    def handler(request):
+        calls.append(request)
+        if name == "anthropic":
+            return httpx.Response(200, json={"data": [{"id": "second" if request.url.params.get("after_id") else "first"}], "has_more": not bool(request.url.params.get("after_id")), "last_id": "cursor"})
+        if request.url.params.get("pageToken"):
+            return httpx.Response(200, json={"models": [{"name": "models/second", "supportedGenerationMethods": ["generateContent"]}]})
+        return httpx.Response(200, json={"models": [{"name": "models/embedding", "supportedGenerationMethods": ["embedContent"]}, {"name": "models/first", "supportedGenerationMethods": ["generateContent"]}], "nextPageToken": "cursor"})
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(**kwargs, transport=httpx.MockTransport(handler)))
+    response = client.post("/api/v1/global/presets/default/models", json=preset)
+    assert response.status_code == 200
+    assert [model["id"] for model in response.json()["models"]] == ["first", "second"]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("failure", ["http", "cursor"])
+def test_discovery_does_not_return_a_partial_list(tmp_path, monkeypatch, failure):
+    import json
+    import httpx
+    from fastapi.testclient import TestClient
+    from app.web import create_app
+    from tests.test_web import make_project
+    root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=root))
+    preset = json.loads((ROOT / "llm_presets/default.json").read_text())
+    preset.update(adapter_id="anthropic", base_url="https://models.invalid/v1")
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    def handler(request):
+        if failure == "http" and request.url.params.get("after_id"):
+            return httpx.Response(503)
+        return httpx.Response(200, json={"data": [{"id": "first"}], "has_more": True, "last_id": "cursor"})
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(**kwargs, transport=httpx.MockTransport(handler)))
+    response = client.post("/api/v1/global/presets/default/models", json=preset)
+    assert response.status_code == 400
+    assert "models" not in response.json()
+    assert ("HTTP 503" if failure == "http" else "重复分页游标") in response.json()["error"]
+
+
+def test_unknown_responses_incomplete_fails_even_with_body():
+    adapter = load_json_adapter(ROOT / "llm_adapters/openai-responses.json")
+    response = {"status": "incomplete", "incomplete_details": {"reason": "unknown"}, "output": [{"type": "message", "content": [{"type": "output_text", "text": "partial"}]}]}
+    with pytest.raises(ExternalError, match="未完成.*unknown"):
+        adapter.parse_response(response)
+    assert adapter.stream_error_details({"type": "response.incomplete", "response": response}).message.endswith("unknown")

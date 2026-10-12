@@ -970,19 +970,30 @@ def register_resource_routes(
         )
         timeout = float(preset.definition["request_timeout_seconds"])
         proxy = (connection.read()["proxy_url"] if plan else str(preset.definition["proxy_url"])) or None
+        models = []
+        query: dict[str, str] = {}
+        cursors: set[tuple[tuple[str, str], ...]] = set()
         try:
             async with httpx.AsyncClient(timeout=timeout, proxy=proxy, **({"trust_env": False} if plan else {})) as client:
-                response = await client.get(url, headers=headers)
+                while True:
+                    response = await client.get(url, headers=headers, params=query)
+                    if response.status_code >= 400:
+                        raise UsageError(f"模型列表请求失败：HTTP {response.status_code}")
+                    try:
+                        data = response.json()
+                    except ValueError as exc:
+                        raise UsageError("模型列表响应不是合法 JSON") from exc
+                    models.extend(adapter.parse_models_response(data))
+                    next_query = adapter.next_models_query(data)
+                    if next_query is None:
+                        break
+                    cursor = tuple(sorted(next_query.items()))
+                    if cursor in cursors:
+                        raise UsageError("模型列表返回重复分页游标")
+                    cursors.add(cursor)
+                    query = next_query
         except (httpx.HTTPError, OSError) as exc:
             raise UsageError(f"模型列表请求失败：{exc}") from exc
-        if response.status_code >= 400:
-            raise UsageError(f"模型列表请求失败：HTTP {response.status_code}")
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise UsageError("模型列表响应不是合法 JSON") from exc
-        try:
-            models = adapter.parse_models_response(data)
         except ExternalError as exc:
             raise UsageError(str(exc)) from exc
         return {"models": models, "count": len(models)}

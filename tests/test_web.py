@@ -5271,7 +5271,7 @@ class FakeModelsClient:
     async def __aexit__(self, *_: object) -> bool:
         return False
 
-    async def get(self, url: str, headers: dict[str, str] | None = None) -> FakeModelsResponse:
+    async def get(self, url: str, headers: dict[str, str] | None = None, params: dict[str, str] | None = None) -> FakeModelsResponse:
         self.request_url = url
         self.request_headers = headers or {}
         if self.raise_error is not None:
@@ -5367,7 +5367,6 @@ def test_web_preset_models_discovery_fails_fast(
     )
     adapter["adapter_id"] = "minimal"
     adapter.pop("models")
-    adapter.pop("usage")
     (app_root / "llm_adapters" / "minimal.json").write_text(
         json.dumps(adapter), encoding="utf-8"
     )

@@ -241,6 +241,7 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
   ID 不一致时立即拒绝；Key 缺失、格式错误或序号越界均立即报告。
 - Preset 编辑器保留可手工输入的模型 ID；发现结果在字段下方按名称或 ID
   本地搜索。选择结果只更新当前草稿并收起列表，必须显式保存才会生效。
+- 原生 Anthropic 与 Gemini 格式读取全部分页，重复游标或任一页失败时整体报错；Gemini 仅保留支持 `generateContent` 的模型。
 - `response_models_pointer` 指向模型条目数组；`response_model_id` 是条目内
   必填键名；`response_model_display` 与 `response_model_strip_prefix` 可选。
 - 展示名缺失时回退为模型 ID；`response_model_strip_prefix` 从模型 ID 前缀
@@ -634,6 +635,8 @@ Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Pres
 旧协议不在运行期自动转换。全局 schema 7 Preset 使用 `python -m app.llm_migration` 预览，添加 `--apply` 后备份并迁移；历史 Run 快照不改写，旧协议 Run 只供查看，正式执行需创建新 Run。
 
 `send_temperature` 为必填布尔值；关闭后省略请求模板中的温度，禁止在 Extra Body 中再次添加。阶段温度不参与关闭发送后的阶段指纹。`reasoning_effort` 为字符串或 null，null 不发送参数；等级必须属于 Adapter 的声明，不能在 Extra Body 中重复填写声明位置或别名位置。Effort 不自动调整温度、thinking 开关或思考摘要。
+
+内建 Effort 写入位置：Chat Completions 为 `/reasoning_effort`，Responses 与 Plan 为 `/reasoning/effort`，Anthropic 为 `/output_config/effort`，Gemini 为 `/generationConfig/thinkingConfig/thinkingLevel`。等级列表来自 Adapter 声明；具体模型不支持时保留供应商错误，不根据模型名自动转换。Gemini 2.5 示例保持 null，不将等级换算为 thinkingBudget。
 
 Adapter 可声明 `max_output_tokens_minimum` 非负整数，默认 0；宿主按该值校验输出上限。可选 `reasoning_effort` 对象包含 `body_pointer`、非空唯一字符串数组 `values` 和可选 `aliases` JSON Pointer 数组。请求在完成 Extra Body 合并后向声明路径写入 Effort，仅创建必要的 JSON 对象，已有叶子字段或非对象中间路径直接失败。
 

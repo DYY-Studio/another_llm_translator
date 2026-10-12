@@ -140,8 +140,8 @@ def _running_run(
         previous = _endpoint_summary(load_run_config(project / "runs" / run_id))
     else:
         directory = project / "runs" / run_id
-        preset = read_json(project, directory / "llm_preset.json")
-        adapter = read_json(project, directory / "llm_adapter.json")
+        preset = json.loads((directory / "llm_preset.json").read_text(encoding="utf-8"))
+        adapter = json.loads((directory / "llm_adapter.json").read_text(encoding="utf-8"))
         previous = {"model": preset["model"], "endpoint": endpoint_url(preset["base_url"], adapter["endpoint"], model=preset["model"])}
     result = {
         "run_id": run_id,

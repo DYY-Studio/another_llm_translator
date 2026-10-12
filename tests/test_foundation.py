@@ -146,7 +146,6 @@ def test_cli_help_does_not_access_keyring(
 ) -> None:
     monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
     monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
-    monkeypatch.setattr("app.main.migrate_llm_resources", lambda: 0)
 
     def fail_get_password(*args: object, **kwargs: object) -> None:
         raise AssertionError("CLI help must not access the keyring")

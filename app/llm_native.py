@@ -89,6 +89,12 @@ def reasoning_deltas(fmt: str, data: dict[str, Any]) -> list[str]:
 
 def stream_error(fmt: str, data: dict[str, Any]) -> StreamErrorDetails | None:
     detail = data.get("error")
+    if fmt == "responses":
+        response = _object(data.get("response", {})) if data.get("type") == "response.incomplete" else data
+        if response.get("status") == "incomplete" or data.get("type") == "response.incomplete":
+            reason = _object(response.get("incomplete_details") or {}).get("reason")
+            if reason not in {"max_output_tokens", "content_filter"}:
+                return StreamErrorDetails(f"Responses 未完成：{reason or '未提供原因'}", None)
     if fmt == "responses" and data.get("type") == "response.failed":
         detail = _object(data.get("response", {})).get("error") or {"message": "response.failed"}
     elif fmt == "responses" and data.get("type") == "error":

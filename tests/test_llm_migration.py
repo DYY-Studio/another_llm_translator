@@ -48,3 +48,22 @@ def test_migration_leaves_conflicting_effort_unchanged(tmp_path: Path) -> None:
     reports = migrate_llm_resources(root=tmp_path, builtin_root=ROOT, apply=True)
     assert reports[0]["status"] == "manual"
     assert path.read_bytes() == original
+
+
+def test_failed_adapter_apply_keeps_dependent_preset_unchanged(tmp_path: Path, monkeypatch) -> None:
+    import hashlib
+    from app import llm_migration
+    preset_path = old_preset(tmp_path, {})
+    original = preset_path.read_bytes()
+    directory = tmp_path / "llm_adapters"
+    directory.mkdir()
+    path = directory / "openai-responses.json"
+    legacy = json.loads((ROOT / "llm_adapters/openai-responses.json").read_text())
+    legacy["schema_version"] = 3
+    path.write_text(json.dumps(legacy))
+    monkeypatch.setitem(llm_migration._LEGACY_ADAPTER_HASHES, "openai-responses", hashlib.sha256(path.read_bytes()).hexdigest())
+    path.with_suffix(".json.pre-contract-upgrade.bak").write_text("existing backup")
+    reports = migrate_llm_resources(root=tmp_path, builtin_root=ROOT, apply=True)
+    assert [report["status"] for report in reports] == ["manual", "manual"]
+    assert preset_path.read_bytes() == original
+    assert "Adapter 迁移失败" in reports[1]["detail"]

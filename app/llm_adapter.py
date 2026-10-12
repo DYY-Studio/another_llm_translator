@@ -480,6 +480,12 @@ class JSONLLMAdapter:
         strip_prefix = self.models_spec.get("response_model_strip_prefix", "")
         result: list[dict[str, str]] = []
         for item in items:
+            if self.response_format == "gemini" and isinstance(item, dict):
+                methods = item.get("supportedGenerationMethods", [])
+                if not isinstance(methods, list) or any(not isinstance(method, str) for method in methods):
+                    raise ExternalError("Gemini 模型能力不是字符串数组")
+                if "generateContent" not in methods:
+                    continue
             if self.adapter_id == "chatgpt-plan" and isinstance(item, dict) and item.get("visibility") != "list":
                 continue
             if not isinstance(item, dict) or not isinstance(item.get(id_key), str):
@@ -492,6 +498,25 @@ class JSONLLMAdapter:
                 display = model_id
             result.append({"id": model_id, "display": display})
         return result
+
+    def next_models_query(self, response: dict[str, Any]) -> dict[str, str] | None:
+        if self.response_format == "anthropic":
+            if type(response.get("has_more")) is not bool:
+                raise ExternalError("Anthropic 模型列表缺少 has_more")
+            if not response["has_more"]:
+                return None
+            token = response.get("last_id")
+            parameter = "after_id"
+        elif self.response_format == "gemini":
+            token = response.get("nextPageToken")
+            if token is None or token == "":
+                return None
+            parameter = "pageToken"
+        else:
+            return None
+        if not isinstance(token, str) or not token:
+            raise ExternalError("模型分页游标不是非空字符串")
+        return {parameter: token}
 
     def extract_usage(self, response: Any) -> Usage | None:
         if self.response_format != "json-pointer":

@@ -1363,8 +1363,8 @@ def _interrupt_run(
 
 def run_protocol_is_current(project: Path, run_id: str) -> bool:
     directory = project / "runs" / run_id
-    preset = read_json(project, directory / "llm_preset.json")
-    adapter = read_json(project, directory / "llm_adapter.json")
+    preset = json.loads((directory / "llm_preset.json").read_text(encoding="utf-8"))
+    adapter = json.loads((directory / "llm_adapter.json").read_text(encoding="utf-8"))
     return preset.get("schema_version") == 8 and adapter.get("schema_version") == ADAPTER_SCHEMA_VERSION
 
 

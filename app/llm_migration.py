@@ -102,11 +102,14 @@ def migrate_llm_resources(
             except (ConfigError, ExternalError, OSError, ValueError, KeyError, TypeError) as exc:
                 reports.append({"path": str(path), "status": "manual", "detail": str(exc)})
     if apply:
+        failed_adapters: set[str] = set()
         for report in reports:
             path = Path(report["path"])
             if path not in changes:
                 continue
             try:
+                if path.parent.name == "llm_presets" and changes[path]["adapter_id"] in failed_adapters:
+                    raise ConfigError("依赖的 Adapter 迁移失败，请先处理该 Adapter")
                 backup = path.with_suffix(path.suffix + ".pre-contract-upgrade.bak")
                 if backup.exists():
                     raise ConfigError(f"迁移备份已存在：{backup}")
@@ -115,6 +118,8 @@ def migrate_llm_resources(
                 report.update(status="updated", backup=str(backup))
             except (OSError, ConfigError) as exc:
                 report.update(status="manual", detail=str(exc))
+                if path.parent.name == "llm_adapters":
+                    failed_adapters.add(changes[path]["adapter_id"])
     return reports
 
 
