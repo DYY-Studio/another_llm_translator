@@ -165,6 +165,7 @@ def test_scanned_terms_can_be_exported_and_published_without_complete_task(
             str(metadata["project_id"]),
             active_task_id=task_id,
             run_id="RUN-PARTIAL",
+            source_order={"segment_id": "F0001-S000001", "offset": 0},
             terms=[
                 {
                     "source": "recover",
@@ -193,6 +194,61 @@ def test_scanned_terms_can_be_exported_and_published_without_complete_task(
     assert load_terms(project)["terms"][0]["source"] == "recover"
     assert read_json(project, project / "terminology" / "active_task.json")["status"] == "partial_published"
     assert read_jsonl(project, project / "terminology" / "candidates.jsonl")
+
+
+def test_publication_orders_slices_and_preserves_published_descriptions(tmp_path: Path) -> None:
+    from app.term_library import _merge_and_publish_terms
+
+    project = make_project(tmp_path)
+    metadata = read_json(project, project / "project.json")
+    project_id = str(metadata["project_id"])
+    write_json(project, project / "terminology" / "terms.json", record_header(
+        "terminology_library", project_id, terms_revision=1,
+        terms=[{**term("Alpha"), "description": "z-old；a-old"}],
+    ))
+    write_json(project, project / "terminology" / "active_task.json", record_header(
+        "terminology_task", project_id, active_task_id="TASK", status="active",
+    ))
+    for offset, description in [(20, "a-later"), (0, "z-first"), (10, "z-first")]:
+        append_jsonl(project, project / "terminology" / "candidates.jsonl", record_header(
+            "terminology_candidates", project_id, active_task_id="TASK",
+            source_order={"segment_id": "F0001-S000001", "offset": offset},
+            terms=[{**term("Alpha"), "description": description}],
+        ))
+    library = _merge_and_publish_terms(project, task_id="TASK", project_id=project_id, published_run_id="RUN")
+    assert library["terms"][0]["description"] == "z-old；a-old；z-first；a-later"
+    write_json(project, project / "terminology" / "overrides.json", record_header(
+        "terminology_overrides", project_id,
+        overrides=[{"normalized": "alpha", "description": "已确认说明"}],
+    ))
+    library = _merge_and_publish_terms(project, task_id="TASK", project_id=project_id, published_run_id="RUN")
+    assert library["terms"][0]["description"] == "已确认说明"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["publish", "scan", "draft"])
+async def test_old_candidates_fail_before_publication_or_scan(tmp_path: Path, operation: str) -> None:
+    project = make_project(tmp_path)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    write_json(project, project / "terminology" / "active_task.json", record_header(
+        "terminology_task", project_id, active_task_id="OLD", status="active",
+    ))
+    append_jsonl(project, project / "terminology" / "candidates.jsonl", record_header(
+        "terminology_candidates", project_id, active_task_id="OLD", terms=[term("Alpha")],
+    ))
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("旧候选校验必须在模型请求前完成")
+
+    os.environ["LLM_API_KEY"] = "test"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(UsageError, match="源文排序.*重新扫描"):
+            if operation == "publish":
+                publish_partial_terms(project)
+            else:
+                await run_terminology(project, Scope(), http_client=client,
+                                      include_draft_translation=operation == "draft")
+    assert load_terms(project) is None
 
 
 def test_terms_json_csv_round_trip_and_disabled_export(tmp_path: Path) -> None:
@@ -532,7 +588,8 @@ def test_automatic_group_alias_removal_survives_later_manual_edits(tmp_path, cre
             status="active", initial_stage_fingerprint="test"))
         append_jsonl(project, project / "terminology" / "candidates.jsonl", record_header(
             "terminology_candidates", metadata["project_id"], active_task_id=task_id,
-            run_id="RUN-BETA", terms=[term("Beta")]))
+            run_id="RUN-BETA", source_order={"segment_id": "F0001-S000001", "offset": 0},
+            terms=[term("Beta")]))
         publish_partial_terms(project)
     store.save_term(term("Gamma"))
     rows = {item["source"]: item for item in load_terms(project)["terms"]}

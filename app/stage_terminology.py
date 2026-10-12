@@ -79,7 +79,12 @@ from .stage_runtime import (
     prompt_middle_digests,
 )
 from .summary_provenance import write_fragment_summary
-from .term_library import _merge_and_publish_terms, load_terms
+from .term_library import (
+    _candidate_source_order,
+    _merge_and_publish_terms,
+    _ordered_term_candidates,
+    load_terms,
+)
 
 _SUMMARY_MODE_KEY = "_terminology_response_mode"
 
@@ -342,6 +347,7 @@ async def run_terminology(
     if run_options_snapshot is not None:
         context_kwargs["frozen_run_options"] = run_options_snapshot
     config, metadata, files, segments = _project_context(project, **context_kwargs)
+    segment_order = {str(item["segment_id"]): index for index, item in enumerate(segments)}
     logger.info(
         "stage preparation context ready elapsed=%.3fs files=%d segments=%d",
         time.perf_counter() - preparation_started_at,
@@ -644,7 +650,6 @@ async def run_terminology(
         task_id = str(active["active_task_id"])
     else:
         task_id = str(active.get("active_task_id", "none")) if active else "none"
-
     # A forced terminology run rescans the full project and merges at publish.
     (
         selected,
@@ -664,6 +669,8 @@ async def run_terminology(
         if include_summaries and partial_published and not scope.force
         else [segment for segment in selected if segment_needs_terms(segment)]
     )
+    if not create_task and (term_work or active and active.get("status") == "active"):
+        _ordered_term_candidates(project, task_id)
     summary_selection = (
         _summary_participation(project, selected) if include_summaries else set()
     )
@@ -1556,6 +1563,9 @@ async def run_terminology(
                             active_task_id=task_id,
                             stage_fingerprint=fingerprint,
                             segment_ids=[item["segment_id"] for item in unresolved],
+                            source_order=_candidate_source_order(
+                                unresolved, segment_order, part_original,
+                            ),
                             terms=list(parsed.terms),
                         ),
                     )
@@ -1719,6 +1729,9 @@ async def run_terminology(
                             segment_ids=[
                                 segment["segment_id"] for segment in unresolved
                             ],
+                            source_order=_candidate_source_order(
+                                unresolved, segment_order, part_original,
+                            ),
                             terms=terms,
                         ),
                     )
