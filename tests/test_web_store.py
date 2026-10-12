@@ -785,6 +785,11 @@ def test_term_hits_isolate_a_group_member_from_its_primary(tmp_path: Path) -> No
 
     hits = WebStore(project).term_hits("alicia")
 
+    terms = WebStore(project).segment_detail("F0001-S000003")["matched_terms"]
+    assert [term["source"] for term in terms] == ["Alice", "Alicia"]
+    assert terms[1]["primary_source"] == "Alice"
+    assert terms[1]["aliases"] == ["Ally"]
+
     assert hits["source"] == "Alicia"
     assert hits["total"] == 3
     assert [item["source"] for item in hits["hits"]] == [
@@ -793,6 +798,35 @@ def test_term_hits_isolate_a_group_member_from_its_primary(tmp_path: Path) -> No
         "Alice and Alicia",
     ]
 
+
+    library = load_terms(project)
+    claim = {"entry": "alicia", "claimed_by": "alice", "alias": "Ally", "reason": "multiple_owners"}
+    for term in library["terms"]:
+        term["conflicts"]["group_claims"] = [claim]
+    write_json(project, project / "terminology" / "terms.json", library)
+    disputed = WebStore(project).segment_detail("F0001-S000003")["matched_terms"]
+    assert {term["source"] for term in disputed} == {"Alice", "Alicia"}
+    assert all(term["group_claims"] == [claim] for term in disputed)
+    assert all(term["preferred_translation"] is None for term in disputed)
+
+
+def test_segment_detail_matches_current_terms_without_request_limit(tmp_path: Path) -> None:
+    project = create_web_store_project(tmp_path, "Alice meets Bobby\nNothing here")
+    store = WebStore(project)
+    assert store.segment_detail("F0001-S000001")["matched_terms"] == []
+    for source, translation, aliases in [("Alice", "爱丽丝", []), ("Bob", "鲍勃", ["Bobby"])]:
+        store.save_term({"source": source, "preferred_translation": translation,
+                         "category": "人名", "description": "参考说明", "aliases": aliases})
+    store.config["terminology"]["max_terms_per_segment"] = 1
+    terms = store.segment_detail("F0001-S000001")["matched_terms"]
+    assert {term["source"] for term in terms} == {"Alice", "Bob"}
+    bob = next(term for term in terms if term["source"] == "Bob")
+    assert bob["aliases"] == ["Bobby"]
+    assert bob["preferred_translation"] == "鲍勃"
+    assert bob["description"] == "参考说明"
+    assert store.segment_detail("F0001-S000002")["matched_terms"] == []
+    store.remove_terms({"normalized": ["bob"]})
+    assert [term["source"] for term in store.segment_detail("F0001-S000001")["matched_terms"]] == ["Alice"]
 
 def test_term_hits_include_matches_found_in_aozora_ruby_reading(
     tmp_path: Path,

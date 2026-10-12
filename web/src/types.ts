@@ -122,7 +122,18 @@ export interface Segment {
   };
 }
 
+export interface SegmentTermMatch {
+  source: string;
+  preferred_translation: string | null;
+  category: string | null;
+  description: string | null;
+  aliases: string[];
+  primary_source?: string;
+  group_claims?: TermDecisionConflicts["group_claims"];
+}
+
 export interface SegmentDetail extends Segment {
+  matched_terms: SegmentTermMatch[];
   context: {
     before: Segment[];
     after: Segment[];

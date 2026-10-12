@@ -34,7 +34,3 @@ export function clearSegmentReadError(
   delete pages[pageKey];
   return { ...current, pages };
 }
-
-export function firstSegmentReadError(errors: SegmentReadErrors): string {
-  return errors.index || Object.values(errors.pages)[0] || errors.detail;
-}
