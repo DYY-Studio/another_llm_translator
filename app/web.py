@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from .diagnostics import DiagnosticsHub
 from .errors import (
@@ -107,6 +108,7 @@ def create_app(
     except OSError as exc:
         raise RuntimeError(f"无法创建项目目录：{projects_root}: {exc}") from exc
     app = FastAPI(title="Another LLM Translator", version="1")
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
     app.state.uvicorn_server = None
     app.state.projects_root = projects_root
     app.state.app_root = app_root

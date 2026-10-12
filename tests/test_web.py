@@ -1732,6 +1732,30 @@ def test_web_returns_drive_entries_at_a_root(
 WEB_DIST_PRESENT = (Path(__file__).parents[1] / "app" / "web_dist").is_dir()
 
 
+def test_web_compresses_assets_and_project_data(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    web_dist = tmp_path / "web-dist"
+    web_dist.mkdir()
+    script = "console.log('startup');\n" * 100
+    (web_dist / "index.js").write_text(script, encoding="utf-8")
+    client = TestClient(create_app(projects_root=projects_root, web_dist=web_dist))
+
+    asset = client.get("/index.js", headers={"Accept-Encoding": "gzip"})
+    overview = client.get("/api/v1/projects/sample", headers={"Accept-Encoding": "gzip"})
+
+    for response in (asset, overview):
+        assert response.status_code == 200
+        assert response.headers["content-encoding"] == "gzip"
+        assert "Accept-Encoding" in response.headers["vary"]
+        assert int(response.headers["content-length"]) < len(response.content)
+    assert asset.text == script
+    assert overview.json()["total_segments"] == 2
+
+    uncompressed = client.get("/index.js", headers={"Accept-Encoding": "identity"})
+    assert "content-encoding" not in uncompressed.headers
+    assert uncompressed.text == script
+
+
 @pytest.mark.skipif(
     not WEB_DIST_PRESENT,
     reason="web_dist 未构建；请先 npm run build --prefix web",
