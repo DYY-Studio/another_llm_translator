@@ -3,153 +3,48 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
-from app.errors import ConfigError
 from app.llm_migration import migrate_llm_resources
-from app.llm_preset import load_llm_preset
-from app.user_config import default_user_root
 
 ROOT = Path(__file__).parents[1]
 
 
-def test_llm_resource_migration_upgrades_presets_but_not_adapter(
-    tmp_path: Path,
-) -> None:
-    root = default_user_root(base=tmp_path)
-    (root / "llm_presets").mkdir(parents=True)
-    (root / "llm_adapters").mkdir(parents=True)
-    preset = json.loads(
-        (ROOT / "llm_presets" / "default.json").read_text("utf-8")
-    )
-    preset["schema_version"] = 2
-    preset.pop("stream")
-    preset.pop("stream_endpoint", None)
-    preset.pop("target_chunk_input_tokens")
-    (root / "llm_presets" / "custom.json").write_text(
-        json.dumps(preset), encoding="utf-8"
-    )
-    preset_v6 = json.loads(
-        (ROOT / "llm_presets" / "default.json").read_text("utf-8")
-    )
-    preset_v6["schema_version"] = 6
-    preset_v6["endpoint"] = "/legacy-endpoint"
-    preset_v6["stream_endpoint"] = "/legacy-stream-endpoint"
-    (root / "llm_presets" / "custom-v6.json").write_text(
-        json.dumps(preset_v6), encoding="utf-8"
-    )
-    adapter = json.loads(
-        (ROOT / "llm_adapters" / "openai-compatible.json").read_text("utf-8")
-    )
-    adapter["schema_version"] = 1
-    adapter.pop("streaming")
-    (root / "llm_adapters" / "custom.json").write_text(
-        json.dumps(adapter), encoding="utf-8"
-    )
-
-    assert migrate_llm_resources(base=tmp_path) == 2
-    assert migrate_llm_resources(base=tmp_path) == 0
-    upgraded_preset = json.loads(
-        (root / "llm_presets" / "custom.json").read_text("utf-8")
-    )
-    upgraded_adapter = json.loads(
-        (root / "llm_adapters" / "custom.json").read_text("utf-8")
-    )
-    assert upgraded_preset["schema_version"] == 7
-    assert upgraded_preset["stream"] is False
-    assert upgraded_preset["stream_endpoint"] == ""
-    assert upgraded_preset["stream_read_timeout_enabled"] is True
-    assert upgraded_preset["target_chunk_input_tokens"] == 8192
-    upgraded_v6 = json.loads(
-        (root / "llm_presets" / "custom-v6.json").read_text("utf-8")
-    )
-    assert upgraded_v6["schema_version"] == 7
-    assert upgraded_v6["endpoint"] == "/legacy-endpoint"
-    assert upgraded_v6["stream_endpoint"] == "/legacy-stream-endpoint"
-    assert upgraded_preset == load_llm_preset(
-        root / "llm_presets" / "custom.json"
-    ).definition
-    assert upgraded_adapter["schema_version"] == 1
-    assert "streaming" not in upgraded_adapter
+def old_preset(root: Path, effort: dict) -> Path:
+    directory = root / "llm_presets"
+    directory.mkdir()
+    value = json.loads((ROOT / "llm_presets/openai-responses.json").read_text())
+    value["schema_version"] = 7
+    value.pop("send_temperature")
+    value.pop("reasoning_effort")
+    value["extra_body"] = effort
+    path = directory / "sample.json"
+    value["preset_id"] = "sample"
+    path.write_text(json.dumps(value))
+    return path
 
 
-def test_llm_resource_migration_uses_user_root_override_without_base(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "override"
-    monkeypatch.setenv("ANOTHER_LLM_USER_ROOT", str(root))
-    presets = root / "llm_presets"
-    presets.mkdir(parents=True)
-    value = json.loads(
-        (ROOT / "llm_presets" / "default.json").read_text("utf-8")
-    )
-    value["schema_version"] = 2
-    value.pop("stream")
-    value.pop("stream_endpoint", None)
-    value.pop("target_chunk_input_tokens")
-    (presets / "default.json").write_text(json.dumps(value), encoding="utf-8")
-
-    assert migrate_llm_resources() == 1
-    assert (
-        json.loads((presets / "default.json").read_text("utf-8"))["schema_version"]
-        == 7
-    )
+def test_migration_previews_then_moves_effort_without_touching_snapshots(tmp_path: Path) -> None:
+    path = old_preset(tmp_path, {"reasoning": {"effort": "high", "summary": "auto"}})
+    original = path.read_bytes()
+    snapshot = tmp_path / "projects/sample/runs/old/llm_preset.json"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_bytes(original)
+    reports = migrate_llm_resources(root=tmp_path, builtin_root=ROOT)
+    assert reports[0]["status"] == "preview"
+    assert path.read_bytes() == original
+    reports = migrate_llm_resources(root=tmp_path, builtin_root=ROOT, apply=True)
+    assert reports[0]["status"] == "updated"
+    upgraded = json.loads(path.read_text())
+    assert upgraded["schema_version"] == 8
+    assert upgraded["send_temperature"] is True
+    assert upgraded["reasoning_effort"] == "high"
+    assert upgraded["extra_body"] == {"reasoning": {"summary": "auto"}}
+    assert Path(reports[0]["backup"]).read_bytes() == original
+    assert snapshot.read_bytes() == original
 
 
-def test_llm_resource_migration_upgrades_v4_per_key_concurrency(
-    tmp_path: Path,
-) -> None:
-    root = default_user_root(base=tmp_path)
-    presets = root / "llm_presets"
-    presets.mkdir(parents=True)
-    value = json.loads(
-        (ROOT / "llm_presets" / "default.json").read_text("utf-8")
-    )
-    value["schema_version"] = 4
-    value.pop("max_parallel_per_key")
-    value.pop("target_chunk_input_tokens")
-    (presets / "default.json").write_text(json.dumps(value), encoding="utf-8")
-
-    assert migrate_llm_resources(base=tmp_path) == 1
-    upgraded = json.loads((presets / "default.json").read_text("utf-8"))
-    assert upgraded["schema_version"] == 7
-    assert upgraded["max_parallel_per_key"] == upgraded["max_parallel"]
-
-
-def test_llm_resource_migration_rejects_invalid_file_without_rewriting(
-    tmp_path: Path,
-) -> None:
-    root = default_user_root(base=tmp_path)
-    presets = root / "llm_presets"
-    presets.mkdir(parents=True)
-    path = presets / "broken.json"
-    path.write_text("{not-json", encoding="utf-8")
-
-    with pytest.raises(ConfigError, match="迁移文件"):
-        migrate_llm_resources(base=tmp_path)
-    assert path.read_text("utf-8") == "{not-json"
-
-
-def test_llm_resource_migration_reports_atomic_write_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = default_user_root(base=tmp_path)
-    presets = root / "llm_presets"
-    presets.mkdir(parents=True)
-    value = json.loads(
-        (ROOT / "llm_presets" / "default.json").read_text("utf-8")
-    )
-    value["schema_version"] = 2
-    value.pop("stream")
-    value.pop("stream_endpoint", None)
-    value.pop("target_chunk_input_tokens")
-    path = presets / "default.json"
-    path.write_text(json.dumps(value), encoding="utf-8")
-
-    def fail(*_: object, **__: object) -> None:
-        raise OSError("disk full")
-
-    monkeypatch.setattr("app.llm_migration.atomic_write_json", fail)
-    with pytest.raises(ConfigError, match="无法写入"):
-        migrate_llm_resources(base=tmp_path)
-    assert json.loads(path.read_text("utf-8"))["schema_version"] == 2
+def test_migration_leaves_conflicting_effort_unchanged(tmp_path: Path) -> None:
+    path = old_preset(tmp_path, {"reasoning": {"effort": "unsupported"}})
+    original = path.read_bytes()
+    reports = migrate_llm_resources(root=tmp_path, builtin_root=ROOT, apply=True)
+    assert reports[0]["status"] == "manual"
+    assert path.read_bytes() == original

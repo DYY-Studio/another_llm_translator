@@ -1,5 +1,5 @@
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "preset_id": "default",
   "adapter_id": "openai-compatible",
   "base_url": "https://example.com/v1",
@@ -21,5 +21,8 @@
   "credential": {
     "kind": "environment",
     "name": "LLM_API_KEY"
-  }
+  },
+  "send_temperature": true,
+  "reasoning_effort": null,
+  "extra_headers": {}
 }

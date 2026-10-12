@@ -45,7 +45,7 @@ from .errors import (
 
 from .i18n import SUPPORTED_LANGUAGES
 
-from .llm_adapter import JSONLLMAdapter
+from .llm_adapter import ADAPTER_SCHEMA_VERSION, JSONLLMAdapter
 
 from .llm_response import TerminologyResponseMode, response_record_types
 
@@ -699,7 +699,7 @@ def stage_fingerprint(
             ),
             "prompt_rules_version": PROMPT_RULES_VERSION,
             "prompt_languages": prompt_languages or {},
-            "temperature": None if config["llm"]["credential"]["kind"] == "chatgpt" else config["llm"][temperature_key],
+            "temperature": None if not config["llm"]["send_temperature"] else config["llm"][temperature_key],
             "context": config["context"].get(stage, {}),
             "scheduling_mode": config["execution"]["scheduling_mode"],
             "terms_revision": terms_revision,
@@ -1361,6 +1361,13 @@ def _interrupt_run(
     run_id = str(manifest["run_id"])
     write_json(project, project / "runs" / run_id / "manifest.json", manifest)
 
+def run_protocol_is_current(project: Path, run_id: str) -> bool:
+    directory = project / "runs" / run_id
+    preset = read_json(project, directory / "llm_preset.json")
+    adapter = read_json(project, directory / "llm_adapter.json")
+    return preset.get("schema_version") == 8 and adapter.get("schema_version") == ADAPTER_SCHEMA_VERSION
+
+
 def choose_running_run(
     project: Path,
     stage: str,
@@ -1377,6 +1384,8 @@ def choose_running_run(
     latest = candidates[0]
     run_id = str(latest["run_id"])
     warning = f"发现未完成 Run：{run_id}"
+    if not run_protocol_is_current(project, run_id) and action != "decline":
+        raise UsageError(f"旧 Run 使用旧 LLM 协议，不能续作；请使用 --decline-run 创建新 Run：{run_id}")
     if dry_run:
         if action == "resume":
             return run_id, [f"{warning}；dry-run 将按其原范围规划续作"]

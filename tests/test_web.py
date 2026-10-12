@@ -2541,6 +2541,8 @@ def test_web_manages_presets_and_previews_merged_extra_body(
         "stream_endpoint": "/v1/models/${model}:stream",
         "stream_read_timeout_enabled": False,
         "model": "provider/model",
+        "send_temperature": False,
+        "reasoning_effort": "high",
         "extra_body": {
             "provider": {
                 "order": ["anthropic", "google"],
@@ -2562,28 +2564,13 @@ def test_web_manages_presets_and_previews_merged_extra_body(
     assert preview["body"]["model"] == "provider/model"
     assert preview["transport"] == "sse"
     assert preview["body"]["stream"] is True
+    assert "temperature" not in preview["body"]
+    assert preview["body"]["reasoning_effort"] == "high"
     assert preview["body"]["stream_options"] == {"include_usage": True}
 
-    legacy = {
-        **default,
-        "preset_id": "legacy",
-        "schema_version": 4,
-    }
-    legacy.pop("max_parallel_per_key")
-    migrated = client.put("/api/v1/global/presets/legacy", json=legacy)
-    assert migrated.status_code == 200
-    stored_legacy = json.loads(
-        (tmp_path / "user-root" / "llm_presets" / "legacy.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert stored_legacy["schema_version"] == 7
-    assert stored_legacy["max_parallel_per_key"] == stored_legacy["max_parallel"]
+    legacy = {**default, "preset_id": "legacy", "schema_version": 7}
+    assert client.put("/api/v1/global/presets/legacy", json=legacy).status_code == 400
 
-    conflict = {**custom, "preset_id": "conflict", "extra_body": {"model": "x"}}
-    assert client.put(
-        "/api/v1/global/presets/conflict", json=conflict
-    ).status_code == 400
     secret = {**custom, "preset_id": "secret", "extra_body": {"x": "${api_key}"}}
     assert client.put(
         "/api/v1/global/presets/secret", json=secret

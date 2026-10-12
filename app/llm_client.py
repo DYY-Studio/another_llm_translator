@@ -979,6 +979,8 @@ class LLMClient:
                     temperature=temperature,
                     max_output_tokens=effective_output,
                     stream=stream_enabled,
+                    send_temperature=self.config["llm"]["send_temperature"],
+                    reasoning_effort=self.config["llm"]["reasoning_effort"],
                     extra_body=self.config.get("_llm_extra_body"),
                     extra_headers=self.config.get("_llm_extra_headers"),
                     session_id=self.run_id,

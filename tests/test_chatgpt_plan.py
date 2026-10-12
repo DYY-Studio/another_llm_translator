@@ -24,7 +24,7 @@ ROOT = Path(__file__).parents[1]
 
 def plan_config(tmp_path):
     value = json.loads((ROOT / "llm_presets/openai-responses.json").read_text())
-    value.update(adapter_id="chatgpt-plan", stream=True, proxy_url="", credential={"kind": "chatgpt", "name": "default"})
+    value.update(adapter_id="chatgpt-plan", stream=True, send_temperature=False, proxy_url="", credential={"kind": "chatgpt", "name": "default"})
     path = tmp_path / "preset.json"
     path.write_text(json.dumps(value))
     return _resolve_llm_config(load_global_config(ROOT), adapter_file=ROOT / "llm_adapters/chatgpt-plan.json", preset=load_llm_preset(path))
@@ -190,6 +190,7 @@ def test_adapter_capabilities_follow_template_and_fixed_connection(tmp_path):
     plan = load_json_adapter(ROOT / "llm_adapters/chatgpt-plan.json")
     assert plan.capabilities == {
         "temperature": False, "max_output_tokens": False, "streaming": "required",
+        "max_output_tokens_minimum": 0, "reasoning_effort": plan.definition["reasoning_effort"],
         "connection": {"base_url": "https://api.openai.com/v1", "credential": {"kind": "chatgpt", "name": "default"}, "proxy_source": "connection"},
     }
     regular = load_json_adapter(ROOT / "llm_adapters/openai-responses.json")

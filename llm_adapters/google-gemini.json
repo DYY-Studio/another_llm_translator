@@ -22,8 +22,16 @@
   },
   "response_content_pointer": "/candidates/0/content/parts/-1/text",
   "response_finish_reason_pointer": "/candidates/0/finishReason",
-  "truncated_finish_reasons": ["MAX_TOKENS"],
-  "blocked_finish_reasons": ["SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"],
+  "truncated_finish_reasons": [
+    "MAX_TOKENS"
+  ],
+  "blocked_finish_reasons": [
+    "SAFETY",
+    "RECITATION",
+    "BLOCKLIST",
+    "PROHIBITED_CONTENT",
+    "SPII"
+  ],
   "models": {
     "endpoint": "/models",
     "response_models_pointer": "/models",
@@ -41,18 +49,43 @@
     "endpoint": "/models/${model}:streamGenerateContent?alt=sse",
     "request_body": {},
     "content_events": [
-      {"pointer": "/candidates/0/content/parts/-1/text"}
+      {
+        "pointer": "/candidates/0/content/parts/-1/text"
+      }
     ],
     "reasoning_events": [],
-    "finish_reason_events": [{"pointer": "/candidates/0/finishReason"}],
+    "finish_reason_events": [
+      {
+        "pointer": "/candidates/0/finishReason"
+      }
+    ],
     "terminal": {
-      "when": {"pointer": "/candidates/0/finishReason", "exists": true}
+      "when": {
+        "pointer": "/candidates/0/finishReason",
+        "exists": true
+      }
     },
     "error_events": [],
     "usage": {
-      "input_tokens_pointers": ["/usageMetadata/promptTokenCount"],
-      "output_tokens_pointers": ["/usageMetadata/candidatesTokenCount"],
-      "total_tokens_pointers": ["/usageMetadata/totalTokenCount"]
+      "input_tokens_pointers": [
+        "/usageMetadata/promptTokenCount"
+      ],
+      "output_tokens_pointers": [
+        "/usageMetadata/candidatesTokenCount"
+      ],
+      "total_tokens_pointers": [
+        "/usageMetadata/totalTokenCount"
+      ]
     }
+  },
+  "reasoning_effort": {
+    "body_pointer": "/generationConfig/thinkingConfig/thinkingLevel",
+    "values": [
+      "MINIMAL",
+      "LOW",
+      "MEDIUM",
+      "HIGH"
+    ],
+    "aliases": []
   }
 }

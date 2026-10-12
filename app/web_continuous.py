@@ -409,8 +409,8 @@ def inspect_continuous(
                     bool(run.get("include_draft_translation")) == include_draft_translation
                     and bool(run.get("include_summaries")) == include_summaries
                 )
-                run["resume_compatible"] = compatible
-                run["resume_incompatibility_reason"] = None if compatible else "续用 Run 必须保持原有粗翻和概括选项"
+                run["resume_compatible"] = run.get("resume_compatible", True) and compatible
+                run["resume_incompatibility_reason"] = run.get("resume_incompatibility_reason") or (None if compatible else "续用 Run 必须保持原有粗翻和概括选项")
                 if actions.get(stage) == "resume" and not compatible:
                     blocking.append(_blocking("terminology_resume_incompatible", run["resume_incompatibility_reason"], stage=stage))
         running_runs[stage] = runs
@@ -443,8 +443,8 @@ def inspect_continuous(
                     if compatible
                     else 0
                 )
-                run["resume_compatible"] = compatible
-                run["resume_incompatibility_reason"] = reason
+                run["resume_compatible"] = run.get("resume_compatible", True) and compatible
+                run["resume_incompatibility_reason"] = run.get("resume_incompatibility_reason") or reason
             if action == "resume" and not runs[0]["resume_compatible"]:
                 blocking.append(
                     _blocking(

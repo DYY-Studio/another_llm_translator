@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 
 from .errors import ConfigError, ExternalError
 
+ADAPTER_SCHEMA_VERSION = 3
+
 _PLACEHOLDER_RE = re.compile(r"\$\{([a-z_][a-z0-9_]*)\}")
 _BODY_PLACEHOLDERS = frozenset(
     {"model", "system", "messages", "temperature", "max_output_tokens", "stream"}
@@ -38,6 +40,8 @@ _OPTIONAL_ADAPTER_KEYS = frozenset(
         "usage",
         "streaming",
         "connection",
+        "max_output_tokens_minimum",
+        "reasoning_effort",
     }
 )
 _MESSAGES_FORMATS = frozenset({"openai", "anthropic", "gemini", "responses"})
@@ -121,17 +125,35 @@ class JSONLLMAdapter:
         temperature: float,
         max_output_tokens: int,
         stream: bool,
+        send_temperature: bool = True,
+        reasoning_effort: str | None = None,
         extra_body: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
         session_id: str | None = None,
         request_id: str | None = None,
     ) -> tuple[dict[str, str], dict[str, Any]]:
+        minimum = self.definition.get("max_output_tokens_minimum", 0)
+        if max_output_tokens < minimum:
+            raise ConfigError(f"输出上限必须至少为 {minimum}")
+        effort = self.definition.get("reasoning_effort")
+        if reasoning_effort is not None and (effort is None or reasoning_effort not in effort["values"]):
+            raise ConfigError("Reasoning Effort 不在 Adapter 声明的等级中")
+        if extra_body:
+            if not send_temperature and _contains_key(extra_body, "temperature"):
+                raise ConfigError("已关闭温度发送，Extra Body 不得填写 temperature")
+            if effort:
+                for pointer in [effort["body_pointer"], *effort["aliases"]]:
+                    try:
+                        _resolve_json_pointer(extra_body, pointer)
+                    except ExternalError:
+                        continue
+                    raise ConfigError("Extra Body 不得重复填写 Reasoning Effort")
         values: dict[str, Any] = {
             "api_key": api_key,
             "model": model,
             "system": _extract_system(messages),
             "messages": _transform_messages(messages, self.messages_format),
-            "temperature": temperature,
+            "temperature": temperature if send_temperature else None,
             "max_output_tokens": max_output_tokens,
             "stream": stream,
         }
@@ -182,6 +204,8 @@ class JSONLLMAdapter:
                     + ", ".join(sorted(conflicts))
                 )
             body.update(deepcopy(extra_body))
+        if reasoning_effort is not None:
+            _insert_body_value(body, effort["body_pointer"], reasoning_effort)
         if self.adapter_id == "chatgpt-plan":
             from .chatgpt_oauth import validate_plan_body
             validate_plan_body(body)
@@ -202,10 +226,19 @@ class JSONLLMAdapter:
             "max_output_tokens": "max_output_tokens" in placeholders,
             "streaming": "required" if self.streaming_supported and self.body_template.get("stream") is True else "optional" if self.streaming_supported else "unsupported",
             "connection": deepcopy(self.definition.get("connection")),
+            "max_output_tokens_minimum": self.definition.get("max_output_tokens_minimum", 0),
+            "reasoning_effort": deepcopy(self.definition.get("reasoning_effort")),
         }
 
     def validate_preset(self, definition: dict[str, Any]) -> None:
         capabilities = self.capabilities
+        if definition["send_temperature"] and not capabilities["temperature"]:
+            raise ConfigError("该 Adapter 不支持发送温度")
+        if definition["max_output_tokens"] < capabilities["max_output_tokens_minimum"]:
+            raise ConfigError(f"输出上限必须至少为 {capabilities['max_output_tokens_minimum']}")
+        effort = capabilities["reasoning_effort"]
+        if definition["reasoning_effort"] is not None and (effort is None or definition["reasoning_effort"] not in effort["values"]):
+            raise ConfigError("Reasoning Effort 不在 Adapter 声明的等级中")
         connection = capabilities["connection"]
         if connection is not None:
             if definition["base_url"] != connection["base_url"] or definition["credential"] != connection["credential"]:
@@ -456,8 +489,8 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
     if not isinstance(value, dict):
         raise ConfigError(f"LLM Adapter 顶层必须是 JSON 对象：{path}")
     schema_version = value.get("schema_version")
-    if schema_version != 3:
-        raise ConfigError("LLM Adapter schema_version 必须是 3")
+    if schema_version != ADAPTER_SCHEMA_VERSION:
+        raise ConfigError(f"LLM Adapter schema_version 必须是 {ADAPTER_SCHEMA_VERSION}")
     unknown = set(value) - _REQUIRED_ADAPTER_KEYS - _OPTIONAL_ADAPTER_KEYS
     missing = _REQUIRED_ADAPTER_KEYS - set(value)
     if unknown:
@@ -549,6 +582,28 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
             raise ConfigError("LLM Adapter connection proxy_source 无效")
         if connection["proxy_source"] == "connection" and credential["kind"] != "chatgpt":
             raise ConfigError("该凭据类型没有授权连接代理")
+    minimum = value.get("max_output_tokens_minimum", 0)
+    if type(minimum) is not int or minimum < 0:
+        raise ConfigError("max_output_tokens_minimum 必须是非负整数")
+    effort = value.get("reasoning_effort")
+    if effort is not None:
+        if not isinstance(effort, dict) or set(effort) - {"body_pointer", "values", "aliases"} or not {"body_pointer", "values"} <= set(effort):
+            raise ConfigError("reasoning_effort 必须声明 body_pointer 和 values")
+        levels = effort["values"]
+        if not isinstance(levels, list) or not levels or any(not isinstance(level, str) or not level for level in levels) or len(set(levels)) != len(levels):
+            raise ConfigError("reasoning_effort.values 必须是互不重复的非空字符串数组")
+        aliases = effort.get("aliases", [])
+        if not isinstance(aliases, list):
+            raise ConfigError("reasoning_effort.aliases 必须是数组")
+        for effort_pointer in [effort["body_pointer"], *aliases]:
+            _validate_stream_pointer(effort_pointer, "reasoning_effort")
+        effort["aliases"] = aliases
+        for effort_pointer in [effort["body_pointer"], *aliases]:
+            try:
+                _resolve_json_pointer(body, effort_pointer)
+            except ExternalError:
+                continue
+            raise ConfigError("Adapter body 不得重复配置声明的 Reasoning Effort 字段")
     digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     return JSONLLMAdapter(
         adapter_id=adapter_id,
@@ -888,8 +943,8 @@ def _render_body(value: Any, values: dict[str, Any]) -> Any:
             key: _render_body(child, values)
             for key, child in value.items()
             if not (
-                child == "${max_output_tokens}"
-                and values["max_output_tokens"] == 0
+                (child == "${max_output_tokens}" and values["max_output_tokens"] == 0)
+                or (child == "${temperature}" and values["temperature"] is None)
             )
         }
     if isinstance(value, list):
@@ -980,3 +1035,26 @@ def _resolve_json_pointer_tokens(value: Any, tokens: list[str]) -> Any:
     except (KeyError, IndexError) as exc:
         raise ExternalError("LLM 响应缺少配置的正文路径") from exc
     return current
+
+
+def _contains_key(value: Any, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(_contains_key(child, key) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_key(child, key) for child in value)
+    return False
+
+
+def _insert_body_value(body: dict[str, Any], pointer: str, value: Any) -> None:
+    tokens = _parse_json_pointer(pointer)
+    parent = body
+    for key in tokens[:-1]:
+        if key not in parent:
+            parent[key] = {}
+        child = parent[key]
+        if not isinstance(child, dict):
+            raise ConfigError("Reasoning Effort 请求路径必须经过 JSON 对象")
+        parent = child
+    if tokens[-1] in parent:
+        raise ConfigError("Reasoning Effort 请求字段与 Adapter body 冲突")
+    parent[tokens[-1]] = value

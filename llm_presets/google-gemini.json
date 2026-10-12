@@ -1,5 +1,5 @@
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "preset_id": "google-gemini",
   "adapter_id": "google-gemini",
   "base_url": "https://generativelanguage.googleapis.com/v1beta",
@@ -21,5 +21,8 @@
   "credential": {
     "kind": "environment",
     "name": "GEMINI_API_KEY"
-  }
+  },
+  "send_temperature": true,
+  "reasoning_effort": null,
+  "extra_headers": {}
 }

@@ -1045,6 +1045,8 @@ export interface ProjectConfig {
 
 export interface AdapterCapabilities {
   temperature: boolean;
+  max_output_tokens_minimum: number;
+  reasoning_effort: { body_pointer: string; values: string[]; aliases: string[] } | null;
   max_output_tokens: boolean;
   streaming: "required" | "optional" | "unsupported";
   connection: { base_url: string; credential: LLMPreset["credential"]; proxy_source: "preset" | "connection" } | null;
@@ -1086,7 +1088,7 @@ export interface LLMPresetSummary {
 }
 
 export interface LLMPreset {
-  schema_version: 7;
+  schema_version: 8;
   preset_id: string;
   adapter_id: string;
   base_url: string;
@@ -1096,6 +1098,8 @@ export interface LLMPreset {
   context_window_tokens: number;
   target_chunk_input_tokens: number;
   max_output_tokens: number;
+  send_temperature: boolean;
+  reasoning_effort: string | null;
   context_safety_margin_tokens: number;
   token_safety_factor: number;
   requests_per_minute: number;

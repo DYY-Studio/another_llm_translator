@@ -38,6 +38,30 @@ def definition() -> dict[str, object]:
     }
 
 
+def test_adapter_declares_request_controls(tmp_path: Path) -> None:
+    value = definition()
+    value["body"].pop("reasoning_effort")
+    value["max_output_tokens_minimum"] = 1
+    value["reasoning_effort"] = {
+        "body_pointer": "/reasoning/effort", "values": ["low", "high"],
+        "aliases": ["/reasoning_effort"],
+    }
+    adapter = load_json_adapter(write_adapter(tmp_path, value))
+    arguments = dict(api_key="key", model="model", messages=[], temperature=0.2,
+                     max_output_tokens=10, stream=False, send_temperature=False)
+    _, body = adapter.build_request(**arguments, reasoning_effort="high",
+                                    extra_body={"reasoning": {"summary": "auto"}})
+    assert body["reasoning"] == {"summary": "auto", "effort": "high"}
+    assert "temperature" not in body["sampling"]
+    assert "reasoning" not in adapter.build_request(**arguments)[1]
+    with pytest.raises(ConfigError, match="输出上限"):
+        adapter.build_request(**{**arguments, "max_output_tokens": 0})
+    with pytest.raises(ConfigError, match="Reasoning Effort"):
+        adapter.build_request(**arguments, reasoning_effort="medium")
+    with pytest.raises(ConfigError, match="Extra Body"):
+        adapter.build_request(**arguments, extra_body={"reasoning_effort": "high"})
+
+
 def test_adapter_schema_v3_owns_request_endpoints(tmp_path: Path) -> None:
     value = definition()
     value["endpoint"] = "/models/${model}:generate"

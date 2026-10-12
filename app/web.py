@@ -25,7 +25,6 @@ from .errors import (
     app_error_payload,
     internal_error_payload,
 )
-from .llm_migration import migrate_llm_resources
 from .logging_utils import get_logger
 from .plugins import load_plugins
 from .project import APP_ROOT as DEFAULT_APP_ROOT
@@ -102,7 +101,6 @@ def create_app(
     server_config: dict[str, Any] | None = None,
 ) -> FastAPI:
     load_plugins()
-    migrate_llm_resources()
     try:
         projects_root.mkdir(parents=True, exist_ok=True)
     except OSError as exc:

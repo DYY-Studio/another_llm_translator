@@ -505,7 +505,7 @@ def _decision_fingerprint(
         "model": config["llm"]["model"],
         "adapter_hash": config.get("_llm_adapter_hash"),
         "preset_hash": config.get("_llm_preset_hash"),
-        "temperature": config["llm"]["temperature_terminology_decision"],
+        "temperature": config["llm"]["temperature_terminology_decision"] if config["llm"]["send_temperature"] else None,
         "prompts": {
             phase: hashlib.sha256(prompts[phase].encode()).hexdigest()
             for phase in prompts
