@@ -647,7 +647,7 @@ def full_prompt(
         stage_suffix = (
             terminology_final_review_protocol(language)
             if phase == "final_review"
-            else terminology_decision_protocol(language)
+            else terminology_decision_protocol(language, phase=phase or "adjudication")
         )
     else:
         protocol_ids = dict.fromkeys(
