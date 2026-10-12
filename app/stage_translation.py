@@ -916,6 +916,7 @@ async def run_translation(
             group,
             payload_builder=payload_builder,
             prompt=prompt_for_items(group),
+            prompt_language=language,
             config=config,
             llm=state.llm,
             stage="translation",
@@ -972,6 +973,7 @@ async def run_translation(
                     if draft_scan
                     else prompt_for_items(group)
                 ),
+                prompt_language=language,
                 config=config,
                 llm=state.llm,
                 stage=run_stage,

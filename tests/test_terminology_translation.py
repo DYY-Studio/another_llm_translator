@@ -1465,7 +1465,7 @@ async def test_advisory_term_usage_repairs_once_even_when_hard_repairs_are_zero(
     assert summary["failed"] == 0
     assert len(calls) == 2
     assert calls[0]["terms"] == calls[1]["terms"]
-    assert calls[1]["validation_repair"] == "preferred_term_missing"
+    assert calls[1]["validation_repair"] == "对源文中适用的术语使用本次提供的推荐译名"
     assert calls[1]["segments"] == calls[0]["segments"]
     record = read_jsonl(project, project / "stages" / "translation.jsonl")[-1]
     assert record["validation_status"] == "passed"

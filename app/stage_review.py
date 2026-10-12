@@ -542,6 +542,7 @@ async def run_review(
             list(chunk.segments),
             payload_builder=payload_builder,
             prompt=prompt_for_items(list(chunk.segments)),
+            prompt_language=language,
             config=config,
             llm=state.llm,
             stage=stage,

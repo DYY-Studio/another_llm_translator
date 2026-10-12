@@ -832,11 +832,32 @@ async def _execute_stage_run(
     )
 
 
+_GENERATION_RETRY_GUIDANCE = {
+    "zh-CN": {
+        "segment_misaligned": "每条译文对应本次同 ID 的源文，保持内容归属",
+        "preferred_term_missing": "对源文中适用的术语使用本次提供的推荐译名",
+        "japanese_kana": "将日语假名译为目标语言",
+        "korean_hangul": "将韩文译为目标语言",
+        "source_full": "将源文内容完整译为目标语言",
+        "source_span": "将源文内容完整译为目标语言",
+    },
+    "en": {
+        "segment_misaligned": "Keep each translation aligned with the source of the same ID in this request.",
+        "preferred_term_missing": "Use the provided preferred translations for terms applicable to the source.",
+        "japanese_kana": "Translate Japanese kana into the target language.",
+        "korean_hangul": "Translate Korean Hangul into the target language.",
+        "source_full": "Translate the source content fully into the target language.",
+        "source_span": "Translate the source content fully into the target language.",
+    },
+}
+
+
 async def _localized_request_loop(
     group: list[dict[str, Any]],
     *,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
     prompt: str,
+    prompt_language: str,
     config: dict[str, Any],
     llm: LLMClient,
     stage: str,
@@ -873,12 +894,14 @@ async def _localized_request_loop(
         if not items:
             payload["segments"] = []
         if repair_candidates is not None:
-            feedback = ", ".join(sorted({
+            codes = sorted({
                 str(finding["validator"] if finding["match_type"] == "character" else finding["match_type"])
                 for item in items
                 for finding in repair_candidates[str(item["segment_id"])]["findings"]
                 if finding.get("repairable", True)
-            }))
+            })
+            guidance = _GENERATION_RETRY_GUIDANCE[prompt_language]
+            feedback = "\n".join(dict.fromkeys(guidance.get(code, code) for code in codes))
             if feedback:
                 payload["validation_repair"] = feedback
         payload, id_map = localize_request_ids(payload, items)
