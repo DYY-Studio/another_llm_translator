@@ -78,7 +78,6 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
       {view.fragments.map((fragment) => <article key={fragment.id}>
         <div className="knowledge-fragment-content">
           <p>{fragment.text}</p>
-          <small>{fragment.source ?? fragment.original_owner} / {t(fragment.state)}</small>
           {!fragment.valid && <p className="error-text">{t("expiredSource")}</p>}
           <div className="knowledge-fragment-sources">
             {fragment.source_range ? compactKnowledgeRanges(fragment).map((range) => <button className="quiet-button" type="button" key={range.key} disabled={!fragment.valid} onClick={() => onFindSegment(fragment.source ?? view.entity_key, range.segmentId)}>{t("openSource")}: {range.label}</button>) : <small>{t("noSource")}</small>}
