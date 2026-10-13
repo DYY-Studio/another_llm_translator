@@ -1196,16 +1196,18 @@ export function TermsView({
               <button className="quiet-button" disabled={selected?.disabled} onClick={() => setForm({ ...form, aliases: [...form.aliases, ""] })}>{translate("terms.addAlias", language)}</button>
             </div>
             {message && <p className={message.startsWith("Error") ? "error-text" : "success-text"}>{message}</p>}
-            <div className="editor-actions term-actions">
-              {selected?.disabled ? (
-                <button className="primary-button" disabled={saving} onClick={() => save(false)}>{translate("terms.restore", language)}</button>
-              ) : (
-                <>
-                  <button className="primary-button" disabled={saving || !form.source.trim()} onClick={() => save(false)}>{translate("common.save", language)}</button>
-                  {selected && <button className="danger-button" disabled={saving} onClick={() => save(true)}>{translate("common.remove", language)}</button>}
-                </>
-              )}
-            </div>
+          </div>
+        )}
+        {(!selected || editorTab === "edit") && (
+          <div className="term-actions">
+            {selected?.disabled ? (
+              <button className="primary-button" disabled={saving} onClick={() => save(false)}>{translate("terms.restore", language)}</button>
+            ) : (
+              <>
+                <button className="primary-button" disabled={saving || !form.source.trim()} onClick={() => save(false)}>{translate("common.save", language)}</button>
+                {selected && <button className="danger-button" disabled={saving} onClick={() => save(true)}>{translate("common.remove", language)}</button>}
+              </>
+            )}
           </div>
         )}
       </section>

@@ -173,7 +173,7 @@
 .conflict-box { padding: 12px; border: 1px solid var(--warning-border); border-radius: 6px; background: var(--warning-bg); color: var(--warning-text); font-size: 12px; }
 .choice-buttons { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
 .choice-buttons button { min-height: 30px; padding: 0 10px; border: 1px solid var(--warning-choice); border-radius: 5px; background: var(--surface); }
-.term-actions { bottom: 0; padding-block: 18px; background: var(--surface); }
+.term-actions { display: flex; flex-shrink: 0; gap: 9px; justify-content: flex-end; padding: 18px 30px; background: var(--surface); }
 .term-hits-panel { display: flex; flex-direction: column; gap: 10px; padding: 18px 30px 24px; }
 .term-hits-state { color: var(--muted); font-size: 12px; }
 .term-hits-list { flex: 1; min-height: 0; overflow: auto; display: grid; gap: 6px; align-content: start; }
