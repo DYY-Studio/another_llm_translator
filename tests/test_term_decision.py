@@ -65,10 +65,12 @@ def default_llm_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def deterministic_knowledge_phase(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def aggregate(_llm, view, _prompt, _config):
-        return {"items": [{"text":f["text"],"fragment_ids":[f["id"]]} for f in view["fragments"] if f["state"]=="active" and f["valid"]],
-                "reason":"模拟聚合", "input_version":view["input_version"]}
-    monkeypatch.setattr("app.term_knowledge.aggregate_entity", aggregate)
+    async def aggregate(_llm, views, _prompt, _config, *, on_result):
+        for view in views:
+            on_result(view, {"items": [{"text": f["text"], "fragment_ids": [f["id"]]} for f in view["fragments"] if f["state"] == "active" and f["valid"]],
+                             "reason": "模拟聚合", "input_version": view["input_version"]})
+        return {}
+    monkeypatch.setattr("app.term_knowledge.aggregate_batch", aggregate)
 
 
 def create_decision_project(tmp_path: Path, text: str = "Alice Ally\nBob") -> Path:

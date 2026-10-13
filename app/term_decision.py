@@ -588,14 +588,10 @@ def decision_plan(
         spec=spec,
         conflicts=source_conflicts,
     )
-    from .term_knowledge import knowledge_payload
-    from .execution import estimate_messages, render_messages
+    from .term_knowledge import pack_knowledge_batches
     knowledge_views = [entity_view(project, library, root, all_evidence=known_fragments) for root in entity_members(library)]
     knowledge_views = [view for view in knowledge_views if view["status"] != "current"]
-    knowledge_tokens = sum(estimate_messages(
-        render_messages(prompts["knowledge"], knowledge_payload(view, config["project"]["target_language"])[0]),
-        float(config["execution"]["token_safety_factor"]),
-    ) for view in knowledge_views if any(f["state"] == "active" for f in view["fragments"]))
+    knowledge_batches, knowledge_tokens, _ = pack_knowledge_batches(knowledge_views, prompts["knowledge"], config)
     return {
         "library": library,
         "config": config,
@@ -611,7 +607,7 @@ def decision_plan(
         "spec": spec,
         "protected_states": protected_states,
         "phase_one": phase_one,
-        "estimated_requests": len(phase_one) + len(phase_two) + sum(any(f["state"] == "active" for f in view["fragments"]) for view in knowledge_views),
+        "estimated_requests": len(phase_one) + len(phase_two) + len(knowledge_batches),
         "estimated_input_tokens": phase_one_tokens + phase_two_tokens + knowledge_tokens,
         "total_steps": len(eligible) * 2 + len(knowledge_views),
         "knowledge_pending": len(knowledge_views),
@@ -1317,7 +1313,7 @@ async def run_terminology_decision(
                     conflicts=final_conflicts,
                 )
             _validate_final_states(project, final, original=states, spec=spec)
-            from .term_knowledge import aggregate_entity, entity_members, entity_view, save_items, transfer_alias_evidence, evidence as knowledge_evidence
+            from .term_knowledge import aggregate_batch, pack_knowledge_batches, entity_members, entity_view, save_items, transfer_alias_evidence, evidence as knowledge_evidence
             knowledge_library = deepcopy(library)
             knowledge_library["terms"] = [deepcopy(state) for state in final.values() if not state.get("disabled")]
             owner_moves = transfer_alias_evidence(knowledge_library, spec)
@@ -1328,35 +1324,49 @@ async def run_terminology_decision(
             total = len(eligible) * 2 + final_review_target_count + len(containment_focus) + len(targets)
             cached = checkpoint["phases"]["knowledge"]
             already_cached = set(cached)
-            usage_invoked = usage_invoked or any(view["entity_key"] not in cached for view in targets)
+
+            def accept_knowledge(view: dict[str, Any], result: dict[str, Any]) -> None:
+                nonlocal completed
+                root = view["entity_key"]
+                save_items(project, knowledge_library, root, result["items"], all_evidence=known_fragments)
+                knowledge_updates[root] = {"aggregate": deepcopy(knowledge_library["knowledge"]["entities"][root]),
+                                           "members": view["members"], "reason": result["reason"],
+                                           "owner_moves": {old: new for old, new in owner_moves.items() if new in view["members"]}}
+                if root not in already_cached:
+                    result["source_order"] = view["source_order"]
+                    cached[root] = {"decision": deepcopy(result), "decision_fingerprint": fingerprint,
+                                    "model_fingerprint": model_fingerprint, "prompt_fingerprint": prompt_fingerprints["knowledge"]}
+                    atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
+                    completed += 1
+                if on_progress:
+                    on_progress(completed, len(knowledge_errors), total)
+
+            remaining_views = []
             for view in targets:
                 root = view["entity_key"]
-                try:
-                    if any(f["state"] == "active" and not f["valid"] for f in view["fragments"]):
-                        raise UsageError("实体证据已过期，请重新扫描或停用失效片段")
-                    if root in cached:
-                        result = deepcopy(cached[root]["decision"])
-                        if result["input_version"] != view["input_version"] or result["source_order"] != view["source_order"]:
-                            raise UsageError("实体说明检查点输入已变化，请重新生成")
+                if root in cached:
+                    result = deepcopy(cached[root]["decision"])
+                    if result["input_version"] != view["input_version"] or result["source_order"] != view["source_order"]:
+                        knowledge_errors[root] = "实体说明检查点输入已变化，请重新生成"
+                    elif any(f["state"] == "active" and not f["valid"] for f in view["fragments"]):
+                        knowledge_errors[root] = "实体证据已过期，请重新扫描或停用失效片段"
                     else:
-                        result = await aggregate_entity(llm, view, prompts["knowledge"], config)
-                        result["source_order"] = view["source_order"]
-                        cached[root] = {"decision": deepcopy(result), "decision_fingerprint": fingerprint,
-                                        "model_fingerprint": model_fingerprint, "prompt_fingerprint": prompt_fingerprints["knowledge"]}
-                        atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
-                    save_items(project, knowledge_library, root, result["items"], all_evidence=known_fragments)
-                    knowledge_updates[root] = {"aggregate": deepcopy(knowledge_library["knowledge"]["entities"][root]),
-                                               "members": view["members"], "reason": result["reason"],
-                                               "owner_moves": {old:new for old,new in owner_moves.items() if new in view["members"]}}
-                    if root not in already_cached:
-                        completed += 1
-                    if on_progress:
-                        on_progress(completed, len(knowledge_errors), total)
-                except AppError as exc:
-                    from .errors import FatalExternalError
-                    if isinstance(exc, (FatalExternalError, StorageError)):
-                        raise
-                    knowledge_errors[root] = str(exc)
+                        accept_knowledge(view, result)
+                elif not any(f["state"] == "active" for f in view["fragments"]):
+                    accept_knowledge(view, {"items": [], "reason": "没有说明证据", "input_version": view["input_version"]})
+                else:
+                    remaining_views.append(view)
+            knowledge_batches, _, packing_errors = pack_knowledge_batches(remaining_views, prompts["knowledge"], config)
+            knowledge_errors.update(packing_errors)
+            usage_invoked = usage_invoked or bool(knowledge_batches)
+
+            async def aggregate_knowledge(batch: list[dict[str, Any]]) -> None:
+                errors = await aggregate_batch(llm, batch, prompts["knowledge"], config, on_result=accept_knowledge)
+                knowledge_errors.update(errors)
+                if on_progress:
+                    on_progress(completed, len(knowledge_errors), total)
+
+            await run_bounded(knowledge_batches, aggregate_knowledge, max_parallel=int(config["execution"]["max_parallel"]))
             if knowledge_errors:
                 raise UsageError("实体说明聚合失败：" + "；".join(f"{root}: {error}" for root, error in knowledge_errors.items()))
             usage = llm.usage_summary()

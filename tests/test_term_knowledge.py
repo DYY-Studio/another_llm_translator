@@ -43,10 +43,10 @@ def test_knowledge_payload_compacts_ranges_without_bridging_gaps_or_slices():
                 "source_range": ranges, "_positions": {f"S{i}": i for i in range(8)}}
     before = deepcopy(fragment)
     view = {"entity_key": "alpha", "members": ["alpha"], "items": [], "fragments": [fragment]}
-    payload, refs = knowledge_payload(view, "简体中文")
-    assert refs == {"K1": "persistent"}
-    assert payload["fragments"][0]["text"] == "完整说明"
-    assert payload["fragments"][0]["source_range"] == [
+    payload, refs = knowledge_payload([view], "简体中文")
+    assert refs == {"K1": ("alpha", "persistent")}
+    assert payload["entities"][0]["fragments"][0]["text"] == "完整说明"
+    assert payload["entities"][0]["fragments"][0]["source_range"] == [
         {"file_id": "F1", "part_id": "P1", "first": {"position": 0, "start": 0}, "last": {"position": 1, "end": 6}},
         {"file_id": "F1", "part_id": "P1", "first": {"position": 3, "start": 0}, "last": {"position": 4, "end": 3}},
         {"file_id": "F1", "part_id": "P1", "first": {"position": 5, "start": 0}, "last": {"position": 5, "end": 6}},
@@ -187,11 +187,11 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
         payload = json.loads(messages[1]["content"])
         assert payload["phase"] == "knowledge"
         assert "NAME_RULE_SENTINEL" not in messages[0]["content"]
-        scan = next(f for f in payload["fragments"] if f["origin"] == "scan")
+        scan = next(f for f in payload["entities"][0]["fragments"] if f["origin"] == "scan")
         assert scan["source_range"] == [{"file_id": "F0001", "part_id": "document",
                                         "first": {"position": 0, "start": 0}, "last": {"position": 0, "end": 14}}]
         attempts.append(payload)
-        refs = [f["id"] for f in payload["fragments"]]
+        refs = [f["id"] for f in payload["entities"][0]["fragments"]]
         # Invalid references must trigger a format retry, not a partially accepted explanation.
         content = llm_jsonl([{"type": "entity_knowledge", "entity": "alpha", "reason": "补充身份", "items": [
             {"text": "船长，保留人工说明", "refs": ["unknown"] if len(attempts) == 1 else refs},
@@ -249,11 +249,14 @@ async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(
     allow_alpha = False
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        calls.append((payload["phase"], payload.get("entity")))
+        calls.append((payload["phase"], tuple(e["entity"] for e in payload.get("entities", []))))
         if payload["phase"] == "knowledge":
-            root = payload["entity"]
-            refs = [payload["fragments"][0]["id"]] if root == "beta" or allow_alpha else ["missing"]
-            records = [{"type":"entity_knowledge", "entity":root,"reason":"身份", "items":[{"text":root,"refs":refs}]}]
+            records = []
+            for entity in payload["entities"]:
+                root = entity["entity"]
+                refs = [entity["fragments"][0]["id"]] if root == "beta" or allow_alpha else ["missing"]
+                records.append({"type": "entity_knowledge", "entity": root, "reason": "身份",
+                                "items": [{"text": root, "refs": refs}]})
         else:
             assert payload["phase"] in {"adjudication", "consistency"}
             records = [{"type":"decision","normalized":s["normalized"],"reason":"译名",
@@ -270,7 +273,7 @@ async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(
         calls.clear()
         allow_alpha = True
         result = await run_terminology_decision(project,http_client=client,resume_run_id=run_id)
-    assert calls == [("knowledge", "alpha")]
+    assert calls == [("knowledge", ("alpha",))]
     assert result["proposals"] == 2
     for proposal in current_decision_draft(project)["proposals"]:
         refs = {key for aggregate in proposal["knowledge_after"].values()
@@ -296,19 +299,16 @@ async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(
 @pytest.mark.asyncio
 async def test_entity_budget_fails_before_any_model_request(tmp_path: Path) -> None:
     from app.config import load_project_config
-    from app.errors import RequestSizeError
     from app.term_library import term_normalization
-    from app.term_knowledge import publish_evidence, entity_view, aggregate_entity
+    from app.term_knowledge import publish_evidence, entity_view, pack_knowledge_batches
     project = make_project(tmp_path)
     data = library()
     config = load_project_config(project, stage="terminology_decision")
     publish_evidence(project, data, [scan_record(project, "身份信息" * 1000)], term_normalization(config))
     config["llm"].update(context_window_tokens=100, context_safety_margin_tokens=0)
-    class NoRequests:
-        async def chat(self, **kwargs):
-            raise AssertionError("超限请求不得发送")
-    with pytest.raises(RequestSizeError, match="完整证据"):
-        await aggregate_entity(NoRequests(), entity_view(project,data,"alpha"), "聚合", config)
+    batches, _, errors = pack_knowledge_batches([entity_view(project, data, "alpha")], "聚合", config)
+    assert not batches
+    assert "完整证据" in errors["alpha"]
 
 
 def test_group_changes_invalidate_shared_explanation_and_cross_entity_refs(tmp_path: Path) -> None:

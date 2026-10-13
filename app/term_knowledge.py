@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .errors import UsageError
 from .execution import segment_model_source
@@ -280,74 +280,144 @@ def compact_source_ranges(ranges: list[dict[str, Any]] | None, positions: dict[s
     return groups or None
 
 
-def knowledge_payload(view: dict[str, Any], target_language: str) -> tuple[dict[str, Any], dict[str, str]]:
-    active = [f for f in view["fragments"] if f["state"] == "active"]
-    refs = {f"K{index}": f["id"] for index, f in enumerate(active, 1)}
-    base = {
-        "phase": "knowledge", "entity": view["entity_key"], "members": view["members"],
-        "target_language": target_language,
-        "current_items": [{"text": item["text"]} for item in view["items"]],
-        "fragments": [{"id": key, "text": f["text"], "owner": f["owner"],
-                       "original_source": f.get("source", f["original_owner"]),
-                       "origin": f["origin"], "source_range": compact_source_ranges(f["source_range"], f["_positions"])}
-                      for key, f in zip(refs, active, strict=True)],
-    }
-    return base, refs
+def knowledge_payload(views: list[dict[str, Any]], target_language: str) -> tuple[dict[str, Any], dict[str, tuple[str, str]]]:
+    refs: dict[str, tuple[str, str]] = {}
+    entities = []
+    for view in views:
+        fragments = []
+        for f in view["fragments"]:
+            if f["state"] != "active":
+                continue
+            key = f"K{len(refs) + 1}"
+            refs[key] = (view["entity_key"], f["id"])
+            fragments.append({"id": key, "text": f["text"], "owner": f["owner"],
+                              "original_source": f.get("source", f["original_owner"]),
+                              "origin": f["origin"], "source_range": compact_source_ranges(f["source_range"], f["_positions"])})
+        entities.append({"entity": view["entity_key"], "members": view["members"],
+                         "current_items": [{"text": item["text"]} for item in view["items"]],
+                         "fragments": fragments})
+    return {"phase": "knowledge", "target_language": target_language, "entities": entities}, refs
 
 
-async def aggregate_entity(llm: Any, view: dict[str, Any], prompt: str, config: dict[str, Any]) -> dict[str, Any]:
-    """Aggregate one complete entity input, with checked request-local citations."""
-    from .errors import RequestSizeError
+def pack_knowledge_batches(views: list[dict[str, Any]], prompt: str, config: dict[str, Any], *,
+                           feedback: str = "") -> tuple[list[list[dict[str, Any]]], int, dict[str, str]]:
+    """Pack complete entities, isolating invalid/oversized evidence without trimming."""
+    from .execution import estimate_messages, render_messages
+    from .term_decision_batches import _request_limits
+    soft, hard, _, _ = _request_limits(config)
+    overflow = config["terminology_decision"]["allow_soft_target_overflow"]
+    batches, errors = [], {}
+    current: list[dict[str, Any]] = []
+    total = 0
+
+    def estimate(group: list[dict[str, Any]]) -> int:
+        payload, _ = knowledge_payload(group, config["project"]["target_language"])
+        if feedback:
+            payload["validation_feedback"] = feedback
+        return estimate_messages(render_messages(prompt, payload), float(config["execution"]["token_safety_factor"]))
+
+    def flush() -> None:
+        nonlocal current, total
+        if current:
+            total += estimate(current)
+            batches.append(current)
+            current = []
+
+    for view in views:
+        active = [f for f in view["fragments"] if f["state"] == "active"]
+        if any(not f["valid"] for f in active):
+            errors[view["entity_key"]] = "实体证据已过期，请重新扫描或停用失效片段"
+            continue
+        if not active:
+            continue
+        size = estimate([view])
+        if size > hard or (size > soft and not overflow):
+            limit = hard if size > hard else soft
+            errors[view["entity_key"]] = f"实体完整证据请求估算 {size} tokens，超过{'硬限制' if size > hard else '软预算'} {limit} tokens"
+            continue
+        if current and estimate([*current, view]) > min(soft, hard):
+            flush()
+        current.append(view)
+        if size > soft:
+            flush()
+    flush()
+    return batches, total, errors
+
+
+def _knowledge_result(view: dict[str, Any], record: dict[str, Any], refs: dict[str, tuple[str, str]]) -> dict[str, Any]:
+    if set(record) != {"type", "entity", "items", "reason"}:
+        raise UsageError("实体说明响应字段错误")
+    if not isinstance(record["reason"], str) or not record["reason"].strip():
+        raise UsageError("实体说明响应缺少理由")
+    if not isinstance(record["items"], list):
+        raise UsageError("说明条目必须是数组")
+    items = []
+    for item in record["items"]:
+        if not isinstance(item, dict) or set(item) != {"text", "refs"}:
+            raise UsageError("说明条目必须包含 text 和 refs")
+        if (not isinstance(item["refs"], list) or not item["refs"]
+                or not all(isinstance(r, str) and r in refs and refs[r][0] == view["entity_key"] for r in item["refs"])):
+            raise UsageError("说明引用必须来自本次实体证据")
+        items.append({"text": item["text"], "fragment_ids": [refs[r][1] for r in item["refs"]]})
+    return {"items": validate_items(view, items), "reason": record["reason"], "input_version": view["input_version"]}
+
+
+async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, config: dict[str, Any], *,
+                          on_result: Callable[[dict[str, Any], dict[str, Any]], None]) -> dict[str, str]:
+    """Persist valid entity results before retrying only unfinished complete inputs."""
+    from .errors import AppError, FatalExternalError, StorageError
     from .execution import estimate_messages, render_messages
     from .llm_response import parse_jsonl_document
-    from .term_decision_batches import _request_limits
-    active = [f for f in view["fragments"] if f["state"] == "active"]
-    if any(not f["valid"] for f in active):
-        raise UsageError("实体证据已过期，请重新扫描或停用失效片段")
-    if not active:
-        return {"items": [], "reason": "没有说明证据", "input_version": view["input_version"]}
-    base, refs = knowledge_payload(view, config["project"]["target_language"])
-    parent_request_id = None
+    pending = list(views)
+    errors: dict[str, str] = {}
     feedback = ""
+    parent_request_id = None
     for attempt in range(int(config["retry"]["format_max_attempts"]) + 1):
-        payload = {**base, **({"validation_feedback": feedback} if feedback else {})}
-        messages = render_messages(prompt, payload)
-        estimate = estimate_messages(messages, float(config["execution"]["token_safety_factor"]))
-        soft, hard, context, itpm = _request_limits(config)
-        if estimate > hard:
-            raise RequestSizeError(f"实体完整证据请求估算 {estimate} tokens，超过硬限制 {hard} tokens", reason="itpm" if 0 < itpm < context else "context")
-        if estimate > soft and not config["terminology_decision"]["allow_soft_target_overflow"]:
-            raise RequestSizeError(f"实体完整证据请求估算 {estimate} tokens，超过软预算 {soft} tokens", reason="soft_target")
-        response, request_id = await llm.chat(
-            messages=messages, temperature=float(config["llm"]["temperature_terminology_decision"]),
-            estimated_input_tokens=estimate, request_id=new_record_id("REQ"), parent_request_id=parent_request_id,
-        )
-        try:
-            document = parse_jsonl_document(response.content, record_type="entity_knowledge")
-            if document.errors or not document.complete or len(document.records) != 1:
-                raise UsageError("实体说明响应必须含一条完整 entity_knowledge 和 end")
-            record = document.records[0]
-            if set(record) != {"type", "entity", "items", "reason"} or record["entity"] != view["entity_key"]:
-                raise UsageError("实体说明响应目标或字段错误")
-            if not isinstance(record["reason"], str) or not record["reason"].strip():
-                raise UsageError("实体说明响应缺少理由")
-            if not isinstance(record["items"], list):
-                raise UsageError("说明条目必须是数组")
-            items = []
-            for item in record["items"]:
-                if not isinstance(item, dict) or set(item) != {"text", "refs"}:
-                    raise UsageError("说明条目必须包含 text 和 refs")
-                if not isinstance(item["refs"], list) or not item["refs"] or not all(isinstance(r, str) and r in refs for r in item["refs"]):
-                    raise UsageError("说明引用必须来自本次实体证据")
-                items.append({"text": item["text"], "fragment_ids": [refs[r] for r in item["refs"]]})
-            clean = validate_items(view, items)
-            return {"items": clean, "reason": record["reason"], "input_version": view["input_version"]}
-        except UsageError as exc:
-            if attempt >= int(config["retry"]["format_max_attempts"]):
-                raise
-            feedback = str(exc)
+        batches, _, oversized = pack_knowledge_batches(pending, prompt, config, feedback=feedback)
+        errors.update(oversized)
+        retry = []
+        for batch in batches:
+            payload, refs = knowledge_payload(batch, config["project"]["target_language"])
+            if feedback:
+                payload["validation_feedback"] = feedback
+            messages = render_messages(prompt, payload)
+            estimate = estimate_messages(messages, float(config["execution"]["token_safety_factor"]))
+            try:
+                response, request_id = await llm.chat(
+                    messages=messages, temperature=float(config["llm"]["temperature_terminology_decision"]),
+                    estimated_input_tokens=estimate, request_id=new_record_id("REQ"), parent_request_id=parent_request_id,
+                )
+            except AppError as exc:
+                if isinstance(exc, (FatalExternalError, StorageError)):
+                    raise
+                errors.update({v["entity_key"]: str(exc) for v in batch})
+                continue
             parent_request_id = request_id
-    raise AssertionError("unreachable")
+            document = parse_jsonl_document(response.content, record_type="entity_knowledge")
+            requested = {v["entity_key"] for v in batch}
+            if (document.errors or not document.complete
+                    or any(not isinstance(r.get("entity"), str) or r["entity"] not in requested for r in document.records)):
+                errors.update({key: "实体说明响应格式损坏、终止记录缺失或包含未知实体" for key in requested})
+                retry.extend(batch)
+                continue
+            for view in batch:
+                root = view["entity_key"]
+                records = [r for r in document.records if r["entity"] == root]
+                try:
+                    if len(records) != 1:
+                        raise UsageError("每个实体必须恰好返回一条 entity_knowledge")
+                    result = _knowledge_result(view, records[0], refs)
+                except UsageError as exc:
+                    errors[root] = str(exc)
+                    retry.append(view)
+                    continue
+                on_result(view, result)
+                errors.pop(root, None)
+        if not retry:
+            break
+        pending = retry
+        feedback = "；".join(f'{v["entity_key"]}: {errors[v["entity_key"]]}' for v in pending)
+    return errors
 
 
 def update_entity(project: Path, payload: dict[str, Any]) -> dict[str, Any]:
