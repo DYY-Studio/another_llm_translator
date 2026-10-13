@@ -44,8 +44,8 @@ async def test_stream_refusal_rejects_partial_body_without_retry(tmp_path, name)
     current = streaming_config(tmp_path)
     current["_llm_adapter"] = load_json_adapter(ROOT / "llm_adapters" / f"{name}.json")
     calls = []
-    events = ([{"type": "response.output_text.delta", "delta": "partial"}, {"type": "response.refusal.delta", "delta": "no"}, {"type": "response.completed"}]
-              if name == "openai-responses" else [{"choices": [{"delta": {"content": "partial"}}]}, {"choices": [{"delta": {"refusal": "no"}, "finish_reason": "stop"}]}, "[DONE]"])
+    events = ([{"type": "response.output_text.delta", "delta": "partial"}, {"type": "response.refusal.delta", "delta": "no"}, {"type": "error", "message": "error after refusal"}]
+              if name == "openai-responses" else [{"choices": [{"delta": {"content": "partial"}}]}, {"choices": [{"delta": {"refusal": "no"}}]}, {"choices": [{"delta": {}, "finish_reason": "stop"}]}, "[DONE]"])
     def handler(request):
         calls.append(request)
         return stream_response(*events)

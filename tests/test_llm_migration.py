@@ -67,3 +67,14 @@ def test_failed_adapter_apply_keeps_dependent_preset_unchanged(tmp_path: Path, m
     assert [report["status"] for report in reports] == ["manual", "manual"]
     assert preset_path.read_bytes() == original
     assert "Adapter 迁移失败" in reports[1]["detail"]
+
+
+def test_invalid_legacy_preset_is_not_rewritten(tmp_path: Path) -> None:
+    path = old_preset(tmp_path, {})
+    value = json.loads(path.read_text())
+    value["max_parallel"] = 0
+    path.write_text(json.dumps(value))
+    original = path.read_bytes()
+    reports = migrate_llm_resources(root=tmp_path, builtin_root=ROOT, apply=True)
+    assert reports[0]["status"] == "manual"
+    assert path.read_bytes() == original

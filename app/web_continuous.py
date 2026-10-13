@@ -14,6 +14,7 @@ from .execution import (
     choose_running_run,
     combine_usage,
     find_running_runs,
+    run_protocol_is_current,
     select_scope,
     stage_fingerprint,
     unavailable_usage,
@@ -395,6 +396,9 @@ def inspect_continuous(
     blocking: list[dict[str, str]] = []
     for stage in execution_stages:
         runs = [_run_summary(item) for item in find_running_runs(project, stage)]
+        for run in runs:
+            if not run_protocol_is_current(project, str(run["run_id"])):
+                run.update(resume_compatible=False, resume_incompatibility_reason="旧 Run 使用旧 LLM 协议，请创建新 Run")
         if stage == "content_summary":
             for run in runs:
                 run["resume_compatible"] = False
@@ -411,8 +415,6 @@ def inspect_continuous(
                 )
                 run["resume_compatible"] = run.get("resume_compatible", True) and compatible
                 run["resume_incompatibility_reason"] = run.get("resume_incompatibility_reason") or (None if compatible else "续用 Run 必须保持原有粗翻和概括选项")
-                if actions.get(stage) == "resume" and not compatible:
-                    blocking.append(_blocking("terminology_resume_incompatible", run["resume_incompatibility_reason"], stage=stage))
         running_runs[stage] = runs
         action = actions.get(stage)
         if runs and action is None:
@@ -445,17 +447,11 @@ def inspect_continuous(
                 )
                 run["resume_compatible"] = run.get("resume_compatible", True) and compatible
                 run["resume_incompatibility_reason"] = run.get("resume_incompatibility_reason") or reason
-            if action == "resume" and not runs[0]["resume_compatible"]:
-                blocking.append(
-                    _blocking(
-                        "decision_resume_incompatible",
-                        str(
-                            runs[0]["resume_incompatibility_reason"]
-                            or "自动术语决策 Run 不兼容"
-                        ),
-                        stage=stage,
-                    )
-                )
+        if action == "resume" and runs and runs[0].get("resume_compatible") is False:
+            blocking.append(_blocking(
+                "decision_resume_incompatible" if stage == "terminology_decision" else f"{stage}_resume_incompatible",
+                str(runs[0]["resume_incompatibility_reason"]), stage=stage,
+            ))
         if action == "resume" and (force or reuse_mixed_fingerprints):
             blocking.append(
                 _blocking(

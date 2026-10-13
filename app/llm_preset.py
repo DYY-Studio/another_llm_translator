@@ -67,6 +67,10 @@ def load_llm_preset(path: Path, *, model_discovery: bool = False) -> LLMPreset:
         raise ConfigError(f"无法读取 LLM Preset：{path}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ConfigError(f"LLM Preset 不是合法 JSON：{path}: {exc}") from exc
+    return _parse_llm_preset(value, model_discovery=model_discovery)
+
+
+def _parse_llm_preset(value: Any, *, model_discovery: bool = False) -> LLMPreset:
     if not isinstance(value, dict):
         raise ConfigError("LLM Preset 顶层必须是 JSON 对象")
     schema_version = value.get("schema_version")

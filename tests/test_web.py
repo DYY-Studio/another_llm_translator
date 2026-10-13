@@ -5602,6 +5602,7 @@ def test_continuous_inspection_requires_per_stage_run_actions_and_apply_permissi
 ) -> None:
     _projects_root, project = make_project(tmp_path)
 
+    monkeypatch.setattr("app.web_continuous.run_protocol_is_current", lambda *_: True)
     monkeypatch.setattr(
         "app.web_continuous.find_running_runs",
         lambda _project, stage: (
@@ -5852,6 +5853,7 @@ def test_continuous_skipped_decision_resume_requires_decline_and_force(
 ) -> None:
     _projects_root, project = make_project(tmp_path)
     monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: None)
+    monkeypatch.setattr("app.web_continuous.run_protocol_is_current", lambda *_: True)
     monkeypatch.setattr(
         "app.web_continuous.find_running_runs",
         lambda _project, stage: (
@@ -6680,6 +6682,7 @@ def test_continuous_decision_resume_preflight_rejects_incompatible_run(
         "evidence": {},
         "language": "zh-CN",
     })
+    monkeypatch.setattr("app.web_continuous.run_protocol_is_current", lambda *_: True)
     monkeypatch.setattr(
         "app.web_continuous.find_running_runs",
         lambda _project, stage: (
@@ -7072,3 +7075,21 @@ def test_segment_read_keeps_task_status_responsive(tmp_path: Path, monkeypatch) 
             assert result.json() == {"segments": [], "total": 0}
 
     asyncio.run(exercise())
+
+
+def test_continuous_preflight_disables_old_llm_run(tmp_path: Path) -> None:
+    _, project = make_project(tmp_path)
+    run_id, directory = create_run(
+        project, config=load_project_config(project), stage="translation",
+        fingerprint="old", prompt="prompt", selected_count=1, requested_count=1, reused_count=0,
+        details={"scope": {"all_nonempty": True}},
+    )
+    path = directory / "llm_preset.json"
+    preset = json.loads(path.read_text())
+    preset["schema_version"] = 7
+    path.write_text(json.dumps(preset))
+    result = inspect_continuous(project, ["translation"], run_actions={"translation": "resume"})
+    run = result["steps"][0]["running_run"]
+    assert run["run_id"] == run_id
+    assert run["resume_compatible"] is False
+    assert any("旧 LLM 协议" in item["message"] for item in result["blocking"])

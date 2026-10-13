@@ -585,7 +585,7 @@ class LLMClient:
                     )
                     content_parts.extend(self.adapter.stream_content_deltas(event))
                     reasoning_parts.extend(self.adapter.stream_reasoning_deltas(event))
-                    if self.adapter.stream_terminal(event):
+                    if finish_reason in self.adapter.blocked_finish_reasons or self.adapter.stream_terminal(event):
                         terminal = True
                         termination = "explicit"
                         break

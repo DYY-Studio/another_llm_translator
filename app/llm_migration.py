@@ -11,7 +11,7 @@ from typing import Any
 
 from .errors import ConfigError, ExternalError
 from .llm_adapter import load_json_adapter, _parse_json_pointer, _resolve_json_pointer
-from .llm_preset import load_llm_preset
+from .llm_preset import load_llm_preset, _parse_llm_preset
 from .project import APP_ROOT
 from .sqlite_storage import atomic_write_json
 from .user_config import user_root
@@ -74,6 +74,7 @@ def migrate_llm_resources(
                     upgraded = deepcopy(value)
                     upgraded.update(schema_version=8, send_temperature=value["credential"]["kind"] != "chatgpt", reasoning_effort=None)
                     upgraded.setdefault("extra_headers", {})
+                    _parse_llm_preset(upgraded)
                     relative = Path("llm_adapters") / (str(value["adapter_id"]) + ".json")
                     override = root / relative
                     adapter_path = override if override.is_file() and override not in changes else builtin_root / relative
