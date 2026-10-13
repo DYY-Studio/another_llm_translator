@@ -205,6 +205,11 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
     assert len(draft["proposals"]) == 1
     assert load_terms(project)["terms"][0]["description"] == before
     apply_decision_draft(project, confirm_all=True)
+    stored = read_json(project, project / "terminology" / "terms.json")
+    assert all(not {"entity_key", "knowledge_status", "description_items"} & term.keys() for term in stored["terms"])
+    from app.web_store import WebStore
+    assert all(set(item) == {"text", "fragment_ids"} for term in WebStore(project).terms()["terms"]
+               for item in term["description_items"])
     applied = load_terms(project)["terms"][0]
     assert applied["description"] == "船长，保留人工说明"
     assert applied["preferred_translation"] == "阿尔法"
@@ -361,15 +366,22 @@ async def test_sibling_name_updates_share_one_review_unit_through_protected_root
 
 
 def test_generation_context_shares_entity_once_and_blocks_stale_hits(tmp_path: Path) -> None:
-    from app.term_knowledge import save_items, project_descriptions
+    from app.term_knowledge import save_items, project_descriptions, publish_evidence, entity_view
     from app.term_matching import _TermMatchCache
-    from app.term_library import TermNormalization
+    from app.term_library import TermNormalization, term_normalization
+    from app.config import load_project_config
     from app.sqlite_storage import read_segments
     project = make_project(tmp_path)
     data = library()
     data["terms"][0].update(aliases=[],category="name",preferred_translation="阿尔法")
     data["terms"].append(dict(source="Beta",normalized="beta",group_primary="alpha",aliases=[],category="name",preferred_translation="贝塔"))
     save_items(project,data,"alpha",[{"text":"共享说明","fragment_ids":[]}])
+    publish_evidence(project, data, [scan_record(project, "身份一"), scan_record(project, "身份二")],
+                     term_normalization(load_project_config(project)), replace=False)
+    view = entity_view(project, data, "alpha")
+    refs = [f["id"] for f in view["fragments"] if f["origin"] == "scan"]
+    save_items(project, data, "alpha", [{"text": "共享说明", "fragment_ids": view["items"][0]["fragment_ids"]},
+                                        {"text": "有来源说明", "fragment_ids": refs}])
     project_descriptions(project, data)
     segments = read_segments(project)
     cache = _TermMatchCache(data,TermNormalization("NFKC",True),10,segments=segments)
@@ -377,6 +389,9 @@ def test_generation_context_shares_entity_once_and_blocks_stale_hits(tmp_path: P
     entities = [m["entity_knowledge"] for m in matches if "entity_knowledge" in m]
     assert len(entities)==1
     assert entities[0]["items"][0]["text"]=="共享说明"
+    assert entities[0]["items"][0]["unsourced"] is True
+    assert entities[0]["items"][1]["source_ranges"] == [{"file_id": "F0001", "part_id": "document",
+                                                       "first": {"position": 0, "start": 0}, "last": {"position": 0, "end": 14}}]
     assert entities[0]["current_positions"][0]["segment_id"]==segments[0]["segment_id"]
     assert all("description" not in match for match in matches)
     data["terms"][1]["group_primary"]=None

@@ -442,10 +442,13 @@ class _TermMatchCache:
                         normalized = normalize_term(source, self.spec)
                         origin = self.matcher.by_normalized[normalized]
                         explanation = []
+                        from .term_knowledge import compact_source_ranges
                         for entry in origin.get("description_items", []):
-                            ranges = [{**{k:r[k] for k in ("segment_id","file_id","part_id","start","end")},
-                                       "position": self.positions[r["segment_id"]]["position"]}
-                                      for refs in entry["sources"] if refs is not None for r in refs]
+                            unique = {(r["segment_id"], r["start"], r["end"]): r
+                                      for refs in entry["sources"] if refs is not None for r in refs}
+                            ranges = sorted(unique.values(), key=lambda r: (self.positions[r["segment_id"]]["position"], r["start"], r["end"]))
+                            positions = {r["segment_id"]: self.positions[r["segment_id"]]["position"] for r in ranges}
+                            ranges = compact_source_ranges(ranges, positions) or []
                             explanation.append({"text": entry["text"], "source_ranges": ranges,
                                                 "unsourced": any(refs is None for refs in entry["sources"])})
                         entity = str(origin.get("entity_key") or origin.get("group_primary") or normalized)

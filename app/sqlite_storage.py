@@ -351,6 +351,9 @@ def _project_id(connection: sqlite3.Connection) -> str | None:
 
 
 def _residual(value: dict[str, Any], keys: Iterable[str]) -> str:
+    if value.get("record_type") == "terminology_library":
+        from .term_knowledge import persistent_library
+        value = persistent_library(value)
     residual = dict(value)
     for key in keys:
         residual.pop(key, None)

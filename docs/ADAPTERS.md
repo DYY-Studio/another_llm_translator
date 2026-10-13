@@ -322,7 +322,9 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 字段严格校验，条目文字非空且引用非空。未知、跨实体、停用或失效引用按格式错误处理。宿主将短引用转换为持久化 `fragment_ids`；扫描片段以候选记录 ID 和条目序号标识，并关联原 Segment、实际输入切片范围及原文/模型输入摘要。
 
-术语查询附加 `entity_key`、`knowledge_status`（`current`、`pending`、`stale`）、`description_items`，保留只读 `description` 投影。`GET /api/v1/projects/{name}/terms/knowledge?normalized=...` 返回条目、片段和引用范围。
+术语查询附加 `entity_key`、`knowledge_status`（`current`、`pending`、`stale`）、`description_items`，保留只读 `description` 投影。条目只返回 `text` 和 `fragment_ids`。`GET /api/v1/projects/{name}/terms/knowledge?normalized=...` 返回条目、片段和导航所需的引用范围，不暴露来源摘要。
+
+翻译、校对、润色和联合粗翻的 `entity_knowledge.items` 提供 `text`、去重后的 `source_ranges` 和布尔 `unsourced`。`source_ranges` 使用上述连续区间结构；`current_positions` 仍携带当前 Segment 的标识、文件、分部和全局位置。每个命中实体只提供一次全部已应用条目。
 
 `PUT` 同一路径使用现有写锁和事务，必须提供 `normalized`、`expected_revision`、`action`，操作字段分别为：
 

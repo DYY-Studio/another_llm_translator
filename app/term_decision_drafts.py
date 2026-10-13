@@ -62,7 +62,7 @@ def _build_draft(
     final = deepcopy(final)
     decisions = deepcopy(decisions)
     graph = _decision_dependency_graph(original, final, spec)
-    from .term_knowledge import entity_members
+    from .term_knowledge import entity_members, persistent_library
     groups = entity_members({"terms": [s for s in final.values() if not s.get("disabled")]})
     failed = {key for root in knowledge_errors for key in groups.get(root, [root])}
     blocked = set().union(*_dependency_components(graph, failed)) if failed else set()
@@ -160,7 +160,7 @@ def _build_draft(
         proposals=proposals,
         needs_review=needs_review,
         rejected_proposal_ids=[],
-        source_library=source_library,
+        source_library=persistent_library(source_library),
         source_overrides=source_overrides,
     )
 
@@ -192,7 +192,7 @@ def current_decision_draft(project: Path) -> dict[str, Any] | None:
     refs = {key for proposal in draft["proposals"]
             for aggregate in [*proposal.get("knowledge_before", {}).values(), *proposal.get("knowledge_after", {}).values()]
             if aggregate for item in aggregate["items"] for key in item["fragment_ids"]}
-    from .term_knowledge import evidence as knowledge_evidence
+    from .term_knowledge import evidence as knowledge_evidence, navigation_fragment
     fragments = knowledge_evidence(project, draft["source_library"]) if refs else {}
     for proposal in draft["proposals"]:
         proposal_refs = {key for aggregate in [*proposal.get("knowledge_before", {}).values(), *proposal.get("knowledge_after", {}).values()]
@@ -201,11 +201,7 @@ def current_decision_draft(project: Path) -> dict[str, Any] | None:
         for key in proposal_refs:
             if key not in fragments:
                 continue
-            fragment = fragments[key]
-            value = {field: fragment[field] for field in ("id", "owner", "original_owner", "origin", "text", "state", "valid", "_positions")}
-            value["source_range"] = [{field: r[field] for field in ("segment_id", "file_id", "part_id", "start", "end")}
-                                     for r in fragment["source_range"]] if fragment["source_range"] else None
-            proposal["knowledge_evidence"][key] = value
+            proposal["knowledge_evidence"][key] = navigation_fragment(fragments[key])
     return draft
 
 def _decision_needs_review(

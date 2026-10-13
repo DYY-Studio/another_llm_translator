@@ -36,13 +36,18 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
 
     @app.get("/api/v1/projects/{name}/terms/knowledge")
     async def get_knowledge(name: str, normalized: str) -> dict[str, Any]:
-        from .term_library import load_terms
-        from .term_knowledge import entity_view
+        from .sqlite_storage import read_json, record_exists
+        from .term_knowledge import entity_view, navigation_fragment
         root = project(name)
-        library = load_terms(root)
-        if library is None:
+        path = root / "terminology" / "terms.json"
+        if not record_exists(root, path):
             raise UsageError("没有已发布术语库")
-        return {**entity_view(root, library, normalized), "terms_revision": library["terms_revision"]}
+        library = read_json(root, path)
+        view = entity_view(root, library, normalized)
+        return {"entity_key": view["entity_key"], "members": view["members"], "status": view["status"],
+                "items": [{"text": item["text"], "fragment_ids": item["fragment_ids"]} for item in view["items"]],
+                "fragments": [navigation_fragment(f) for f in view["fragments"]],
+                "terms_revision": library["terms_revision"]}
 
     @app.put("/api/v1/projects/{name}/terms/knowledge")
     async def put_knowledge(name: str, payload: dict[str, Any]) -> dict[str, Any]:

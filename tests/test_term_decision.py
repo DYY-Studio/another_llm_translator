@@ -4536,7 +4536,7 @@ def test_unrelated_draft_update_cannot_clear_scalar_conflicts(tmp_path: Path) ->
     alice["conflicts"]["categories"] = ["人物", "角色"]
     alice["conflicts"]["preferred_translations"] = ["爱丽丝", "艾丽丝"]
     write_term_library(project, project / "terminology" / "terms.json", library)
-    before_terms = deepcopy(library)
+    before_terms = read_json(project, project / "terminology" / "terms.json")
     before_overrides = read_json(project, project / "terminology" / "overrides.json")
     write_pending_decision_draft(
         project,
@@ -4647,6 +4647,7 @@ def test_unresolved_relationship_component_is_restored_and_cannot_be_applied(
     assert final == original
     assert all(decision["action"] == "needs_review" for decision in decisions.values())
 
+    before_library = read_json(project, project / "terminology" / "terms.json")
     before_overrides = read_json(project, project / "terminology" / "overrides.json")
     write_pending_decision_draft(
         project,
@@ -4655,7 +4656,7 @@ def test_unresolved_relationship_component_is_restored_and_cannot_be_applied(
     )
     with pytest.raises(UsageError, match="未解决 alias 或组争用"):
         apply_decision_draft(project, confirm_all=True)
-    assert read_json(project, project / "terminology" / "terms.json") == library
+    assert read_json(project, project / "terminology" / "terms.json") == before_library
     assert (
         read_json(project, project / "terminology" / "overrides.json")
         == before_overrides

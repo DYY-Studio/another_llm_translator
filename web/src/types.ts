@@ -805,7 +805,7 @@ export interface KnowledgeSourceRange {
   segment_id: string; file_id: string; part_id: string; start: number; end: number;
 }
 export interface KnowledgeItem {
-  text: string; fragment_ids: string[]; sources?: Array<KnowledgeSourceRange[] | null>;
+  text: string; fragment_ids: string[];
 }
 export interface KnowledgeFragment {
   id: string; owner: string; original_owner: string; source?: string; origin: "scan" | "manual" | "import" | "legacy";

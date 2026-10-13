@@ -842,12 +842,15 @@ class WebStore:
             for item in overrides_document.get("overrides", [])
         }
         rows: list[dict[str, Any]] = []
+        archived_evidence = None
         for normalized in sorted(set(current) | set(overrides)):
             term = current.get(normalized, {})
             override = overrides.get(normalized, {})
             if not term and library and normalized in library["knowledge"]["entities"]:
-                from .term_knowledge import entity_view
-                view = entity_view(self.project, {**library, "terms": [*library["terms"], {"normalized": normalized, "group_primary": None}]}, normalized)
+                from .term_knowledge import entity_view, evidence
+                if archived_evidence is None:
+                    archived_evidence = evidence(self.project, library)
+                view = entity_view(self.project, {**library, "terms": [*library["terms"], {"normalized": normalized, "group_primary": None}]}, normalized, all_evidence=archived_evidence)
                 term = {"description": "\n".join(item["text"] for item in view["items"]),
                         "entity_key": view["entity_key"], "knowledge_status": view["status"], "description_items": view["items"]}
             raw_conflicts = term.get("conflicts", {})
@@ -870,7 +873,8 @@ class WebStore:
                     "description": term.get("description"),
                     "entity_key": term.get("entity_key", normalized),
                     "knowledge_status": term.get("knowledge_status", "pending"),
-                    "description_items": term.get("description_items", []),
+                    "description_items": [{"text": item["text"], "fragment_ids": item["fragment_ids"]}
+                                          for item in term.get("description_items", [])],
                     "preferred_translation": override.get(
                         "preferred_translation", term.get("preferred_translation")
                     ),

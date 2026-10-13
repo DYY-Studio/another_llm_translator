@@ -303,8 +303,8 @@ _FIELD_PREFIX = {
         "en": "segments[].current_text: The current translation of the corresponding source.",
     },
     "terms": {
-        "zh-CN": "terms: 本次提供的参考术语。entity_knowledge 提供已应用实体说明、证据范围与当前位置。允许利用全篇知识确认实体，结合当前位置判断称谓、身份和关系，保留原文表达与悬念；证据范围不等于事实生效范围。",
-        "en": "terms: Reference terminology provided for this request. entity_knowledge provides applied entity explanations, source evidence ranges and current positions. Use full-work knowledge to disambiguate identity, evaluate local names and relationships at the current position, and preserve the source wording and suspense. Evidence ranges are revelation coverage, not fact-effective intervals.",
+        "zh-CN": "terms: 本次提供的参考术语。entity_knowledge 提供已应用实体说明、证据范围与当前位置。source_ranges 是连续区间，first/last.position 为从 0 开始的 Segment 位置，start/end 为首尾 Segment 内的字符偏移，end 不包含端点。允许利用全篇知识确认实体，结合当前位置判断称谓、身份和关系，保留原文表达与悬念；证据范围不等于事实生效范围。",
+        "en": "terms: Reference terminology provided for this request. entity_knowledge provides applied entity explanations, source evidence ranges and current positions. source_ranges contains contiguous intervals: first/last.position are zero-based Segment positions, and start/end are character offsets within the first/last Segment, with end exclusive. Use full-work knowledge to disambiguate identity, evaluate local names and relationships at the current position, and preserve the source wording and suspense. Evidence ranges are revelation coverage, not fact-effective intervals.",
     },
     "reference_context": {
         "zh-CN": "reference_context: 只供判断性别、指代、身份和语义，不得作为生成来源，不提取仅在其中出现的术语，不输出。",

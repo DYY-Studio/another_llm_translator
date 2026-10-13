@@ -15,6 +15,22 @@ def empty_knowledge() -> dict[str, Any]:
     return {"version": 1, "fragments": {}, "entities": {}, "published_candidates": []}
 
 
+def persistent_library(library: dict[str, Any]) -> dict[str, Any]:
+    """Keep runtime explanation projections out of storage and Run snapshots."""
+    return {**library, "terms": [{key: value for key, value in term.items()
+                                 if key not in {"entity_key", "knowledge_status", "description_items"}}
+                                for term in library["terms"]]}
+
+
+def navigation_fragment(fragment: dict[str, Any]) -> dict[str, Any]:
+    value = {key: fragment[key] for key in ("id", "owner", "original_owner", "origin", "text", "state", "valid", "_positions")}
+    if "source" in fragment:
+        value["source"] = fragment["source"]
+    value["source_range"] = [{key: r[key] for key in ("segment_id", "file_id", "part_id", "start", "end")}
+                             for r in fragment["source_range"]] if fragment["source_range"] else None
+    return value
+
+
 def require_knowledge(library: dict[str, Any]) -> dict[str, Any]:
     knowledge = library.get("knowledge")
     if not isinstance(knowledge, dict) or knowledge.get("version") != 1:
@@ -245,14 +261,14 @@ def project_descriptions(project: Path, library: dict[str, Any], *,
             term["description_items"] = view["items"]
 
 
-def _request_source_ranges(fragment: dict[str, Any]) -> list[dict[str, Any]] | None:
+def compact_source_ranges(ranges: list[dict[str, Any]] | None, positions: dict[str, int]) -> list[dict[str, Any]] | None:
     groups: list[dict[str, Any]] = []
     previous = None
-    for r in fragment["source_range"] or []:
-        position = fragment["_positions"][r["segment_id"]]
+    for r in ranges or []:
+        position = positions[r["segment_id"]]
         contiguous = previous is not None and (
             previous["file_id"] == r["file_id"] and previous["part_id"] == r["part_id"]
-            and fragment["_positions"][previous["segment_id"]] + 1 == position
+            and positions[previous["segment_id"]] + 1 == position
             and r["start"] == 0
             and previous["slice_source_digest"] == previous["source_digest"]
         )
@@ -273,7 +289,7 @@ def knowledge_payload(view: dict[str, Any], target_language: str) -> tuple[dict[
         "current_items": [{"text": item["text"]} for item in view["items"]],
         "fragments": [{"id": key, "text": f["text"], "owner": f["owner"],
                        "original_source": f.get("source", f["original_owner"]),
-                       "origin": f["origin"], "source_range": _request_source_ranges(f)}
+                       "origin": f["origin"], "source_range": compact_source_ranges(f["source_range"], f["_positions"])}
                       for key, f in zip(refs, active, strict=True)],
     }
     return base, refs
