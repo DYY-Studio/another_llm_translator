@@ -198,7 +198,12 @@
 .entity-knowledge > header { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; }
 .knowledge-item { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 10px; border: 1px solid var(--border); }
 .knowledge-item textarea { width: 100%; box-sizing: border-box; }
-.knowledge-reference { align-items: flex-start; margin-block: 6px; }
+.knowledge-item-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.knowledge-item-actions > small { margin-right: auto; }
+.knowledge-reference-list { display: grid; gap: 8px; padding: 10px 8px 4px; }
+.knowledge-reference { display: flex; width: 100%; box-sizing: border-box; align-items: flex-start; gap: 8px; margin: 0; line-height: 1.5; }
+.knowledge-reference > input[type="checkbox"] { flex: 0 0 16px; width: 16px; height: 16px; min-height: 0; margin: 3px 0 0; padding: 0; }
+.knowledge-reference > span { min-width: 0; }
 .knowledge-reference span { white-space: pre-wrap; overflow-wrap: anywhere; }
 .knowledge-reference small { display: block; color: var(--muted); }
 .entity-knowledge > .editor-actions { position: static; flex-wrap: wrap; padding-top: 4px; background: none; }

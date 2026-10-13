@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { compactKnowledgeRanges } from "../termKnowledge";
@@ -24,10 +24,22 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
   onChanged: (value: TermsResponse) => Promise<void>; onFindSegment: (source: string, segmentId: string) => void;
 }) {
   const [items, setItems] = useState<KnowledgeItem[]>(() => view.items.map(({ text, fragment_ids }) => ({ text, fragment_ids: [...fragment_ids] })));
+  const [expandedReferences, setExpandedReferences] = useState<Set<number>>(() => new Set());
+  const fragments = useMemo(() => new Map(view.fragments.map((fragment) => [fragment.id, fragment])), [view.fragments]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const t = (key: string) => translate(`knowledge.${key}`, language);
   const replace = (index: number, item: KnowledgeItem) => setItems((previous) => previous.map((value, i) => i === index ? item : value));
+
+  function reference(item: KnowledgeItem, index: number, id: string) {
+    const fragment = fragments.get(id);
+    const checked = item.fragment_ids.includes(id);
+    const available = fragment?.state === "active" && fragment.valid;
+    return <label className="knowledge-reference checkbox-label" key={id}>
+      <input type="checkbox" checked={checked} disabled={!available && !checked} onChange={(event) => replace(index, { ...item, fragment_ids: event.target.checked ? [...item.fragment_ids, id] : item.fragment_ids.filter((ref) => ref !== id) })} />
+      <span>{fragment?.text ?? t("stale")}{fragment && !available && <small>{fragment.valid ? t(fragment.state) : t("expiredSource")}</small>}</span>
+    </label>;
+  }
 
   async function submit(operation: Record<string, unknown>) {
     setSaving(true);
@@ -51,22 +63,26 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
     {items.map((item, index) => <fieldset className="knowledge-item" key={index} disabled={saving}>
       <legend>{t("title")} {index + 1}</legend>
       <textarea aria-label={`${t("title")} ${index + 1}`} value={item.text} onChange={(event) => replace(index, { ...item, text: event.target.value })} />
-      <div><button className="quiet-button" type="button" onClick={() => replace(index, { ...item, fragment_ids: [] })}>{t("unsourced")}</button>{(item.fragment_ids.length === 0 || item.fragment_ids.every((id) => view.fragments.find((f) => f.id === id)?.source_range === null)) && <small>{t("noSource")}</small>}</div>
-      <details>
+      <div className="knowledge-item-actions">
+        {(item.fragment_ids.length === 0 || item.fragment_ids.every((id) => fragments.get(id)?.source_range === null)) && <small>{t("noSource")}</small>}
+        <button className="quiet-button" type="button" onClick={() => { replace(index, { ...item, fragment_ids: [] }); setExpandedReferences(new Set()); }}>{t("unsourced")}</button>
+        <button className="danger-button" type="button" onClick={() => { setItems((previous) => previous.filter((_, i) => i !== index)); setExpandedReferences(new Set()); }}>{t("remove")}</button>
+      </div>
+      <details open={expandedReferences.has(index)} onToggle={(event) => {
+        const open = event.currentTarget.open;
+        setExpandedReferences((previous) => {
+          if (previous.has(index) === open) return previous;
+          const next = new Set(previous);
+          if (open) next.add(index); else next.delete(index);
+          return next;
+        });
+      }}>
         <summary>{t("references")} ({item.fragment_ids.length})</summary>
-        {view.fragments.map((fragment) => {
-          const checked = item.fragment_ids.includes(fragment.id);
-          const available = fragment.state === "active" && fragment.valid;
-          return <label className="knowledge-reference checkbox-label" key={fragment.id}>
-            <input type="checkbox" checked={checked} disabled={!available && !checked} onChange={(event) => replace(index, { ...item, fragment_ids: event.target.checked ? [...item.fragment_ids, fragment.id] : item.fragment_ids.filter((id) => id !== fragment.id) })} />
-            <span>{fragment.text}{!available && <small>{fragment.valid ? t(fragment.state) : t("expiredSource")}</small>}</span>
-          </label>;
-        })}
-        {item.fragment_ids.filter((id) => !view.fragments.some((fragment) => fragment.id === id)).map((id) => <label className="checkbox-label" key={id}>
-          <input type="checkbox" checked onChange={() => replace(index, { ...item, fragment_ids: item.fragment_ids.filter((ref) => ref !== id) })} />{t("stale")}
-        </label>)}
+        {expandedReferences.has(index) && <div className="knowledge-reference-list">
+          {view.fragments.map((fragment) => reference(item, index, fragment.id))}
+          {item.fragment_ids.filter((id) => !fragments.has(id)).map((id) => reference(item, index, id))}
+        </div>}
       </details>
-      <button className="quiet-button" type="button" onClick={() => setItems((previous) => previous.filter((_, i) => i !== index))}>{t("remove")}</button>
     </fieldset>)}
     <div className="editor-actions">
       <button className="quiet-button" type="button" disabled={saving} onClick={() => setItems((previous) => [...previous, { text: "", fragment_ids: [] }])}>{t("add")}</button>
