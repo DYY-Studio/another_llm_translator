@@ -31,11 +31,11 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
 
 
     @app.get("/api/v1/projects/{name}/terms")
-    async def terms(name: str) -> dict[str, Any]:
+    def terms(name: str) -> dict[str, Any]:
         return WebStore(project(name)).terms()
 
     @app.get("/api/v1/projects/{name}/terms/knowledge")
-    async def get_knowledge(name: str, normalized: str) -> dict[str, Any]:
+    def get_knowledge(name: str, normalized: str) -> dict[str, Any]:
         from .sqlite_storage import read_json, record_exists
         from .term_knowledge import entity_view, navigation_fragment
         root = project(name)
@@ -50,7 +50,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
                 "terms_revision": library["terms_revision"]}
 
     @app.put("/api/v1/projects/{name}/terms/knowledge")
-    async def put_knowledge(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def put_knowledge(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         from .term_knowledge import update_entity
         root = project(name)
         if app.state.tasks.is_project_running(root):
@@ -59,7 +59,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
         return WebStore(root).terms()
 
     @app.post("/api/v1/projects/{name}/terms/hits")
-    async def term_hits(
+    def term_hits(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         normalized = payload.get("normalized")
@@ -77,7 +77,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
         )
 
     @app.post("/api/v1/projects/{name}/terms/related")
-    async def related_terms(
+    def related_terms(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         normalized = payload.get("normalized")
@@ -92,37 +92,37 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
         return WebStore(project(name)).related_terms(normalized, limit=limit)
 
     @app.post("/api/v1/projects/{name}/terms")
-    async def save_term(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def save_term(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).save_term(payload)
 
     @app.post("/api/v1/projects/{name}/terms/materialize")
-    async def materialize_term(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def materialize_term(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).materialize_term(payload)
 
     @app.post("/api/v1/projects/{name}/terms/set-primary")
-    async def set_term_primary(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def set_term_primary(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).set_term_primary(payload)
 
     @app.post("/api/v1/projects/{name}/terms/leave-group")
-    async def leave_term_group(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def leave_term_group(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).leave_term_group(payload)
 
     @app.post("/api/v1/projects/{name}/terms/group-related")
-    async def group_related_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def group_related_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).group_related_terms(payload)
 
     @app.post("/api/v1/projects/{name}/terms/convert-to-alias")
-    async def convert_related_to_alias(
+    def convert_related_to_alias(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         return WebStore(project(name)).convert_related_to_alias(payload)
 
     @app.post("/api/v1/projects/{name}/terms/remove")
-    async def remove_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def remove_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).remove_terms(payload)
 
     @app.post("/api/v1/projects/{name}/terms/clear")
-    async def clear_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def clear_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("confirm") is not True:
             raise UsageError("必须明确确认清空术语阶段")
         root = project(name)
@@ -131,15 +131,15 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
         return WebStore(root).clear_terms()
 
     @app.post("/api/v1/projects/{name}/terms/delete")
-    async def delete_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def delete_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).delete_terms(payload)
 
     @app.get("/api/v1/projects/{name}/terms/decision")
-    async def get_term_decision(name: str) -> dict[str, Any]:
+    def get_term_decision(name: str) -> dict[str, Any]:
         return decision_review_state(project(name))
 
     @app.put("/api/v1/projects/{name}/terms/decision/rejections")
-    async def put_term_decision_rejections(
+    def put_term_decision_rejections(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         root = project(name)
@@ -152,7 +152,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             return {"draft": save_decision_rejections(root, values)}
 
     @app.put("/api/v1/projects/{name}/terms/decision/manual-review")
-    async def put_term_decision_manual_review(
+    def put_term_decision_manual_review(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         root = project(name)
@@ -174,7 +174,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             )}
 
     @app.post("/api/v1/projects/{name}/terms/decision/apply")
-    async def apply_term_decision(
+    def apply_term_decision(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         root = project(name)
@@ -189,7 +189,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             return {**result, "terms": WebStore(root).terms()}
 
     @app.post("/api/v1/projects/{name}/terms/decision/discard")
-    async def discard_term_decision(
+    def discard_term_decision(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         root = project(name)
@@ -201,7 +201,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             )
 
     @app.post("/api/v1/projects/{name}/terms/decision/rollback")
-    async def rollback_term_decision(
+    def rollback_term_decision(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         root = project(name)
@@ -214,7 +214,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             return {**result, "terms": WebStore(root).terms()}
 
     @app.post("/api/v1/projects/{name}/terms/publish-partial")
-    async def publish_partial_term_results(
+    def publish_partial_term_results(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         if payload.get("confirm") is not True:
@@ -226,7 +226,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             return publish_partial_terms(root)
 
     @app.post("/api/v1/projects/{name}/terms/import")
-    async def import_term_file(
+    def import_term_file(
         name: str,
         file: UploadFile = File(...),
     ) -> dict[str, Any]:
@@ -240,7 +240,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             suffix=suffix,
             delete=False,
         ) as handle:
-            handle.write(await file.read())
+            handle.write(file.file.read())
             temporary = Path(handle.name)
         try:
             with project_write_lock(root):
@@ -249,7 +249,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             temporary.unlink(missing_ok=True)
 
     @app.get("/api/v1/projects/{name}/terms/export")
-    async def export_term_file(
+    def export_term_file(
         name: str,
         format: str = "json",
         include_disabled: bool = False,

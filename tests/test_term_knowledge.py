@@ -436,6 +436,36 @@ def test_knowledge_api_checks_revision_and_explicit_fragment_operations(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_decision_application_keeps_other_requests_responsive(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+    import httpx
+    from app.web import create_app
+
+    project = make_project(tmp_path)
+    app = create_app(projects_root=project.parent)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def apply(*args, **kwargs):
+        entered.set()
+        assert release.wait(5), "应用期间其他请求被阻塞"
+        return {"run_id": "test", "applied": 0, "rejected": 0, "terms_revision": 0}
+
+    monkeypatch.setattr("app.web_term_routes.apply_decision_draft", apply)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+        pending = asyncio.create_task(client.post("/api/v1/projects/terms/terms/decision/apply", json={"confirm": True}))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2), (await pending).text
+            response = await asyncio.wait_for(client.get("/api/v1/tasks/active"), 2)
+            assert response.status_code == 200
+            assert not pending.done()
+        finally:
+            release.set()
+        assert (await pending).status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_force_scan_requires_replacement_confirmation_and_empty_results_retire_old_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
     import httpx

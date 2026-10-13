@@ -69,6 +69,7 @@ FastAPI 应用装配、鉴权、生命周期、静态资源和 route 注册。�
 
 Route 只校验 HTTP 输入并调用共享后端。请求模型集中在 `web_payloads.py`；Web 进程内项目缓存
 和打开状态位于 `web_store.py`；任务生命周期位于 `web_tasks.py`。
+术语资源的同步读写由 FastAPI 线程池执行，写操作继续使用项目写锁。
 
 ## 4. 项目、存储与导出
 
