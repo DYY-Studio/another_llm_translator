@@ -68,3 +68,24 @@ def test_source_preparation_is_reused_across_segments_and_candidate_requests(mon
         payload = cache.for_items(segments[:end])
         assert len([term for term in payload if "entity_knowledge" in term]) == 2
     assert calls == 2
+
+
+def test_ambiguous_claims_keep_each_entity_explanation_once():
+    cache, segments = make_cache([("identity", [0, 6])])
+    terms = cache.matcher.terms
+    terms[0]["conflicts"] = {"group_claims": [{"alias": "Shared", "entry": "alpha", "claimed_by": "gamma", "reason": "ambiguous"}]}
+    terms[1]["conflicts"] = {"group_claims": [{"alias": "Shared", "entry": "beta", "claimed_by": "gamma", "reason": "ambiguous"}]}
+    cache = _TermMatchCache({"terms": terms}, TermNormalization("NFKC", True), 20, segments=segments)
+    payload = cache.for_items([{**segments[4], "source": "Shared"}])
+    assert {term["source"] for term in payload} == {"Alpha", "Beta", "Gamma"}
+    assert sorted(term["entity_knowledge"]["entity"] for term in payload if "entity_knowledge" in term) == ["alpha", "gamma"]
+    assert all(term["preferred_translation"] is None and term["group_claims"] for term in payload)
+
+
+def test_mixed_unsourced_and_overlapping_evidence_retains_all_relations():
+    cache, segments = make_cache([("mixed", [0, 4, 6])])
+    entry = cache.matcher.by_normalized["alpha"]["description_items"][0]
+    # Duplicate and overlapping citations must not create extra relations or ranks.
+    entry["sources"].extend([None, entry["sources"][0]])
+    result = cache.for_items([segments[4]])[0]["entity_knowledge"]["items"]
+    assert result == [{"text": "mixed", "source_relation": ["before 1", "within", "after 1"], "unsourced": True}]
