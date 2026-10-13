@@ -57,7 +57,7 @@ def evidence(project: Path, library: dict[str, Any]) -> dict[str, dict[str, Any]
     positions = {key: i for i, key in enumerate(segments)}
     result = {}
     for key, fragment in fragments.items():
-        value = {**fragment, "id": key, "source_range": None, "valid": True}
+        value = {**fragment, "id": key, "source_range": None, "valid": True, "_positions": {}}
         if fragment.get("candidate_id"):
             record = records.get(fragment["candidate_id"])
             if record is None:

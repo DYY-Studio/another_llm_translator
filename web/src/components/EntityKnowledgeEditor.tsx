@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
+import { compactKnowledgeRanges } from "../termKnowledge";
 import { errorMessage, translate, type Language } from "../i18n";
 import type { EntityKnowledge, KnowledgeItem, TermsResponse } from "../types";
 
@@ -78,7 +79,7 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
         <p>{fragment.text}</p>
         <small>{fragment.source ?? fragment.original_owner} / {t(fragment.state)}</small>
         {!fragment.valid && <p className="error-text">{t("expiredSource")}</p>}
-        {fragment.source_range ? fragment.source_range.map((range) => <button className="quiet-button" type="button" key={`${range.segment_id}:${range.start}:${range.end}`} disabled={!fragment.valid} onClick={() => onFindSegment(fragment.source ?? view.entity_key, range.segment_id)}>{t("openSource")}: {range.segment_id} [{range.start}–{range.end}]</button>) : <small>{t("noSource")}</small>}
+        {fragment.source_range ? compactKnowledgeRanges(fragment).map((range) => <button className="quiet-button" type="button" key={range.key} disabled={!fragment.valid} onClick={() => onFindSegment(fragment.source ?? view.entity_key, range.segmentId)}>{t("openSource")}: {range.label}</button>) : <small>{t("noSource")}</small>}
         {fragment.state !== "superseded" && <button className="quiet-button" type="button" disabled={saving} onClick={() => submit({ action: "set_fragment_enabled", fragment_id: fragment.id, enabled: fragment.state !== "active" })}>{t(fragment.state === "active" ? "disable" : "restore")}</button>}
       </article>)}
     </details>

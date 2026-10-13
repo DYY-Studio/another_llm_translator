@@ -811,6 +811,7 @@ export interface KnowledgeFragment {
   id: string; owner: string; original_owner: string; source?: string; origin: "scan" | "manual" | "import" | "legacy";
   text: string; state: "active" | "disabled" | "superseded"; valid: boolean;
   source_range: KnowledgeSourceRange[] | null;
+  _positions: Record<string, number>;
 }
 export interface EntityKnowledge {
   entity_key: string; members: string[]; status: "current" | "pending" | "stale";

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
+import { compactKnowledgeRanges } from "../termKnowledge";
 import { errorMessage, translate, type Language } from "../i18n";
 import { isCurrentProjectRequest } from "../requestState";
 import {
@@ -107,7 +108,7 @@ function ProposalCard({ proposal, rejected, busy, running, language, onToggle, o
               return <details key={id}><summary>{translate("knowledge.references", language)}: {fragment?.text ?? id}</summary>
                 {!fragment?.source_range ? <small>{translate("knowledge.noSource", language)}</small> : <>
                   {!fragment.valid && <p className="error-text">{translate("knowledge.expiredSource", language)}</p>}
-                  {fragment.source_range.map((range) => <button className="quiet-button" type="button" disabled={!fragment.valid} key={`${range.segment_id}:${range.start}`} onClick={() => onFindSegment(fragment.original_owner, range.segment_id)}>{translate("knowledge.openSource", language)}: {range.segment_id} [{range.start}–{range.end}]</button>)}
+                  {compactKnowledgeRanges(fragment).map((range) => <button className="quiet-button" type="button" disabled={!fragment.valid} key={range.key} onClick={() => onFindSegment(fragment.original_owner, range.segmentId)}>{translate("knowledge.openSource", language)}: {range.label}</button>)}
                 </>}
               </details>;
             })}
