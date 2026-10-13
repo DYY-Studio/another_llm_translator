@@ -142,3 +142,104 @@ async def test_knowledge_run_uses_bounded_parallel_batches(tmp_path, monkeypatch
     assert maximum == 2
     assert sorted(calls) == ["a", "b", "c", "d"]
     assert result["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_retry_preserves_checkpoint_and_resume_requests_only_unfinished(tmp_path, monkeypatch):
+    import asyncio
+    import httpx
+    from app.sqlite_storage import read_json, write_json, record_header
+    from app.term_knowledge import add_unsourced, empty_knowledge
+    from app.term_decision import run_terminology_decision, decision_resume_compatibility, decision_plan, _decision_fingerprint
+    project = make_project(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    terms = [{"source": k, "normalized": k, "category": "name", "preferred_translation": k,
+              "aliases": [], "group_primary": None, "conflicts": {}} for k in ("alpha", "beta")]
+    data = {"terms_revision": 1, "terms": terms, "knowledge": empty_knowledge()}
+    for term in terms:
+        add_unsourced(data["knowledge"], term["normalized"], "身份说明", "manual")
+    meta = read_json(project, project / "project.json")
+    write_json(project, project / "terminology/terms.json", record_header("terminology_library", meta["project_id"], **data))
+    overrides = read_json(project, project / "terminology/overrides.json")
+    overrides["overrides"] = [{"normalized": t["normalized"], "preferred_translation": t["normalized"]} for t in terms]
+    write_json(project, project / "terminology/overrides.json", overrides)
+    calls = []
+    resumed = False
+
+    async def handler(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        entities = payload["entities"]
+        calls.append([e["entity"] for e in entities])
+        if len(calls) == 2:
+            checkpoint = json.loads(next((project / "runs").glob("*/terminology_decision_checkpoint.json")).read_text())
+            assert set(checkpoint["phases"]["knowledge"]) == {"beta"}
+            raise asyncio.CancelledError()
+        records = [{"type": "entity_knowledge", "entity": e["entity"], "reason": "整理",
+                    "items": [{"text": "身份", "refs": [e["fragments"][0]["id"] if resumed or e["entity"] == "beta" else "unknown"]}]}
+                   for e in entities]
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(asyncio.CancelledError):
+            await run_terminology_decision(project, http_client=client)
+        run_id = next((project / "runs").glob("*/terminology_decision_checkpoint.json")).parent.name
+        assert decision_resume_compatibility(project, run_id, source_terms_revision=1)[0]
+        resumed = True
+        result = await run_terminology_decision(project, http_client=client, resume_run_id=run_id)
+    assert calls == [["alpha", "beta"], ["alpha"], ["alpha"]]
+    assert result["proposals"] == 2
+    # Independent policy changes participate in the existing resume fingerprint.
+    plan = decision_plan(project)
+    before = _decision_fingerprint(plan["config"], plan["prompts"], plan["library"], final_review=False)
+    path = project / "prompts/terminology_knowledge.zh-CN.middle.txt"
+    path.write_text(path.read_text() + "\nchanged policy")
+    plan = decision_plan(project)
+    after = _decision_fingerprint(plan["config"], plan["prompts"], plan["library"], final_review=False)
+    assert before != after
+
+
+def test_soft_overflow_and_feedback_budget_are_explicit(tmp_path):
+    from app.term_knowledge import pack_knowledge_batches, knowledge_payload
+    from app.execution import estimate_messages, render_messages
+    config = load_project_config(make_project(tmp_path), stage="terminology_decision")
+    config["execution"]["input_tokens_per_minute"] = 0
+    size = estimate_messages(render_messages("整理", knowledge_payload([view("alpha")], config["project"]["target_language"])[0]), config["execution"]["token_safety_factor"])
+    config["execution"]["target_chunk_input_tokens"] = size - 1
+    config["terminology_decision"]["allow_soft_target_overflow"] = False
+    assert set(pack_knowledge_batches([view("alpha")], "整理", config)[2]) == {"alpha"}
+    config["terminology_decision"]["allow_soft_target_overflow"] = True
+    assert len(pack_knowledge_batches([view("alpha")], "整理", config)[0]) == 1
+    config["llm"].update(context_window_tokens=size + 5, context_safety_margin_tokens=0)
+    batches, _, errors = pack_knowledge_batches([view("alpha")], "整理", config, feedback="格式修正" * 100)
+    assert not batches and set(errors) == {"alpha"}
+
+
+@pytest.mark.asyncio
+async def test_request_failure_preserves_prior_success_and_fatal_errors_propagate(tmp_path):
+    from app.term_knowledge import aggregate_batch
+    from app.errors import ExternalError, FatalExternalError
+    config = load_project_config(make_project(tmp_path), stage="terminology_decision")
+    saved = {}
+    calls = 0
+
+    class Model:
+        async def chat(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise ExternalError("请求失败")
+            return SimpleNamespace(content=llm_jsonl([
+                {"type": "entity_knowledge", "entity": "alpha", "reason": "整理", "items": []},
+                {"type": "entity_knowledge", "entity": "beta", "reason": "整理", "items": [{"text": "错误引用", "refs": ["unknown"]}]}])), "request"
+
+    errors = await aggregate_batch(Model(), [view("alpha"), view("beta")], "整理", config,
+                                   on_result=lambda v, r: saved.update({v["entity_key"]: r}))
+    assert set(saved) == {"alpha"}
+    assert errors == {"beta": "请求失败"}
+
+    class FatalModel:
+        async def chat(self, **kwargs):
+            raise FatalExternalError("致命错误")
+
+    with pytest.raises(FatalExternalError):
+        await aggregate_batch(FatalModel(), [view("alpha")], "整理", config, on_result=lambda *_: None)

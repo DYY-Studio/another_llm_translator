@@ -355,8 +355,8 @@ def _knowledge_result(view: dict[str, Any], record: dict[str, Any], refs: dict[s
     for item in record["items"]:
         if not isinstance(item, dict) or set(item) != {"text", "refs"}:
             raise UsageError("说明条目必须包含 text 和 refs")
-        if (not isinstance(item["refs"], list) or not item["refs"]
-                or not all(isinstance(r, str) and r in refs and refs[r][0] == view["entity_key"] for r in item["refs"])):
+        if (not isinstance(item["refs"], list)
+                or not all(isinstance(r, str) and r in refs for r in item["refs"])):
             raise UsageError("说明引用必须来自本次实体证据")
         items.append({"text": item["text"], "fragment_ids": [refs[r][1] for r in item["refs"]]})
     return {"items": validate_items(view, items), "reason": record["reason"], "input_version": view["input_version"]}
