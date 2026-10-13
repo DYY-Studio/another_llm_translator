@@ -76,11 +76,15 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
     <details className="knowledge-fragments">
       <summary>{t("fragments")} ({view.fragments.length})</summary>
       {view.fragments.map((fragment) => <article key={fragment.id}>
-        <p>{fragment.text}</p>
-        <small>{fragment.source ?? fragment.original_owner} / {t(fragment.state)}</small>
-        {!fragment.valid && <p className="error-text">{t("expiredSource")}</p>}
-        {fragment.source_range ? compactKnowledgeRanges(fragment).map((range) => <button className="quiet-button" type="button" key={range.key} disabled={!fragment.valid} onClick={() => onFindSegment(fragment.source ?? view.entity_key, range.segmentId)}>{t("openSource")}: {range.label}</button>) : <small>{t("noSource")}</small>}
-        {fragment.state !== "superseded" && <button className="quiet-button" type="button" disabled={saving} onClick={() => submit({ action: "set_fragment_enabled", fragment_id: fragment.id, enabled: fragment.state !== "active" })}>{t(fragment.state === "active" ? "disable" : "restore")}</button>}
+        <div className="knowledge-fragment-content">
+          <p>{fragment.text}</p>
+          <small>{fragment.source ?? fragment.original_owner} / {t(fragment.state)}</small>
+          {!fragment.valid && <p className="error-text">{t("expiredSource")}</p>}
+          <div className="knowledge-fragment-sources">
+            {fragment.source_range ? compactKnowledgeRanges(fragment).map((range) => <button className="quiet-button" type="button" key={range.key} disabled={!fragment.valid} onClick={() => onFindSegment(fragment.source ?? view.entity_key, range.segmentId)}>{t("openSource")}: {range.label}</button>) : <small>{t("noSource")}</small>}
+          </div>
+        </div>
+        {fragment.state !== "superseded" && <button className={fragment.state === "active" ? "danger-button" : "quiet-button"} type="button" disabled={saving} onClick={() => submit({ action: "set_fragment_enabled", fragment_id: fragment.id, enabled: fragment.state !== "active" })}>{t(fragment.state === "active" ? "disable" : "restore")}</button>}
       </article>)}
     </details>
     {error && <p className="error-text" role="alert">{error}</p>}

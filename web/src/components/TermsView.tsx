@@ -995,7 +995,6 @@ export function TermsView({
                       <small>{translate("terms.groupCountBadge", language, { count: membersByPrimary.get(term.normalized)?.length ?? 0 })}</small>
                     ) : null}
                   </span>
-                  {!term.disabled && term.knowledge_status !== "current" && <span className="muted">{translate(`knowledge.${term.knowledge_status}`, language)}</span>}
                   <em>{term.has_conflicts ? translate("terms.conflict", language) : term.disabled ? translate("terms.removed", language) : translate("terms.active", language)}</em>
                 </button>
               );

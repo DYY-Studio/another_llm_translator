@@ -167,13 +167,13 @@
 .modal .related-primary-options label.radio-option > span { min-width: 0; overflow-wrap: anywhere; }
 .modal .related-primary-options label.radio-option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
 .term-tab-panel { flex: 1; min-height: 0; overflow: auto; }
-.term-edit-panel { padding: 24px 30px 90px; }
+.term-edit-panel { padding: 24px 30px; }
 .term-edit-panel > label { display: grid; gap: 7px; margin: 16px 0; font-size: 13px; font-weight: 650; }
 .term-edit-panel textarea { min-height: 100px; padding: 11px; resize: vertical; line-height: 1.55; }
 .conflict-box { padding: 12px; border: 1px solid var(--warning-border); border-radius: 6px; background: var(--warning-bg); color: var(--warning-text); font-size: 12px; }
 .choice-buttons { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
 .choice-buttons button { min-height: 30px; padding: 0 10px; border: 1px solid var(--warning-choice); border-radius: 5px; background: var(--surface); }
-.term-actions { bottom: -90px; }
+.term-actions { bottom: 0; padding-block: 18px; background: var(--surface); }
 .term-hits-panel { display: flex; flex-direction: column; gap: 10px; padding: 18px 30px 24px; }
 .term-hits-state { color: var(--muted); font-size: 12px; }
 .term-hits-list { flex: 1; min-height: 0; overflow: auto; display: grid; gap: 6px; align-content: start; }
@@ -201,6 +201,10 @@
 .knowledge-reference { align-items: flex-start; margin-block: 6px; }
 .knowledge-reference span { white-space: pre-wrap; overflow-wrap: anywhere; }
 .knowledge-reference small { display: block; color: var(--muted); }
-.knowledge-fragments article { display: grid; gap: 6px; padding-block: 10px; border-bottom: 1px solid var(--border); }
+.entity-knowledge > .editor-actions { position: static; flex-wrap: wrap; padding-top: 4px; background: none; }
+.knowledge-fragments article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px; margin: 10px 0 0 12px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.knowledge-fragment-content { display: grid; gap: 6px; min-width: 0; }
+.knowledge-fragment-sources { display: flex; flex-wrap: wrap; gap: 6px; }
+.knowledge-fragment-sources button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
 .knowledge-fragments article p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .knowledge-fragments small { color: var(--muted); }
