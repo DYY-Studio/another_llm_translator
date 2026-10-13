@@ -850,3 +850,10 @@ def test_json_adapter_streaming_schema_rejects_invalid(
     mutate(value)
     with pytest.raises(ConfigError, match=message):
         load_json_adapter(write_adapter(tmp_path, value))
+
+
+def test_adapter_rejects_managed_effort_in_stream_request_body(tmp_path: Path) -> None:
+    value = json.loads((Path(__file__).parents[1] / "llm_adapters/openai-responses.json").read_text())
+    value["streaming"]["request_body"] = {"reasoning": {"effort": "high"}}
+    with pytest.raises(ConfigError, match="Reasoning Effort"):
+        load_json_adapter(write_adapter(tmp_path, value))

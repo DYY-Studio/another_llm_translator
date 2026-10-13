@@ -672,12 +672,13 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         for effort_pointer in [effort["body_pointer"], *aliases]:
             _validate_stream_pointer(effort_pointer, "reasoning_effort")
         effort["aliases"] = aliases
-        for effort_pointer in [effort["body_pointer"], *aliases]:
-            try:
-                _resolve_json_pointer(body, effort_pointer)
-            except ExternalError:
-                continue
-            raise ConfigError("Adapter body 不得重复配置声明的 Reasoning Effort 字段")
+        for template in (body, (streaming_spec or {}).get("request_body", {})):
+            for effort_pointer in [effort["body_pointer"], *aliases]:
+                try:
+                    _resolve_json_pointer(template, effort_pointer)
+                except ExternalError:
+                    continue
+                raise ConfigError("Adapter 请求体不得重复配置声明的 Reasoning Effort 字段")
     digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     return JSONLLMAdapter(
         adapter_id=adapter_id,
