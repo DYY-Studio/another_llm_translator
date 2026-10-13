@@ -147,7 +147,7 @@ def test_prompt_api_reports_sync_and_keeps_library_separate(
     assert set(decision_detail.json()["assembled_phases"]) == {
         "adjudication",
         "consistency",
-        "final_review", "knowledge", "knowledge",
+        "final_review", "containment",
     }
     assert project_prompt_path.read_text(encoding="utf-8") == changed_global
     assert (
@@ -246,3 +246,32 @@ def test_builtin_prompt_view_ignores_global_overrides(tmp_path: Path):
         assert client.get("/api/v1/prompts/unknown/default?language=en").status_code == 400
         (root / "prompts/terminology.en.middle.txt").unlink()
         assert client.get("/api/v1/prompts/terminology/default?language=en").status_code == 400
+
+
+def test_entity_knowledge_prompt_edit_preview_sync_and_runtime(tmp_path: Path) -> None:
+    from app.project import ensure_missing_summary_prompts
+    from app.term_decision import _prompt
+    from app.execution import full_prompt
+    from app.errors import StorageError
+    app_root, projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
+    url = "/api/v1/projects/sample/prompts/terminology_knowledge"
+    initial = client.get(url)
+    assert initial.status_code == 200
+    content = "KNOWLEDGE_POLICY_SENTINEL"
+    assert client.put("/api/v1/global/prompts/terminology_knowledge", json={"language": "zh-CN", "content": content}).status_code == 200
+    assert not client.get(url).json()["global_sync"]["same"]
+    assert client.put(url, json={"language": "zh-CN", "content": content}).status_code == 200
+    preview = client.get(url).json()
+    assert preview["global_sync"]["same"]
+    assert preview["assembled"] == _prompt(project, "zh-CN")["knowledge"]
+    assert content in preview["assembled"]
+    assert client.put("/api/v1/prompt-library/terminology_knowledge/zh-CN/policy", json={"content": content}).status_code == 200
+    assert client.get("/api/v1/prompt-library/terminology_knowledge/zh-CN/policy").json()["assembled"] == full_prompt("terminology_knowledge", content)
+    path = project / "prompts/terminology_knowledge.zh-CN.middle.txt"
+    path.unlink()
+    with pytest.raises(StorageError, match="terminology_knowledge"):
+        _prompt(project, "zh-CN")
+    warnings = ensure_missing_summary_prompts(project, app_root=app_root)
+    assert warnings and path.exists()
+    assert "terminology_knowledge.zh-CN.middle.txt" in " ".join(warnings)

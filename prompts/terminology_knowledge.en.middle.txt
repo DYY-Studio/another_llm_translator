@@ -1,0 +1,1 @@
+Organize the complete explanation evidence for each entity independently. Merge duplicate information and preserve supported identity, relationships, changes and uncertainty. Use applied explanations as review comparisons without adding facts.

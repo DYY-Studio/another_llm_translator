@@ -171,6 +171,8 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
     from app.project import prompt_file
     prompt_path = project / "prompts" / prompt_file("terminology_decision", "zh-CN")
     prompt_path.write_text(prompt_path.read_text() + "\nNAME_RULE_SENTINEL", encoding="utf-8")
+    knowledge_prompt = project / "prompts" / prompt_file("terminology_knowledge", "zh-CN")
+    knowledge_prompt.write_text("KNOWLEDGE_RULE_SENTINEL", encoding="utf-8")
     save_items(project, data, "alpha", [{"text": "人工已有说明", "fragment_ids": []}])
     project_descriptions(project, data)
     before = data["terms"][0]["description"]
@@ -187,6 +189,7 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
         payload = json.loads(messages[1]["content"])
         assert payload["phase"] == "knowledge"
         assert "NAME_RULE_SENTINEL" not in messages[0]["content"]
+        assert "KNOWLEDGE_RULE_SENTINEL" in messages[0]["content"]
         scan = next(f for f in payload["entities"][0]["fragments"] if f["origin"] == "scan")
         assert scan["source_range"] == [{"file_id": "F0001", "part_id": "document",
                                         "first": {"position": 0, "start": 0}, "last": {"position": 0, "end": 14}}]

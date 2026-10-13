@@ -119,15 +119,19 @@ def _prompt_language(project: Path, requested: str | None) -> str:
 def _prompt(
     project: Path, language: str, *, final_review: bool = False
 ) -> dict[str, str]:
-    path = project / "prompts" / prompt_file(STAGE, language)
-    try:
-        middle = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise StorageError(f"无法读取 Prompt：{path.name}: {exc}") from exc
-    return {
-        phase: full_prompt(STAGE, middle, language, phase=phase)
-        for phase in _phase_names(final_review)
-    }
+    prompts = {}
+    for resource in (STAGE, "terminology_knowledge"):
+        path = project / "prompts" / prompt_file(resource, language)
+        try:
+            middle = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise StorageError(f"无法读取 Prompt：{path.name}: {exc}") from exc
+        if resource == "terminology_knowledge":
+            prompts["knowledge"] = full_prompt(resource, middle, language)
+        else:
+            prompts.update({phase: full_prompt(STAGE, middle, language, phase=phase)
+                            for phase in _phase_names(final_review) if phase != "knowledge"})
+    return prompts
 
 def _prompt_snapshot(
     prompts: dict[str, str], *, final_review: bool = False

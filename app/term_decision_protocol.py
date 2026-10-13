@@ -123,8 +123,8 @@ _DESCRIPTION_CONTEXT = {
 def terminology_decision_protocol(language: str, *, phase: str) -> str:
     if phase == "knowledge":
         return {
-            "zh-CN": '为 entities 中每个实体恰好输出一条 {"type":"entity_knowledge","entity":"对应 entity","items":[{"text":"目标语说明","refs":["K1"]}],"reason":"更新理由"} 和末行 {"type":"end"}。items 可以为空。允许实体结果乱序。每条说明必须引用对应实体 fragments 中至少一个 id，禁止跨实体引用，不得引用 current_items 或虚构引用。归并重复信息，保留有证据的身份、关系、变化与不确定性，不新增事实。不修改名称、译名或分组。',
-            "en": 'Output exactly one record for each entity in entities: {"type":"entity_knowledge","entity":"input entity","items":[{"text":"target-language explanation","refs":["K1"]}],"reason":"reason"}, followed by {"type":"end"}. items may be empty. Entity records may be unordered. Each item must cite at least one id from its own fragments; cross-entity refs are forbidden; never cite current_items or invent refs. Merge repeated information; preserve supported identity, relationships, changes and uncertainty. Do not add facts or change names, translations or groups.',
+            "zh-CN": '为 entities 中每个实体恰好输出一条 {"type":"entity_knowledge","entity":"对应 entity","items":[{"text":"目标语说明","refs":["K1"]}],"reason":"更新理由"} 和末行 {"type":"end"}。items 可以为空。允许实体结果乱序。每条说明必须引用对应实体 fragments 中至少一个 id，禁止跨实体引用，不得引用 current_items 或虚构引用。不修改名称、译名或分组。',
+            "en": 'Output exactly one record for each entity in entities: {"type":"entity_knowledge","entity":"input entity","items":[{"text":"target-language explanation","refs":["K1"]}],"reason":"reason"}, followed by {"type":"end"}. items may be empty. Entity records may be unordered. Each item must cite at least one id from its own fragments; cross-entity refs are forbidden; never cite current_items or invent refs. Do not change names, translations or groups.',
         }[language]
     return f"{_PHASE_PROTOCOL[phase][language]}\n{_COMMON_PROTOCOL[language]}\n{_DESCRIPTION_CONTEXT[language]}"
 

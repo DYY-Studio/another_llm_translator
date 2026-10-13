@@ -301,7 +301,7 @@ def register_resource_routes(
                 phase: full_prompt(
                     stage, content, resolved, requirements_for(stage), phase=phase
                 )
-                for phase in ("adjudication", "consistency", "final_review", "knowledge")
+                for phase in ("adjudication", "consistency", "final_review", "containment")
             }
             result["assembled_phases"] = assembled_phases
             result["assembled"] = assembled_phases["adjudication"]
@@ -667,7 +667,7 @@ def register_resource_routes(
         if stage == "terminology_decision":
             assembled_phases = {
                 phase: full_prompt(stage, content, language, phase=phase)
-                for phase in ("adjudication", "consistency", "final_review", "knowledge")
+                for phase in ("adjudication", "consistency", "final_review", "containment")
             }
             result["assembled_phases"] = assembled_phases
             result["assembled"] = assembled_phases["adjudication"]
