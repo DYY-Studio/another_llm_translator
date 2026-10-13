@@ -108,7 +108,12 @@ function ProposalCard({ proposal, rejected, busy, running, language, onToggle, o
               return <details key={id}><summary>{translate("knowledge.references", language)}: {fragment?.text ?? id}</summary>
                 {!fragment?.source_range ? <small>{translate("knowledge.noSource", language)}</small> : <>
                   {!fragment.valid && <p className="error-text">{translate("knowledge.expiredSource", language)}</p>}
-                  {compactKnowledgeRanges(fragment).map((range) => <button className="quiet-button" type="button" disabled={!fragment.valid} key={range.key} onClick={() => onFindSegment(fragment.original_owner, range.segmentId)}>{translate("knowledge.openSource", language)}: {range.label}</button>)}
+                  <small className="knowledge-fragment-sources">
+                    {compactKnowledgeRanges(fragment).map((range, index) => <span key={range.key}>
+                      {index > 0 && <span aria-hidden="true"> · </span>}
+                      <button type="button" disabled={!fragment.valid} onClick={() => onFindSegment(fragment.original_owner, range.segmentId)}>{range.label}</button>
+                    </span>)}
+                  </small>
                 </>}
               </details>;
             })}

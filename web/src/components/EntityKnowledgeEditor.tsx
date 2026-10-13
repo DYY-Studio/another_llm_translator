@@ -79,9 +79,12 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
         <div className="knowledge-fragment-content">
           <p>{fragment.text}</p>
           {!fragment.valid && <p className="error-text">{t("expiredSource")}</p>}
-          <div className="knowledge-fragment-sources">
-            {fragment.source_range ? compactKnowledgeRanges(fragment).map((range) => <button className="quiet-button" type="button" key={range.key} disabled={!fragment.valid} onClick={() => onFindSegment(fragment.source ?? view.entity_key, range.segmentId)}>{t("openSource")}: {range.label}</button>) : <small>{t("noSource")}</small>}
-          </div>
+          <small className="knowledge-fragment-sources">
+            {fragment.source_range ? compactKnowledgeRanges(fragment).map((range, index) => <span key={range.key}>
+              {index > 0 && <span aria-hidden="true"> · </span>}
+              <button type="button" disabled={!fragment.valid} onClick={() => onFindSegment(fragment.source ?? view.entity_key, range.segmentId)}>{range.label}</button>
+            </span>) : t("noSource")}
+          </small>
         </div>
         {fragment.state !== "superseded" && <button className={fragment.state === "active" ? "danger-button" : "quiet-button"} type="button" disabled={saving} onClick={() => submit({ action: "set_fragment_enabled", fragment_id: fragment.id, enabled: fragment.state !== "active" })}>{t(fragment.state === "active" ? "disable" : "restore")}</button>}
       </article>)}

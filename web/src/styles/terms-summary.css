@@ -204,7 +204,9 @@
 .entity-knowledge > .editor-actions { position: static; flex-wrap: wrap; padding-top: 4px; background: none; }
 .knowledge-fragments article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px; margin: 10px 0 0 12px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .knowledge-fragment-content { display: grid; gap: 6px; min-width: 0; }
-.knowledge-fragment-sources { display: flex; flex-wrap: wrap; gap: 6px; }
-.knowledge-fragment-sources button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.knowledge-fragment-sources { display: block; color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
+.knowledge-fragment-sources button { max-width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.knowledge-fragment-sources button:hover:not(:disabled) { text-decoration: underline; }
+.knowledge-fragment-sources button:disabled { cursor: not-allowed; }
 .knowledge-fragments article p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .knowledge-fragments small { color: var(--muted); }
