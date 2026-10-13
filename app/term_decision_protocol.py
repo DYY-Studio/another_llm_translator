@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-DECISION_RULES_VERSION = 10
+DECISION_RULES_VERSION = 11
 DECISION_ACTIONS = frozenset({"keep", "update", "disable", "needs_review"})
 SIMPLE_ACTION_KEYS = frozenset({"type", "normalized", "action", "reason"})
 PATCH_FIELDS = frozenset(
@@ -114,16 +114,19 @@ _PHASE_PROTOCOL = {
 }
 
 
+_DESCRIPTION_CONTEXT = {
+    "zh-CN": "description 是有效说明片段的只读拼接文本，方括号标明原术语归属；applied_description 是已应用实体说明，仅供对照。片段可能重复、存在分歧或描述不同位置的情况，须结合原文判断，不得把排列顺序当作事实发生时间。两者均不得修改，说明只能在最后的 knowledge 阶段更新。",
+    "en": "description joins valid explanation fragments as read-only text; brackets identify the original term. applied_description is the applied entity explanation for comparison. Fragments may repeat, disagree or describe different source positions; assess them against source evidence and do not treat their order as event chronology. Neither field may be changed; explanations may only be updated in the final knowledge phase.",
+}
+
+
 def terminology_decision_protocol(language: str, *, phase: str) -> str:
     if phase == "knowledge":
         return {
             "zh-CN": '只输出一条 {"type":"entity_knowledge","entity":"输入 entity","items":[{"text":"目标语说明","refs":["K1"]}],"reason":"更新理由"} 和末行 {"type":"end"}。items 可以为空。每条说明必须引用本次 fragments 中至少一个 id，不得引用 current_items 或虚构引用。归并重复信息，保留有证据的身份、关系、变化与不确定性，不新增事实。不修改名称、译名或分组。',
             "en": 'Output one {"type":"entity_knowledge","entity":"input entity","items":[{"text":"target-language explanation","refs":["K1"]}],"reason":"reason"}, followed by {"type":"end"}. items may be empty. Each item must cite at least one id from fragments; never cite current_items or invent refs. Merge repeated information; preserve supported identity, relationships, changes and uncertainty. Do not add facts or change names, translations or groups.',
         }[language]
-    return f"{_PHASE_PROTOCOL[phase][language]}\n{_COMMON_PROTOCOL[language]}\n" + (
-        "description 是只读上下文，说明只能在最后的 knowledge 阶段修改。" if language == "zh-CN"
-        else "description is read-only context; explanations may only change in the final knowledge phase."
-    )
+    return f"{_PHASE_PROTOCOL[phase][language]}\n{_COMMON_PROTOCOL[language]}\n{_DESCRIPTION_CONTEXT[language]}"
 
 
 _FINAL_REVIEW_PROTOCOL = {
@@ -171,7 +174,7 @@ _FINAL_REVIEW_PROTOCOL = {
 
 
 def terminology_final_review_protocol(language: str) -> str:
-    return _FINAL_REVIEW_PROTOCOL[language]
+    return f"{_FINAL_REVIEW_PROTOCOL[language]}\n{_DESCRIPTION_CONTEXT[language]}"
 
 
 _CONTENT_RETRY_GUIDANCE = {

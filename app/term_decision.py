@@ -549,6 +549,12 @@ def decision_plan(
     evidence = _batches.collect_term_evidence(
         project, list(library.get("terms", [])), config
     )
+    for key, item in evidence.items():
+        item["description"] = "\n\n".join(
+            f"[{fragment.get('source', fragment['original_owner'])}] {fragment['text']}"
+            for fragment in known_fragments.values()
+            if fragment["owner"] == key and fragment["state"] == "active" and fragment["valid"]
+        ) or None
     language = _prompt_language(project, prompt_language)
     prompts = _prompt(project, language, final_review=final_review)
     spec = term_normalization(config)
@@ -1108,7 +1114,8 @@ async def run_terminology_decision(
                     review_evidence = _batches.collect_term_review_evidence(
                         project, review_focus, config
                     )
-                    evidence.update(review_evidence)
+                    for key, item in review_evidence.items():
+                        evidence[key].update(item)
                 total = len(eligible) * 2 + final_review_target_count + len(containment_decisions)
                 usage_invoked = completed < total
                 manifest = read_json(project, run_dir / "manifest.json")

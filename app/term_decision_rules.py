@@ -223,6 +223,9 @@ def _payload_term(
             "group_primary",
         )
     } | {"evidence": deepcopy(evidence[state["normalized"]])}
+    if "description" in value["evidence"]:
+        value["applied_description"] = value["description"]
+        value["description"] = value["evidence"].pop("description")
     term_conflicts = (conflicts or {}).get(str(state["normalized"]))
     if term_conflicts is not None and _has_conflicts(term_conflicts):
         value["conflicts"] = deepcopy(term_conflicts)
@@ -422,6 +425,7 @@ def _analyze_decisions(
     spec: Any | None,
     phase: str,
     conflicts: dict[str, dict[str, list[Any]]] | None = None,
+    descriptions: dict[str, str | None] | None = None,
 ) -> tuple[
     dict[str, dict[str, Any]],
     list[str],
@@ -523,7 +527,8 @@ def _analyze_decisions(
             mismatched = sorted(
                 key
                 for key in extra_keys & (PATCH_FIELDS | {"description"})
-                if value[key] != expected[normalized].get(key)
+                if value[key] != (descriptions[normalized] if key == "description" and descriptions is not None
+                                  else expected[normalized].get(key))
             )
             if mismatched:
                 details.append(f"冗余字段与当前状态不一致 {', '.join(mismatched)}")

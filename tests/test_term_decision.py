@@ -570,6 +570,75 @@ def test_decision_payload_exposes_read_only_disabled_state() -> None:
     assert "disabled" not in phase_one["anchors"][0]
 
 
+@pytest.mark.asyncio
+async def test_decision_carries_fragment_descriptions_through_final_review(tmp_path, monkeypatch):
+    from app.term_knowledge import add_unsourced
+
+    project = create_decision_project(tmp_path)
+    path = project / "terminology" / "terms.json"
+    library = read_json(project, path)
+    knowledge = library["knowledge"]
+    add_unsourced(knowledge, "alice", "新身份线索", "import")
+    moved = add_unsourced(knowledge, "bob", "原本描述 Bob", "import")
+    knowledge["fragments"][moved]["owner"] = "alice"
+    disabled = add_unsourced(knowledge, "alice", "已停用内容", "import")
+    knowledge["fragments"][disabled]["state"] = "inactive"
+    write_json(project, path, library)
+    plan = decision_plan(project, final_review=True)
+    expected = "[alice] unhelpful\n\n[alice] 新身份线索\n\n[bob] 原本描述 Bob"
+    for phase in ("adjudication", "consistency", "final_review", "containment"):
+        evidence = deepcopy(plan["evidence"])
+        if phase == "final_review":
+            for key, item in collect_term_review_evidence(project, list(plan["states"].values()), plan["config"]).items():
+                evidence[key].update(item)
+        payload = _make_payload(
+            phase=phase, target_language="简体中文", focus=[plan["states"]["alice"]],
+            anchors=[plan["states"]["bob"]], evidence=evidence,
+        )
+        assert payload["terms"][0]["description"] == expected
+        assert payload["terms"][0]["applied_description"] == "unhelpful"
+        assert payload["anchors"][0]["description"] is None
+        assert "description" not in payload["terms"][0]["evidence"]
+
+    phases = []
+
+    def handler(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        phases.append(payload["phase"])
+        records = []
+        for term in payload["terms"]:
+            if term["normalized"] == "alice":
+                assert term["description"] == expected
+                assert term["applied_description"] == "unhelpful"
+            record = dict(type="decision", normalized=term["normalized"], action="keep", reason="确认")
+            if term["normalized"] == "alice":
+                if payload["phase"] != "final_review":
+                    record["action"] = "needs_review"
+                else:
+                    record.update(action="update", changes={"preferred_translation": "爱丽丝"})
+            records.append(record)
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}],
+                                         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}})
+
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await run_terminology_decision(project, final_review=True, http_client=client)
+    assert phases == ["adjudication", "consistency", "final_review"]
+    assert read_json(project, path)["terms"][0]["description"] == "unhelpful"
+
+
+def test_fragment_description_is_not_truncated_to_fit_decision_budget(tmp_path):
+    from app.term_knowledge import add_unsourced
+
+    project = create_decision_project(tmp_path)
+    path = project / "terminology" / "terms.json"
+    library = read_json(project, path)
+    add_unsourced(library["knowledge"], "alice", "线索" * 1_000_000, "import")
+    write_json(project, path, library)
+    with pytest.raises(RequestSizeError):
+        decision_plan(project)
+
+
 def test_decision_payload_exposes_only_nonempty_read_only_conflicts() -> None:
     focus = _batch_state("focus", "Focus")
     anchor = _batch_state("anchor", "Anchor")
