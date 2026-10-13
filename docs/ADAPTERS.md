@@ -309,7 +309,9 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 ### 实体说明决策与接口
 
-名称与关系确定后，`phase: "knowledge"` 按最终实体发送 `entity`、`members`、`current_items` 和全部有效 `fragments`。片段包含请求内短 ID（如 `K1`）、原归属、当前归属、说明及来源范围。一次请求只处理一个实体，不截断或压缩证据。
+名称与关系确定后，`phase: "knowledge"` 按最终实体发送 `entity`、`members`、`current_items` 和全部有效 `fragments`。片段包含请求内短 ID（如 `K1`）、原归属、当前归属、说明及来源范围。一次请求只处理一个实体，完整保留证据文字。此阶段使用专用聚合指令，不携带项目名称与关系决策 Prompt。
+
+请求中的 `source_range` 将连续源文表示为区间，每项包含 `file_id`、`part_id`、`first: {position, start}` 和 `last: {position, end}`。`position` 是从 0 开始的 Segment 位置，偏移是首尾 Segment 内的字符位置，`end` 为不包含端点。跨文件、分部、位置间断或切片空缺分别保留。无来源片段为 `null`。持久化来源和引用校验仍使用完整 Segment 范围。
 
 响应为一条实体记录和终止记录：
 

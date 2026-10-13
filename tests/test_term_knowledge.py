@@ -27,6 +27,35 @@ def library() -> dict:
     ], "knowledge": empty_knowledge()}
 
 
+def test_knowledge_payload_compacts_ranges_without_bridging_gaps_or_slices():
+    from copy import deepcopy
+    from app.term_knowledge import knowledge_payload, source_range
+
+    originals = {f"S{i}": {"segment_id": f"S{i}", "file_id": "F1", "part_id": "P1", "source": "abcdef"}
+                 for i in range(8)}
+    originals["S7"]["part_id"] = "P2"
+    inputs = [originals["S0"], originals["S1"], originals["S3"],
+              {**originals["S4"], "source": "abc"}, originals["S5"],
+              {**originals["S6"], "source": "ef", "_source_offset": 4}, originals["S7"]]
+    ranges = source_range(inputs, originals, {})
+    fragment = {"id": "persistent", "state": "active", "text": "完整说明",
+                "owner": "alpha", "original_owner": "alpha", "origin": "scan",
+                "source_range": ranges, "_positions": {f"S{i}": i for i in range(8)}}
+    before = deepcopy(fragment)
+    view = {"entity_key": "alpha", "members": ["alpha"], "items": [], "fragments": [fragment]}
+    payload, refs = knowledge_payload(view, "简体中文")
+    assert refs == {"K1": "persistent"}
+    assert payload["fragments"][0]["text"] == "完整说明"
+    assert payload["fragments"][0]["source_range"] == [
+        {"file_id": "F1", "part_id": "P1", "first": {"position": 0, "start": 0}, "last": {"position": 1, "end": 6}},
+        {"file_id": "F1", "part_id": "P1", "first": {"position": 3, "start": 0}, "last": {"position": 4, "end": 3}},
+        {"file_id": "F1", "part_id": "P1", "first": {"position": 5, "start": 0}, "last": {"position": 5, "end": 6}},
+        {"file_id": "F1", "part_id": "P1", "first": {"position": 6, "start": 4}, "last": {"position": 6, "end": 6}},
+        {"file_id": "F1", "part_id": "P2", "first": {"position": 7, "start": 0}, "last": {"position": 7, "end": 6}},
+    ]
+    assert fragment == before
+
+
 def test_published_evidence_needs_application_and_source_changes_block_use(tmp_path: Path) -> None:
     from app.term_knowledge import publish_evidence, entity_view, save_items, project_descriptions
     from app.term_library import term_normalization
@@ -139,6 +168,9 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
     project = make_project(tmp_path)
     data = library()
     data["terms"][0].update(category="name", preferred_translation="阿尔法", aliases=[], conflicts={})
+    from app.project import prompt_file
+    prompt_path = project / "prompts" / prompt_file("terminology_decision", "zh-CN")
+    prompt_path.write_text(prompt_path.read_text() + "\nNAME_RULE_SENTINEL", encoding="utf-8")
     save_items(project, data, "alpha", [{"text": "人工已有说明", "fragment_ids": []}])
     before = data["terms"][0]["description"]
     record = scan_record(project, "Alpha is a captain")
@@ -150,8 +182,13 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
     write_json(project, project / "terminology" / "overrides.json", overrides)
     attempts = []
     def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        messages = json.loads(request.content)["messages"]
+        payload = json.loads(messages[1]["content"])
         assert payload["phase"] == "knowledge"
+        assert "NAME_RULE_SENTINEL" not in messages[0]["content"]
+        scan = next(f for f in payload["fragments"] if f["origin"] == "scan")
+        assert scan["source_range"] == [{"file_id": "F0001", "part_id": "document",
+                                        "first": {"position": 0, "start": 0}, "last": {"position": 0, "end": 14}}]
         attempts.append(payload)
         refs = [f["id"] for f in payload["fragments"]]
         # Invalid references must trigger a format retry, not a partially accepted explanation.

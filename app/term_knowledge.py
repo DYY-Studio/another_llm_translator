@@ -232,6 +232,25 @@ def project_descriptions(project: Path, library: dict[str, Any]) -> None:
                 term["description_items"] = view["items"]
 
 
+def _request_source_ranges(fragment: dict[str, Any]) -> list[dict[str, Any]] | None:
+    groups: list[dict[str, Any]] = []
+    previous = None
+    for r in fragment["source_range"] or []:
+        position = fragment["_positions"][r["segment_id"]]
+        contiguous = previous is not None and (
+            previous["file_id"] == r["file_id"] and previous["part_id"] == r["part_id"]
+            and fragment["_positions"][previous["segment_id"]] + 1 == position
+            and r["start"] == 0
+            and previous["slice_source_digest"] == previous["source_digest"]
+        )
+        if not contiguous:
+            groups.append({"file_id": r["file_id"], "part_id": r["part_id"],
+                           "first": {"position": position, "start": r["start"]}})
+        groups[-1]["last"] = {"position": position, "end": r["end"]}
+        previous = r
+    return groups or None
+
+
 def knowledge_payload(view: dict[str, Any], target_language: str) -> tuple[dict[str, Any], dict[str, str]]:
     active = [f for f in view["fragments"] if f["state"] == "active"]
     refs = {f"K{index}": f["id"] for index, f in enumerate(active, 1)}
@@ -241,10 +260,7 @@ def knowledge_payload(view: dict[str, Any], target_language: str) -> tuple[dict[
         "current_items": [{"text": item["text"]} for item in view["items"]],
         "fragments": [{"id": key, "text": f["text"], "owner": f["owner"],
                        "original_source": f.get("source", f["original_owner"]),
-                       "origin": f["origin"], "source_range": [
-                           {**{k:r[k] for k in ("segment_id","file_id","part_id","start","end")},
-                            "position": f["_positions"][r["segment_id"]]} for r in f["source_range"]
-                       ] if f["source_range"] else None}
+                       "origin": f["origin"], "source_range": _request_source_ranges(f)}
                       for key, f in zip(refs, active, strict=True)],
     }
     return base, refs
