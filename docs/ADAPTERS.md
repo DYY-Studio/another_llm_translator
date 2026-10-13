@@ -249,7 +249,7 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
 - 缺少 `models` 规格、缺失或格式错误的 credential、HTTP 错误或网络异常都明确
   报告，不猜测、不 fallback。请求使用 Preset 的代理与超时设置。
 
-Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为规范化计数：
+JSON Pointer Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为规范化计数：
 
 ```json
 {
@@ -265,9 +265,11 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
   任务标记为 partial；保留已观测计数但吞吐量不可用，不使用本地启发式估算冒充
   端点账单。完全没有可观测 usage 时显示 unavailable。
 - 宿主在每个尝试收到 usage 后累计规范化计数，任务结束时写入任务摘要与 Run
-  `manifest.json` 的 `usage` 字段。Adapter 未声明 `usage` 时任务与 Run
+  `manifest.json` 的 `usage` 字段。JSON Pointer Adapter 未声明 `usage` 时任务与 Run
   摘要不包含 usage 字段。
 - 主请求的限速、重试与错误语义不受影响。
+
+原生模式直接读取供应商用量字段。Anthropic 输入包含基础输入、缓存读取和创建，输出使用已包含 thinking 的 `output_tokens`；Gemini 输出包含 candidate 与 thoughts。流式累计计数采用最终值，非法计数直接报错。
 
 ### 内置 Adapter 定义
 

@@ -33,7 +33,7 @@ def test_native_errors_and_refusals_keep_provider_context():
 
 def test_anthropic_usage_includes_cached_input_and_total():
     adapter = load_json_adapter(ROOT / "llm_adapters/anthropic.json")
-    usage = adapter.extract_usage({"usage": {"input_tokens": 50, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 100000, "output_tokens": 20}})
+    usage = adapter.extract_usage({"usage": {"input_tokens": 50, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 100000, "output_tokens": 20, "output_tokens_details": {"thinking_tokens": 10}}})
     assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (100050, 20, 100070)
 
 
@@ -129,3 +129,43 @@ def test_unknown_responses_incomplete_fails_even_with_body():
     with pytest.raises(ExternalError, match="未完成.*unknown"):
         adapter.parse_response(response)
     assert adapter.stream_error_details({"type": "response.incomplete", "response": response}).message.endswith("unknown")
+
+
+def test_gemini_usage_includes_thinking_output():
+    adapter = load_json_adapter(ROOT / "llm_adapters/google-gemini.json")
+    payload = {"usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 2, "thoughtsTokenCount": 5, "totalTokenCount": 10}}
+    usage = adapter.extract_usage(payload)
+    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (3, 7, 10)
+    assert adapter.extract_stream_usage(payload)["output_tokens"] == 7
+
+
+@pytest.mark.parametrize(("name", "payload"), [
+    ("openai-compatible", {"usage": {"prompt_tokens": -1}}),
+    ("openai-responses", {"response": {"usage": {"output_tokens": "2"}}}),
+    ("anthropic", {"type": "message_start", "message": {"usage": {"input_tokens": 2, "cache_read_input_tokens": -1}}}),
+    ("google-gemini", {"usageMetadata": {"thoughtsTokenCount": -1}}),
+])
+def test_native_stream_rejects_invalid_token_counts(name, payload):
+    adapter = load_json_adapter(ROOT / "llm_adapters" / f"{name}.json")
+    with pytest.raises(ExternalError, match="Token"):
+        adapter.extract_stream_usage(payload)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_keeps_final_thinking_usage(tmp_path):
+    from tests.test_llm_streaming import streaming_config, run_client, stream_response
+    current = streaming_config(tmp_path)
+    current["_llm_adapter"] = load_json_adapter(ROOT / "llm_adapters/anthropic.json")
+    def handler(request):
+        return stream_response(
+            {"type": "message_start", "message": {"usage": {"input_tokens": 2, "cache_read_input_tokens": 3, "output_tokens": 1}}},
+            {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "thinking"}},
+            {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "ok"}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 7, "output_tokens_details": {"thinking_tokens": 5}}},
+            {"type": "message_stop"},
+        )
+    response, llm, client = await run_client(current, tmp_path, handler)
+    await client.aclose()
+    assert response.content == "ok"
+    usage = llm.usage_summary()
+    assert (usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (5, 7, 12)

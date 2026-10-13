@@ -166,6 +166,12 @@ def usage_values(fmt: str, data: dict[str, Any], *, stream: bool = False) -> dic
     if usage is None:
         return {}
     usage = _object(usage)
+    fields = ("prompt_tokens", "completion_tokens", "total_tokens") if fmt == "chat-completions" else ("promptTokenCount", "candidatesTokenCount", "totalTokenCount") if fmt == "gemini" else ("input_tokens", "output_tokens", "total_tokens")
+    additional = ("cache_creation_input_tokens", "cache_read_input_tokens") if fmt == "anthropic" else ("thoughtsTokenCount",) if fmt == "gemini" else ()
+    if stream:
+        for field in (*fields, *additional):
+            if field in usage and (type(usage[field]) is not int or usage[field] < 0):
+                raise ExternalError(f"LLM 流式 Token 计数无效：{field}")
     if fmt == "anthropic":
         values = {}
         if "input_tokens" in usage:
@@ -176,8 +182,14 @@ def usage_values(fmt: str, data: dict[str, Any], *, stream: bool = False) -> dic
         if type(usage.get("output_tokens")) is int and usage["output_tokens"] >= 0:
             values["output_tokens"] = usage["output_tokens"]
         return complete_usage(fmt, values)
-    fields = ("prompt_tokens", "completion_tokens", "total_tokens") if fmt == "chat-completions" else ("promptTokenCount", "candidatesTokenCount", "totalTokenCount") if fmt == "gemini" else ("input_tokens", "output_tokens", "total_tokens")
-    return {metric: usage[field] for metric, field in zip(("input_tokens", "output_tokens", "total_tokens"), fields) if type(usage.get(field)) is int and usage[field] >= 0}
+    values = {metric: usage[field] for metric, field in zip(("input_tokens", "output_tokens", "total_tokens"), fields) if type(usage.get(field)) is int and usage[field] >= 0}
+    if fmt == "gemini" and "output_tokens" in values:
+        thoughts = usage.get("thoughtsTokenCount", 0)
+        if type(thoughts) is int and thoughts >= 0:
+            values["output_tokens"] += thoughts
+        else:
+            del values["output_tokens"]
+    return values
 
 
 def complete_usage(fmt: str, values: dict[str, int]) -> dict[str, int]:
