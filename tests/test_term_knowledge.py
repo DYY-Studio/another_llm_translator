@@ -229,6 +229,13 @@ async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(
         result = await run_terminology_decision(project,http_client=client,resume_run_id=run_id)
     assert calls == [("knowledge", "alpha")]
     assert result["proposals"] == 2
+    for proposal in current_decision_draft(project)["proposals"]:
+        refs = {key for aggregate in proposal["knowledge_after"].values()
+                for item in aggregate["items"] for key in item["fragment_ids"]}
+        assert set(proposal["knowledge_evidence"]) == refs
+        for fragment in proposal["knowledge_evidence"].values():
+            assert all(set(r) == {"segment_id", "file_id", "part_id", "start", "end"}
+                       for r in fragment["source_range"])
 
 
 @pytest.mark.asyncio

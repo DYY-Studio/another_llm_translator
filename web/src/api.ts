@@ -84,6 +84,12 @@ export async function api<T>(
     }
     throw error;
   }
-  const value = await response.json().catch(() => null);
+  const value = await response.json().catch(() => {
+    throw new ApiError(response.status, {
+      code: "invalid_json_response",
+      params: {},
+      error: "服务器响应无法解析为 JSON",
+    });
+  });
   return value as T;
 }

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   ApiError,
+  api,
   apiErrorFromResponse,
   errorPayloadFrom,
   parseErrorPayload,
@@ -12,6 +13,15 @@ import {
   formatErrorPayload,
   translateError,
 } from "../src/i18n.ts";
+
+test("successful HTTP response with invalid JSON fails explicitly", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => new Response("{", { status: 200 }));
+  await assert.rejects(api("/terms/decision"), (error) => {
+    assert.ok(error instanceof ApiError);
+    assert.equal(error.payload.code, "invalid_json_response");
+    return true;
+  });
+});
 
 test("preserves structured API error fields and HTTP status", async () => {
   const error = await apiErrorFromResponse(new Response(JSON.stringify({

@@ -188,8 +188,17 @@ def current_decision_draft(project: Path) -> dict[str, Any] | None:
         from .term_knowledge import evidence as knowledge_evidence
         fragments = knowledge_evidence(project, draft["source_library"]) if refs else {}
         for proposal in draft["proposals"]:
-            proposal["knowledge_evidence"] = {key: {field:fragments[key][field] for field in ("id","owner","original_owner","origin","text","state","valid","source_range","_positions")}
-                                              for key in refs if key in fragments}
+            proposal_refs = {key for aggregate in [*proposal.get("knowledge_before", {}).values(), *proposal.get("knowledge_after", {}).values()]
+                             if aggregate for item in aggregate["items"] for key in item["fragment_ids"]}
+            proposal["knowledge_evidence"] = {}
+            for key in proposal_refs:
+                if key not in fragments:
+                    continue
+                fragment = fragments[key]
+                value = {field: fragment[field] for field in ("id", "owner", "original_owner", "origin", "text", "state", "valid", "_positions")}
+                value["source_range"] = [{field: r[field] for field in ("segment_id", "file_id", "part_id", "start", "end")}
+                                         for r in fragment["source_range"]] if fragment["source_range"] else None
+                proposal["knowledge_evidence"][key] = value
         return draft
     return None
 
