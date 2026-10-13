@@ -26,6 +26,8 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
   const [items, setItems] = useState<KnowledgeItem[]>(() => view.items.map(({ text, fragment_ids }) => ({ text, fragment_ids: [...fragment_ids] })));
   const [expandedReferences, setExpandedReferences] = useState<Set<number>>(() => new Set());
   const fragments = useMemo(() => new Map(view.fragments.map((fragment) => [fragment.id, fragment])), [view.fragments]);
+  const [explanationsExpanded, setExplanationsExpanded] = useState(false);
+  const [fragmentsExpanded, setFragmentsExpanded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const t = (key: string) => translate(`knowledge.${key}`, language);
@@ -57,9 +59,14 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
   }
 
   return <section className="entity-knowledge" aria-label={t("title")}>
-    <header><strong>{t("title")}</strong><span className={view.status === "stale" ? "error-text" : "muted"}>{t(view.status)}</span></header>
+    <details className="knowledge-explanations" onToggle={(event) => {
+      if (event.target === event.currentTarget) setExplanationsExpanded(event.currentTarget.open);
+    }}>
+      <summary><strong>{t("title")}</strong><span className={view.status === "stale" ? "error-text" : "muted"}>{t(view.status)}</span></summary>
+      {explanationsExpanded && <div className="knowledge-explanation-content">
     {view.members.length > 1 && <small>{t("shared")}</small>}
     {!items.length && <small>{t("noItems")}</small>}
+    <div className="knowledge-items knowledge-scroll">
     {items.map((item, index) => <fieldset className="knowledge-item" key={index} disabled={saving}>
       <legend>{t("title")} {index + 1}</legend>
       <textarea aria-label={`${t("title")} ${index + 1}`} value={item.text} onChange={(event) => replace(index, { ...item, text: event.target.value })} />
@@ -84,13 +91,17 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
         </div>}
       </details>
     </fieldset>)}
+    </div>
     <div className="editor-actions">
       <button className="quiet-button" type="button" disabled={saving} onClick={() => setItems((previous) => [...previous, { text: "", fragment_ids: [] }])}>{t("add")}</button>
       <button className="primary-button" type="button" disabled={saving || items.some((item) => !item.text.trim())} onClick={() => submit({ action: "save_items", items })}>{t("save")}</button>
       {view.status === "pending" && view.items.length > 0 && <button className="quiet-button" type="button" disabled={saving} onClick={() => submit({ action: "confirm_keep" })}>{t("keep")}</button>}
     </div>
-    <details className="knowledge-fragments">
+      </div>}
+    </details>
+    <details className="knowledge-fragments" onToggle={(event) => setFragmentsExpanded(event.currentTarget.open)}>
       <summary>{t("fragments")} ({view.fragments.length})</summary>
+      {fragmentsExpanded && <div className="knowledge-fragment-list knowledge-scroll">
       {view.fragments.map((fragment) => <article key={fragment.id}>
         <div className="knowledge-fragment-content">
           <p>{fragment.text}</p>
@@ -104,6 +115,7 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
         </div>
         {fragment.state !== "superseded" && <button className={fragment.state === "active" ? "danger-button" : "quiet-button"} type="button" disabled={saving} onClick={() => submit({ action: "set_fragment_enabled", fragment_id: fragment.id, enabled: fragment.state !== "active" })}>{t(fragment.state === "active" ? "disable" : "restore")}</button>}
       </article>)}
+      </div>}
     </details>
     {error && <p className="error-text" role="alert">{error}</p>}
   </section>;

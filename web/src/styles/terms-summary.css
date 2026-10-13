@@ -195,7 +195,10 @@
 .summary-focused-boundary { margin: 0 0 14px; color: var(--muted); overflow-wrap: anywhere; font-size: 13px; }
 
 .entity-knowledge { display: grid; gap: 10px; min-width: 0; padding-block: 12px; border-block: 1px solid var(--border); }
-.entity-knowledge > header { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; }
+.knowledge-explanations > summary > span { float: right; margin-left: 8px; }
+.knowledge-explanation-content { display: grid; gap: 10px; margin-top: 10px; }
+.knowledge-scroll { max-height: min(400px, 40vh); overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 4px 8px 4px 0; }
+.knowledge-items { display: grid; gap: 10px; }
 .knowledge-item { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 10px; border: 1px solid var(--border); }
 .knowledge-item textarea { width: 100%; box-sizing: border-box; }
 .knowledge-item-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
@@ -206,7 +209,7 @@
 .knowledge-reference > span { min-width: 0; }
 .knowledge-reference span { white-space: pre-wrap; overflow-wrap: anywhere; }
 .knowledge-reference small { display: block; color: var(--muted); }
-.entity-knowledge > .editor-actions { position: static; flex-wrap: wrap; padding-top: 4px; background: none; }
+.knowledge-explanation-content > .editor-actions { position: static; flex-wrap: wrap; padding-top: 4px; background: none; }
 .knowledge-fragments article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px; margin: 10px 0 0 12px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .knowledge-fragment-content { display: grid; gap: 6px; min-width: 0; }
 .knowledge-fragment-sources { display: block; color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }

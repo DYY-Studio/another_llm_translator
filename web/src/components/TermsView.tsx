@@ -1178,12 +1178,6 @@ export function TermsView({
                 ))}
               </div>
             )}
-            {selected && !selected.disabled && data?.terms_revision != null ? (
-              <EntityKnowledgeEditor key={`${projectId}:${selected.entity_key}:${data.terms_revision}`}
-                project={project} projectId={projectId} normalized={selected.normalized} revision={data.terms_revision}
-                language={language} onChanged={setCurrentData}
-                onFindSegment={onFindSegment} />
-            ) : !selected ? <small>{translate("knowledge.saveTermFirst", language)}</small> : null}
             <div className="term-alias-editor">
               <strong>{translate("terms.aliases", language)}</strong>
               {form.aliases.map((alias, index) => (
@@ -1195,6 +1189,12 @@ export function TermsView({
               ))}
               <button className="quiet-button" disabled={selected?.disabled} onClick={() => setForm({ ...form, aliases: [...form.aliases, ""] })}>{translate("terms.addAlias", language)}</button>
             </div>
+            {selected && !selected.disabled && data?.terms_revision != null ? (
+              <EntityKnowledgeEditor key={`${projectId}:${selected.entity_key}:${data.terms_revision}`}
+                project={project} projectId={projectId} normalized={selected.normalized} revision={data.terms_revision}
+                language={language} onChanged={setCurrentData}
+                onFindSegment={onFindSegment} />
+            ) : !selected ? <small>{translate("knowledge.saveTermFirst", language)}</small> : null}
             {message && <p className={message.startsWith("Error") ? "error-text" : "success-text"}>{message}</p>}
           </div>
         )}
