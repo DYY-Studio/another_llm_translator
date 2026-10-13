@@ -559,6 +559,12 @@ _TERM_DECLARATION_SUFFIX = {
 }
 
 
+_TERMINOLOGY_DECISION_PHASE_PREFIX["knowledge"] = {
+    "zh-CN": "最后阶段只聚合当前实体的说明。fragments 是全部证据，current_items 仅作已应用说明对照。source_range 是揭示或证据范围，不等于事实生效范围。按证据组织稳定身份和变化，保留不确定性，不得凭排列顺序推断事件时间。",
+    "en": "The last phase only aggregates the current entity's explanation. fragments contains all evidence; current_items is only the applied comparison. source_range is evidence/revelation coverage, not a fact's effective interval. Preserve identity, changes and uncertainty without inferring event time from input order.",
+}
+
+
 def full_prompt(
     stage: str,
     middle: str,

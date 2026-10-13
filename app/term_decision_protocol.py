@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-DECISION_RULES_VERSION = 9
+DECISION_RULES_VERSION = 10
 DECISION_ACTIONS = frozenset({"keep", "update", "disable", "needs_review"})
 SIMPLE_ACTION_KEYS = frozenset({"type", "normalized", "action", "reason"})
 PATCH_FIELDS = frozenset(
     {
         "category",
-        "description",
         "preferred_translation",
         "aliases",
         "group_primary",
@@ -23,11 +22,9 @@ _COMMON_PROTOCOL = {
         "action/reason 均为只读数据，不得输出 anchor 决策。每条记录必须有非空字符串 "
         "reason。keep、disable、needs_review 必须且只能含 type、normalized、action、reason。"
         "update 必须且只能含 type、normalized、action、reason、changes；changes 是 Patch，"
-        "只能包含 category、description、preferred_translation、aliases、group_primary 中实际"
-        "需要修改的键。category、description、preferred_translation、group_primary 为字符串或 "
-        "JSON null；aliases 为字符串数组。description 可保持、清为 null，或改写为简洁的目标语"
-        "说明；非空新说明必须由当前说明、evidence 中的源文样本或可见 anchors 支持，不得增加无"
-        "证据事实。aliases 只能使用本次 terms[]/anchors[] 中可见的 source/alias 原文，不得虚构"
+        "只能包含 category、preferred_translation、aliases、group_primary 中实际"
+        "需要修改的键。category、preferred_translation、group_primary 为字符串或 "
+        "JSON null；aliases 为字符串数组。description 是只读说明。aliases 只能使用本次 terms[]/anchors[] 中可见的 source/alias 原文，不得虚构"
         "或重复。group_primary "
         "只能为 null 或本次可见、启用且自身 group_primary=null 的根术语 normalized。"
         "禁止自指、指向 disabled 术语、成员指向成员以及任何链或循环。"
@@ -50,11 +47,9 @@ _COMMON_PROTOCOL = {
         "Every record requires a non-empty string "
         "reason. keep, disable, and needs_review contain exactly type, normalized, action, reason. "
         "update contains exactly type, normalized, action, reason, changes. changes is a Patch and "
-        "may contain only fields actually changed from category, description, preferred_translation, "
+        "may contain only fields actually changed from category, preferred_translation, "
         "aliases, and group_primary. Nullable scalar fields use strings or JSON null; aliases is a "
-        "string array. description may be retained, cleared to null, or rewritten as a concise target-language "
-        "explanation. A non-empty rewrite must be supported by the current description, source samples in "
-        "evidence, or visible anchors and must not add unsupported facts. aliases may use "
+        "string array. description is read-only context. aliases may use "
         "only source/alias spellings visible in this request. group_primary is null or the normalized "
         "of a visible enabled root whose group_primary is null. It must not self-reference, target a "
         "disabled term or another member, or form a chain or cycle. Root aliases must not equal the normalized source "
@@ -120,7 +115,15 @@ _PHASE_PROTOCOL = {
 
 
 def terminology_decision_protocol(language: str, *, phase: str) -> str:
-    return f"{_PHASE_PROTOCOL[phase][language]}\n{_COMMON_PROTOCOL[language]}"
+    if phase == "knowledge":
+        return {
+            "zh-CN": '只输出一条 {"type":"entity_knowledge","entity":"输入 entity","items":[{"text":"目标语说明","refs":["K1"]}],"reason":"更新理由"} 和末行 {"type":"end"}。items 可以为空。每条说明必须引用本次 fragments 中至少一个 id，不得引用 current_items 或虚构引用。归并重复信息，保留有证据的身份、关系、变化与不确定性，不新增事实。不修改名称、译名或分组。',
+            "en": 'Output one {"type":"entity_knowledge","entity":"input entity","items":[{"text":"target-language explanation","refs":["K1"]}],"reason":"reason"}, followed by {"type":"end"}. items may be empty. Each item must cite at least one id from fragments; never cite current_items or invent refs. Merge repeated information; preserve supported identity, relationships, changes and uncertainty. Do not add facts or change names, translations or groups.',
+        }[language]
+    return f"{_PHASE_PROTOCOL[phase][language]}\n{_COMMON_PROTOCOL[language]}\n" + (
+        "description 是只读上下文，说明只能在最后的 knowledge 阶段修改。" if language == "zh-CN"
+        else "description is read-only context; explanations may only change in the final knowledge phase."
+    )
 
 
 _FINAL_REVIEW_PROTOCOL = {
@@ -129,9 +132,9 @@ _FINAL_REVIEW_PROTOCOL = {
         "并逐字照录 normalized。anchors[]、evidence、windows、conflicts、source、disabled 和 prior action/reason "
         "均为只读数据，不得输出 anchor 决策。每条记录必须有非空字符串 reason。终审 action 只能是 keep、update 或 disable；"
         "keep、disable 必须且只能含 type、normalized、action、reason，update 必须且只能含 type、normalized、action、reason、changes。"
-        "changes 是 Patch，只能包含 category、description、preferred_translation、aliases、group_primary 中实际需要修改的键；"
-        "category、description、preferred_translation、group_primary 为字符串或 JSON null，aliases 为字符串数组。"
-        "description 的非空改写必须由当前说明、evidence 中的源文样本或可见 anchors 支持，不得增加无证据事实。"
+        "changes 是 Patch，只能包含 category、preferred_translation、aliases、group_primary 中实际需要修改的键；"
+        "category、preferred_translation、group_primary 为字符串或 JSON null，aliases 为字符串数组。"
+        "description 是只读说明。"
         "aliases 只能使用本次 terms[]/anchors[] 中可见的 source/alias 原文，不得虚构或重复。"
         "group_primary 只能为 null 或本次可见、启用且自身 group_primary=null 的根术语 normalized；禁止自指、指向 disabled 术语、"
         "成员指向成员以及任何链或循环。主术语 aliases 不得与启用组成员的 source 或 aliases 规范化后相同；"
@@ -150,9 +153,8 @@ _FINAL_REVIEW_PROTOCOL = {
         "and prior action/reason are read-only; never output an anchor decision. Every record requires a non-empty string reason. "
         "Final-review action may only be keep, update, or disable. keep and disable contain exactly type, normalized, action, reason; "
         "update contains exactly type, normalized, action, reason, changes. changes is a Patch and may contain only fields actually changed "
-        "from category, description, preferred_translation, aliases, and group_primary. category, description, preferred_translation, and "
-        "group_primary use strings or JSON null; aliases is a string array. A non-empty description rewrite must be supported by the current "
-        "description, source samples in evidence, or visible anchors and must not add unsupported facts. aliases may use only source/alias "
+        "from category, preferred_translation, aliases, and group_primary. category, preferred_translation, and "
+        "group_primary use strings or JSON null; aliases is a string array. description is read-only context. aliases may use only source/alias "
         "spellings visible in this request. group_primary is null or the normalized of a visible enabled root whose group_primary is null; "
         "it must not self-reference, target a disabled term or another member, or form a chain or cycle. "
         "Root aliases must not equal the normalized source or aliases of active group members. Keep the member "

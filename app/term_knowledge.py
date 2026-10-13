@@ -161,7 +161,8 @@ def entity_view(
     for item in items:
         item["sources"] = [known[key]["source_range"] for key in item["fragment_ids"] if key in known]
     return {"entity_key": root, "members": members, "status": status, "items": items,
-            "fragments": fragments, "input_version": version}
+            "fragments": fragments, "input_version": version,
+            "source_order": _source_order(project, [f for f in fragments if f["state"] == "active"])}
 
 
 def validate_items(view: dict[str, Any], items: Any, *, allow_manual: bool = False) -> list[dict[str, Any]]:
@@ -223,3 +224,73 @@ def project_descriptions(project: Path, library: dict[str, Any]) -> None:
                 term["entity_key"] = root
                 term["knowledge_status"] = view["status"]
                 term["description_items"] = view["items"]
+
+
+def knowledge_payload(view: dict[str, Any], target_language: str) -> tuple[dict[str, Any], dict[str, str]]:
+    active = [f for f in view["fragments"] if f["state"] == "active"]
+    refs = {f"K{index}": f["id"] for index, f in enumerate(active, 1)}
+    base = {
+        "phase": "knowledge", "entity": view["entity_key"], "members": view["members"],
+        "target_language": target_language,
+        "current_items": [{"text": item["text"]} for item in view["items"]],
+        "fragments": [{"id": key, "text": f["text"], "owner": f["owner"],
+                       "origin": f["origin"], "source_range": [
+                           {**{k:r[k] for k in ("segment_id","file_id","part_id","start","end")},
+                            "position": f["_positions"][r["segment_id"]]} for r in f["source_range"]
+                       ] if f["source_range"] else None}
+                      for key, f in zip(refs, active, strict=True)],
+    }
+    return base, refs
+
+
+async def aggregate_entity(llm: Any, view: dict[str, Any], prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+    """Aggregate one complete entity input, with checked request-local citations."""
+    from .errors import RequestSizeError
+    from .execution import estimate_messages, render_messages
+    from .llm_response import parse_jsonl_document
+    from .term_decision_batches import _request_limits
+    active = [f for f in view["fragments"] if f["state"] == "active"]
+    if any(not f["valid"] for f in active):
+        raise UsageError("实体证据已过期，请重新扫描或停用失效片段")
+    if not active:
+        return {"items": [], "reason": "没有说明证据", "input_version": view["input_version"]}
+    base, refs = knowledge_payload(view, config["project"]["target_language"])
+    parent_request_id = None
+    feedback = ""
+    for attempt in range(int(config["retry"]["format_max_attempts"]) + 1):
+        payload = {**base, **({"validation_feedback": feedback} if feedback else {})}
+        messages = render_messages(prompt, payload)
+        estimate = estimate_messages(messages, float(config["execution"]["token_safety_factor"]))
+        _, hard, context, itpm = _request_limits(config)
+        if estimate > hard:
+            raise RequestSizeError(f"实体完整证据请求估算 {estimate} tokens，超过硬限制 {hard} tokens", reason="itpm" if 0 < itpm < context else "context")
+        response, request_id = await llm.chat(
+            messages=messages, temperature=float(config["llm"]["temperature_terminology_decision"]),
+            estimated_input_tokens=estimate, request_id=new_record_id("REQ"), parent_request_id=parent_request_id,
+        )
+        try:
+            document = parse_jsonl_document(response.content, record_type="entity_knowledge")
+            if document.errors or not document.complete or len(document.records) != 1:
+                raise UsageError("实体说明响应必须含一条完整 entity_knowledge 和 end")
+            record = document.records[0]
+            if set(record) != {"type", "entity", "items", "reason"} or record["entity"] != view["entity_key"]:
+                raise UsageError("实体说明响应目标或字段错误")
+            if not isinstance(record["reason"], str) or not record["reason"].strip():
+                raise UsageError("实体说明响应缺少理由")
+            if not isinstance(record["items"], list):
+                raise UsageError("说明条目必须是数组")
+            items = []
+            for item in record["items"]:
+                if not isinstance(item, dict) or set(item) != {"text", "refs"}:
+                    raise UsageError("说明条目必须包含 text 和 refs")
+                if not isinstance(item["refs"], list) or not item["refs"] or not all(isinstance(r, str) and r in refs for r in item["refs"]):
+                    raise UsageError("说明引用必须来自本次实体证据")
+                items.append({"text": item["text"], "fragment_ids": [refs[r] for r in item["refs"]]})
+            clean = validate_items(view, items)
+            return {"items": clean, "reason": record["reason"], "input_version": view["input_version"]}
+        except UsageError as exc:
+            if attempt >= int(config["retry"]["format_max_attempts"]):
+                raise
+            feedback = str(exc)
+            parent_request_id = request_id
+    raise AssertionError("unreachable")

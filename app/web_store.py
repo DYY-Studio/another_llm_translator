@@ -1,4 +1,5 @@
 from __future__ import annotations
+from copy import deepcopy
 
 import asyncio
 
@@ -1444,6 +1445,7 @@ class WebStore:
             overrides=[overrides[key] for key in sorted(overrides)],
             origin=origin,
         )
+        from .term_knowledge import empty_knowledge
         term_record = record_header(
             "terminology_library",
             self.project_id,
@@ -1457,6 +1459,7 @@ class WebStore:
             ),
             terms=terms,
             origin=origin,
+            knowledge=deepcopy(library["knowledge"]) if library else empty_knowledge(),
         )
         write_json(
             self.project,

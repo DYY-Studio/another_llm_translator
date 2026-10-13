@@ -86,7 +86,6 @@ _TOKEN_SPLIT = re.compile(r"[\s・·･._—–\-]+")
 
 _STATE_FIELDS = (
     "category",
-    "description",
     "preferred_translation",
     "aliases",
     "group_primary",
@@ -105,7 +104,7 @@ _FINAL_REVIEW_PHASE = "final_review"
 
 
 def _phase_names(final_review: bool = False) -> tuple[str, ...]:
-    return (*_PHASES, _FINAL_REVIEW_PHASE, "containment") if final_review else (*_PHASES, "containment")
+    return (*_PHASES, _FINAL_REVIEW_PHASE, "containment", "knowledge") if final_review else (*_PHASES, "containment", "knowledge")
 
 _GroupViolation = tuple[str, tuple[str, ...]]
 
@@ -253,6 +252,7 @@ def _load_checkpoint(
     project_id: str,
     revision: int,
     known_terms: set[str],
+    knowledge_terms: set[str] | None = None,
     final_review: bool = False,
 ) -> dict[str, Any]:
     path = _checkpoint_path(project, run_id)
@@ -284,7 +284,7 @@ def _load_checkpoint(
         records = phases.get(phase)
         if not isinstance(records, dict):
             raise StorageError(f"术语决策检查点 {phase} 无效")
-        unknown = set(map(str, records)) - known_terms
+        unknown = set(map(str, records)) - (knowledge_terms if phase == "knowledge" and knowledge_terms is not None else known_terms)
         if unknown:
             raise StorageError(
                 "术语决策检查点包含未知术语：" + ", ".join(sorted(unknown)[:10])
@@ -542,7 +542,8 @@ def decision_plan(
         for key, state in states.items()
         if key not in protected and not state["disabled"]
     ]
-    if not eligible:
+    from .term_knowledge import entity_members, entity_view
+    if not eligible and all(entity_view(project, library, key)["status"] == "current" for key in entity_members(library)):
         raise UsageError("已发布术语全部受到人工 override 保护")
     evidence = _batches.collect_term_evidence(
         project, list(library.get("terms", [])), config
@@ -580,6 +581,14 @@ def decision_plan(
         spec=spec,
         conflicts=source_conflicts,
     )
+    from .term_knowledge import knowledge_payload
+    from .execution import estimate_messages, render_messages
+    knowledge_views = [entity_view(project, library, root) for root in entity_members(library)]
+    knowledge_views = [view for view in knowledge_views if view["status"] != "current"]
+    knowledge_tokens = sum(estimate_messages(
+        render_messages(prompts["knowledge"], knowledge_payload(view, config["project"]["target_language"])[0]),
+        float(config["execution"]["token_safety_factor"]),
+    ) for view in knowledge_views if any(f["state"] == "active" for f in view["fragments"]))
     return {
         "library": library,
         "config": config,
@@ -595,9 +604,10 @@ def decision_plan(
         "spec": spec,
         "protected_states": protected_states,
         "phase_one": phase_one,
-        "estimated_requests": len(phase_one) + len(phase_two),
-        "estimated_input_tokens": phase_one_tokens + phase_two_tokens,
-        "total_steps": len(eligible) * 2,
+        "estimated_requests": len(phase_one) + len(phase_two) + sum(any(f["state"] == "active" for f in view["fragments"]) for view in knowledge_views),
+        "estimated_input_tokens": phase_one_tokens + phase_two_tokens + knowledge_tokens,
+        "total_steps": len(eligible) * 2 + len(knowledge_views),
+        "knowledge_pending": len(knowledge_views),
     }
 
 async def run_terminology_decision(
@@ -730,6 +740,7 @@ async def run_terminology_decision(
         project_id=str(metadata["project_id"]),
         revision=revision,
         known_terms=eligible_terms,
+        knowledge_terms=set(states),
         final_review=final_review,
     )
     tentative = deepcopy(states)
@@ -744,8 +755,8 @@ async def run_terminology_decision(
     if consistency_decisions and len(decisions) != len(eligible):
         raise StorageError("术语决策检查点在第一阶段完成前包含第二阶段结果")
     containment_decisions = _checkpoint_decisions(checkpoint, "containment")
-    completed = len(decisions) + len(consistency_decisions) + len(review_decisions) + len(containment_decisions)
-    total = len(eligible) * 2 + len(containment_decisions)
+    completed = len(decisions) + len(consistency_decisions) + len(review_decisions) + len(containment_decisions) + len(checkpoint["phases"]["knowledge"])
+    total = len(eligible) * 2 + len(containment_decisions) + len(checkpoint["phases"]["knowledge"])
     final_review_target_count = 0
     containment_components: list[set[str]] = []
     usage_invoked = completed < total
@@ -756,6 +767,8 @@ async def run_terminology_decision(
     containment_base: dict[str, dict[str, Any]] | None = None
     review_target_ids: set[str] = set()
     final_responses_complete = False
+    knowledge_updates: dict[str, Any] = {}
+    knowledge_errors: dict[str, str] = {}
 
     def save_draft(failure: AppError | None = None) -> dict[str, Any]:
         draft_conflicts = _merge_conflict_evidence(
@@ -780,6 +793,8 @@ async def run_terminology_decision(
             prompt_fingerprint=_composite_fingerprint(checkpoint, "prompt_fingerprint"),
             spec=spec,
             reviewed_components=containment_components,
+            knowledge_updates=knowledge_updates,
+            knowledge_errors=knowledge_errors,
         )
         atomic_write_json(_drafts._draft_path(project, run_id), draft)
         manifest = read_json(project, run_dir / "manifest.json")
@@ -1188,7 +1203,7 @@ async def run_terminology_decision(
             target_ids = {str(item["normalized"]) for item in containment_focus}
             if set(containment_decisions) - target_ids:
                 raise StorageError("包含关系复核检查点包含非当前目标术语")
-            total = len(eligible) * 2 + final_review_target_count + len(containment_focus)
+            total = len(eligible) * 2 + final_review_target_count + len(containment_focus) + len(checkpoint["phases"]["knowledge"])
             usage_invoked = usage_invoked or completed < total
             remaining = [item for item in containment_focus if item["normalized"] not in containment_decisions]
             if containment_focus:
@@ -1258,42 +1273,81 @@ async def run_terminology_decision(
                     for key in component & eligible_terms:
                         final[key] = deepcopy(containment_base[key])
                         decisions[key] = {"action": "needs_review", "reason": reason}
-            usage = llm.usage_summary()
-        if not final_review:
-            _recover_invalid_relationship_components(
-                original=states,
-                final=final,
-                decisions=decisions,
-                language=language,
-                spec=spec,
-            )
-        final_conflicts = _effective_conflicts(project, final, source_conflicts)
-        if final_review:
-            unresolved = sorted(
-                normalized
-                for normalized, conflicts in final_conflicts.items()
-                if not final[normalized].get("disabled") and _has_conflicts(conflicts)
-            )
-            if unresolved:
-                raise UsageError(
-                    "术语自动终审后仍有未解决冲突："
-                    + ", ".join(unresolved[:10])
+            if not final_review:
+                _recover_invalid_relationship_components(
+                    original=states,
+                    final=final,
+                    decisions=decisions,
+                    language=language,
+                    spec=spec,
                 )
-            if any(
-                decision.get("action") == "needs_review" and not any(normalized in component for component in containment_components)
-                for normalized, decision in decisions.items()
-            ):
-                raise UsageError("术语自动终审后仍存在 needs_review 决策")
-        else:
-            _recover_invalid_relationship_components(
-                original=states,
-                final=final,
-                decisions=decisions,
-                language=language,
-                spec=spec,
-                conflicts=final_conflicts,
-            )
-        _validate_final_states(project, final, original=states, spec=spec)
+            final_conflicts = _effective_conflicts(project, final, source_conflicts)
+            if final_review:
+                unresolved = sorted(
+                    normalized
+                    for normalized, conflicts in final_conflicts.items()
+                    if not final[normalized].get("disabled") and _has_conflicts(conflicts)
+                )
+                if unresolved:
+                    raise UsageError(
+                        "术语自动终审后仍有未解决冲突："
+                        + ", ".join(unresolved[:10])
+                    )
+                if any(
+                    decision.get("action") == "needs_review" and not any(normalized in component for component in containment_components)
+                    for normalized, decision in decisions.items()
+                ):
+                    raise UsageError("术语自动终审后仍存在 needs_review 决策")
+            else:
+                _recover_invalid_relationship_components(
+                    original=states,
+                    final=final,
+                    decisions=decisions,
+                    language=language,
+                    spec=spec,
+                    conflicts=final_conflicts,
+                )
+            _validate_final_states(project, final, original=states, spec=spec)
+            from .term_knowledge import aggregate_entity, entity_members, entity_view, save_items
+            knowledge_library = deepcopy(library)
+            knowledge_library["terms"] = [deepcopy(state) for state in final.values() if not state.get("disabled")]
+            views = [entity_view(project, knowledge_library, root) for root in entity_members(knowledge_library)]
+            unresolved_names = {key for key, decision in decisions.items() if decision["action"] == "needs_review"}
+            targets = [view for view in views if view["status"] != "current" and not set(view["members"]) & unresolved_names]
+            total = len(eligible) * 2 + final_review_target_count + len(containment_focus) + len(targets)
+            cached = checkpoint["phases"]["knowledge"]
+            already_cached = set(cached)
+            usage_invoked = usage_invoked or any(view["entity_key"] not in cached for view in targets)
+            for view in targets:
+                root = view["entity_key"]
+                try:
+                    if any(f["state"] == "active" and not f["valid"] for f in view["fragments"]):
+                        raise UsageError("实体证据已过期，请重新扫描或停用失效片段")
+                    if root in cached:
+                        result = deepcopy(cached[root]["decision"])
+                        if result["input_version"] != view["input_version"] or result["source_order"] != view["source_order"]:
+                            raise UsageError("实体说明检查点输入已变化，请重新生成")
+                    else:
+                        result = await aggregate_entity(llm, view, prompts["knowledge"], config)
+                        result["source_order"] = view["source_order"]
+                        cached[root] = {"decision": deepcopy(result), "decision_fingerprint": fingerprint,
+                                        "model_fingerprint": model_fingerprint, "prompt_fingerprint": prompt_fingerprints["knowledge"]}
+                        atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
+                    save_items(project, knowledge_library, root, result["items"])
+                    knowledge_updates[root] = {"aggregate": deepcopy(knowledge_library["knowledge"]["entities"][root]),
+                                               "members": view["members"], "reason": result["reason"]}
+                    if root not in already_cached:
+                        completed += 1
+                    if on_progress:
+                        on_progress(completed, len(knowledge_errors), total)
+                except AppError as exc:
+                    from .errors import FatalExternalError
+                    if isinstance(exc, (FatalExternalError, StorageError)):
+                        raise
+                    knowledge_errors[root] = str(exc)
+            if knowledge_errors:
+                raise UsageError("实体说明聚合失败：" + "；".join(f"{root}: {error}" for root, error in knowledge_errors.items()))
+            usage = llm.usage_summary()
         draft = save_draft()
         manifest = read_json(project, run_dir / "manifest.json")
         manifest.pop("last_interruption", None)
@@ -1331,7 +1385,9 @@ async def run_terminology_decision(
         if active_llm is not None:
             usage = active_llm.usage_summary()
         record_resumable_interruption(usage, exc)
-        if final_review and review_base is not None and isinstance(exc, AppError) and not isinstance(exc, StorageError):
+        if knowledge_errors and isinstance(exc, AppError):
+            save_draft(exc)
+        elif final_review and review_base is not None and isinstance(exc, AppError) and not isinstance(exc, StorageError):
             # Rebuild from completed dependency components, never partial relationship patches.
             if not final_responses_complete:
                 final = deepcopy(review_base)

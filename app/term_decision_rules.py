@@ -24,7 +24,6 @@ from .term_library import build_term_library_rows, normalize_term
 _GroupViolation = tuple[str, tuple[str, ...]]
 _STATE_FIELDS = (
     "category",
-    "description",
     "preferred_translation",
     "aliases",
     "group_primary",
@@ -515,7 +514,7 @@ def _analyze_decisions(
         else:
             missing_keys = sorted(SIMPLE_ACTION_KEYS - set(value))
             extra_keys = set(value) - SIMPLE_ACTION_KEYS
-            unknown_extra_keys = sorted(extra_keys - PATCH_FIELDS)
+            unknown_extra_keys = sorted(extra_keys - (PATCH_FIELDS | {"description"}))
             details = []
             if missing_keys:
                 details.append(f"缺少字段 {', '.join(missing_keys)}")
@@ -523,7 +522,7 @@ def _analyze_decisions(
                 details.append(f"禁止字段 {', '.join(unknown_extra_keys)}")
             mismatched = sorted(
                 key
-                for key in extra_keys & PATCH_FIELDS
+                for key in extra_keys & (PATCH_FIELDS | {"description"})
                 if value[key] != expected[normalized].get(key)
             )
             if mismatched:

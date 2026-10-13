@@ -52,7 +52,7 @@ from app.term_decision_drafts import (
 from app.term_decision_protocol import DECISION_RULES_VERSION
 from app.web import create_app
 from app.web_store import WebStore
-from tests.helpers import llm_jsonl
+from tests.helpers import llm_jsonl, write_term_library
 from tests.test_documents import make_epub
 from tests.test_foundation import make_app_root
 
@@ -61,6 +61,14 @@ from tests.test_foundation import make_app_root
 def default_llm_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Provide the environment credential required at execution start."""
     monkeypatch.setenv("LLM_API_KEY", "test")
+
+
+@pytest.fixture(autouse=True)
+def deterministic_knowledge_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def aggregate(_llm, view, _prompt, _config):
+        return {"items": [{"text":f["text"],"fragment_ids":[f["id"]]} for f in view["fragments"] if f["state"]=="active" and f["valid"]],
+                "reason":"模拟聚合", "input_version":view["input_version"]}
+    monkeypatch.setattr("app.term_knowledge.aggregate_entity", aggregate)
 
 
 def create_decision_project(tmp_path: Path, text: str = "Alice Ally\nBob") -> Path:
@@ -75,7 +83,7 @@ def create_decision_project(tmp_path: Path, text: str = "Alice Ally\nBob") -> Pa
     )
     assert project is not None
     metadata = read_json(project, project / "project.json")
-    write_json(
+    write_term_library(
         project,
         project / "terminology" / "terms.json",
         record_header(
@@ -215,7 +223,6 @@ def decision_response(payload: dict) -> list[dict]:
                     "reason": "补全译名并清理说明",
                     "changes": {
                         "category": "女性人名",
-                        "description": None,
                         "preferred_translation": "爱丽丝",
                     },
                 }
@@ -308,6 +315,7 @@ def create_complete_legacy_group_run(
             decision_rules_version=DECISION_RULES_VERSION,
             phases={
                 "containment": {},
+                "knowledge": {},
                 "adjudication": {
                     key: checkpoint_record({"action": "keep", "reason": "保持"})
                     for key in ("alice", "bob")
@@ -1277,6 +1285,7 @@ def test_dry_run_plans_second_phase_instead_of_doubling_first(
         "consistency",
         "final_review",
         "containment",
+        "knowledge",
     }
 
 
@@ -1547,68 +1556,6 @@ def test_phase_two_keep_preserves_prior_review_with_scalar_conflicts() -> None:
     assert decisions["target"]["action"] == "keep"
 
 
-def test_description_patch_allows_rewrite_and_clear_but_rejects_type_and_noop() -> None:
-    rewrite = {**_batch_state("rewrite", "Rewrite"), "description": "旧说明；重复说明"}
-    clear = {**_batch_state("clear", "Clear"), "description": "无助于区分的说明"}
-    states = {"rewrite": rewrite, "clear": clear}
-    decisions, _, _, errors, _ = _analyze_decisions(
-        llm_jsonl(
-            [
-                {
-                    "type": "decision",
-                    "normalized": "rewrite",
-                    "action": "update",
-                    "reason": "依据当前说明与源文样本整理",
-                    "changes": {"description": "作品中的核心角色"},
-                },
-                {
-                    "type": "decision",
-                    "normalized": "clear",
-                    "action": "update",
-                    "reason": "现有说明没有区分作用",
-                    "changes": {"description": None},
-                },
-            ]
-        ),
-        [rewrite, clear],
-        visible_states=[rewrite, clear],
-        known_states=states,
-        read_only_terms=set(),
-        prompt_language="zh-CN",
-        review_states=None,
-        spec=None,
-        phase="adjudication",
-    )
-    assert errors == []
-    assert decisions["rewrite"]["after"]["description"] == "作品中的核心角色"
-    assert decisions["clear"]["after"]["description"] is None
-
-    for value, code in (
-        (" 旧说明；重复说明 ", "no_op_patch"),
-        (1, "invalid_patch_value"),
-    ):
-        _, _, _, errors, _ = _analyze_decisions(
-            llm_jsonl(
-                [
-                    {
-                        "type": "decision",
-                        "normalized": "rewrite",
-                        "action": "update",
-                        "reason": "测试宿主校验",
-                        "changes": {"description": value},
-                    }
-                ]
-            ),
-            [rewrite],
-            visible_states=[rewrite],
-            known_states={"rewrite": rewrite},
-            read_only_terms=set(),
-            prompt_language="zh-CN",
-            review_states=None,
-            spec=None,
-            phase="adjudication",
-        )
-        assert [error["code"] for error in errors] == [code]
 
 
 @pytest.mark.parametrize(
@@ -2475,7 +2422,7 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
         if item["normalized"] == "alice"
     )
     assert alice["preferred_translation"] == "爱丽丝"
-    assert alice["description"] == ""
+    assert alice["description"] == "unhelpful"
     assert current_decision_draft(project) is None
 
     rolled_back = rollback_decision(project, confirm=True)
@@ -2843,66 +2790,6 @@ async def test_final_review_failure_saves_draft_and_resumes_same_run(
     assert "final_review_error" not in current_decision_draft(project)
 
 
-@pytest.mark.asyncio
-async def test_grounded_description_rewrite_has_full_draft_diff_apply_and_rollback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project = create_decision_project(tmp_path)
-    rewritten = "女性主角，源文中亦称 Ally"
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        records = []
-        for term in payload["terms"]:
-            if payload["phase"] == "adjudication" and term["normalized"] == "alice":
-                records.append(
-                    {
-                        "type": "decision",
-                        "normalized": "alice",
-                        "action": "update",
-                        "reason": "当前说明与 Alice Ally 样本支持精简改写",
-                        "changes": {"description": rewritten},
-                    }
-                )
-            else:
-                records.append(
-                    {
-                        "type": "decision",
-                        "normalized": term["normalized"],
-                        "action": "keep",
-                        "reason": "保持当前有效裁决",
-                    }
-                )
-        return httpx.Response(
-            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
-        )
-
-    monkeypatch.setenv("LLM_API_KEY", "test")
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await run_terminology_decision(project, http_client=client)
-
-    draft = current_decision_draft(project)
-    assert draft is not None
-    proposal = draft["proposals"][0]
-    assert proposal["changes"] == ["description"]
-    assert proposal["before"][0]["description"] == "unhelpful"
-    assert proposal["after"][0]["description"] == rewritten
-
-    apply_decision_draft(project, confirm_all=True)
-    applied = next(
-        term
-        for term in read_json(project, project / "terminology" / "terms.json")["terms"]
-        if term["normalized"] == "alice"
-    )
-    assert applied["description"] == rewritten
-
-    rollback_decision(project, confirm=True)
-    restored = next(
-        term
-        for term in read_json(project, project / "terminology" / "terms.json")["terms"]
-        if term["normalized"] == "alice"
-    )
-    assert restored["description"] == "unhelpful"
 
 
 @pytest.mark.asyncio
@@ -2916,7 +2803,7 @@ async def test_conflict_candidates_reach_both_phases_and_new_resolution_applies(
     alice["preferred_translation"] = None
     alice["conflicts"]["categories"] = ["人物", "主角"]
     alice["conflicts"]["preferred_translations"] = ["爱丽丝", "艾丽丝"]
-    write_json(project, project / "terminology" / "terms.json", library)
+    write_term_library(project, project / "terminology" / "terms.json", library)
     seen: dict[str, dict[str, list[object]]] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -3111,7 +2998,7 @@ async def test_phase_one_needs_review_is_not_a_phase_two_anchor(
     alice = next(term for term in library["terms"] if term["normalized"] == "alice")
     alice["category"] = None
     alice["conflicts"]["categories"] = ["人物", "核心角色"]
-    write_json(project, project / "terminology" / "terms.json", library)
+    write_term_library(project, project / "terminology" / "terms.json", library)
     observed: dict[str, list[str]] = {}
 
     async def request_batch(*_: object, **kwargs: object) -> dict[str, dict]:
@@ -3601,7 +3488,7 @@ async def test_manual_review_queue_survives_apply_and_revision_change(
     # attached to the completed decision Run until explicitly handled.
     terms = read_json(project, project / "terminology" / "terms.json")
     terms["terms_revision"] = 99
-    write_json(project, project / "terminology" / "terms.json", terms)
+    write_term_library(project, project / "terminology" / "terms.json", terms)
     resolved = client.put(
         "/api/v1/projects/decision-demo/terms/decision/manual-review",
         json={"run_id": run_id, "normalized": "alice", "resolved": True},
@@ -3850,6 +3737,7 @@ def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
             decision_rules_version=DECISION_RULES_VERSION,
             phases={
                 "containment": {},
+                "knowledge": {},
                 "adjudication": {
                     "alice": {
                         "decision": {"action": "keep", "reason": "保持"},
@@ -3937,7 +3825,7 @@ def test_web_rejects_decision_resume_after_terms_revision_changes(
     run_id, _, _, _ = create_complete_legacy_group_run(project)
     terms = read_json(project, project / "terminology" / "terms.json")
     terms["terms_revision"] = 2
-    write_json(project, project / "terminology" / "terms.json", terms)
+    write_term_library(project, project / "terminology" / "terms.json", terms)
 
     client = TestClient(create_app(projects_root=project.parent))
     options = client.get(
@@ -3964,7 +3852,7 @@ def test_web_rejects_decision_task_without_published_terms(
     project = create_decision_project(tmp_path)
     terms = read_json(project, project / "terminology" / "terms.json")
     terms["terms"] = []
-    write_json(project, project / "terminology" / "terms.json", terms)
+    write_term_library(project, project / "terminology" / "terms.json", terms)
 
     client = TestClient(create_app(projects_root=project.parent))
     response = client.post(
@@ -4577,7 +4465,7 @@ def test_unrelated_draft_update_cannot_clear_scalar_conflicts(tmp_path: Path) ->
     alice["preferred_translation"] = None
     alice["conflicts"]["categories"] = ["人物", "角色"]
     alice["conflicts"]["preferred_translations"] = ["爱丽丝", "艾丽丝"]
-    write_json(project, project / "terminology" / "terms.json", library)
+    write_term_library(project, project / "terminology" / "terms.json", library)
     before_terms = deepcopy(library)
     before_overrides = read_json(project, project / "terminology" / "overrides.json")
     write_pending_decision_draft(
@@ -4641,7 +4529,7 @@ def test_unresolved_relationship_component_is_restored_and_cannot_be_applied(
         ],
         {},
     )
-    write_json(project, project / "terminology" / "terms.json", library)
+    write_term_library(project, project / "terminology" / "terms.json", library)
     assert all(
         term["conflicts"]["group_claims"]
         for term in library["terms"]
@@ -4722,8 +4610,7 @@ async def test_alias_transfer_and_disable_form_one_relationship_proposal(
                         "action": "update",
                         "reason": "转移简称",
                         "changes": {
-                            "description": None,
-                            "preferred_translation": "爱丽丝",
+                                "preferred_translation": "爱丽丝",
                             "aliases": ["Ally", "Bob"],
                         },
                     }
@@ -4782,8 +4669,7 @@ async def test_provable_alias_theft_exhausts_local_repair_without_implicit_group
                         "action": "update",
                         "reason": "接收 Bob 作为 alias",
                         "changes": {
-                            "description": None,
-                            "preferred_translation": "爱丽丝",
+                                "preferred_translation": "爱丽丝",
                             "aliases": ["Ally", "Bob"],
                         },
                     }
@@ -4836,7 +4722,6 @@ def test_decision_rejections_and_stale_revision(tmp_path: Path) -> None:
                         "normalized": "alice",
                         "source": "Alice",
                         "category": "人物",
-                        "description": None,
                         "preferred_translation": "爱丽丝",
                         "aliases": ["Ally"],
                         "group_primary": None,
@@ -4883,7 +4768,7 @@ def test_decision_rejections_and_stale_revision(tmp_path: Path) -> None:
     write_json(project, run_dir / "manifest.json", manifest)
     library = read_json(project, project / "terminology" / "terms.json")
     library["terms_revision"] = 2
-    write_json(project, project / "terminology" / "terms.json", library)
+    write_term_library(project, project / "terminology" / "terms.json", library)
     with pytest.raises(UsageError, match="已过期"):
         save_decision_rejections(project, [])
     with pytest.raises(UsageError, match="已过期"):
@@ -4915,7 +4800,6 @@ def test_atomic_apply_failure_preserves_terms(
                         "normalized": "alice",
                         "source": "Alice",
                         "category": "人物",
-                        "description": None,
                         "preferred_translation": "爱丽丝",
                         "aliases": ["Ally"],
                         "group_primary": None,
@@ -4993,7 +4877,7 @@ async def test_automatic_decision_resolves_existing_group_alias_overlap(tmp_path
     library = load_terms(project)
     library["terms"][0]["aliases"] = ["Bob"]
     library["terms"][1]["group_primary"] = "alice"
-    write_json(project, project / "terminology" / "terms.json", library)
+    write_term_library(project, project / "terminology" / "terms.json", library)
     def respond(request):
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         records = []
@@ -5031,7 +4915,7 @@ async def test_group_alias_partial_rejection_cannot_publish_invalid_combination(
     project = create_decision_project(tmp_path)
     library = load_terms(project)
     library["terms"][1]["group_primary"] = "alice"
-    write_json(project, project / "terminology" / "terms.json", library)
+    write_term_library(project, project / "terminology" / "terms.json", library)
     overrides = read_json(project, project / "terminology" / "overrides.json")
     def respond(request):
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -5071,7 +4955,7 @@ async def test_group_alias_conflict_does_not_modify_protected_root(tmp_path):
     library = load_terms(project)
     library["terms"][0]["aliases"] = ["Bob"]
     library["terms"][1]["group_primary"] = "alice"
-    write_json(project, project / "terminology" / "terms.json", library)
+    write_term_library(project, project / "terminology" / "terms.json", library)
     overrides = read_json(project, project / "terminology" / "overrides.json")
     overrides["overrides"] = [{"normalized": "alice", "source": "Alice", "aliases": ["Bob"]}]
     write_json(project, project / "terminology" / "overrides.json", overrides)
@@ -5097,7 +4981,7 @@ async def test_containment_review_uses_final_spelling_and_keeps_changes_atomic(t
     library = load_terms(project)
     library['terms'][0].update(source='Alice', normalized='alice', preferred_translation='爱丽丝', aliases=[])
     library['terms'][1].update(source='Alice Show', normalized='alice show', preferred_translation='爱丽丝节目')
-    write_json(project, project / 'terminology' / 'terms.json', library)
+    write_term_library(project, project / 'terminology' / 'terms.json', library)
     phases = []
 
     def handler(request):
@@ -5162,7 +5046,7 @@ async def test_containment_review_keeps_protected_spelling_read_only(tmp_path):
     library = load_terms(project)
     library['terms'][0].update(preferred_translation='艾丽丝', aliases=[])
     library['terms'][1].update(source='Alice Show', normalized='alice show', preferred_translation='爱丽丝节目')
-    write_json(project, project / 'terminology' / 'terms.json', library)
+    write_term_library(project, project / 'terminology' / 'terms.json', library)
     overrides = read_json(project, project / 'terminology' / 'overrides.json')
     overrides['overrides'] = [dict(normalized='alice', preferred_translation='艾丽丝')]
     write_json(project, project / 'terminology' / 'overrides.json', overrides)
@@ -5195,7 +5079,7 @@ async def test_containment_repair_cannot_create_new_unreviewed_conflict(tmp_path
     land = deepcopy(library['terms'][1])
     land.update(record_id='TERM-000003', source='Alice Land', normalized='alice land', preferred_translation='艾丽丝领地')
     library['terms'].append(land)
-    write_json(project, project / 'terminology' / 'terms.json', library)
+    write_term_library(project, project / 'terminology' / 'terms.json', library)
 
     def handler(request):
         payload = json.loads(json.loads(request.content)['messages'][1]['content'])
@@ -5346,7 +5230,7 @@ async def test_failed_final_review_retains_safe_proposals_for_manual_apply(tmp_p
         for term in payload["terms"]:
             record = dict(type="decision", normalized=term["normalized"], action="keep", reason="确认")
             if phase == "adjudication" and term["normalized"] == "bob":
-                record.update(action="update", changes={"description": "源文中的 Bob"})
+                record.update(action="update", changes={"category": "医生"})
             if phase == "consistency" and term["normalized"] == "alice":
                 record.update(action="needs_review", reason="待终审")
             if phase == "final_review" and failure == "format":
@@ -5372,7 +5256,7 @@ async def test_failed_final_review_retains_safe_proposals_for_manual_apply(tmp_p
     assert "pending_decision_draft" not in {item["code"] for item in preflight["blocking"]}
     applied = apply_decision_draft(project, confirm_all=True)
     assert applied["applied"] > 0
-    assert next(term for term in load_terms(project)["terms"] if term["normalized"] == "bob")["description"] == "源文中的 Bob"
+    assert next(term for term in load_terms(project)["terms"] if term["normalized"] == "bob")["category"] == "医生"
     manifest = read_json(project, project / "runs" / draft["run_id"] / "manifest.json")
     assert manifest["status"] == "completed"
     from app.term_decision import decision_resume_compatibility
@@ -5386,7 +5270,7 @@ async def test_final_review_failure_does_not_apply_partial_relationship_componen
     library = load_terms(project)
     library["terms"][0].update(aliases=[], preferred_translation="爱丽丝")
     library["terms"][1]["group_primary"] = "alice"
-    write_json(project, project / "terminology" / "terms.json", library)
+    write_term_library(project, project / "terminology" / "terms.json", library)
     monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
     alice_finished = asyncio.Event()
 
@@ -5422,7 +5306,7 @@ async def test_containment_request_failure_keeps_prior_changes_and_resumes(tmp_p
     library = load_terms(project)
     library['terms'][0].update(preferred_translation='爱丽丝', aliases=[])
     library['terms'][1].update(source='Alice Show', normalized='alice show', preferred_translation='爱丽丝节目')
-    write_json(project, project / 'terminology' / 'terms.json', library)
+    write_term_library(project, project / 'terminology' / 'terms.json', library)
     plan = decision_plan(project, final_review=True)
     plan['config']['retry']['http_max_attempts'] = 1
     phases = []
@@ -5491,7 +5375,7 @@ async def test_final_scalar_conflict_is_excluded_from_failed_draft_proposals(tmp
     project = create_decision_project(tmp_path)
     library = load_terms(project)
     library['terms'][0]['conflicts']['preferred_translations'] = ['爱丽丝', '艾丽丝']
-    write_json(project, project / 'terminology' / 'terms.json', library)
+    write_term_library(project, project / 'terminology' / 'terms.json', library)
 
     def handler(request):
         payload = json.loads(json.loads(request.content)['messages'][1]['content'])
@@ -5500,7 +5384,7 @@ async def test_final_scalar_conflict_is_excluded_from_failed_draft_proposals(tmp
             record = dict(type='decision', normalized=term['normalized'], action='keep', reason='确认')
             if payload['phase'] == 'adjudication':
                 changes = ({'preferred_translation': '艾丽丝', 'category': '人名'}
-                           if term['normalized'] == 'alice' else {'description': '源文中的 Bob'})
+                           if term['normalized'] == 'alice' else {'category': '医生'})
                 record.update(action='update', changes=changes)
             elif payload['phase'] == 'consistency' and term['normalized'] == 'alice':
                 record.update(action='update', changes={'preferred_translation': None})
@@ -5514,3 +5398,14 @@ async def test_final_scalar_conflict_is_excluded_from_failed_draft_proposals(tmp
     assert [proposal['normalized'] for proposal in draft['proposals']] == [['bob']]
     assert [item['normalized'] for item in draft['needs_review']] == ['alice']
     assert apply_decision_draft(project, confirm_all=True)['applied'] == 1
+
+
+def test_naming_decisions_cannot_write_scalar_description() -> None:
+    state = _batch_state("alice", "Alice")
+    for description in ("新说明", None, 1):
+        _, _, _, errors, _ = _analyze_decisions(
+            llm_jsonl([dict(type="decision", normalized="alice", action="update", reason="说明", changes={"description":description})]),
+            [state], visible_states=[state], known_states={"alice":state}, read_only_terms=set(),
+            prompt_language="zh-CN", review_states=None, spec=None, phase="adjudication",
+        )
+        assert [error["code"] for error in errors] == ["invalid_patch"]
