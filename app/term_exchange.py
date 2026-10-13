@@ -240,8 +240,8 @@ def import_terms(
     for root, members in entity_members(library_record).items():
         if root not in previous_entities:
             save_items(project, library_record, root, [{"text":f["text"], "fragment_ids":[key]}
-                       for key,f in known.items() if f["owner"] in members and f["state"] == "active"])
-    project_descriptions(project, library_record)
+                       for key,f in known.items() if f["owner"] in members and f["state"] == "active"], all_evidence=known)
+    project_descriptions(project, library_record, all_evidence=known)
     changed = (terms != list((library or {}).get("terms", [])) or overrides_list != original_overrides
                or knowledge != (library or {}).get("knowledge"))
     summary = {

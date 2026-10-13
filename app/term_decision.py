@@ -631,7 +631,7 @@ async def run_terminology_decision(
     plan: dict[str, Any] | None = None,
     final_review: bool = False,
 ) -> dict[str, Any]:
-    existing = _drafts.current_decision_draft(project)
+    existing = _drafts._read_pending_draft(project)
     if existing is not None and existing["run_id"] != resume_run_id and not replace_draft:
         raise UsageError("已有待处理术语决策草案；必须明确替换")
     if plan is None:
@@ -1344,7 +1344,7 @@ async def run_terminology_decision(
                         cached[root] = {"decision": deepcopy(result), "decision_fingerprint": fingerprint,
                                         "model_fingerprint": model_fingerprint, "prompt_fingerprint": prompt_fingerprints["knowledge"]}
                         atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
-                    save_items(project, knowledge_library, root, result["items"])
+                    save_items(project, knowledge_library, root, result["items"], all_evidence=known_fragments)
                     knowledge_updates[root] = {"aggregate": deepcopy(knowledge_library["knowledge"]["entities"][root]),
                                                "members": view["members"], "reason": result["reason"],
                                                "owner_moves": {old:new for old,new in owner_moves.items() if new in view["members"]}}

@@ -160,7 +160,7 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
     from app.config import load_project_config
     from app.sqlite_storage import read_json, write_json
     from app.term_library import term_normalization, load_terms
-    from app.term_knowledge import publish_evidence, save_items
+    from app.term_knowledge import publish_evidence, save_items, project_descriptions
     from app.term_decision import run_terminology_decision
     from app.term_decision_drafts import apply_decision_draft, current_decision_draft, rollback_decision
     from tests.helpers import llm_jsonl
@@ -172,6 +172,7 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
     prompt_path = project / "prompts" / prompt_file("terminology_decision", "zh-CN")
     prompt_path.write_text(prompt_path.read_text() + "\nNAME_RULE_SENTINEL", encoding="utf-8")
     save_items(project, data, "alpha", [{"text": "人工已有说明", "fragment_ids": []}])
+    project_descriptions(project, data)
     before = data["terms"][0]["description"]
     record = scan_record(project, "Alpha is a captain")
     publish_evidence(project, data, [record], term_normalization(load_project_config(project)))
@@ -273,6 +274,18 @@ async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(
         for fragment in proposal["knowledge_evidence"].values():
             assert all(set(r) == {"segment_id", "file_id", "part_id", "start", "end"}
                        for r in fragment["source_range"])
+    from collections import Counter
+    import app.term_knowledge as knowledge_module
+    from app.term_decision_drafts import apply_decision_draft
+    counts = Counter()
+    for name in ("evidence", "project_descriptions"):
+        original = getattr(knowledge_module, name)
+        def counted(*args, _name=name, _original=original, **kwargs):
+            counts[_name] += 1
+            return _original(*args, **kwargs)
+        monkeypatch.setattr(knowledge_module, name, counted)
+    assert apply_decision_draft(project, confirm_all=True)["applied"] == 2
+    assert counts == {"evidence": 2, "project_descriptions": 2}
 
 
 @pytest.mark.asyncio
@@ -294,7 +307,7 @@ async def test_entity_budget_fails_before_any_model_request(tmp_path: Path) -> N
 
 
 def test_group_changes_invalidate_shared_explanation_and_cross_entity_refs(tmp_path: Path) -> None:
-    from app.term_knowledge import entity_view, save_items
+    from app.term_knowledge import entity_view, save_items, project_descriptions
     project = make_project(tmp_path)
     data = library()
     save_items(project,data,"alpha",[{"text":"Alpha说明","fragment_ids":[]}])
@@ -305,6 +318,7 @@ def test_group_changes_invalidate_shared_explanation_and_cross_entity_refs(tmp_p
     data["terms"][1]["group_primary"] = "alpha"
     assert entity_view(project,data,"beta")["status"] == "stale"
     save_items(project,data,"alpha",[{"text":"共享实体说明","fragment_ids":[alpha_ref]}])
+    project_descriptions(project, data)
     assert data["terms"][0]["description"] == data["terms"][1]["description"] == "共享实体说明"
     data["terms"][1]["group_primary"] = None
     assert entity_view(project,data,"alpha")["status"] == "stale"
@@ -356,6 +370,7 @@ def test_generation_context_shares_entity_once_and_blocks_stale_hits(tmp_path: P
     data["terms"][0].update(aliases=[],category="name",preferred_translation="阿尔法")
     data["terms"].append(dict(source="Beta",normalized="beta",group_primary="alpha",aliases=[],category="name",preferred_translation="贝塔"))
     save_items(project,data,"alpha",[{"text":"共享说明","fragment_ids":[]}])
+    project_descriptions(project, data)
     segments = read_segments(project)
     cache = _TermMatchCache(data,TermNormalization("NFKC",True),10,segments=segments)
     matches = cache.for_items(segments)

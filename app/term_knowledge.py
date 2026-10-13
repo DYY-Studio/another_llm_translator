@@ -55,6 +55,8 @@ def evidence(project: Path, library: dict[str, Any]) -> dict[str, dict[str, Any]
     records = {r["record_id"]: r for r in read_terminology_candidates(project, ids)}
     segments = {s["segment_id"]: s for s in read_segments(project)}
     positions = {key: i for i, key in enumerate(segments)}
+    segment_digests = {}
+    record_sources = {}
     result = {}
     for key, fragment in fragments.items():
         value = {**fragment, "id": key, "source_range": None, "valid": True, "_positions": {}}
@@ -65,13 +67,18 @@ def evidence(project: Path, library: dict[str, Any]) -> dict[str, dict[str, Any]
             value["source"] = record["terms"][fragment["term_index"]]["source"]
             value["text"] = record["terms"][fragment["term_index"]]["description"]
             value["source_range"] = record["source_range"]
-            value["_positions"] = {r["segment_id"]: positions.get(r["segment_id"], -1) for r in record["source_range"]}
-            value["valid"] = all(
-                r["segment_id"] in segments
-                and digest(str(segments[r["segment_id"]]["source"])) == r["source_digest"]
-                and digest(segment_model_source(segments[r["segment_id"]])) == r["model_text_digest"]
-                for r in value["source_range"]
-            )
+            if fragment["candidate_id"] not in record_sources:
+                for r in record["source_range"]:
+                    segment_id = r["segment_id"]
+                    if segment_id in segments and segment_id not in segment_digests:
+                        segment = segments[segment_id]
+                        segment_digests[segment_id] = (digest(str(segment["source"])), digest(segment_model_source(segment)))
+                record_sources[fragment["candidate_id"]] = (
+                    {r["segment_id"]: positions.get(r["segment_id"], -1) for r in record["source_range"]},
+                    all(segment_digests.get(r["segment_id"]) == (r["source_digest"], r["model_text_digest"])
+                        for r in record["source_range"]),
+                )
+            value["_positions"], value["valid"] = record_sources[fragment["candidate_id"]]
         result[key] = value
     return result
 
@@ -196,23 +203,27 @@ def add_unsourced(knowledge: dict[str, Any], owner: str, text: str, origin: str)
     return key
 
 
-def save_items(project: Path, library: dict[str, Any], normalized: str, items: Any) -> None:
-    view = entity_view(project, library, normalized)
+def save_items(project: Path, library: dict[str, Any], normalized: str, items: Any, *,
+               all_evidence: dict[str, dict[str, Any]] | None = None) -> None:
+    known = all_evidence if all_evidence is not None else evidence(project, library)
+    view = entity_view(project, library, normalized, all_evidence=known)
     clean = validate_items(view, items, allow_manual=True)
     knowledge = require_knowledge(library)
     for item in clean:
         if not item["fragment_ids"]:
-            item["fragment_ids"] = [add_unsourced(knowledge, view["entity_key"], item["text"], "manual")]
-    view = entity_view(project, library, normalized)
+            key = add_unsourced(knowledge, view["entity_key"], item["text"], "manual")
+            item["fragment_ids"] = [key]
+            known[key] = {**knowledge["fragments"][key], "id": key, "source_range": None, "valid": True, "_positions": {}}
+    view = entity_view(project, library, normalized, all_evidence=known)
     knowledge["entities"][view["entity_key"]] = {
         "items": clean, "members": view["members"], "input_version": view["input_version"],
         "source_order": view["source_order"],
     }
-    project_descriptions(project, library)
 
 
-def confirm_keep(project: Path, library: dict[str, Any], normalized: str) -> None:
-    view = entity_view(project, library, normalized, require_current=True)
+def confirm_keep(project: Path, library: dict[str, Any], normalized: str, *,
+                 all_evidence: dict[str, dict[str, Any]] | None = None) -> None:
+    view = entity_view(project, library, normalized, require_current=True, all_evidence=all_evidence)
     saved = require_knowledge(library)["entities"].get(view["entity_key"])
     if saved is None:
         raise UsageError("尚无已应用说明，不能确认保持")
@@ -220,16 +231,18 @@ def confirm_keep(project: Path, library: dict[str, Any], normalized: str) -> Non
     saved["source_order"] = view["source_order"]
 
 
-def project_descriptions(project: Path, library: dict[str, Any]) -> None:
-    known = evidence(project, library)
+def project_descriptions(project: Path, library: dict[str, Any], *,
+                         all_evidence: dict[str, dict[str, Any]] | None = None) -> None:
+    known = all_evidence if all_evidence is not None else evidence(project, library)
+    terms = {term["normalized"]: term for term in library["terms"]}
     for root, members in entity_members(library).items():
         view = entity_view(project, library, root, all_evidence=known)
-        for term in library["terms"]:
-            if term["normalized"] in members:
-                term["description"] = "；".join(item["text"] for item in view["items"])
-                term["entity_key"] = root
-                term["knowledge_status"] = view["status"]
-                term["description_items"] = view["items"]
+        for member in members:
+            term = terms[member]
+            term["description"] = "；".join(item["text"] for item in view["items"])
+            term["entity_key"] = root
+            term["knowledge_status"] = view["status"]
+            term["description_items"] = view["items"]
 
 
 def _request_source_ranges(fragment: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -334,7 +347,8 @@ def update_entity(project: Path, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = payload.get("normalized")
         if not isinstance(normalized, str):
             raise UsageError("实体术语标识必须是字符串")
-        view = entity_view(project, library, normalized)
+        known = evidence(project, library)
+        view = entity_view(project, library, normalized, all_evidence=known)
         action = payload.get("action")
         fields = {"save_items": {"items"}, "confirm_keep": set(), "set_fragment_enabled": {"fragment_id", "enabled"}}
         if not isinstance(action, str) or action not in fields:
@@ -342,9 +356,9 @@ def update_entity(project: Path, payload: dict[str, Any]) -> dict[str, Any]:
         if set(payload) - {"normalized", "expected_revision", "action"} - fields[action]:
             raise UsageError("实体说明操作包含不支持的字段")
         if action == "save_items":
-            save_items(project, library, normalized, payload.get("items"))
+            save_items(project, library, normalized, payload.get("items"), all_evidence=known)
         elif action == "confirm_keep":
-            confirm_keep(project, library, normalized)
+            confirm_keep(project, library, normalized, all_evidence=known)
         elif action == "set_fragment_enabled":
             key = payload.get("fragment_id")
             if not isinstance(key, str) or key not in {f["id"] for f in view["fragments"]}:
@@ -355,11 +369,12 @@ def update_entity(project: Path, payload: dict[str, Any]) -> dict[str, Any]:
             if fragment["state"] == "superseded":
                 raise UsageError("已被重扫替换的片段不能恢复")
             fragment["state"] = "active" if payload["enabled"] else "disabled"
+            known[key]["state"] = fragment["state"]
         else:
             raise UsageError("不支持的实体说明操作")
         library["terms_revision"] += 1
         library["record_id"] = f'TERMS-{library["terms_revision"]}'
-        project_descriptions(project, library)
+        project_descriptions(project, library, all_evidence=known)
         overrides = read_json(project, project / "terminology" / "overrides.json")
         write_terminology_publication(project, terms=library, overrides=overrides)
         return library

@@ -1454,7 +1454,7 @@ class WebStore:
             overrides=[overrides[key] for key in sorted(overrides)],
             origin=origin,
         )
-        from .term_knowledge import empty_knowledge, remap_owner, transfer_alias_evidence, save_items, project_descriptions
+        from .term_knowledge import empty_knowledge, remap_owner, transfer_alias_evidence, save_items, project_descriptions, evidence
         term_record = record_header(
             "terminology_library",
             self.project_id,
@@ -1473,14 +1473,15 @@ class WebStore:
         if owner_move is not None:
             remap_owner(term_record, *owner_move)
         transfer_alias_evidence(term_record, term_normalization(self.config))
+        known = evidence(self.project, term_record)
         if description_items is not None:
             assert knowledge_target is not None
             if knowledge_target not in {item["normalized"] for item in terms}:
                 archived = {**term_record, "terms": [*terms, {"normalized": knowledge_target, "group_primary": None}]}
-                save_items(self.project, archived, knowledge_target, description_items)
+                save_items(self.project, archived, knowledge_target, description_items, all_evidence=known)
             else:
-                save_items(self.project, term_record, knowledge_target, description_items)
-        project_descriptions(self.project, term_record)
+                save_items(self.project, term_record, knowledge_target, description_items, all_evidence=known)
+        project_descriptions(self.project, term_record, all_evidence=known)
         from .sqlite_storage import write_terminology_publication
         write_terminology_publication(self.project, terms=term_record, overrides=override_record)
         return self.terms()
