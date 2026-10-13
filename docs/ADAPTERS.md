@@ -324,7 +324,7 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 术语查询附加 `entity_key`、`knowledge_status`（`current`、`pending`、`stale`）、`description_items`，保留只读 `description` 投影。条目只返回 `text` 和 `fragment_ids`。`GET /api/v1/projects/{name}/terms/knowledge?normalized=...` 返回条目、片段和导航所需的引用范围，不暴露来源摘要。
 
-翻译、校对、润色和联合粗翻的 `entity_knowledge.items` 提供 `text`、去重后的 `source_ranges` 和布尔 `unsourced`。`source_ranges` 使用上述连续区间结构；`current_positions` 仍携带当前 Segment 的标识、文件、分部和全局位置。每个命中实体只提供一次全部已应用条目。
+翻译、校对、润色和联合粗翻的 `entity_knowledge.items` 提供 `text`、`source_relation` 和布尔 `unsourced`，每个命中实体只提供一次全部已应用条目。`source_relation` 最多包含三个指示，例如 `["before 1", "within", "after 2"]`；无来源说明使用空数组及 `unsourced: true`，混合引用同时保留相对关系和无来源标记。位置以本次待处理源文的首尾范围为准，使用原 Segment 位置和实际切片偏移，结束偏移不包含端点；范围内空缺归为 `within`，参考上下文不扩大范围。`before`、`after` 分别按同一实体各条目的最早相关证据位置升序编号，同位置同号，`within` 不编号。位置和编号表示证据先后，不表示事实生效范围或事件时间。生成请求不发送具体来源区间或当前位置数组；持久来源、实体详情和导航保留完整范围。
 
 `PUT` 同一路径使用现有写锁和事务，必须提供 `normalized`、`expected_revision`、`action`，操作字段分别为：
 

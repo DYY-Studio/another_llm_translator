@@ -393,9 +393,8 @@ def test_generation_context_shares_entity_once_and_blocks_stale_hits(tmp_path: P
     assert len(entities)==1
     assert entities[0]["items"][0]["text"]=="共享说明"
     assert entities[0]["items"][0]["unsourced"] is True
-    assert entities[0]["items"][1]["source_ranges"] == [{"file_id": "F0001", "part_id": "document",
-                                                       "first": {"position": 0, "start": 0}, "last": {"position": 0, "end": 14}}]
-    assert entities[0]["current_positions"][0]["segment_id"]==segments[0]["segment_id"]
+    assert entities[0]["items"][1]["source_relation"] == ["within"]
+    assert set(entities[0]) == {"entity", "items"}
     assert all("description" not in match for match in matches)
     data["terms"][1]["group_primary"]=None
     project_descriptions(project,data)
