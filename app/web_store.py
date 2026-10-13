@@ -1859,6 +1859,11 @@ class WebStore:
         disabled = bool(payload.get("disabled", False))
 
         library = load_terms(self.project)
+        if description_items is not None and (
+            type(payload.get("expected_revision")) is not int
+            or payload["expected_revision"] != int((library or {}).get("terms_revision", 0))
+        ):
+            raise UsageError("术语库版本已变化，请刷新后再编辑说明")
         current = {
             str(item["normalized"]): dict(item)
             for item in (library or {}).get("terms", [])

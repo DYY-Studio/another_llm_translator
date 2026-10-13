@@ -347,6 +347,9 @@ def test_knowledge_api_checks_revision_and_explicit_fragment_operations(tmp_path
     assert details["items"][0]["text"]=="人工说明"
     bad=client.put(url,json={"normalized":"alpha","expected_revision":0,"action":"save_items","items":[]})
     assert bad.status_code==400
+    term_url = "/api/v1/projects/terms/terms"
+    assert client.post(term_url, json={"source": "Alpha", "description_items": []}).status_code == 400
+    assert client.post(term_url, json={"source": "Alpha", "expected_revision": 0, "description_items": []}).status_code == 400
     fragment=details["fragments"][0]["id"]
     disabled=client.put(url,json={"normalized":"alpha","expected_revision":1,"action":"set_fragment_enabled","fragment_id":fragment,"enabled":False})
     assert disabled.status_code==200

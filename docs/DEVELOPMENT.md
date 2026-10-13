@@ -339,3 +339,13 @@ v7 的阶段父引用索引仅保存非空引用；Run 中相同的 `terminology
 检查 `PRAGMA integrity_check`、文件体积与升级前备份；迁移失败应保留旧 schema 和记录。
 若提交后快照整理或压缩失败，错误会说明数据库已升级及备份位置。
 存储回归使用 `python -m pytest -q tests/test_sqlite_storage.py tests/test_summary_provenance.py`。
+
+## 一次性术语说明迁移
+
+在旧版中先完成或结束活动扫描和运行中的术语 Run，处理旧决策草案，然后在当前源码目录使用项目虚拟环境运行：
+
+```bash
+.venv/bin/python scripts/migrate_term_knowledge.py /absolute/path/to/project
+```
+
+脚本在项目写锁内先执行 SQLite 在线备份，保存新结构并输出备份位置。未满足前置条件或重复迁移会明确失败。产品语义见[实体说明](MINIMAL.md#实体说明实验)。

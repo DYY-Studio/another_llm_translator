@@ -210,6 +210,7 @@ def test_term_group_materialize_switch_primary_and_lifecycle(tmp_path: Path) -> 
     store = WebStore(project)
     store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "source": "Alice",
             "category": "人物",
             "description_items": [{"text": "main", "fragment_ids": []}],
@@ -246,6 +247,7 @@ def test_materialize_alias_restores_removed_entry_and_preserves_term_data(
     store = WebStore(project)
     store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
             "category": "别名条目",
@@ -256,6 +258,7 @@ def test_materialize_alias_restores_removed_entry_and_preserves_term_data(
     removed = store.remove_terms({"normalized": ["alicia"]})
     store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "source": "Alice",
             "preferred_translation": "爱丽丝",
             "category": "人物",
@@ -374,6 +377,7 @@ def test_term_group_member_can_leave_without_changing_term_data(tmp_path: Path) 
     store = WebStore(project)
     store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "source": "John Smith",
             "preferred_translation": "约翰·史密斯",
             "category": "人物",
@@ -382,6 +386,7 @@ def test_term_group_member_can_leave_without_changing_term_data(tmp_path: Path) 
     )
     store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "source": "John",
             "preferred_translation": "约翰",
             "category": "姓氏",
@@ -658,6 +663,7 @@ def test_group_member_conversion_moves_forms_to_primary_without_containment(
     store.materialize_term({"normalized": "john smith", "alias": "Bob"})
     store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "old_normalized": "john",
             "source": "Alice",
             "aliases": ["A"],
@@ -816,7 +822,7 @@ def test_segment_detail_matches_current_terms_without_request_limit(tmp_path: Pa
     store = WebStore(project)
     assert store.segment_detail("F0001-S000001")["matched_terms"] == []
     for source, translation, aliases in [("Alice", "爱丽丝", []), ("Bob", "鲍勃", ["Bobby"])]:
-        store.save_term({"source": source, "preferred_translation": translation,
+        store.save_term({"expected_revision": store.terms()["terms_revision"] or 0, "source": source, "preferred_translation": translation,
                          "category": "人名", "description_items": [{"text": "参考说明", "fragment_ids": []}], "aliases": aliases})
     store.config["terminology"]["max_terms_per_segment"] = 1
     terms = store.segment_detail("F0001-S000001")["matched_terms"]
@@ -836,6 +842,7 @@ def test_term_hits_include_matches_found_in_aozora_ruby_reading(
     store = WebStore(project)
     store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "source": "Aoki",
             "category": "人名",
             "description_items": [],
@@ -1508,6 +1515,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
     store = WebStore(project)
     added = store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "old_normalized": None,
             "source": "Alice",
             "preferred_translation": "爱丽丝",
@@ -1524,6 +1532,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
 
     renamed = store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "old_normalized": "alice",
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
@@ -1551,6 +1560,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
         )
     disabled = store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "old_normalized": "alicia",
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
@@ -1566,6 +1576,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
 
     restored = store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "old_normalized": "alicia",
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
@@ -1605,6 +1616,7 @@ def test_web_store_exposes_and_resolves_term_conflicts_independently(
     with pytest.raises(UsageError, match="类别冲突"):
         store.save_term(
             {
+                "expected_revision": store.terms()["terms_revision"] or 0,
                 "old_normalized": "alpha",
                 "source": "Alpha",
                 "preferred_translation": "阿尔法",
@@ -1616,6 +1628,7 @@ def test_web_store_exposes_and_resolves_term_conflicts_independently(
         )
     resolved = store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "old_normalized": "alpha",
             "source": "Alpha",
             "preferred_translation": "阿尔法",
@@ -1637,6 +1650,7 @@ def test_web_store_exposes_and_resolves_term_conflicts_independently(
     with pytest.raises(UsageError, match="推荐译名冲突"):
         store.save_term(
             {
+                "expected_revision": store.terms()["terms_revision"] or 0,
                 "old_normalized": "beta",
                 "source": "Beta",
                 "preferred_translation": "",
@@ -1656,6 +1670,7 @@ def test_web_store_can_remove_conflicted_term_without_resolving_it(
     store = WebStore(project)
     removed = store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "old_normalized": "gamma",
             "source": "Gamma",
             "preferred_translation": "",
@@ -1707,6 +1722,7 @@ def test_web_store_keeps_case_distinct_aliases_when_case_insensitive_off(
     store = WebStore(project)
     added = store.save_term(
         {
+            "expected_revision": store.terms()["terms_revision"] or 0,
             "old_normalized": None,
             "source": "Alice",
             "preferred_translation": "爱丽丝",

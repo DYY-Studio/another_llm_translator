@@ -2709,6 +2709,7 @@ def test_web_rejects_unresolved_term_conflict_on_save(tmp_path: Path) -> None:
     unresolved = client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "old_normalized": "alpha",
             "source": "Alpha",
             "preferred_translation": "阿尔法",
@@ -2728,6 +2729,7 @@ def test_web_can_permanently_delete_disabled_term(tmp_path: Path) -> None:
     added = client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "source": "Alice",
             "preferred_translation": "爱丽丝",
             "category": "人物",
@@ -2866,6 +2868,7 @@ def test_web_materializes_alias_and_changes_group_primary(tmp_path: Path) -> Non
     added = client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "source": "Alice",
             "preferred_translation": "爱丽丝",
             "category": "人物",
@@ -2909,6 +2912,7 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
     assert client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
             "category": "别名条目",
@@ -2925,6 +2929,7 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
     assert client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "source": "Alice",
             "preferred_translation": "爱丽丝",
             "category": "人物",
