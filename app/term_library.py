@@ -260,7 +260,6 @@ def _term_bucket() -> dict[str, Any]:
     return {
         "sources": [],
         "categories": [],
-        "descriptions": [],
         "translations": [],
         "aliases": [],
         "alias_conflicts": [],
@@ -357,6 +356,8 @@ def _ordered_term_candidates(project: Path, task_id: str) -> list[dict[str, Any]
     )
     if any(not isinstance(record.get("source_order"), dict) for record in candidates):
         raise UsageError("旧术语扫描缺少源文排序信息，请结束旧扫描并重新扫描")
+    if any(not record.get("source_range") for record in candidates):
+        raise UsageError("旧术语扫描缺少完整来源范围，请结束旧扫描并重新扫描")
     segment_order = {
         str(item["segment_id"]): index for index, item in enumerate(read_segments(project))
     }

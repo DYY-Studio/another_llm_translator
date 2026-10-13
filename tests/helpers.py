@@ -37,6 +37,8 @@ def write_term_library(project: Path, path: Path, value: dict[str, Any]) -> None
     if "knowledge" not in value:
         knowledge = empty_knowledge()
         value["knowledge"] = knowledge
+        for term in value["terms"]:
+            term.setdefault("normalized", term["source"].casefold())
         refs = {term["normalized"]: add_unsourced(knowledge, term["normalized"], term["description"], "manual")
                 for term in value["terms"] if term.get("description")}
         for root, members in entity_members(value).items():
@@ -50,3 +52,10 @@ def write_term_library(project: Path, path: Path, value: dict[str, Any]) -> None
     write_json(project, path, value)
     target.clear()
     target.update(value)
+
+
+def scan_source_range(project: Path) -> list[dict[str, Any]]:
+    from app.sqlite_storage import read_segments
+    from app.term_knowledge import source_range
+    segments = read_segments(project)
+    return source_range(segments, {s["segment_id"]: s for s in segments}, {})

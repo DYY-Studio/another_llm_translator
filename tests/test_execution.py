@@ -1023,7 +1023,7 @@ def test_chunk_builder_partitions_alternating_empty_lines_within_soft_target() -
                 }
             )
     current = config()
-    current["execution"]["target_chunk_input_tokens"] = 600
+    current["execution"]["target_chunk_input_tokens"] = 1000
     work = [item for item in source if not item["is_empty"]]
     plans = build_chunk_plans(
         work,
@@ -1049,7 +1049,7 @@ def test_chunk_builder_partitions_alternating_empty_lines_within_soft_target() -
         for plan in plans
         for item in plan.segments
     )
-    assert all(plan.estimated_input_tokens <= 600 for plan in plans)
+    assert all(plan.estimated_input_tokens <= 1000 for plan in plans)
 
 
 def test_single_segment_may_exceed_soft_target_but_not_input_limit() -> None:

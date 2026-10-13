@@ -94,6 +94,7 @@ class Scope:
     only_segment: str | None = None
     segment_ids: tuple[str, ...] | None = None
     force: bool = False
+    confirm_knowledge_replacement: bool = False
     dry_run: bool = False
 
     def validate(self) -> None:
@@ -302,8 +303,8 @@ _FIELD_PREFIX = {
         "en": "segments[].current_text: The current translation of the corresponding source.",
     },
     "terms": {
-        "zh-CN": "terms: 本次提供的参考术语。",
-        "en": "terms: Reference terminology provided for this request.",
+        "zh-CN": "terms: 本次提供的参考术语。entity_knowledge 提供已应用实体说明、证据范围与当前位置。允许利用全篇知识确认实体，结合当前位置判断称谓、身份和关系，保留原文表达与悬念；证据范围不等于事实生效范围。",
+        "en": "terms: Reference terminology provided for this request. entity_knowledge provides applied entity explanations, source evidence ranges and current positions. Use full-work knowledge to disambiguate identity, evaluate local names and relationships at the current position, and preserve the source wording and suspense. Evidence ranges are revelation coverage, not fact-effective intervals.",
     },
     "reference_context": {
         "zh-CN": "reference_context: 只供判断性别、指代、身份和语义，不得作为生成来源，不提取仅在其中出现的术语，不输出。",
@@ -358,8 +359,8 @@ _STAGE_FIELDS = {
 
 _TASK_PREFIX = {
     "terminology": {
-        "zh-CN": "提取术语候选。",
-        "en": "Extract terminology candidates.",
+        "zh-CN": "提取术语候选。Description 只记录本次待扫描源文支持的实体身份、属性、关系及变化，参考上下文只用于理解指代，不得把参考知识当成本次源文揭示的事实。",
+        "en": "Extract terminology candidates. Description must contain only entity identity, attributes, relationships and changes supported by the current source_segments. Reference context may resolve references but must not be copied as facts revealed by the current source.",
     },
     "fragment_summary": {
         "zh-CN": "概括本次源文内容。",
@@ -1461,6 +1462,7 @@ def scope_from_run(
             else None
         ),
         force=False,
+        confirm_knowledge_replacement=bool(raw.get("confirm_knowledge_replacement", False)),
         dry_run=dry_run,
     )
 

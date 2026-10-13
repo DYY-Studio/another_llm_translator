@@ -1241,6 +1241,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
           <button type="button" role="tab" aria-selected={previewPhase === "adjudication"} className={previewPhase === "adjudication" ? "active" : ""} onClick={() => setPreviewPhase("adjudication")}>{translate("settings.promptPhaseAdjudication", language)}</button>
           <button type="button" role="tab" aria-selected={previewPhase === "consistency"} className={previewPhase === "consistency" ? "active" : ""} onClick={() => setPreviewPhase("consistency")}>{translate("settings.promptPhaseConsistency", language)}</button>
           <button type="button" role="tab" aria-selected={previewPhase === "final_review"} className={previewPhase === "final_review" ? "active" : ""} onClick={() => setPreviewPhase("final_review")}>{translate("settings.promptPhaseFinalReview", language)}</button>
+          <button type="button" role="tab" aria-selected={previewPhase === "knowledge"} className={previewPhase === "knowledge" ? "active" : ""} onClick={() => setPreviewPhase("knowledge")}>{translate("knowledge.title", language)}</button>
         </div>
       </>}
       <pre>{(assembledPhases[previewPhase] ?? modePreview ?? assembled) || translate("settings.promptAssembledEmpty", language)}</pre>

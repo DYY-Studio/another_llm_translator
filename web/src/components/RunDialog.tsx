@@ -29,6 +29,7 @@ export function RunDialog({
   onSummariesChange?: (enabled: boolean) => Promise<void>;
   language: Language;
 }) {
+  const [knowledgeConfirmed, setKnowledgeConfirmed] = useState(false);
   const [draftLoading, setDraftLoading] = useState(false);
   const [draftError, setDraftError] = useState("");
   const [runAction, setRunAction] = useState<"resume" | "decline" | null>(
@@ -63,7 +64,8 @@ export function RunDialog({
   const finalReviewLocked = decisionMode && Boolean(options.running_run && resuming);
   const draftEnabled = Boolean(options.include_draft_translation);
   const draftBlocked = draftEnabled && options.draft_prompt_preflight?.ok === false;
-  const ready = summaryConfigurationBlocked || draftBlocked || draftLoading ? false : decisionMode
+  const replacementNeeded = !resuming && resultPolicy === "force" && Boolean(options.knowledge_replacement_impacts?.length);
+  const ready = (replacementNeeded && !knowledgeConfirmed) ? false : summaryConfigurationBlocked || draftBlocked || draftLoading ? false : decisionMode
     ? !options.running_run || resuming || resultPolicy === "force"
     : resuming || resultPolicy !== null;
 
@@ -95,6 +97,7 @@ export function RunDialog({
     if (!ready) return;
     onStart({
       force: !resuming && resultPolicy === "force",
+      confirm_knowledge_replacement: replacementNeeded && knowledgeConfirmed,
       reuse_mixed_fingerprints: !resuming && resultPolicy === "reuse",
       run_action: options.running_run ? runAction : null,
       final_review: decisionMode && finalReview,
@@ -182,6 +185,11 @@ export function RunDialog({
           {draftError && <p className="error-text">{draftError}</p>}
           {options.draft_progress && Object.entries(options.draft_progress).map(([stage, value]) => <span key={stage}>{translate(stage === "content_summary" ? "stage.contentSummary" : `stage.${stage}`, language)} · {translate("runDialog.draftCounts", language, { completed: value.completed, pending: value.total - value.completed, total: value.total })}</span>)}
           {draftBlocked && <p className="error-text">{translate("runDialog.draftMissingPrompt", language)} {options.draft_prompt_preflight?.missing.join(", ")}</p>}
+          {replacementNeeded && <div className="warning-banner run-warning">
+            <strong>{translate("knowledge.replacement", language, { count: options.knowledge_replacement_impacts?.length ?? 0 })}</strong>
+            <details><summary>{translate("knowledge.fragments", language)}</summary>{options.knowledge_replacement_impacts?.map((fragment) => <p key={fragment.fragment_id}>{fragment.owner}: {fragment.text}</p>)}</details>
+            <label className="checkbox-label"><input type="checkbox" checked={knowledgeConfirmed} onChange={(event) => setKnowledgeConfirmed(event.target.checked)} />{translate("knowledge.confirmReplacement", language)}</label>
+          </div>}
           {hybridSummary && resultPolicy === "force" && !resuming && <div className="warning-banner run-warning">{translate("runDialog.summaryForce", language, { count: options.summary_selected_boundaries ?? 0 })}</div>}
           {draftEnabled && resultPolicy === "force" && !resuming && <div className="warning-banner run-warning">{translate("runDialog.draftForce", language, { total: options.selected, count: options.draft_progress?.translation?.completed ?? 0 })}</div>}
         </div>}

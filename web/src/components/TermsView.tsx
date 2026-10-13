@@ -9,6 +9,7 @@ import { fetchRelatedTerms, fetchTermHits, fetchTerms, queryKeys } from "../quer
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
 import { TermDecisionWorkspace } from "./TermDecisionWorkspace";
+import { EntityKnowledgeEditor } from "./EntityKnowledgeEditor";
 import { SummaryWorkspace } from "./SummaryWorkspace";
 import { ConfirmDialog, RelatedGroupDialog, TermImportDialog, TermExportDialog, PartialPublishDialog } from "./TermDialogs";
 
@@ -16,7 +17,6 @@ interface TermForm {
   source: string;
   preferredTranslation: string;
   category: string;
-  description: string;
   aliases: string[];
 }
 
@@ -24,7 +24,6 @@ const emptyForm: TermForm = {
   source: "",
   preferredTranslation: "",
   category: "",
-  description: "",
   aliases: [],
 };
 
@@ -72,7 +71,6 @@ function formFor(term: Term): TermForm {
     source: term.source,
     preferredTranslation: term.preferred_translation ?? "",
     category: term.category ?? "",
-    description: term.description ?? "",
     aliases: [...term.aliases],
   };
 }
@@ -492,7 +490,6 @@ export function TermsView({
           source: form.source,
           preferred_translation: form.preferredTranslation,
           category: form.category,
-          description: form.description,
           aliases: form.aliases.map((item) => item.trim()).filter(Boolean),
           disabled,
         }),
@@ -611,7 +608,6 @@ export function TermsView({
       setForm(member ? restored ? formFor(member) : {
         ...formFor(member),
         category: groupPrimary.category ?? "",
-        description: groupPrimary.description ?? "",
       } : emptyForm);
       setMessage(translate(restored ? "terms.materializedRestored" : "terms.materializedUnsaved", language));
     } catch (error) {
@@ -843,6 +839,7 @@ export function TermsView({
       initialTab={decisionInitialTab}
       onReviewState={updateDecisionReview}
       onNavigateToEditor={openManualEditor}
+      onFindSegment={onFindSegment}
     />;
   }
 
@@ -998,6 +995,7 @@ export function TermsView({
                       <small>{translate("terms.groupCountBadge", language, { count: membersByPrimary.get(term.normalized)?.length ?? 0 })}</small>
                     ) : null}
                   </span>
+                  {!term.disabled && term.knowledge_status !== "current" && <span className="muted">{translate(`knowledge.${term.knowledge_status}`, language)}</span>}
                   <em>{term.has_conflicts ? translate("terms.conflict", language) : term.disabled ? translate("terms.removed", language) : translate("terms.active", language)}</em>
                 </button>
               );
@@ -1181,7 +1179,12 @@ export function TermsView({
                 ))}
               </div>
             )}
-            <label>{translate("terms.description", language)}<textarea value={form.description} disabled={selected?.disabled} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
+            {selected && !selected.disabled && data?.terms_revision != null ? (
+              <EntityKnowledgeEditor key={`${projectId}:${selected.entity_key}:${data.terms_revision}`}
+                project={project} projectId={projectId} normalized={selected.normalized} revision={data.terms_revision}
+                language={language} onChanged={setCurrentData}
+                onFindSegment={onFindSegment} />
+            ) : !selected ? <small>{translate("knowledge.saveTermFirst", language)}</small> : null}
             <div className="term-alias-editor">
               <strong>{translate("terms.aliases", language)}</strong>
               {form.aliases.map((alias, index) => (

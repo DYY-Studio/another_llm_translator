@@ -542,8 +542,9 @@ def decision_plan(
         for key, state in states.items()
         if key not in protected and not state["disabled"]
     ]
-    from .term_knowledge import entity_members, entity_view
-    if not eligible and all(entity_view(project, library, key)["status"] == "current" for key in entity_members(library)):
+    from .term_knowledge import entity_members, entity_view, evidence as knowledge_evidence
+    known_fragments = knowledge_evidence(project, library)
+    if not eligible and all(entity_view(project, library, key, all_evidence=known_fragments)["status"] == "current" for key in entity_members(library)):
         raise UsageError("已发布术语全部受到人工 override 保护")
     evidence = _batches.collect_term_evidence(
         project, list(library.get("terms", [])), config
@@ -583,7 +584,7 @@ def decision_plan(
     )
     from .term_knowledge import knowledge_payload
     from .execution import estimate_messages, render_messages
-    knowledge_views = [entity_view(project, library, root) for root in entity_members(library)]
+    knowledge_views = [entity_view(project, library, root, all_evidence=known_fragments) for root in entity_members(library)]
     knowledge_views = [view for view in knowledge_views if view["status"] != "current"]
     knowledge_tokens = sum(estimate_messages(
         render_messages(prompts["knowledge"], knowledge_payload(view, config["project"]["target_language"])[0]),
@@ -898,7 +899,8 @@ async def run_terminology_decision(
             on_usage=on_usage,
         ) as llm:
             active_llm = llm
-            llm._prepare_keys()
+            if plan["estimated_requests"] > 0:
+                llm._prepare_keys()
             if on_progress:
                 on_progress(completed, 0, total)
             remaining_phase_one = [
@@ -1308,10 +1310,12 @@ async def run_terminology_decision(
                     conflicts=final_conflicts,
                 )
             _validate_final_states(project, final, original=states, spec=spec)
-            from .term_knowledge import aggregate_entity, entity_members, entity_view, save_items
+            from .term_knowledge import aggregate_entity, entity_members, entity_view, save_items, transfer_alias_evidence, evidence as knowledge_evidence
             knowledge_library = deepcopy(library)
             knowledge_library["terms"] = [deepcopy(state) for state in final.values() if not state.get("disabled")]
-            views = [entity_view(project, knowledge_library, root) for root in entity_members(knowledge_library)]
+            owner_moves = transfer_alias_evidence(knowledge_library, spec)
+            known_fragments = knowledge_evidence(project, knowledge_library)
+            views = [entity_view(project, knowledge_library, root, all_evidence=known_fragments) for root in entity_members(knowledge_library)]
             unresolved_names = {key for key, decision in decisions.items() if decision["action"] == "needs_review"}
             targets = [view for view in views if view["status"] != "current" and not set(view["members"]) & unresolved_names]
             total = len(eligible) * 2 + final_review_target_count + len(containment_focus) + len(targets)
@@ -1335,7 +1339,8 @@ async def run_terminology_decision(
                         atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
                     save_items(project, knowledge_library, root, result["items"])
                     knowledge_updates[root] = {"aggregate": deepcopy(knowledge_library["knowledge"]["entities"][root]),
-                                               "members": view["members"], "reason": result["reason"]}
+                                               "members": view["members"], "reason": result["reason"],
+                                               "owner_moves": {old:new for old,new in owner_moves.items() if new in view["members"]}}
                     if root not in already_cached:
                         completed += 1
                     if on_progress:

@@ -164,7 +164,7 @@ async def test_scan_descriptions_follow_source_order_despite_completion_order(
             {"segment_id": "F0001-S000001", "offset": 0},
         ]
         await run_terminology(
-            project, Scope(force=True), http_client=client,
+            project, Scope(force=True, confirm_knowledge_replacement=True), http_client=client,
             include_draft_translation=include_draft, include_summaries=include_summaries,
         )
     assert published_descriptions(project) == ["z-first", "a-later"]
@@ -331,7 +331,7 @@ async def test_triple_scan_preserves_independent_results_and_force(
         seen.clear()
         result = await run_terminology(
             project,
-            Scope(force=True),
+            Scope(force=True, confirm_knowledge_replacement=True),
             http_client=client,
             include_summaries=True,
             include_draft_translation=True,
@@ -427,7 +427,7 @@ async def test_supplement_adapter_requirements_follow_active_tasks(
         ):
             await run_terminology(
                 project,
-                Scope(force=True),
+                Scope(force=True, confirm_knowledge_replacement=True),
                 http_client=client,
                 include_summaries=True,
                 include_draft_translation=True,

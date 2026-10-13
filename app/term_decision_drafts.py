@@ -114,7 +114,7 @@ def _build_draft(
         proposals.append(
             {
                 "proposal_id": _proposal_id([{"before": before, "after": after, "knowledge_before": before_knowledge, "knowledge_after": updates}]),
-                "kind": "relationship" if relationship else "term_update",
+                "kind": "entity_knowledge" if fields == ["description_items"] else "relationship" if relationship else "term_update",
                 "normalized": keys,
                 "before": before,
                 "after": after,
@@ -125,6 +125,7 @@ def _build_draft(
                 ),
                 "knowledge_before": before_knowledge,
                 "knowledge_after": deepcopy(updates),
+                "knowledge_owner_moves": {old:new for root, update in knowledge_updates.items() if root in updates for old,new in update.get("owner_moves", {}).items()},
                 "evidence": {key: deepcopy(evidence[key]) for key in keys},
                 "conflicts": {key: deepcopy(conflicts[key]) for key in keys},
             }
@@ -181,6 +182,14 @@ def current_decision_draft(project: Path) -> dict[str, Any] | None:
         draft["rejected_proposal_ids"] = list(manifest.get("rejected_proposal_ids", []))
         if "final_review_error" in manifest:
             draft["final_review_error"] = deepcopy(manifest["final_review_error"])
+        refs = {key for proposal in draft["proposals"]
+                for aggregate in [*proposal.get("knowledge_before", {}).values(), *proposal.get("knowledge_after", {}).values()]
+                if aggregate for item in aggregate["items"] for key in item["fragment_ids"]}
+        from .term_knowledge import evidence as knowledge_evidence
+        fragments = knowledge_evidence(project, draft["source_library"]) if refs else {}
+        for proposal in draft["proposals"]:
+            proposal["knowledge_evidence"] = {key: {field:fragments[key][field] for field in ("id","owner","original_owner","origin","text","state","valid","source_range")}
+                                              for key in refs if key in fragments}
         return draft
     return None
 
@@ -463,7 +472,8 @@ def apply_decision_draft(
         terms=terms,
         knowledge=deepcopy(library["knowledge"]),
     )
-    from .term_knowledge import entity_view, save_items, project_descriptions
+    from .term_knowledge import entity_view, save_items, project_descriptions, transfer_alias_evidence
+    transfer_alias_evidence(term_record, term_normalization(load_project_config(project)))
     for proposal in draft["proposals"]:
         if proposal["proposal_id"] in rejected:
             continue

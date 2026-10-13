@@ -2440,11 +2440,27 @@ def clear_terminology_state(project: Path, overrides: dict[str, Any]) -> None:
     connection = _with_db(project)
     try:
         with connection:
-            connection.execute(
-                "DELETE FROM terms_state WHERE key IN ('terms', 'active_task')"
-            )
+            from .term_knowledge import empty_knowledge
+            previous = connection.execute("SELECT payload_json FROM terms_state WHERE key = 'terms'").fetchone()
+            revision = int(_load(previous["payload_json"]).get("terms_revision", 0)) if previous else 0
+            library = record_header("terminology_library", _project_id(connection),
+                                    terms_revision=revision + 1, terms=[], knowledge=empty_knowledge())
+            connection.execute("INSERT INTO terms_state(key, payload_json) VALUES ('terms', ?) "
+                               "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
+                               (_residual(library, _TERMS_RESIDUAL_FIELDS),))
+            connection.execute("DELETE FROM terms_state WHERE key = 'active_task'")
             connection.execute("DELETE FROM terminology_scans")
-            connection.execute("DELETE FROM terminology_candidates")
+            pinned: set[str] = set()
+            for row in connection.execute("SELECT run_id FROM runs WHERE stage = 'terminology_decision'"):
+                draft_path = project / "runs" / row["run_id"] / "terminology_decision_draft.json"
+                if draft_path.is_file():
+                    draft = json.loads(draft_path.read_text(encoding="utf-8"))
+                    pinned.update(fragment["candidate_id"] for fragment in
+                                  draft["source_library"].get("knowledge", {}).get("fragments", {}).values()
+                                  if fragment.get("candidate_id"))
+            deletable = [(row["record_id"],) for row in connection.execute("SELECT record_id FROM terminology_candidates")
+                         if row["record_id"] not in pinned]
+            connection.executemany("DELETE FROM terminology_candidates WHERE record_id = ?", deletable)
             connection.execute(
                 "INSERT INTO terms_state(key, payload_json) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",

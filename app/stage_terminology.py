@@ -288,6 +288,11 @@ async def run_terminology(
     include_draft_translation: bool = False,
     on_draft_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    from .term_knowledge import replacement_impacts
+    from .sqlite_storage import read_segments
+    impacts = replacement_impacts(project, [s for s in read_segments(project) if not s["is_empty"]]) if scope.force else []
+    if impacts and not scope.dry_run and not scope.confirm_knowledge_replacement:
+        raise UsageError(f"强制重扫会替换 {len(impacts)} 个相交说明片段，请先查看影响并明确确认（--confirm-knowledge-replacement）")
     if resume_run_id is not None:
         manifest = read_json(
             project, project / "runs" / resume_run_id / "manifest.json"
@@ -314,7 +319,7 @@ async def run_terminology(
     if include_draft_translation:
         from .stage_translation import run_translation
 
-        return await run_translation(
+        result = await run_translation(
             project,
             scope,
             http_client=http_client,
@@ -328,6 +333,7 @@ async def run_terminology(
             _include_summaries=include_summaries,
             _on_draft_progress=on_draft_progress,
         )
+        return {**result, "knowledge_replacement_impacts": impacts}
     logger = get_logger("terminology")
     preparation_started_at = time.perf_counter()
     scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
@@ -1049,6 +1055,7 @@ async def run_terminology(
         return {
             "stage": "terminology",
             "dry_run": True,
+            "knowledge_replacement_impacts": impacts,
             "resume_run_id": resume_run_id,
             "active_task_id": task_id,
             "selected": len(selected),

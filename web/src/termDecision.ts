@@ -42,7 +42,6 @@ export function decisionProposalChanges(
   ]> = [
     ["preferred_translation", before.preferred_translation, after.preferred_translation],
     ["category", before.category, after.category],
-    ["description", before.description, after.description],
     ["group_primary", before.group_primary, after.group_primary],
     ["disabled", before.disabled, after.disabled],
   ];
@@ -158,6 +157,6 @@ export function summarizeDecisionProposals(
       )).length,
       0,
     ),
-    structural: accepted.filter((proposal) => proposal.kind === "relationship").length,
+    structural: accepted.filter((proposal) => proposal.kind === "relationship" && proposal.changes.some((field) => ["group_primary", "aliases", "disabled"].includes(field))).length,
   };
 }

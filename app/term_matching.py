@@ -386,16 +386,30 @@ class _TermMatchCache:
         library: dict[str, Any] | None,
         spec: TermNormalization,
         limit: int,
+        *, segments: list[dict[str, Any]], warnings: list[str] | None = None,
     ) -> None:
         self.matcher = _PreparedTermMatcher(library, spec) if library else None
         self.spec = spec
         self.limit = limit
+        self.positions = {str(s["segment_id"]): {"segment_id": str(s["segment_id"]), "file_id": s["file_id"], "part_id": s["part_id"], "position": i}
+                          for i, s in enumerate(segments)}
+        self.warnings = warnings if warnings is not None else []
         self._cache: dict[tuple[str, str], tuple[dict, ...]] = {}
 
     def _matches_for_item(self, item: dict[str, Any]) -> tuple[dict, ...]:
         key = (str(item["segment_id"]), str(item["source"]))
         matches = self._cache.get(key)
         if matches is None:
+            if self.matcher is not None:
+                names = self.matcher._candidate_names_for_source(str(item["source"]))
+                for index in {i for name in names for i in self.matcher._name_terms.get(name, ())}:
+                    term = self.matcher.terms[index]
+                    if term.get("knowledge_status") == "stale":
+                        raise UsageError(f"实体说明已过期，请更新后再执行：{term['source']}")
+                    if term.get("knowledge_status") == "pending":
+                        warning = f"实体说明待聚合，当前只使用已应用说明：{term['source']}"
+                        if warning not in self.warnings:
+                            self.warnings.append(warning)
             matches = tuple(
                 self.matcher.match(str(item["source"]), self.limit)
                 if self.matcher is not None
@@ -415,6 +429,7 @@ class _TermMatchCache:
 
     def for_items(self, items: list[dict[str, Any]]) -> list[dict]:
         by_source: dict[str, dict] = {}
+        by_entity: dict[str, dict] = {}
         for item in items:
             matches = self._matches_for_item(item)
             for term in matches:
@@ -422,6 +437,21 @@ class _TermMatchCache:
                 current = by_source.get(source)
                 if current is None:
                     current = dict(term)
+                    current.pop("description", None)
+                    if self.matcher is not None and "primary_source" not in term:
+                        normalized = normalize_term(source, self.spec)
+                        origin = self.matcher.by_normalized[normalized]
+                        explanation = []
+                        for entry in origin.get("description_items", []):
+                            ranges = [{**{k:r[k] for k in ("segment_id","file_id","part_id","start","end")},
+                                       "position": self.positions[r["segment_id"]]["position"]}
+                                      for refs in entry["sources"] if refs is not None for r in refs]
+                            explanation.append({"text": entry["text"], "source_ranges": ranges,
+                                                "unsourced": any(refs is None for refs in entry["sources"])})
+                        entity = str(origin.get("entity_key") or origin.get("group_primary") or normalized)
+                        if entity not in by_entity:
+                            current["entity_knowledge"] = {"entity": entity, "items": explanation, "current_positions": []}
+                            by_entity[entity] = current["entity_knowledge"]
                     aliases = {
                         str(alias)
                         for alias in term.get("aliases", [])
@@ -432,7 +462,15 @@ class _TermMatchCache:
                         key=lambda value: (normalize_term(value, self.spec), value),
                     )
                     by_source[source] = current
-                    continue
+                if "entity_knowledge" in current:
+                    original_id = str(item.get("_original_segment_id") or item["segment_id"])
+                    if original_id not in self.positions:
+                        raise UsageError("请求缺少可追溯的当前源文位置")
+                    position = {**self.positions[original_id], "start": int(item.get("_source_offset", 0))}
+                    position["end"] = position["start"] + len(str(item["source"]))
+                    positions = current["entity_knowledge"]["current_positions"]
+                    if position not in positions:
+                        positions.append(position)
                 aliases = {
                     str(alias)
                     for alias in current.get("aliases", [])

@@ -97,6 +97,9 @@ def test_migration_preserves_old_explanations_without_fabricating_sources(tmp_pa
     project = make_project(tmp_path)
     data = {"terms_revision": 3, "terms": [{"normalized": "alpha", "source": "Alpha", "description": "已有说明", "group_primary": None}]}
     write_json(project, project / "terminology" / "terms.json", record_header("terminology_library", "test", **data))
+    write_json(project, project / "terminology" / "overrides.json", record_header("terminology_overrides", "test",
+               overrides=[{"normalized": "alpha", "description": "人工决定"},
+                          {"normalized": "beta", "source": "Beta", "description": "已移除资料", "disabled": True}]))
     with pytest.raises(UsageError, match="迁移"):
         load_terms(project)
     backup = migrate(project)
@@ -106,12 +109,19 @@ def test_migration_preserves_old_explanations_without_fabricating_sources(tmp_pa
         old = json.loads(connection.execute("SELECT payload_json FROM terms_state WHERE key='terms'").fetchone()[0])
     assert "knowledge" not in old
     migrated = load_terms(project)
-    assert migrated["terms"][0]["description"] == "已有说明"
+    assert migrated["terms"][0]["description"] == "人工决定"
     assert migrated["terms"][0]["knowledge_status"] == "current"
     from app.term_knowledge import entity_view
     fragment = entity_view(project, migrated, "alpha")["fragments"][0]
     assert fragment["origin"] == "legacy"
     assert fragment["source_range"] is None
+    from app.web_store import WebStore
+    assert next(row for row in WebStore(project).terms()["terms"] if row["normalized"] == "beta")["description"] == "已移除资料"
+    from app.term_exchange import export_terms
+    output = tmp_path / "exchange.json"
+    summary = export_terms(project, output, include_disabled=True)
+    assert summary["warnings"]
+    assert next(row for row in json.loads(output.read_text())["terms"] if row["source"] == "Beta")["description"] == "已移除资料"
 
 
 @pytest.mark.asyncio
@@ -290,3 +300,159 @@ async def test_sibling_name_updates_share_one_review_unit_through_protected_root
     assert proposals[0]["normalized"]==["alpha","beta","gamma"]
     apply_decision_draft(project,confirm_all=True,rejected_proposal_ids=[proposals[0]["proposal_id"]])
     assert all(s["preferred_translation"] is None for s in load_terms(project)["terms"])
+
+
+def test_generation_context_shares_entity_once_and_blocks_stale_hits(tmp_path: Path) -> None:
+    from app.term_knowledge import save_items, project_descriptions
+    from app.term_matching import _TermMatchCache
+    from app.term_library import TermNormalization
+    from app.sqlite_storage import read_segments
+    project = make_project(tmp_path)
+    data = library()
+    data["terms"][0].update(aliases=[],category="name",preferred_translation="阿尔法")
+    data["terms"].append(dict(source="Beta",normalized="beta",group_primary="alpha",aliases=[],category="name",preferred_translation="贝塔"))
+    save_items(project,data,"alpha",[{"text":"共享说明","fragment_ids":[]}])
+    segments = read_segments(project)
+    cache = _TermMatchCache(data,TermNormalization("NFKC",True),10,segments=segments)
+    matches = cache.for_items(segments)
+    entities = [m["entity_knowledge"] for m in matches if "entity_knowledge" in m]
+    assert len(entities)==1
+    assert entities[0]["items"][0]["text"]=="共享说明"
+    assert entities[0]["current_positions"][0]["segment_id"]==segments[0]["segment_id"]
+    assert all("description" not in match for match in matches)
+    data["terms"][1]["group_primary"]=None
+    project_descriptions(project,data)
+    stale = _TermMatchCache(data,TermNormalization("NFKC",True),10,segments=segments)
+    with pytest.raises(UsageError,match="过期"):
+        stale.for_items(segments)
+
+
+def test_knowledge_api_checks_revision_and_explicit_fragment_operations(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+    from app.web import create_app
+    from app.sqlite_storage import read_json, write_json
+    from app.term_knowledge import save_items
+    project = make_project(tmp_path)
+    data = library()
+    data["terms"][0].update(aliases=[],category="name",preferred_translation="阿尔法",conflicts={})
+    save_items(project,data,"alpha",[{"text":"人工说明","fragment_ids":[]}])
+    meta = read_json(project,project / "project.json")
+    write_json(project,project / "terminology" / "terms.json",record_header("terminology_library",meta["project_id"],**data))
+    app = create_app(projects_root=project.parent,app_root=tmp_path / "terms")
+    client = TestClient(app)
+    url="/api/v1/projects/terms/terms/knowledge"
+    response=client.get(url,params={"normalized":"alpha"})
+    assert response.status_code==200
+    details=response.json()
+    assert details["items"][0]["text"]=="人工说明"
+    bad=client.put(url,json={"normalized":"alpha","expected_revision":0,"action":"save_items","items":[]})
+    assert bad.status_code==400
+    fragment=details["fragments"][0]["id"]
+    disabled=client.put(url,json={"normalized":"alpha","expected_revision":1,"action":"set_fragment_enabled","fragment_id":fragment,"enabled":False})
+    assert disabled.status_code==200
+    assert client.get(url,params={"normalized":"alpha"}).json()["status"]=="stale"
+    keep=client.put(url,json={"normalized":"alpha","expected_revision":2,"action":"confirm_keep"})
+    assert keep.status_code==400
+    fixed=client.put(url,json={"normalized":"alpha","expected_revision":2,"action":"save_items","items":[{"text":"人工修复","fragment_ids":[]}]})
+    assert fixed.status_code==200
+    assert client.get(url,params={"normalized":"alpha"}).json()["status"]=="current"
+
+
+@pytest.mark.asyncio
+async def test_force_scan_requires_replacement_confirmation_and_empty_results_retire_old_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+    import httpx
+    from app.execution import Scope
+    from app.stage_terminology import run_terminology
+    from app.term_library import load_terms
+    from app.term_knowledge import entity_view
+    from tests.helpers import llm_jsonl
+    monkeypatch.setenv("LLM_API_KEY","test")
+    project=make_project(tmp_path)
+    calls=0
+    def handler(request):
+        nonlocal calls
+        calls+=1
+        records=[dict(type="term",source="Alpha",category="name",description="船长")] if calls==1 else []
+        return httpx.Response(200,json={"choices":[{"message":{"content":llm_jsonl(records)}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await run_terminology(project,Scope(),http_client=client)
+        with pytest.raises(UsageError,match="确认"):
+            await run_terminology(project,Scope(force=True),http_client=client)
+        assert calls==1
+        await run_terminology(project,Scope(force=True,confirm_knowledge_replacement=True),http_client=client)
+    assert calls==2
+    assert all(f["state"]=="superseded" for f in entity_view(project,load_terms(project),"alpha")["fragments"])
+
+
+def test_import_creates_unsourced_explanations_and_preserves_applied_existing_entity(tmp_path: Path) -> None:
+    import json
+    from app.term_exchange import import_terms
+    from app.term_library import load_terms
+    from app.term_knowledge import entity_view
+    project=make_project(tmp_path)
+    path=tmp_path / "terms.json"
+    def write(text):
+        path.write_text(json.dumps({"schema_version":1,"record_type":"terminology_exchange","terms":[{"source":"Alpha","category":"name","description":text,"aliases":[],"disabled":False}]}),encoding="utf-8")
+    write("最初说明")
+    import_terms(project,path,dry_run=False)
+    assert load_terms(project)["terms"][0]["description"]=="最初说明"
+    assert entity_view(project,load_terms(project),"alpha")["fragments"][0]["source_range"] is None
+    write("新说明")
+    import_terms(project,path,dry_run=False)
+    view=entity_view(project,load_terms(project),"alpha")
+    assert view["status"]=="pending"
+    assert view["items"][0]["text"]=="最初说明"
+    assert {f["text"] for f in view["fragments"]}=={"最初说明","新说明"}
+    repeated=import_terms(project,path,dry_run=False)
+    assert repeated["changed"] is False
+
+
+def test_clear_preserves_cited_candidates_in_rollback_and_increments_revision(tmp_path: Path) -> None:
+    import json
+    from app.config import load_project_config
+    from app.sqlite_storage import clear_terminology_state, read_json, write_json, read_terminology_candidates
+    from app.execution import create_run
+    from app.term_knowledge import publish_evidence, evidence, save_items
+    from app.term_library import term_normalization, load_terms
+    project = make_project(tmp_path)
+    data = library()
+    first = scan_record(project, "captain")
+    unused = scan_record(project, "unpublished")
+    publish_evidence(project, data, [first], term_normalization(load_project_config(project)))
+    save_items(project, data, "alpha", [{"text": "captain", "fragment_ids": [f'{first["record_id"]}:0']}])
+    write_json(project, project / "terminology" / "terms.json", record_header("terminology_library", "test", **data))
+    _, directory = create_run(project, config=load_project_config(project), stage="terminology_decision",
+                              fingerprint="test", prompt="test", selected_count=1, requested_count=1, reused_count=0)
+    (directory / "terminology_decision_draft.json").write_text(json.dumps({"source_library": data}), encoding="utf-8")
+    clear_terminology_state(project, read_json(project, project / "terminology" / "overrides.json"))
+    assert load_terms(project)["terms_revision"] == 2
+    assert load_terms(project)["terms"] == []
+    assert [r["record_id"] for r in read_terminology_candidates(project, [first["record_id"], unused["record_id"]])] == [first["record_id"]]
+    assert evidence(project, data)[f'{first["record_id"]}:0']["text"] == "captain"
+
+
+def test_reordered_reviewed_evidence_is_stale_even_when_not_cited(tmp_path: Path) -> None:
+    from app.project import add_project_files
+    from app.config import load_project_config
+    from app.term_library import term_normalization
+    from app.term_knowledge import publish_evidence, save_items, entity_view, source_range
+    project = make_project(tmp_path)
+    additional = tmp_path / "later.txt"
+    additional.write_text("Alpha returns", encoding="utf-8")
+    add_project_files(project, [str(additional)])
+    segments = read_segments(project)
+    data = library()
+    records = []
+    for index, segment in enumerate(segments):
+        record = record_header("terminology_candidates", "test", active_task_id="scan",
+                               terms=[{"source": "Alpha", "description": f"fact-{index}"}],
+                               source_range=source_range([segment], {s["segment_id"]: s for s in segments}, {}))
+        append_jsonl(project, project / "terminology" / "candidates.jsonl", record)
+        records.append(record)
+    publish_evidence(project, data, records, term_normalization(load_project_config(project)))
+    save_items(project, data, "alpha", [{"text": "first fact", "fragment_ids": [f'{records[0]["record_id"]}:0']}])
+    assert entity_view(project, data, "alpha")["status"] == "current"
+    from app.project import reorder_project_files
+    reorder_project_files(project, ["F0002", "F0001"])
+    assert entity_view(project, data, "alpha")["status"] == "stale"

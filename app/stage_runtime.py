@@ -254,6 +254,7 @@ def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
         "only_segment": None if force_all else scope.only_segment,
         "segment_ids": None if force_all else list(scope.segment_ids or []) or None,
         "force": scope.force,
+        **({"confirm_knowledge_replacement": True} if scope.confirm_knowledge_replacement else {}),
     }
 
 
@@ -530,6 +531,7 @@ def _split_oversized_preflight(
             except ConfigError as exc:
                 fail_planning(exc)
                 raise
+            accepted["_original_segment_id"] = str(segment["segment_id"])
             accepted["_source_offset"] = source_offset
             source_offset += len(str(accepted["source"]))
             request_segments.append(accepted)

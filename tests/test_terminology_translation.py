@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.helpers import write_term_library
 
 import asyncio
 import json
@@ -1392,7 +1393,7 @@ async def test_advisory_term_usage_repairs_once_even_when_hard_repairs_are_zero(
 ) -> None:
     project = await create_project(tmp_path, "Alice arrived.")
     project_id = str(read_json(project, project / "project.json")["project_id"])
-    write_json(
+    write_term_library(
         project,
         project / "terminology" / "terms.json",
         record_header(
@@ -1478,7 +1479,7 @@ async def test_advisory_term_usage_accepts_warning_after_one_repair(
 ) -> None:
     project = await create_project(tmp_path, "Alice arrived.")
     project_id = str(read_json(project, project / "project.json")["project_id"])
-    write_json(
+    write_term_library(
         project,
         project / "terminology" / "terms.json",
         record_header(
@@ -1590,7 +1591,7 @@ async def test_translation_injects_term_across_aozora_ruby_without_rewriting_sou
     source = "｜漢《かん》｜字《じ》を読む。"
     project = await create_project(tmp_path, source)
     project_id = str(read_json(project, project / "project.json")["project_id"])
-    write_json(
+    write_term_library(
         project,
         project / "terminology" / "terms.json",
         record_header(
@@ -1661,7 +1662,7 @@ async def test_translation_injects_term_found_only_in_aozora_ruby_reading(
     source = "｜猫《Aoki》出现。"
     project = await create_project(tmp_path, source)
     project_id = str(read_json(project, project / "project.json")["project_id"])
-    write_json(
+    write_term_library(
         project,
         project / "terminology" / "terms.json",
         record_header(
@@ -1735,7 +1736,7 @@ def test_term_match_cache_is_keyed_by_segment_and_source() -> None:
             }
         ]
     }
-    cache = _TermMatchCache(library, TermNormalization("NFKC", True), 10)
+    cache = _TermMatchCache(library, TermNormalization("NFKC", True), 10, segments=[{"segment_id": key, "file_id": "F1", "part_id": "document"} for key in ("S1", "S2")])
     assert cache.matcher is not None
     calls = 0
     original_match = cache.matcher.match
@@ -1765,7 +1766,7 @@ def test_term_match_cache_unions_aliases_across_segments() -> None:
             }
         ]
     }
-    cache = _TermMatchCache(library, TermNormalization("NFKC", True), 10)
+    cache = _TermMatchCache(library, TermNormalization("NFKC", True), 10, segments=[{"segment_id": key, "file_id": "F1", "part_id": "document"} for key in ("S1", "S2")])
 
     matched = cache.for_items(
         [
@@ -2580,7 +2581,7 @@ async def test_draft_scan_preserves_existing_translation_until_force(
         ] == ["原译"]
         result = await run_terminology(
             project,
-            Scope(force=True),
+            Scope(force=True, confirm_knowledge_replacement=True),
             http_client=client,
             include_draft_translation=True,
         )
@@ -2654,7 +2655,10 @@ async def test_scan_resume_keeps_successful_results_and_original_scope(
         {"segment_id": "F0001-S000001", "offset": 0},
         {"segment_id": "F0001-S000002", "offset": 0},
     ]
-    assert load_terms(project)["terms"][0]["description"] == "z-first；a-later"
+    assert load_terms(project)["terms"][0]["description"] == ""
+    from app.term_knowledge import entity_view
+    view = entity_view(project, load_terms(project), "entity")
+    assert [f["text"] for f in view["fragments"]] == ["z-first", "a-later"]
 
 
 @pytest.mark.asyncio

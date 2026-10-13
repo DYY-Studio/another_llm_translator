@@ -32,6 +32,7 @@ _SCOPE_FIELDS = (
     "only_segment",
     "segment_ids",
     "force",
+    "confirm_knowledge_replacement",
     "dry_run",
 )
 _USAGE_FIELDS = (
@@ -74,7 +75,7 @@ def _safe_scope(value: Any) -> dict[str, Any] | None:
             if isinstance(item, list) and all(isinstance(entry, str) for entry in item):
                 result[key] = list(item)
             continue
-        if key in {"all_nonempty", "force", "dry_run"}:
+        if key in {"all_nonempty", "force", "dry_run", "confirm_knowledge_replacement"}:
             if isinstance(item, bool):
                 result[key] = item
             continue
@@ -736,6 +737,7 @@ def register_task_routes(
             only_file=payload.only_file,
             only_segment=payload.only_segment,
             force=payload.force,
+            confirm_knowledge_replacement=payload.confirm_knowledge_replacement,
             dry_run=False,
         )
         scope.validate()

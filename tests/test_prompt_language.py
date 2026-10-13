@@ -245,7 +245,7 @@ def test_web_prompt_endpoints_serve_language_views_and_reject_unknown(
     assert set(decision["assembled_phases"]) == {
         "adjudication",
         "consistency",
-        "final_review",
+        "final_review", "knowledge", "knowledge",
     }
     assert "当前是第一阶段“术语裁决”" in decision["assembled_phases"]["adjudication"]
     assert (

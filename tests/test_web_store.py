@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.helpers import write_term_library
 
 import json
 import sqlite3
@@ -211,7 +212,7 @@ def test_term_group_materialize_switch_primary_and_lifecycle(tmp_path: Path) -> 
         {
             "source": "Alice",
             "category": "人物",
-            "description": "main",
+            "description_items": [{"text": "main", "fragment_ids": []}],
             "preferred_translation": "爱丽丝",
             "aliases": ["Alicia"],
         }
@@ -248,7 +249,7 @@ def test_materialize_alias_restores_removed_entry_and_preserves_term_data(
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
             "category": "别名条目",
-            "description": "已有人物资料",
+            "description_items": [{"text": "已有人物资料", "fragment_ids": []}],
             "aliases": ["Alicia Jr"],
         }
     )
@@ -258,7 +259,7 @@ def test_materialize_alias_restores_removed_entry_and_preserves_term_data(
             "source": "Alice",
             "preferred_translation": "爱丽丝",
             "category": "人物",
-            "description": "主角",
+            "description_items": [{"text": "主角", "fragment_ids": []}],
             "aliases": ["Alicia"],
         }
     )
@@ -274,7 +275,7 @@ def test_materialize_alias_restores_removed_entry_and_preserves_term_data(
     assert rows["alicia"]["source"] == "Alicia"
     assert rows["alicia"]["preferred_translation"] == "艾丽西亚"
     assert rows["alicia"]["category"] == "别名条目"
-    assert rows["alicia"]["description"] == "已有人物资料"
+    assert rows["alicia"]["description"] == "主角"
     assert rows["alicia"]["aliases"] == ["Alicia Jr"]
     assert rows["alicia"]["group_primary"] == "alice"
     assert rows["alicia"]["disabled"] is False
@@ -376,7 +377,7 @@ def test_term_group_member_can_leave_without_changing_term_data(tmp_path: Path) 
             "source": "John Smith",
             "preferred_translation": "约翰·史密斯",
             "category": "人物",
-            "description": "全名",
+            "description_items": [{"text": "全名", "fragment_ids": []}],
         }
     )
     store.save_term(
@@ -384,7 +385,7 @@ def test_term_group_member_can_leave_without_changing_term_data(tmp_path: Path) 
             "source": "John",
             "preferred_translation": "约翰",
             "category": "姓氏",
-            "description": "成员说明",
+            "description_items": [{"text": "成员说明", "fragment_ids": []}],
             "aliases": ["Johnny"],
         }
     )
@@ -415,7 +416,7 @@ def test_term_group_member_can_leave_without_changing_term_data(tmp_path: Path) 
     rows = {item["normalized"]: item for item in left["terms"]}
     assert rows["john"]["group_primary"] is None
     assert rows["john jr"]["group_primary"] == "john smith"
-    for key in ("source", "aliases", "preferred_translation", "category", "description"):
+    for key in ("source", "aliases", "preferred_translation", "category"):
         assert rows["john"][key] == before["john"][key]
     assert left["terms_revision"] == int(before_library["terms_revision"]) + 1
 
@@ -617,7 +618,7 @@ def test_related_conversion_rejects_external_alias_collision_without_writing(
     store.save_term({"source": "Jack"})
     library = read_json(project, project / "terminology" / "terms.json")
     next(item for item in library["terms"] if item["normalized"] == "john")["aliases"].append("Jack")
-    write_json(project, project / "terminology" / "terms.json", library)
+    write_term_library(project, project / "terminology" / "terms.json", library)
     overrides = read_json(project, project / "terminology" / "overrides.json")
     next(item for item in overrides["overrides"] if item["normalized"] == "john")["aliases"].append("Jack")
     write_json(project, project / "terminology" / "overrides.json", overrides)
@@ -662,7 +663,7 @@ def test_group_member_conversion_moves_forms_to_primary_without_containment(
             "aliases": ["A"],
             "preferred_translation": "爱丽丝",
             "category": "人物",
-            "description": "member-only data",
+            "description_items": [{"text": "member-only data", "fragment_ids": []}],
         }
     )
     store.save_term({"old_normalized": "bob", "source": "Bob", "aliases": ["B"]})
@@ -748,7 +749,7 @@ def test_term_hits_isolate_a_group_member_from_its_primary(tmp_path: Path) -> No
         "Alice only\nAlicia walks\nAlly sings\nAlice and Alicia",
     )
     project_id = str(read_json(project, project / "project.json")["project_id"])
-    write_json(
+    write_term_library(
         project,
         project / "terminology" / "terms.json",
         record_header(
@@ -803,7 +804,7 @@ def test_term_hits_isolate_a_group_member_from_its_primary(tmp_path: Path) -> No
     claim = {"entry": "alicia", "claimed_by": "alice", "alias": "Ally", "reason": "multiple_owners"}
     for term in library["terms"]:
         term["conflicts"]["group_claims"] = [claim]
-    write_json(project, project / "terminology" / "terms.json", library)
+    write_term_library(project, project / "terminology" / "terms.json", library)
     disputed = WebStore(project).segment_detail("F0001-S000003")["matched_terms"]
     assert {term["source"] for term in disputed} == {"Alice", "Alicia"}
     assert all(term["group_claims"] == [claim] for term in disputed)
@@ -816,7 +817,7 @@ def test_segment_detail_matches_current_terms_without_request_limit(tmp_path: Pa
     assert store.segment_detail("F0001-S000001")["matched_terms"] == []
     for source, translation, aliases in [("Alice", "爱丽丝", []), ("Bob", "鲍勃", ["Bobby"])]:
         store.save_term({"source": source, "preferred_translation": translation,
-                         "category": "人名", "description": "参考说明", "aliases": aliases})
+                         "category": "人名", "description_items": [{"text": "参考说明", "fragment_ids": []}], "aliases": aliases})
     store.config["terminology"]["max_terms_per_segment"] = 1
     terms = store.segment_detail("F0001-S000001")["matched_terms"]
     assert {term["source"] for term in terms} == {"Alice", "Bob"}
@@ -837,7 +838,7 @@ def test_term_hits_include_matches_found_in_aozora_ruby_reading(
         {
             "source": "Aoki",
             "category": "人名",
-            "description": None,
+            "description_items": [],
             "preferred_translation": "青木",
             "aliases": [],
         }
@@ -854,7 +855,7 @@ def test_terms_keep_group_primary_before_members_even_when_member_conflicts(
 ) -> None:
     project = create_web_store_project(tmp_path)
     project_id = str(read_json(project, project / "project.json")["project_id"])
-    write_json(
+    write_term_library(
         project,
         project / "terminology" / "terms.json",
         record_header(
@@ -964,7 +965,7 @@ def seed_conflicted_terms(project: Path) -> None:
             },
         },
     ]
-    write_json(
+    write_term_library(
         project,
         project / "terminology" / "terms.json",
         record_header(
@@ -1511,7 +1512,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
             "source": "Alice",
             "preferred_translation": "爱丽丝",
             "category": "人名",
-            "description": "主角",
+            "description_items": [{"text": "主角", "fragment_ids": []}],
             "aliases": ["Alice A."],
             "disabled": False,
         }
@@ -1527,7 +1528,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
             "category": "人名",
-            "description": "主角",
+            "description_items": [{"text": "主角", "fragment_ids": []}],
             "aliases": [],
             "disabled": False,
         }
@@ -1554,7 +1555,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
             "category": "人名",
-            "description": "主角",
+            "description_items": [{"text": "主角", "fragment_ids": []}],
             "aliases": [],
             "disabled": True,
         }
@@ -1569,7 +1570,7 @@ def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
             "category": "人名",
-            "description": "主角",
+            "description_items": [{"text": "主角", "fragment_ids": []}],
             "aliases": [],
             "disabled": False,
         }
@@ -1608,7 +1609,7 @@ def test_web_store_exposes_and_resolves_term_conflicts_independently(
                 "source": "Alpha",
                 "preferred_translation": "阿尔法",
                 "category": "",
-                "description": "category conflict",
+                "description_items": [{"text": "category conflict", "fragment_ids": []}],
                 "aliases": [],
                 "disabled": False,
             }
@@ -1619,7 +1620,7 @@ def test_web_store_exposes_and_resolves_term_conflicts_independently(
             "source": "Alpha",
             "preferred_translation": "阿尔法",
             "category": "自定义类别",
-            "description": "category conflict",
+            "description_items": [{"text": "category conflict", "fragment_ids": []}],
             "aliases": [],
             "disabled": False,
         }
@@ -1640,7 +1641,7 @@ def test_web_store_exposes_and_resolves_term_conflicts_independently(
                 "source": "Beta",
                 "preferred_translation": "",
                 "category": "人物",
-                "description": "translation conflict",
+                "description_items": [{"text": "translation conflict", "fragment_ids": []}],
                 "aliases": [],
                 "disabled": False,
             }
@@ -1659,7 +1660,7 @@ def test_web_store_can_remove_conflicted_term_without_resolving_it(
             "source": "Gamma",
             "preferred_translation": "",
             "category": "",
-            "description": "both conflicts",
+            "description_items": [{"text": "both conflicts", "fragment_ids": []}],
             "aliases": [],
             "disabled": True,
         }
@@ -1710,7 +1711,7 @@ def test_web_store_keeps_case_distinct_aliases_when_case_insensitive_off(
             "source": "Alice",
             "preferred_translation": "爱丽丝",
             "category": "人名",
-            "description": "主角",
+            "description_items": [{"text": "主角", "fragment_ids": []}],
             "aliases": ["alice"],
             "disabled": False,
         }

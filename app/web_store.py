@@ -845,6 +845,11 @@ class WebStore:
         for normalized in sorted(set(current) | set(overrides)):
             term = current.get(normalized, {})
             override = overrides.get(normalized, {})
+            if not term and library and normalized in library["knowledge"]["entities"]:
+                from .term_knowledge import entity_view
+                view = entity_view(self.project, {**library, "terms": [*library["terms"], {"normalized": normalized, "group_primary": None}]}, normalized)
+                term = {"description": "\n".join(item["text"] for item in view["items"]),
+                        "entity_key": view["entity_key"], "knowledge_status": view["status"], "description_items": view["items"]}
             raw_conflicts = term.get("conflicts", {})
             conflicts = {
                 "categories": list(raw_conflicts.get("categories", [])),
@@ -862,9 +867,10 @@ class WebStore:
                     "normalized": normalized,
                     "source": override.get("source", term.get("source", normalized)),
                     "category": override.get("category", term.get("category")),
-                    "description": override.get(
-                        "description", term.get("description")
-                    ),
+                    "description": term.get("description"),
+                    "entity_key": term.get("entity_key", normalized),
+                    "knowledge_status": term.get("knowledge_status", "pending"),
+                    "description_items": term.get("description_items", []),
                     "preferred_translation": override.get(
                         "preferred_translation", term.get("preferred_translation")
                     ),
@@ -1421,6 +1427,9 @@ class WebStore:
         overrides: dict[str, dict[str, Any]],
         *,
         origin: str,
+        description_items: list[dict[str, Any]] | None = None,
+        knowledge_target: str | None = None,
+        owner_move: tuple[str, str] | None = None,
     ) -> dict[str, Any]:
         revision = int(library["terms_revision"]) + 1 if library else 1
         removals: dict[str, set[str]] = {}
@@ -1445,7 +1454,7 @@ class WebStore:
             overrides=[overrides[key] for key in sorted(overrides)],
             origin=origin,
         )
-        from .term_knowledge import empty_knowledge
+        from .term_knowledge import empty_knowledge, remap_owner, transfer_alias_evidence, save_items, project_descriptions
         term_record = record_header(
             "terminology_library",
             self.project_id,
@@ -1461,16 +1470,19 @@ class WebStore:
             origin=origin,
             knowledge=deepcopy(library["knowledge"]) if library else empty_knowledge(),
         )
-        write_json(
-            self.project,
-            self.project / "terminology" / "overrides.json",
-            override_record,
-        )
-        write_json(
-            self.project,
-            self.project / "terminology" / "terms.json",
-            term_record,
-        )
+        if owner_move is not None:
+            remap_owner(term_record, *owner_move)
+        transfer_alias_evidence(term_record, term_normalization(self.config))
+        if description_items is not None:
+            assert knowledge_target is not None
+            if knowledge_target not in {item["normalized"] for item in terms}:
+                archived = {**term_record, "terms": [*terms, {"normalized": knowledge_target, "group_primary": None}]}
+                save_items(self.project, archived, knowledge_target, description_items)
+            else:
+                save_items(self.project, term_record, knowledge_target, description_items)
+        project_descriptions(self.project, term_record)
+        from .sqlite_storage import write_terminology_publication
+        write_terminology_publication(self.project, terms=term_record, overrides=override_record)
         return self.terms()
 
     def _terms_edit_prepare(
@@ -1668,7 +1680,6 @@ class WebStore:
                     "normalized": target_normalized,
                     "source": target_source,
                     "category": None,
-                    "description": None,
                     "preferred_translation": None,
                     "aliases": [],
                     "group_primary": primary,
@@ -1839,7 +1850,11 @@ class WebStore:
             if alias.strip() and normalize_term(alias, spec) != normalized
         ]
         category = self._term_value(payload, "category")
-        description = self._term_value(payload, "description")
+        if "description" in payload:
+            raise UsageError("说明只接受 description_items，不接受一段式 description 写入")
+        description_items = payload.get("description_items")
+        if "description_items" in payload and not isinstance(description_items, list):
+            raise UsageError("description_items 必须是数组")
         preferred = self._term_value(payload, "preferred_translation")
         disabled = bool(payload.get("disabled", False))
 
@@ -1903,7 +1918,6 @@ class WebStore:
             "normalized": normalized,
             "source": source,
             "category": category,
-            "description": description,
             "preferred_translation": preferred,
             "aliases": aliases,
             "disabled": disabled,
@@ -1918,7 +1932,6 @@ class WebStore:
                 "source": source,
                 "normalized": normalized,
                 "category": category,
-                "description": description or "",
                 "preferred_translation": preferred,
                 "aliases": sorted(set(aliases)),
                 "group_primary": existing_group_primary,
@@ -1933,4 +1946,6 @@ class WebStore:
             current,
             overrides,
             origin="web",
+            description_items=description_items, knowledge_target=normalized,
+            owner_move=(str(old_normalized), normalized) if old_normalized and old_normalized != normalized else None,
         )

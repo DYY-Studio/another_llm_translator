@@ -4415,7 +4415,7 @@ async def test_decision_protects_override_and_replacement_failure_keeps_draft(
             "old_normalized": "bob",
             "source": "Bob",
             "category": "男性人名",
-            "description": "人工确认",
+            "description_items": [{"text": "人工确认", "fragment_ids": []}],
             "preferred_translation": "鲍勃",
             "aliases": [],
         }

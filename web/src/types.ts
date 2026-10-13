@@ -687,6 +687,7 @@ export interface TaskOptions {
   has_pending_draft?: boolean;
   estimated_requests?: number;
   estimated_input_tokens?: number;
+  knowledge_replacement_impacts?: Array<{fragment_id: string; owner: string; text: string; source_range: KnowledgeSourceRange[]}>;
   summary_selected_boundaries?: number;
   summary_only_work?: boolean;
   summary_prompt_preflight?: {
@@ -761,6 +762,7 @@ export interface ContinuousOptionStep {
 }
 
 export interface ContinuousRunDecision {
+  confirm_knowledge_replacement?: boolean;
   stage: "continuous";
   stages: LLMStage[];
   run_actions: Record<string, "resume" | "decline">;
@@ -774,6 +776,7 @@ export interface ContinuousRunDecision {
 }
 
 export interface RunDecision {
+  confirm_knowledge_replacement?: boolean;
   include_summaries?: boolean;
   include_draft_translation?: boolean;
   force: boolean;
@@ -798,7 +801,26 @@ export interface TermDecisionConflicts {
   }>;
 }
 
+export interface KnowledgeSourceRange {
+  segment_id: string; file_id: string; part_id: string; start: number; end: number;
+}
+export interface KnowledgeItem {
+  text: string; fragment_ids: string[]; sources?: Array<KnowledgeSourceRange[] | null>;
+}
+export interface KnowledgeFragment {
+  id: string; owner: string; original_owner: string; source?: string; origin: "scan" | "manual" | "import" | "legacy";
+  text: string; state: "active" | "disabled" | "superseded"; valid: boolean;
+  source_range: KnowledgeSourceRange[] | null;
+}
+export interface EntityKnowledge {
+  entity_key: string; members: string[]; status: "current" | "pending" | "stale";
+  items: KnowledgeItem[]; fragments: KnowledgeFragment[]; terms_revision: number;
+}
+
 export interface Term {
+  entity_key: string;
+  knowledge_status: "current" | "pending" | "stale";
+  description_items: KnowledgeItem[];
   normalized: string;
   source: string;
   category: string | null;
@@ -837,8 +859,11 @@ export interface TermDecisionEvidence {
 }
 
 export interface TermDecisionProposal {
+  knowledge_evidence: Record<string, KnowledgeFragment>;
+  knowledge_before: Record<string, {items: KnowledgeItem[]} | null>;
+  knowledge_after: Record<string, {items: KnowledgeItem[]}>;
   proposal_id: string;
-  kind: "term_update" | "relationship";
+  kind: "term_update" | "relationship" | "entity_knowledge";
   normalized: string[];
   before: TermDecisionState[];
   after: TermDecisionState[];

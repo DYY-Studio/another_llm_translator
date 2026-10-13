@@ -1,4 +1,5 @@
 from __future__ import annotations
+from copy import deepcopy
 import csv
 import io
 import json
@@ -168,7 +169,6 @@ def import_terms(
         for key in (
             "sources",
             "categories",
-            "descriptions",
             "translations",
             "aliases",
         ):
@@ -214,41 +214,46 @@ def import_terms(
     validate_group_alias_overlaps(terms, spec, affected=affected)
     apply_group_alias_removals(overrides, removals)
     overrides_list = [overrides[key] for key in sorted(overrides)]
-    existing_terms = list((library or {}).get("terms", []))
-    changed = terms != existing_terms or overrides_list != original_overrides
+    from .term_knowledge import add_unsourced, empty_knowledge, entity_members, evidence, project_descriptions, save_items, transfer_alias_evidence
+    from .sqlite_storage import write_terminology_publication
     next_revision = int(library["terms_revision"]) + 1 if library else 1
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    library_record = record_header(
+        "terminology_library", project_id, record_id=f"TERMS-{next_revision}", terms_revision=next_revision,
+        published_run_id=library.get("published_run_id") if library else None,
+        active_task_id=library.get("active_task_id") if library else None,
+        terms=terms, origin="terms_import", knowledge=deepcopy(library["knowledge"]) if library else empty_knowledge(),
+    )
+    transfer_alias_evidence(library_record, spec)
+    knowledge = library_record["knowledge"]
+    known = evidence(project, library_record)
+    no_source = {(f["owner"], f["text"]) for f in known.values() if f["state"] == "active" and f["source_range"] is None}
+    current = {t["normalized"]:t for t in (library or {}).get("terms", [])}
+    for item in imported:
+        owner = normalize_term(item["source"], spec)
+        text = item["description"]
+        if text and not item["disabled"] and (owner, text) not in no_source and text != current.get(owner, {}).get("description"):
+            add_unsourced(knowledge, owner, text, "import")
+            no_source.add((owner, text))
+    previous_entities = entity_members(library) if library else {}
+    known = evidence(project, library_record)
+    for root, members in entity_members(library_record).items():
+        if root not in previous_entities:
+            save_items(project, library_record, root, [{"text":f["text"], "fragment_ids":[key]}
+                       for key,f in known.items() if f["owner"] in members and f["state"] == "active"])
+    project_descriptions(project, library_record)
+    changed = (terms != list((library or {}).get("terms", [])) or overrides_list != original_overrides
+               or knowledge != (library or {}).get("knowledge"))
     summary = {
-        "input": str(input_path),
-        "format": input_path.suffix.casefold().removeprefix("."),
-        "imported": len(imported),
-        "changed": changed,
-        "terms_revision": next_revision if changed else (
-            int(library["terms_revision"]) if library else None
-        ),
-        "dry_run": dry_run,
-        "warnings": [],
+        "input": str(input_path), "format": input_path.suffix.casefold().removeprefix("."),
+        "imported": len(imported), "changed": changed,
+        "terms_revision": next_revision if changed else int(library["terms_revision"]),
+        "dry_run": dry_run, "warnings": [],
     }
     if dry_run or not changed:
         return summary
-    override_record = record_header(
-        "terminology_overrides",
-        str(read_json(project, project / "project.json")["project_id"]),
-        record_id="TERMINOLOGY-OVERRIDES",
-        overrides=overrides_list,
-        origin="terms_import",
-    )
-    library_record = record_header(
-        "terminology_library",
-        str(read_json(project, project / "project.json")["project_id"]),
-        record_id=f"TERMS-{next_revision}",
-        terms_revision=next_revision,
-        published_run_id=library.get("published_run_id") if library else None,
-        active_task_id=library.get("active_task_id") if library else None,
-        terms=terms,
-        origin="terms_import",
-    )
-    write_json(project, overrides_path, override_record)
-    write_json(project, project / "terminology" / "terms.json", library_record)
+    override_record = record_header("terminology_overrides", project_id, record_id="TERMINOLOGY-OVERRIDES", overrides=overrides_list, origin="terms_import")
+    write_terminology_publication(project, terms=library_record, overrides=override_record)
     return summary
 
 def _term_exchange_rows(
@@ -267,19 +272,18 @@ def _term_exchange_rows(
         if not active or active.get("status") != "active":
             return []
         task_id = str(active.get("active_task_id", ""))
-        records = [
-            record
-            for record in read_jsonl(
-                project,
-                project / "terminology" / "candidates.jsonl",
-                task_id=task_id,
-            )
-        ]
+        from .term_library import _ordered_term_candidates
+        records = _ordered_term_candidates(project, task_id)
         merged: dict[str, dict[str, Any]] = {}
+        descriptions: dict[str, list[str]] = {}
         for record in records:
             for candidate in record.get("terms", []):
                 if isinstance(candidate, dict):
                     _add_term_candidate(merged, candidate, spec)
+                    text = candidate.get("description", "")
+                    values = descriptions.setdefault(normalize_term(candidate["source"], spec), [])
+                    if text and text not in values:
+                        values.append(text)
         overrides_document = read_json(project, project / "terminology" / "overrides.json")
         overrides = {
             str(item["normalized"]): dict(item)
@@ -305,7 +309,7 @@ def _term_exchange_rows(
                         "preferred_translation", term.get("preferred_translation")
                     ),
                     "category": override.get("category", term.get("category")),
-                    "description": override.get("description", term.get("description", "")),
+                    "description": "\n".join(descriptions.get(normalized, [])),
                     "aliases": list(override.get("aliases", term.get("aliases", []))),
                     "disabled": disabled,
                     "group_primary": (
@@ -353,9 +357,8 @@ def _term_exchange_rows(
                     "preferred_translation", term.get("preferred_translation")
                 ),
                 "category": override.get("category", term.get("category")),
-                "description": override.get(
-                    "description", term.get("description", "")
-                ),
+                "description": (term["description"] if normalized in current else
+                                "；".join(item["text"] for item in (library or {}).get("knowledge", {}).get("entities", {}).get(normalized, {}).get("items", []))),
                 "aliases": list(override.get("aliases", term.get("aliases", []))),
                 "disabled": disabled,
                 "group_primary": (
@@ -523,6 +526,7 @@ def export_terms(
         "output": str(output),
         "format": output.suffix.casefold().removeprefix("."),
         "exported": len(rows),
+        "warnings": ["术语文本交换不包含说明引用，完整结构请使用项目备份"],
         "include_disabled": include_disabled,
         "source": source,
     }

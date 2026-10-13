@@ -181,6 +181,7 @@ export function TermExportDialog({
   return (
     <Modal ariaLabel={translate("terms.exportDialogTitle", language)}>
       <h2>{translate("terms.exportDialogTitle", language)}</h2>
+      <p className="muted">{translate("knowledge.exchangeNotice", language)}</p>
       <label>{translate("terms.source", language)}<select value={source} onChange={(event) => setSource(event.target.value as "published" | "scanned")}><option value="published">{translate("terms.publishedTerms", language)}</option>{hasScanned && <option value="scanned">{translate("terms.scanCandidatesOption", language)}</option>}</select></label>
       <label>{translate("terms.format", language)}<select value={format} onChange={(event) => setFormat(event.target.value as "json" | "csv")}><option value="json">JSON</option><option value="csv">CSV</option></select></label>
       <label className="check-row"><input type="checkbox" checked={includeDisabled} onChange={(event) => setIncludeDisabled(event.target.checked)} />{translate("terms.includeRemoved", language)}</label>

@@ -72,6 +72,7 @@ class TaskStartPayload(_WebPayload):
     only_file: str | None = None
     only_segment: str | None = None
     force: StrictBool = False
+    confirm_knowledge_replacement: StrictBool = False
     replace_draft: StrictBool = False
     acknowledge_manual_review: StrictBool = False
     include_summaries: StrictBool = False

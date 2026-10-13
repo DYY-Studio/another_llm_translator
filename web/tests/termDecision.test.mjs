@@ -18,6 +18,7 @@ const proposals = [
   {
     proposal_id: "one",
     kind: "term_update",
+    changes: ["preferred_translation"],
     before: [state("Alice", null)],
     after: [state("Alice", "爱丽丝")],
     reason: "fill translation",
@@ -33,6 +34,7 @@ const proposals = [
   {
     proposal_id: "two",
     kind: "relationship",
+    changes: ["disabled"],
     before: [state("Bob", "鲍勃")],
     after: [state("Bob", "鲍勃", true)],
     reason: "unused duplicate",
@@ -61,7 +63,6 @@ test("renders semantic field and alias changes from states", () => {
   const after = { ...before, description: "基于源文证据整理后的完整说明", preferred_translation: "爱丽丝", group_primary: "root", aliases: ["Ally", "A"] };
   assert.deepEqual(decisionProposalChanges(before, after), [
     { field: "preferred_translation", before: "", after: "爱丽丝" },
-    { field: "description", before: "旧说明全文", after: "基于源文证据整理后的完整说明" },
     { field: "group_primary", before: "", after: "root" },
   ]);
   assert.deepEqual(decisionAliasChanges(before, after), { added: ["A"], removed: [] });

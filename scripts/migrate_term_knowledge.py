@@ -27,7 +27,7 @@ def migrate(project: Path) -> Path:
         if record_exists(project, active_path) and read_json(project, active_path).get("status") in {"active", "partial_published"}:
             raise UsageError("请先结束旧活动扫描")
         if any(r.get("stage") in {"terminology", "terminology_decision"}
-               and r.get("status") in {"running", "interrupted", "failed"}
+               and r.get("status") == "running"
                for r in list_runs(project)):
             raise UsageError("请先结束旧术语 Run")
         if any(r.get("decision_status") in {"pending", "generating"} for r in list_runs(project, stage="terminology_decision")):
@@ -39,19 +39,20 @@ def migrate(project: Path) -> Path:
             source.backup(target)
         knowledge = empty_knowledge()
         library["knowledge"] = knowledge
-        refs = {}
-        for term in library["terms"]:
-            if term.get("description"):
-                refs[term["normalized"]] = add_unsourced(knowledge, term["normalized"], term["description"], "legacy")
+        texts = {term["normalized"]: term.get("description", "") for term in library["terms"]}
         for override in overrides.get("overrides", []):
-            text = override.pop("description", None)
-            if text and override["normalized"] not in refs:
-                refs[override["normalized"]] = add_unsourced(knowledge, override["normalized"], text, "legacy")
+            if "description" in override:
+                texts[override["normalized"]] = override.pop("description")
+        refs = {owner: add_unsourced(knowledge, owner, text, "legacy") for owner, text in texts.items() if text}
         for root, members in entity_members(library).items():
             save_items(project, library, root, [
                 {"text": knowledge["fragments"][refs[key]]["text"], "fragment_ids": [refs[key]]}
                 for key in members if key in refs
             ])
+        active = {term["normalized"] for term in library["terms"]}
+        for owner in refs.keys() - active:
+            archived = {**library, "terms": [*library["terms"], {"normalized": owner, "group_primary": None}]}
+            save_items(project, archived, owner, [{"text": texts[owner], "fragment_ids": [refs[owner]]}])
         library["terms_revision"] += 1
         write_terminology_publication(project, terms=library, overrides=overrides)
         return backup

@@ -44,7 +44,7 @@ function StateDetails({ title, state, states, language }: { title: string; state
 }
 
 export function TermDecisionChanges({ beforeStates, afterStates, kind = "term_update", language, focusNormalized }: {
-  beforeStates: TermDecisionState[]; afterStates: TermDecisionState[]; kind?: "term_update" | "relationship"; language: Language; focusNormalized?: string;
+  beforeStates: TermDecisionState[]; afterStates: TermDecisionState[]; kind?: "term_update" | "relationship" | "entity_knowledge"; language: Language; focusNormalized?: string;
 }) {
   const changes = beforeStates.flatMap((before, index) => {
     if (focusNormalized && before.normalized !== focusNormalized) return [];

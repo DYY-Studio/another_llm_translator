@@ -34,6 +34,25 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
     async def terms(name: str) -> dict[str, Any]:
         return WebStore(project(name)).terms()
 
+    @app.get("/api/v1/projects/{name}/terms/knowledge")
+    async def get_knowledge(name: str, normalized: str) -> dict[str, Any]:
+        from .term_library import load_terms
+        from .term_knowledge import entity_view
+        root = project(name)
+        library = load_terms(root)
+        if library is None:
+            raise UsageError("没有已发布术语库")
+        return {**entity_view(root, library, normalized), "terms_revision": library["terms_revision"]}
+
+    @app.put("/api/v1/projects/{name}/terms/knowledge")
+    async def put_knowledge(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from .term_knowledge import update_entity
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能修改实体说明")
+        update_entity(root, payload)
+        return WebStore(root).terms()
+
     @app.post("/api/v1/projects/{name}/terms/hits")
     async def term_hits(
         name: str, payload: dict[str, Any]
