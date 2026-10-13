@@ -194,10 +194,10 @@
 .summary-file-group .summary-boundary-row { padding-left: 30px; }
 .summary-focused-boundary { margin: 0 0 14px; color: var(--muted); overflow-wrap: anywhere; font-size: 13px; }
 
-.entity-knowledge { display: grid; gap: 10px; min-width: 0; padding-block: 12px; border-block: 1px solid var(--border); }
+.entity-knowledge { display: grid; gap: 10px; min-width: 0; padding-block: 12px; border-top: 1px solid var(--border); }
 .knowledge-explanations > summary > span { float: right; margin-left: 8px; }
 .knowledge-explanation-content { display: grid; gap: 10px; margin-top: 10px; }
-.knowledge-scroll { max-height: min(400px, 40vh); overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 4px 8px 4px 0; }
+.knowledge-scroll { max-height: min(400px, 40vh); overflow: auto; scrollbar-gutter: stable; padding: 4px 8px 4px 0; }
 .knowledge-items { display: grid; gap: 10px; }
 .knowledge-item { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 10px; border: 1px solid var(--border); }
 .knowledge-item textarea { width: 100%; box-sizing: border-box; }

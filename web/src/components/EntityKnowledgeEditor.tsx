@@ -62,7 +62,7 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
     <details className="knowledge-explanations" onToggle={(event) => {
       if (event.target === event.currentTarget) setExplanationsExpanded(event.currentTarget.open);
     }}>
-      <summary><strong>{t("title")}</strong><span className={view.status === "stale" ? "error-text" : "muted"}>{t(view.status)}</span></summary>
+      <summary><strong>{t("title")} ({items.length})</strong><span className={view.status === "stale" ? "error-text" : "muted"}>{t(view.status)}</span></summary>
       {explanationsExpanded && <div className="knowledge-explanation-content">
     {view.members.length > 1 && <small>{t("shared")}</small>}
     {!items.length && <small>{t("noItems")}</small>}
