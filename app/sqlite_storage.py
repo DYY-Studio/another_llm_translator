@@ -3601,3 +3601,43 @@ def maintain_project_database(project: Path) -> dict[str, int]:
         error.params = {"deleted_records": deleted, "deduplicated_applied_records": len(deduplicated),
                         "pruning_completed": True}
         raise error from exc
+
+
+def read_terminology_candidates(project: Path, record_ids: set[str]) -> list[dict[str, Any]]:
+    """Load only immutable candidate records referenced by entity explanations."""
+    if not record_ids:
+        return []
+    connection = _with_db(project)
+    try:
+        values = []
+        ids = sorted(record_ids)
+        for offset in range(0, len(ids), 500):
+            batch = ids[offset:offset + 500]
+            rows = connection.execute(
+                f"SELECT record_id, active_task_id, payload_json FROM terminology_candidates WHERE record_id IN ({','.join('?' for _ in batch)})",
+                batch,
+            ).fetchall()
+            values.extend(_hydrate_candidate(row, _project_id(connection)) for row in rows)
+        return values
+    finally:
+        connection.close()
+
+
+def write_terminology_publication(
+    project: Path, *, terms: dict[str, Any], overrides: dict[str, Any],
+    active_task: dict[str, Any] | None = None,
+) -> None:
+    """Publish library, evidence index and associated decisions atomically."""
+    connection = _with_db(project)
+    try:
+        with connection:
+            documents = [("terms", terms), ("overrides", overrides)]
+            if active_task is not None:
+                documents.append(("active_task", active_task))
+            connection.executemany(
+                "INSERT INTO terms_state(key,payload_json) VALUES (?,?) "
+                "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
+                [(key, _residual(value, _TERMS_RESIDUAL_FIELDS)) for key, value in documents],
+            )
+    finally:
+        connection.close()

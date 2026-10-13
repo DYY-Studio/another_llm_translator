@@ -81,7 +81,6 @@ def _build_term_rows(
     terms: list[dict[str, Any]] = []
     for index, (normalized, item) in enumerate(sorted(merged.items()), start=1):
         categories = sorted(set(item["categories"]))
-        descriptions = list(dict.fromkeys(item["descriptions"]))
         translations = sorted(set(item["translations"]))
         sources = sorted(set(item["sources"]), key=lambda text: (len(text), text))
         aliases = sorted(
@@ -98,7 +97,7 @@ def _build_term_rows(
                 or (sources[0] if sources else normalized),
                 "normalized": normalized,
                 "category": categories[0] if len(categories) == 1 else None,
-                "description": "；".join(descriptions),
+                "description": "",
                 "preferred_translation": (
                     translations[0] if len(translations) == 1 else None
                 ),
@@ -279,13 +278,6 @@ def _seed_published_terms(
 ) -> None:
     for term in (library or {}).get("terms", []):
         _add_term_candidate(merged, term, spec)
-        description = term.get("description")
-        if description and "；" in str(description):
-            current = merged[normalize_term(str(term["source"]), spec)]
-            current["descriptions"].remove(str(description))
-            current["descriptions"].extend(
-                part for part in str(description).split("；") if part
-            )
 
 def build_term_library_rows(
     project: Path,
@@ -318,7 +310,6 @@ def _apply_term_overrides(
             current["sources"] = [override["source"]]
         for source_key, target_key in (
             ("category", "categories"),
-            ("description", "descriptions"),
             ("preferred_translation", "translations"),
         ):
             if source_key in override:
@@ -386,6 +377,7 @@ def _merge_and_publish_terms(
 ) -> dict[str, Any]:
     config = load_project_config(project)
     spec = term_normalization(config)
+    from .term_knowledge import empty_knowledge, publish_evidence, project_descriptions
     previous = load_terms(project)
     candidates = _ordered_term_candidates(project, task_id)
     merged: dict[str, dict[str, Any]] = {}
@@ -414,12 +406,15 @@ def _merge_and_publish_terms(
         published_run_id=published_run_id,
         active_task_id=task_id,
         terms=terms,
+        knowledge=previous["knowledge"] if previous else empty_knowledge(),
     )
-    write_json(project, project / "terminology" / "terms.json", library)
+    publish_evidence(project, library, candidates, spec)
+    project_descriptions(project, library)
     active = read_json(project, project / "terminology" / "active_task.json")
     active["status"] = active_status
     active["terms_revision"] = revision
-    write_json(project, project / "terminology" / "active_task.json", active)
+    from .sqlite_storage import write_terminology_publication
+    write_terminology_publication(project, terms=library, overrides=overrides_data, active_task=active)
     return library
 
 def publish_partial_terms(project: Path) -> dict[str, Any]:
@@ -440,7 +435,6 @@ def publish_partial_terms(project: Path) -> dict[str, Any]:
             project / "terminology" / "candidates.jsonl",
             task_id=task_id,
         )
-        if record.get("terms")
     ]
     if not candidates:
         raise UsageError("当前活动扫描没有可发布的候选术语")
@@ -485,9 +479,6 @@ def _add_term_candidate(
         for value in candidate.get("conflicts", {}).get("categories", [])
         if value
     )
-    description = candidate.get("description")
-    if description:
-        current["descriptions"].append(str(description))
     preferred = candidate.get("preferred_translation")
     if preferred:
         current["translations"].append(str(preferred))
@@ -515,7 +506,12 @@ def _add_term_candidate(
 
 def load_terms(project: Path) -> dict[str, Any] | None:
     path = project / "terminology" / "terms.json"
-    return read_json(project, path) if record_exists(project, path) else None
+    if not record_exists(project, path):
+        return None
+    from .term_knowledge import project_descriptions
+    library = read_json(project, path)
+    project_descriptions(project, library)
+    return library
 
 def term_normalization(config: dict[str, Any]) -> TermNormalization:
     terminology = config["terminology"]

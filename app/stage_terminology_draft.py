@@ -607,8 +607,8 @@ class DraftTerminologyScan:
         part_original: dict[str, str],
         original_parts: dict[str, list[str]],
     ) -> None:
-        if terms:
-            append_jsonl(
+        from .term_knowledge import source_range
+        append_jsonl(
                 self.project,
                 self.project / "terminology" / "candidates.jsonl",
                 record_header(
@@ -624,6 +624,7 @@ class DraftTerminologyScan:
                     source_order=_candidate_source_order(
                         items, self.segment_order, part_original,
                     ),
+                    source_range=source_range(items, self.selected_items, part_original),
                     terms=terms,
                 ),
             )

@@ -78,6 +78,7 @@ from .stage_runtime import (
     _split_source_once,
     prompt_middle_digests,
 )
+from .term_knowledge import source_range
 from .summary_provenance import write_fragment_summary
 from .term_library import (
     _candidate_source_order,
@@ -1549,7 +1550,7 @@ async def run_terminology(
                 envelope_ok and parsed.summary_complete
             )
             async with write_lock:
-                if term_ok and parsed.terms:
+                if term_ok and failed_class is not TerminologyResponseMode.SUMMARY_ONLY:
                     append_jsonl(
                         project,
                         project / "terminology" / "candidates.jsonl",
@@ -1566,6 +1567,7 @@ async def run_terminology(
                             source_order=_candidate_source_order(
                                 unresolved, segment_order, part_original,
                             ),
+                            source_range=source_range(unresolved, selected_by_id, part_original),
                             terms=list(parsed.terms),
                         ),
                     )
@@ -1713,7 +1715,7 @@ async def run_terminology(
                     }
                 )
             async with write_lock:
-                if terms:
+                if response_complete:
                     append_jsonl(
                         project,
                         project / "terminology" / "candidates.jsonl",
@@ -1732,6 +1734,7 @@ async def run_terminology(
                             source_order=_candidate_source_order(
                                 unresolved, segment_order, part_original,
                             ),
+                            source_range=source_range(unresolved, selected_by_id, part_original),
                             terms=terms,
                         ),
                     )
