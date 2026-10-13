@@ -25,6 +25,8 @@ _PRESET_KEYS = frozenset(
         "context_window_tokens",
         "target_chunk_input_tokens",
         "max_output_tokens",
+        "send_temperature",
+        "reasoning_effort",
         "context_safety_margin_tokens",
         "token_safety_factor",
         "requests_per_minute",
@@ -65,25 +67,19 @@ def load_llm_preset(path: Path, *, model_discovery: bool = False) -> LLMPreset:
         raise ConfigError(f"无法读取 LLM Preset：{path}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ConfigError(f"LLM Preset 不是合法 JSON：{path}: {exc}") from exc
+    return _parse_llm_preset(value, model_discovery=model_discovery)
+
+
+def _parse_llm_preset(value: Any, *, model_discovery: bool = False) -> LLMPreset:
     if not isinstance(value, dict):
         raise ConfigError("LLM Preset 顶层必须是 JSON 对象")
     schema_version = value.get("schema_version")
-    if schema_version not in {2, 3, 4, 5, 6, 7}:
-        raise ConfigError(
-            "LLM Preset schema_version 必须是 7；v1 的 api_key_env 字段已移除，"
-            "请改用显式 credential 引用"
-        )
-    if schema_version in {2, 3, 4, 5, 6}:
-        value = deepcopy(value)
-        value["schema_version"] = 7
-        if schema_version == 2:
-            value.setdefault("stream", False)
-            value.setdefault("stream_endpoint", "")
-        if schema_version in {2, 3}:
-            value.setdefault("stream_read_timeout_enabled", True)
-        value.setdefault("max_parallel_per_key", value.get("max_parallel"))
-        value.setdefault("target_chunk_input_tokens", 8192)
-    value.setdefault("extra_headers", {})
+    if schema_version != 8:
+        raise ConfigError("LLM Preset schema_version 必须是 8；请运行 python -m app.llm_migration 预览迁移")
+    if type(value.get("send_temperature")) is not bool:
+        raise ConfigError("send_temperature 必须是布尔值")
+    if value.get("reasoning_effort") is not None and not isinstance(value["reasoning_effort"], str):
+        raise ConfigError("reasoning_effort 必须是字符串或 null")
     unknown = set(value) - _PRESET_KEYS
     missing = _REQUIRED_PRESET_KEYS - set(value)
     if unknown:

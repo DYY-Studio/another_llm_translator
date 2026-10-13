@@ -201,7 +201,7 @@ export function RunDialog({
             <legend>{translate("runDialog.unfinishedRun", language)}</legend>
             {options.running_run.resume_compatible === false && (
               <div className="warning-banner run-warning">
-                {translate(options.stage === "content_summary" ? "runDialog.resumeUnavailable" : "terms.decisionResumeIncompatible", language)} {options.running_run.resume_incompatibility_reason}
+                {options.running_run.resume_incompatibility_reason}
               </div>
             )}
             <label className="radio-option decision-option">

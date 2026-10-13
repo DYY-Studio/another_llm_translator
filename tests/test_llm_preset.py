@@ -97,42 +97,11 @@ def test_preset_allows_zero_max_output_tokens(tmp_path: Path) -> None:
     assert preset.definition["max_output_tokens"] == 0
 
 
-def test_preset_v5_is_normalized_with_chunk_target(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7])
+def test_old_preset_requires_explicit_migration(tmp_path: Path, version: int) -> None:
     value = preset_definition()
-    value["schema_version"] = 5
-    value["max_parallel_per_key"] = 2
-    preset = load_llm_preset(write_preset(tmp_path, value))
-
-    assert preset.definition["schema_version"] == 7
-    assert preset.definition["max_parallel_per_key"] == 2
-    assert preset.definition["target_chunk_input_tokens"] == 8192
-
-
-def test_legacy_preset_endpoints_are_preserved_but_ignored(
-    tmp_path: Path,
-) -> None:
-    first_value = preset_definition()
-    first_value["schema_version"] = 6
-    second_value = {
-        **first_value,
-        "endpoint": "/ignored",
-        "stream_endpoint": "/also-ignored",
-    }
-
-    first = load_llm_preset(write_preset(tmp_path, first_value))
-    second = load_llm_preset(write_preset(tmp_path, second_value))
-
-    assert second.definition["schema_version"] == 7
-    assert second.definition["endpoint"] == "/ignored"
-    assert second.definition["stream_endpoint"] == "/also-ignored"
-    assert second.digest == first.digest
-
-
-def test_preset_v5_rejects_invalid_per_key_concurrency(tmp_path: Path) -> None:
-    value = preset_definition()
-    value["schema_version"] = 5
-    value["max_parallel_per_key"] = 0
-    with pytest.raises(ConfigError, match="max_parallel_per_key"):
+    value["schema_version"] = version
+    with pytest.raises(ConfigError, match="预览迁移"):
         load_llm_preset(write_preset(tmp_path, value))
 
 
@@ -167,29 +136,6 @@ def test_preset_preserves_legacy_endpoint(tmp_path: Path) -> None:
     assert preset.definition["endpoint"] == (
         "/v1beta/models/${model}:generateContent"
     )
-
-
-def test_preset_v2_is_normalized_to_non_streaming_in_memory(tmp_path: Path) -> None:
-    value = preset_definition()
-    value["schema_version"] = 2
-    value.pop("stream")
-    value.pop("stream_endpoint", None)
-    preset = load_llm_preset(write_preset(tmp_path, value))
-    assert preset.definition["schema_version"] == 7
-    assert preset.definition["stream"] is False
-    assert preset.definition["stream_endpoint"] == ""
-    assert preset.definition["stream_read_timeout_enabled"] is True
-    assert preset.definition["max_parallel_per_key"] == preset.definition["max_parallel"]
-
-
-def test_preset_v3_enables_stream_read_timeout_in_memory(tmp_path: Path) -> None:
-    value = preset_definition()
-    value["schema_version"] = 3
-    value.pop("stream_read_timeout_enabled")
-    preset = load_llm_preset(write_preset(tmp_path, value))
-    assert preset.definition["schema_version"] == 7
-    assert preset.definition["stream_read_timeout_enabled"] is True
-    assert preset.definition["max_parallel_per_key"] == preset.definition["max_parallel"]
 
 
 def test_preset_accepts_keychain_credential_reference(tmp_path: Path) -> None:
@@ -235,7 +181,7 @@ def test_preset_rejects_v1_schema_with_clear_message(tmp_path: Path) -> None:
     value["schema_version"] = 1
     value["api_key_env"] = "LLM_API_KEY"
     del value["credential"]
-    with pytest.raises(ConfigError, match="schema_version 必须是 7"):
+    with pytest.raises(ConfigError, match="schema_version 必须是 8"):
         load_llm_preset(write_preset(tmp_path, value))
 
 
@@ -333,9 +279,9 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
     adapter_snapshot = json.loads(adapter_snapshot_path.read_text("utf-8"))
     adapter_snapshot["schema_version"] = 2
     adapter_snapshot_path.write_text(json.dumps(adapter_snapshot), encoding="utf-8")
-    with pytest.raises(ConfigError, match="Adapter schema_version 必须是 3"):
+    with pytest.raises(ConfigError, match="Adapter schema_version 必须是 4"):
         load_run_config(run_dir)
-    adapter_snapshot["schema_version"] = 3
+    adapter_snapshot["schema_version"] = 4
     adapter_snapshot_path.write_text(json.dumps(adapter_snapshot), encoding="utf-8")
 
     (run_dir / "llm_preset.json").unlink()
@@ -599,3 +545,22 @@ def test_project_resolves_endpoints_from_adapter_not_legacy_preset(
     assert stage_fingerprint(changed, "translation", "prompt") == stage_fingerprint(
         resolved, "translation", "prompt"
     )
+
+
+def test_effective_temperature_and_effort_change_stage_fingerprint(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    source = tmp_path / "source.txt"
+    source.write_text("one", encoding="utf-8")
+    project, _ = init_project([str(source)], name="controls", app_root=app_root, projects_root=tmp_path / "projects")
+    path = app_root / "llm_presets/default.json"
+    preset = json.loads(path.read_text())
+    preset["send_temperature"] = False
+    path.write_text(json.dumps(preset))
+    config = load_project_config(project, presets_root=app_root)
+    first = stage_fingerprint(config, "translation", {})
+    config["llm"]["temperature_translation"] = 0.9
+    assert stage_fingerprint(config, "translation", {}) == first
+    preset["reasoning_effort"] = "high"
+    path.write_text(json.dumps(preset))
+    changed = load_project_config(project, presets_root=app_root)
+    assert stage_fingerprint(changed, "translation", {}) != first

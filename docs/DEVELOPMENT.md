@@ -33,6 +33,17 @@ python -m pip check
 
 开发用 API Key 只能通过 Preset 引用的环境变量或系统钥匙串提供，不得写入仓库文件。
 
+### 全局 LLM 协议升级
+
+停止服务和运行中的任务后，使用项目虚拟环境预览，再明确执行：
+
+```bash
+.venv/bin/python -m app.llm_migration
+.venv/bin/python -m app.llm_migration --apply
+```
+
+可用 `--root /absolute/user-data-root` 指定用户数据目录。命令列出 preview、updated 或 manual 结果；manual 项需要人工处理，命令以非零状态退出。每个写入前保存 `.pre-contract-upgrade.bak`，已有备份时不会覆盖。只处理全局资源，不扫描项目或改写 Run 快照。修改过的内建 Adapter 副本、自定义 Adapter 和非 schema 7 的旧 Preset 不自动转换。当前协议字段以 [Adapter 契约](ADAPTERS.md) 为准。
+
 ## 2. 后端与 CLI 开发
 
 查看入口帮助：

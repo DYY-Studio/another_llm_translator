@@ -994,7 +994,7 @@ async def test_stream_protocol_error_keeps_usage_seen_before_error(
                 {"type": "message_stop"},
             ],
             "你好",
-            {"input_tokens": 4, "output_tokens": 2, "total_tokens": 0},
+            {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
         ),
         (
             "google-gemini",

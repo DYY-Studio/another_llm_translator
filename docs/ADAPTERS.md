@@ -17,7 +17,8 @@
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
+  "response_format": "json-pointer",
   "adapter_id": "openai-compatible",
   "endpoint": "/chat/completions",
   "headers": {
@@ -45,7 +46,7 @@
 }
 ```
 
-该字段可省略；内置 OpenAI-compatible 定义按上述顺序兼容两种字段。已有配置仍可
+该字段用于 JSON Pointer 模式；原生 Chat Completions 模式按上述顺序读取两种字段。JSON Pointer 定义可
 使用单数的 `response_reasoning_content_pointer`，但单数与复数不能同时配置。候选
 路径只在前一路径缺失时继续尝试；首个存在的 `null` 表示没有 reasoning，多个字段
 不会拼接。
@@ -120,7 +121,7 @@ ID Token 验证签名、issuer、audience、expiry 和 nonce，授权以返回 s
 
 ### SSE 流式规则（可选）
 
-schema 3 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter 摘要中以
+schema 4 的 JSON Pointer Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter 摘要中以
 `streaming_supported` 报告该能力。当前唯一支持的传输是 SSE：
 
 ```json
@@ -180,9 +181,11 @@ schema 3 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
 
 ### 响应边界
 
-`response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串或 null；null 规范化为空正文。只有明确命中声明的截断或拒绝结束原因时，正文路径缺失才规范化为空正文。JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`-1` 为最后一个元素、`-2` 为倒数第二。
+JSON Pointer 模式的 `response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串或 null；null 规范化为空正文。只有明确命中声明的截断或拒绝结束原因时，正文路径缺失才规范化为空正文。JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`-1` 为最后一个元素、`-2` 为倒数第二。
 
-当思考块总是排在最前、文本块在最后时 （Anthropic `content`、Gemini `parts`），负索引可稳定取到最后文本块。未命中已声明的截断或拒绝结束原因时，越界、空数组与普通缺失路径同样快速失败。可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。
+原生 `response_format` 可选 `chat-completions`、`responses`、`anthropic`、`gemini`；宿主聚合各协议的全部正文文本，Gemini 仅取首个 candidate 并排除 thought。原生模式不能同时声明正文、思考正文、结束原因或 usage 映射。原生 streaming 只声明 `transport`、`endpoint`、可选 `request_body` 和 `allow_clean_eof`，事件解析由响应格式决定。
+
+Chat Completions 使用 `[DONE]`，Responses 使用 completed/incomplete，Anthropic 使用 message_stop，Gemini 收到 finishReason 后继续读到自然 EOF，以收集后续 usage。拒绝响应优先失败，即使已经收到部分正文，也不触发空正文重试。截断响应进入已有的有界截断重试策略。
 
 也可使用非空的 `response_reasoning_content_pointers` 数组声明有序候选路径：路径缺失时继续尝试，首个存在的 `null` 规范化为 null，字段存在但类型错误时当前请求失败，不猜测或拼接多个字段。
 
@@ -238,6 +241,7 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
   ID 不一致时立即拒绝；Key 缺失、格式错误或序号越界均立即报告。
 - Preset 编辑器保留可手工输入的模型 ID；发现结果在字段下方按名称或 ID
   本地搜索。选择结果只更新当前草稿并收起列表，必须显式保存才会生效。
+- 原生 Anthropic 与 Gemini 格式读取全部分页，重复游标或任一页失败时整体报错；Gemini 仅保留支持 `generateContent` 的模型。
 - `response_models_pointer` 指向模型条目数组；`response_model_id` 是条目内
   必填键名；`response_model_display` 与 `response_model_strip_prefix` 可选。
 - 展示名缺失时回退为模型 ID；`response_model_strip_prefix` 从模型 ID 前缀
@@ -245,7 +249,7 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
 - 缺少 `models` 规格、缺失或格式错误的 credential、HTTP 错误或网络异常都明确
   报告，不猜测、不 fallback。请求使用 Preset 的代理与超时设置。
 
-Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为规范化计数：
+JSON Pointer Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为规范化计数：
 
 ```json
 {
@@ -261,34 +265,26 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
   任务标记为 partial；保留已观测计数但吞吐量不可用，不使用本地启发式估算冒充
   端点账单。完全没有可观测 usage 时显示 unavailable。
 - 宿主在每个尝试收到 usage 后累计规范化计数，任务结束时写入任务摘要与 Run
-  `manifest.json` 的 `usage` 字段。Adapter 未声明 `usage` 时任务与 Run
+  `manifest.json` 的 `usage` 字段。JSON Pointer Adapter 未声明 `usage` 时任务与 Run
   摘要不包含 usage 字段。
 - 主请求的限速、重试与错误语义不受影响。
 
+原生模式直接读取供应商用量字段。Anthropic 输入包含基础输入、缓存读取和创建，输出使用已包含 thinking 的 `output_tokens`；Gemini 输出包含 candidate 与 thoughts。流式累计计数采用最终值，非法计数直接报错。
+
 ### 内置 Adapter 定义
 
-- `openai-compatible`：
-  - 使用 Bearer API Key 和 Chat Completions body。
-  - 正文 pointer 为 `/choices/0/message/content`。
-  - 推理 pointers 为 `/choices/0/message/reasoning_content` 和
-    `/choices/0/message/reasoning`。
-  - SSE 推理增量对应 `/choices/0/delta/reasoning_content` 和
-    `/choices/0/delta/reasoning`。
-- `anthropic`：`x-api-key` 与 `anthropic-version: 2023-06-01`，body 顶层 `system`，pointer `/content/-1/text`。
+| Adapter | 请求协议 | 原生响应格式 | 输出上限字段 |
+| --- | --- | --- | --- |
+| `openai-compatible` | Chat Completions | `chat-completions` | `max_tokens` |
+| `openai-chat` | OpenAI Chat Completions | `chat-completions` | `max_completion_tokens` |
+| `openai-responses` | Responses | `responses` | `max_output_tokens` |
+| `chatgpt-plan` | Responses，固定授权连接 | `responses` | 仅用于本地预算 |
+| `anthropic` | Messages | `anthropic` | `max_tokens`，最小值 1 |
+| `google-gemini` | generateContent | `gemini` | `generationConfig.maxOutputTokens` |
 
-  未启用 thinking 时 content 首块即文本；负索引使 `extra_body` 日后启用 thinking 时仍可稳定取到最后文本块。不配置 reasoning 指针；需要思考正文时可复制定义并设 `/content/-2/thinking`。
+Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由实际输入和输出相加；流式 usage 使用最终累计值。Gemini 保留官方 totalTokenCount，不以可见正文 token 重算。原生拒绝、promptFeedback 拦截和流内失败保持显式，供应商错误消息不会变成通用缺少正文路径。
 
-  未启用 thinking 或思考块缺失时结果为 null；字段存在但不是字符串或 null 时快速失败。
-- `google-gemini`：`x-goog-api-key`（密钥不进入 URL），model 由 Adapter `endpoint` 的 `${model}` 占位符进入请求路径，pointer `/candidates/0/content/parts/-1/text`。
-
-  不内置 thinkingConfig，思考模型默认思考开启时 text 块仍恒为最后一个 part。不配置 reasoning 指针；可自配 `/candidates/0/content/parts/-2/text`，缺失路径结果为 null，字段存在但不是字符串或 null 时快速失败。
-- `openai-responses`：`input` 原样接收规范化消息（system/user/assistant），body 含 `"store": false`，pointer `/output/-1/content/-1/text`。
-
-  宿主直接解析 REST JSON，不使用 SDK 才提供的 `output_text` 便利属性；当前请求不声明 tool，因此最终 message 是最后一个 output，正文是其最后一个 content。响应缺少该结构时快速失败。
-
-四个内置定义都声明 `streaming`、`models` 与 `usage` 映射；示例 Preset 见 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与 `openai-responses.json`。
-
-Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置 Adapter 的主请求、流式和 `models` 端点都不含版本前缀；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
+版本前缀 `/v1`、`/v1beta` 写在 Preset `base_url` 中。普通和流式 endpoint 仍由 Adapter 声明。
 
 ### 术语提取实验响应
 
@@ -636,9 +632,15 @@ Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter 
 
 Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和影响阶段语义的定义内容 Hash；单独修改 `target_chunk_input_tokens` 不会改变该指纹。
 
-当前 Preset schema 为 7。`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力；普通与流式 Endpoint 均由 Adapter 定义。`target_chunk_input_tokens` 是完整输入 Prompt 的 Chunk 软目标；每个阶段使用其实际解析的 Preset 值，实际请求仍受上下文硬限制、Token 安全系数和启用的 ITPM 约束。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
+当前 Preset schema 为 8。`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力；普通与流式 Endpoint 均由 Adapter 定义。`target_chunk_input_tokens` 是完整输入 Prompt 的 Chunk 软目标；每个阶段使用其实际解析的 Preset 值，实际请求仍受上下文硬限制、Token 安全系数和启用的 ITPM 约束。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
 
-schema 2–6 用户 Preset 在 CLI、Web 或桌面 sidecar 启动时原子迁移为 schema 7，补入缺失字段；旧 `endpoint` 与 `stream_endpoint` 字段原样保留，但不校验、不参与请求或指纹。`target_chunk_input_tokens` 的迁移默认值为 `8192`，`max_parallel_per_key` 默认为 `max_parallel`。Run 内历史 Preset 快照只在内存中补齐默认值，不改写审计文件；schema 1/2 Adapter 快照不兼容 schema 3，不从 Preset 回退 Endpoint。项目配置中曾出现的同名 Chunk 字段是遗留兼容字段：旧项目可继续读取和保存，但其值无效；新项目不再写入该字段。
+旧协议不在运行期自动转换。全局 schema 7 Preset 使用 `python -m app.llm_migration` 预览，添加 `--apply` 后备份并迁移；历史 Run 快照不改写，旧协议 Run 只供查看，正式执行需创建新 Run。
+
+`send_temperature` 为必填布尔值；关闭后省略请求模板中的温度，禁止在 Extra Body 中再次添加。阶段温度不参与关闭发送后的阶段指纹。`reasoning_effort` 为字符串或 null，null 不发送参数；等级必须属于 Adapter 的声明，不能在 Extra Body 中重复填写声明位置或别名位置。Effort 不自动调整温度、thinking 开关或思考摘要。
+
+内建 Effort 写入位置：Chat Completions 为 `/reasoning_effort`，Responses 与 Plan 为 `/reasoning/effort`，Anthropic 为 `/output_config/effort`，Gemini 为 `/generationConfig/thinkingConfig/thinkingLevel`。等级列表来自 Adapter 声明；具体模型不支持时保留供应商错误，不根据模型名自动转换。Gemini 2.5 示例保持 null，不将等级换算为 thinkingBudget。
+
+Adapter 可声明 `max_output_tokens_minimum` 非负整数，默认 0；宿主按该值校验输出上限。可选 `reasoning_effort` 对象包含 `body_pointer`、非空唯一字符串数组 `values` 和可选 `aliases` JSON Pointer 数组。请求在完成 Extra Body 合并后向声明路径写入 Effort，仅创建必要的 JSON 对象，已有叶子字段或非对象中间路径直接失败。
 
 启用流式但 Adapter 没有 `streaming` 规则时保存、创建 Run 和发送请求都会快速失败。
 

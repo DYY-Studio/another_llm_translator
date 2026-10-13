@@ -1573,14 +1573,6 @@ async def test_llm_client_rejects_structured_and_embedded_reasoning_together(
     tmp_path: Path,
 ) -> None:
     current = config()
-    definition = dict(current["_llm_adapter"].definition)
-    definition["response_reasoning_content_pointers"] = [
-        "/choices/0/message/reasoning_content"
-    ]
-    adapter_file = tmp_path / "adapter.json"
-    adapter_file.write_text(json.dumps(definition), encoding="utf-8")
-    current["_llm_adapter"] = load_json_adapter(adapter_file)
-
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -2122,7 +2114,8 @@ async def test_llm_client_without_usage_mapping_has_no_summary(
 ) -> None:
     current = config()
     definition = dict(current["_llm_adapter"].definition)
-    definition.pop("usage")
+    definition.update(response_format="json-pointer", response_content_pointer="/choices/0/message/content")
+    definition.pop("streaming")
     adapter_file = tmp_path / "adapter.json"
     adapter_file.write_text(json.dumps(definition), encoding="utf-8")
     current["_llm_adapter"] = load_json_adapter(adapter_file)
@@ -2553,3 +2546,24 @@ async def test_llm_client_sends_openai_responses_format_request(
     assert sent["input"] == render_messages("prompt", {"segments": []})
     assert sent["store"] is False
     assert sent["stream"] is False
+
+
+def test_old_llm_run_requires_decline_and_preserves_snapshot(tmp_path: Path) -> None:
+    from app.execution import choose_running_run, run_protocol_is_current
+    from app.errors import UsageError
+    project = _finalize_project(tmp_path)
+    run_id, directory = create_run(
+        project, config=config(), stage="translation", fingerprint="fingerprint",
+        prompt="prompt", selected_count=1, requested_count=1, reused_count=0,
+        details={"scope": {"all_nonempty": True}},
+    )
+    assert run_protocol_is_current(project, run_id)
+    path = directory / "llm_preset.json"
+    snapshot = json.loads(path.read_text())
+    snapshot["schema_version"] = 7
+    path.write_text(json.dumps(snapshot))
+    original = path.read_bytes()
+    with pytest.raises(UsageError, match="旧 LLM 协议"):
+        choose_running_run(project, "translation", action="resume", dry_run=False)
+    assert choose_running_run(project, "translation", action="decline", dry_run=False)[0] is None
+    assert path.read_bytes() == original

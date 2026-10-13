@@ -205,6 +205,8 @@ def register_resource_routes(
                 temperature=0,
                 max_output_tokens=int(preset.definition["max_output_tokens"]),
                 stream=bool(preset.definition["stream"]),
+                send_temperature=preset.definition["send_temperature"],
+                reasoning_effort=preset.definition["reasoning_effort"],
                 extra_body=preset.definition["extra_body"],
                 extra_headers=preset.definition["extra_headers"],
                 session_id="RUN-VALIDATION",
@@ -841,7 +843,7 @@ def register_resource_routes(
                         "adapter_id": preset.adapter_id,
                         "model": preset.definition["model"],
                         "stream": bool(preset.definition["stream"]),
-                        "temperature_supported": load_json_adapter(effective_path(f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root)).capabilities["temperature"],
+                        "temperature_supported": load_json_adapter(effective_path(f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root)).capabilities["temperature"] and preset.definition["send_temperature"],
                         "selected": preset.preset_id == selected,
                         "valid": True,
                         "digest": preset.digest,
@@ -911,6 +913,8 @@ def register_resource_routes(
             temperature=0.2,
             max_output_tokens=int(preset.definition["max_output_tokens"]),
             stream=bool(preset.definition["stream"]),
+            send_temperature=preset.definition["send_temperature"],
+            reasoning_effort=preset.definition["reasoning_effort"],
             extra_body=preset.definition["extra_body"],
             extra_headers=preset.definition["extra_headers"],
             session_id="RUN-PREVIEW",
@@ -966,19 +970,30 @@ def register_resource_routes(
         )
         timeout = float(preset.definition["request_timeout_seconds"])
         proxy = (connection.read()["proxy_url"] if plan else str(preset.definition["proxy_url"])) or None
+        models = []
+        query: dict[str, str] = {}
+        cursors: set[tuple[tuple[str, str], ...]] = set()
         try:
             async with httpx.AsyncClient(timeout=timeout, proxy=proxy, **({"trust_env": False} if plan else {})) as client:
-                response = await client.get(url, headers=headers)
+                while True:
+                    response = await client.get(url, headers=headers, params=query)
+                    if response.status_code >= 400:
+                        raise UsageError(f"模型列表请求失败：HTTP {response.status_code}")
+                    try:
+                        data = response.json()
+                    except ValueError as exc:
+                        raise UsageError("模型列表响应不是合法 JSON") from exc
+                    models.extend(adapter.parse_models_response(data))
+                    next_query = adapter.next_models_query(data)
+                    if next_query is None:
+                        break
+                    cursor = tuple(sorted(next_query.items()))
+                    if cursor in cursors:
+                        raise UsageError("模型列表返回重复分页游标")
+                    cursors.add(cursor)
+                    query = next_query
         except (httpx.HTTPError, OSError) as exc:
             raise UsageError(f"模型列表请求失败：{exc}") from exc
-        if response.status_code >= 400:
-            raise UsageError(f"模型列表请求失败：HTTP {response.status_code}")
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise UsageError("模型列表响应不是合法 JSON") from exc
-        try:
-            models = adapter.parse_models_response(data)
         except ExternalError as exc:
             raise UsageError(str(exc)) from exc
         return {"models": models, "count": len(models)}

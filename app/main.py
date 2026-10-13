@@ -11,7 +11,6 @@ from typing import Any
 from .errors import AppError, UsageError
 from .execution import Scope, choose_running_run
 from .i18n import cli_language
-from .llm_migration import migrate_llm_resources
 from .locking import project_write_lock
 from .logging_utils import attach_project_log, configure_cli_logging, get_logger
 from .plugins import document_adapter_summaries, load_plugins
@@ -290,7 +289,6 @@ def emit_summary(summary: dict[str, Any]) -> None:
 
 
 def run(argv: list[str] | None = None) -> int:
-    migrate_llm_resources()
     configure_cli_logging()
     logger = get_logger()
     parser = build_parser()

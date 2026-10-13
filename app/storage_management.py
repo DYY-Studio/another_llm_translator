@@ -243,7 +243,13 @@ def _walk_project_files(
                     continue
                 parts = _relative_parts(path, root)
                 category = category_for(parts)
-                size = _file_size(path)
+                try:
+                    size = _file_size(path)
+                except StorageError as exc:
+                    # SQLite may remove its WAL sidecars after directory enumeration.
+                    if parts in {("project.sqlite-wal",), ("project.sqlite-shm",)} and isinstance(exc.__cause__, FileNotFoundError):
+                        continue
+                    raise
                 reclaimable = category in {"logs", "debug_attachments"}
                 if category == "output":
                     reclaimable = _output_is_eligible(

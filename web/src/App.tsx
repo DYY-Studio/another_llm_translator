@@ -288,9 +288,17 @@ export default function App() {
     setRecentRestoreNotice(null);
     setRecentProjectsReady(false);
     try {
-      const results = await Promise.allSettled(paths.map((path) => api<{ path: string }>(
-        "/api/v1/projects/register",
-        { method: "POST", body: JSON.stringify({ path }) },
+      const available = await queryClient.ensureQueryData({
+        queryKey: queryKeys.projects(),
+        queryFn: ({ signal }) => fetchProjects(signal),
+      });
+      const knownPaths = new Set(available.map((item) => item.path));
+      const results = await Promise.allSettled(paths.map((path) => (
+        knownPaths.has(path)
+          ? Promise.resolve({ path })
+          : api<{ path: string }>("/api/v1/projects/register", {
+              method: "POST", body: JSON.stringify({ path }),
+            })
       )));
       const authRequired = results.some((result) => (
         result.status === "rejected"
@@ -319,7 +327,9 @@ export default function App() {
             retryable: pathResult.transientFailureCount > 0,
           }
         : null;
-      await loadProjects();
+      if (results.some((result, index) => result.status === "fulfilled" && !knownPaths.has(paths[index]))) {
+        await loadProjects();
+      }
       setRecentRestoreNotice(recoveryNotice);
       setRecentProjectsReady(true);
       return true;
@@ -331,7 +341,7 @@ export default function App() {
       setError(reason);
       return false;
     }
-  }, [loadProjects, markAuthRequired]);
+  }, [loadProjects, markAuthRequired, queryClient]);
 
   const retryQuery = useCallback(async () => {
     if (!queryError) return;

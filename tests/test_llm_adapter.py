@@ -17,7 +17,8 @@ def write_adapter(tmp_path: Path, value: dict[str, object]) -> Path:
 
 def definition() -> dict[str, object]:
     return {
-        "schema_version": 3,
+        "schema_version": 4,
+        "response_format": "json-pointer",
         "adapter_id": "custom-json",
         "endpoint": "/generate",
         "headers": {
@@ -36,6 +37,30 @@ def definition() -> dict[str, object]:
         },
         "response_content_pointer": "/result/0/text",
     }
+
+
+def test_adapter_declares_request_controls(tmp_path: Path) -> None:
+    value = definition()
+    value["body"].pop("reasoning_effort")
+    value["max_output_tokens_minimum"] = 1
+    value["reasoning_effort"] = {
+        "body_pointer": "/reasoning/effort", "values": ["low", "high"],
+        "aliases": ["/reasoning_effort"],
+    }
+    adapter = load_json_adapter(write_adapter(tmp_path, value))
+    arguments = dict(api_key="key", model="model", messages=[], temperature=0.2,
+                     max_output_tokens=10, stream=False, send_temperature=False)
+    _, body = adapter.build_request(**arguments, reasoning_effort="high",
+                                    extra_body={"reasoning": {"summary": "auto"}})
+    assert body["reasoning"] == {"summary": "auto", "effort": "high"}
+    assert "temperature" not in body["sampling"]
+    assert "reasoning" not in adapter.build_request(**arguments)[1]
+    with pytest.raises(ConfigError, match="输出上限"):
+        adapter.build_request(**{**arguments, "max_output_tokens": 0})
+    with pytest.raises(ConfigError, match="Reasoning Effort"):
+        adapter.build_request(**arguments, reasoning_effort="medium")
+    with pytest.raises(ConfigError, match="Extra Body"):
+        adapter.build_request(**arguments, extra_body={"reasoning_effort": "high"})
 
 
 def test_adapter_schema_v3_owns_request_endpoints(tmp_path: Path) -> None:
@@ -59,7 +84,7 @@ def test_adapter_rejects_legacy_schema_without_endpoints(tmp_path: Path) -> None
     value = definition()
     value["schema_version"] = 2
     value.pop("endpoint")
-    with pytest.raises(ConfigError, match="schema_version 必须是 3"):
+    with pytest.raises(ConfigError, match="schema_version 必须是 4"):
         load_json_adapter(write_adapter(tmp_path, value))
 
 
@@ -525,15 +550,6 @@ def test_json_adapter_rejects_malformed_index_tokens(
         adapter.parse_response({"result": [{"text": "x"}]})
 
 
-def test_json_adapter_negative_index_replace_content(tmp_path: Path) -> None:
-    value = definition()
-    value["response_content_pointer"] = "/result/-1/text"
-    adapter = load_json_adapter(write_adapter(tmp_path, value))
-    response = {"result": [{"text": "old"}, {"text": "target"}]}
-    adapter.replace_content(response, "new")
-    assert response == {"result": [{"text": "old"}, {"text": "new"}]}
-
-
 def models_definition() -> dict[str, object]:
     value = definition()
     value["headers"] = {"Authorization": "Bearer ${api_key}"}
@@ -833,4 +849,11 @@ def test_json_adapter_streaming_schema_rejects_invalid(
     value = streaming_definition()
     mutate(value)
     with pytest.raises(ConfigError, match=message):
+        load_json_adapter(write_adapter(tmp_path, value))
+
+
+def test_adapter_rejects_managed_effort_in_stream_request_body(tmp_path: Path) -> None:
+    value = json.loads((Path(__file__).parents[1] / "llm_adapters/openai-responses.json").read_text())
+    value["streaming"]["request_body"] = {"reasoning": {"effort": "high"}}
+    with pytest.raises(ConfigError, match="Reasoning Effort"):
         load_json_adapter(write_adapter(tmp_path, value))

@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 
 from .errors import ConfigError, ExternalError
 
+ADAPTER_SCHEMA_VERSION = 4
+
 _PLACEHOLDER_RE = re.compile(r"\$\{([a-z_][a-z0-9_]*)\}")
 _BODY_PLACEHOLDERS = frozenset(
     {"model", "system", "messages", "temperature", "max_output_tokens", "stream"}
@@ -23,11 +25,12 @@ _REQUIRED_ADAPTER_KEYS = frozenset(
         "endpoint",
         "headers",
         "body",
-        "response_content_pointer",
+        "response_format",
     }
 )
 _OPTIONAL_ADAPTER_KEYS = frozenset(
     {
+        "response_content_pointer",
         "messages_format",
         "models",
         "response_finish_reason_pointer",
@@ -38,6 +41,8 @@ _OPTIONAL_ADAPTER_KEYS = frozenset(
         "usage",
         "streaming",
         "connection",
+        "max_output_tokens_minimum",
+        "reasoning_effort",
     }
 )
 _MESSAGES_FORMATS = frozenset({"openai", "anthropic", "gemini", "responses"})
@@ -103,7 +108,7 @@ class JSONLLMAdapter:
     endpoint: str
     headers_template: dict[str, str]
     body_template: dict[str, Any]
-    response_content_pointer: str
+    response_content_pointer: str | None
     response_reasoning_content_pointers: tuple[str, ...] | None
     messages_format: str
     models_spec: dict[str, Any] | None
@@ -121,17 +126,35 @@ class JSONLLMAdapter:
         temperature: float,
         max_output_tokens: int,
         stream: bool,
+        send_temperature: bool = True,
+        reasoning_effort: str | None = None,
         extra_body: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
         session_id: str | None = None,
         request_id: str | None = None,
     ) -> tuple[dict[str, str], dict[str, Any]]:
+        minimum = self.definition.get("max_output_tokens_minimum", 0)
+        if max_output_tokens < minimum:
+            raise ConfigError(f"输出上限必须至少为 {minimum}")
+        effort = self.definition.get("reasoning_effort")
+        if reasoning_effort is not None and (effort is None or reasoning_effort not in effort["values"]):
+            raise ConfigError("Reasoning Effort 不在 Adapter 声明的等级中")
+        if extra_body:
+            if not send_temperature and _contains_key(extra_body, "temperature"):
+                raise ConfigError("已关闭温度发送，Extra Body 不得填写 temperature")
+            if effort:
+                for pointer in [effort["body_pointer"], *effort["aliases"]]:
+                    try:
+                        _resolve_json_pointer(extra_body, pointer)
+                    except ExternalError:
+                        continue
+                    raise ConfigError("Extra Body 不得重复填写 Reasoning Effort")
         values: dict[str, Any] = {
             "api_key": api_key,
             "model": model,
             "system": _extract_system(messages),
             "messages": _transform_messages(messages, self.messages_format),
-            "temperature": temperature,
+            "temperature": temperature if send_temperature else None,
             "max_output_tokens": max_output_tokens,
             "stream": stream,
         }
@@ -182,10 +205,49 @@ class JSONLLMAdapter:
                     + ", ".join(sorted(conflicts))
                 )
             body.update(deepcopy(extra_body))
+        if reasoning_effort is not None:
+            _insert_body_value(body, effort["body_pointer"], reasoning_effort)
         if self.adapter_id == "chatgpt-plan":
             from .chatgpt_oauth import validate_plan_body
             validate_plan_body(body)
         return headers, body
+
+    @property
+    def response_format(self) -> str:
+        return self.definition["response_format"]
+
+    @property
+    def usage_supported(self) -> bool:
+        return self.response_format != "json-pointer" or self.usage_pointers is not None
+
+    @property
+    def truncated_finish_reasons(self) -> list[str]:
+        if self.response_format != "json-pointer":
+            from .llm_native import FINISH_REASONS
+            return FINISH_REASONS[self.response_format][0]
+        return self.definition.get("truncated_finish_reasons", [])
+
+    @property
+    def blocked_finish_reasons(self) -> list[str]:
+        if self.response_format != "json-pointer":
+            from .llm_native import FINISH_REASONS
+            return FINISH_REASONS[self.response_format][1]
+        return self.definition.get("blocked_finish_reasons", [])
+
+    @property
+    def stream_sentinel(self) -> str | None:
+        if self.response_format == "chat-completions":
+            return "[DONE]"
+        return (self.streaming_spec or {}).get("terminal", {}).get("sentinel")
+
+    def complete_stream_usage(self, values: dict[str, int]) -> dict[str, int]:
+        if self.response_format != "json-pointer":
+            from .llm_native import complete_usage
+            return complete_usage(self.response_format, values)
+        return values
+
+    def stream_completed_at_eof(self, reason: str | None) -> bool:
+        return self.response_format == "gemini" and reason is not None
 
     @property
     def streaming_supported(self) -> bool:
@@ -202,10 +264,19 @@ class JSONLLMAdapter:
             "max_output_tokens": "max_output_tokens" in placeholders,
             "streaming": "required" if self.streaming_supported and self.body_template.get("stream") is True else "optional" if self.streaming_supported else "unsupported",
             "connection": deepcopy(self.definition.get("connection")),
+            "max_output_tokens_minimum": self.definition.get("max_output_tokens_minimum", 0),
+            "reasoning_effort": deepcopy(self.definition.get("reasoning_effort")),
         }
 
     def validate_preset(self, definition: dict[str, Any]) -> None:
         capabilities = self.capabilities
+        if definition["send_temperature"] and not capabilities["temperature"]:
+            raise ConfigError("该 Adapter 不支持发送温度")
+        if definition["max_output_tokens"] < capabilities["max_output_tokens_minimum"]:
+            raise ConfigError(f"输出上限必须至少为 {capabilities['max_output_tokens_minimum']}")
+        effort = capabilities["reasoning_effort"]
+        if definition["reasoning_effort"] is not None and (effort is None or definition["reasoning_effort"] not in effort["values"]):
+            raise ConfigError("Reasoning Effort 不在 Adapter 声明的等级中")
         connection = capabilities["connection"]
         if connection is not None:
             if definition["base_url"] != connection["base_url"] or definition["credential"] != connection["credential"]:
@@ -216,6 +287,9 @@ class JSONLLMAdapter:
             raise ConfigError("该 Adapter 要求流式请求")
 
     def stream_content_deltas(self, event: dict[str, Any]) -> list[str]:
+        if self.response_format != "json-pointer":
+            from .llm_native import content_deltas
+            return content_deltas(self.response_format, event)
         if self.streaming_spec is None:
             raise ExternalError("LLM Adapter 未声明 streaming 规则")
         return _stream_deltas(
@@ -225,6 +299,9 @@ class JSONLLMAdapter:
         )
 
     def stream_reasoning_deltas(self, event: dict[str, Any]) -> list[str]:
+        if self.response_format != "json-pointer":
+            from .llm_native import reasoning_deltas
+            return reasoning_deltas(self.response_format, event)
         if self.streaming_spec is None:
             raise ExternalError("LLM Adapter 未声明 streaming 规则")
         return _stream_deltas(
@@ -236,6 +313,9 @@ class JSONLLMAdapter:
     def stream_error_details(
         self, event: dict[str, Any]
     ) -> StreamErrorDetails | None:
+        if self.response_format != "json-pointer":
+            from .llm_native import stream_error
+            return stream_error(self.response_format, event)
         if self.streaming_spec is None:
             raise ExternalError("LLM Adapter 未声明 streaming 规则")
         for rule in self.streaming_spec["error_events"]:
@@ -277,6 +357,9 @@ class JSONLLMAdapter:
         return None
 
     def stream_finish_reason(self, event: dict[str, Any]) -> str | None:
+        if self.response_format != "json-pointer":
+            from .llm_native import finish_reason
+            return finish_reason(self.response_format, event, stream=True)
         if self.streaming_spec is None:
             raise ExternalError("LLM Adapter 未声明 streaming 规则")
         values = _stream_deltas(
@@ -285,6 +368,9 @@ class JSONLLMAdapter:
         return values[-1] if values else None
 
     def stream_terminal(self, event: dict[str, Any]) -> bool:
+        if self.response_format != "json-pointer":
+            from .llm_native import terminal
+            return terminal(self.response_format, event)
         if self.streaming_spec is None:
             raise ExternalError("LLM Adapter 未声明 streaming 规则")
         terminal = self.streaming_spec["terminal"]
@@ -293,6 +379,9 @@ class JSONLLMAdapter:
         return _stream_condition_matches(event, terminal["when"])
 
     def extract_stream_usage(self, event: dict[str, Any]) -> dict[str, int]:
+        if self.response_format != "json-pointer":
+            from .llm_native import usage_values
+            return usage_values(self.response_format, event, stream=True)
         if self.streaming_spec is None:
             return {}
         values: dict[str, int] = {}
@@ -316,6 +405,9 @@ class JSONLLMAdapter:
         return values
 
     def parse_response(self, response: Any) -> LLMResponse:
+        if self.response_format != "json-pointer":
+            from .llm_native import parse_response
+            return parse_response(self.response_format, response)
         finish_reason = None
         reason_pointer = self.definition.get("response_finish_reason_pointer")
         if reason_pointer:
@@ -358,28 +450,6 @@ class JSONLLMAdapter:
             finish_reason=finish_reason,
         )
 
-    def replace_content(self, response: Any, content: str) -> None:
-        tokens = _parse_json_pointer(self.response_content_pointer)
-        if not tokens:
-            raise ExternalError("LLM 响应正文路径不能指向整个响应")
-        parent = _resolve_json_pointer_tokens(response, tokens[:-1])
-        token = tokens[-1]
-        try:
-            if isinstance(parent, list):
-                if not _is_index(token):
-                    raise KeyError(token)
-                parent[int(token)] = content
-            elif isinstance(parent, dict):
-                if token not in parent:
-                    raise KeyError(token)
-                parent[token] = content
-            else:
-                raise KeyError(token)
-        except (KeyError, IndexError) as exc:
-            raise ExternalError(
-                f"LLM 响应缺少正文路径：{self.response_content_pointer}"
-            ) from exc
-
     def build_models_request(
         self, *, api_key: str
     ) -> tuple[str, dict[str, str]]:
@@ -410,6 +480,12 @@ class JSONLLMAdapter:
         strip_prefix = self.models_spec.get("response_model_strip_prefix", "")
         result: list[dict[str, str]] = []
         for item in items:
+            if self.response_format == "gemini" and isinstance(item, dict):
+                methods = item.get("supportedGenerationMethods", [])
+                if not isinstance(methods, list) or any(not isinstance(method, str) for method in methods):
+                    raise ExternalError("Gemini 模型能力不是字符串数组")
+                if "generateContent" not in methods:
+                    continue
             if self.adapter_id == "chatgpt-plan" and isinstance(item, dict) and item.get("visibility") != "list":
                 continue
             if not isinstance(item, dict) or not isinstance(item.get(id_key), str):
@@ -423,7 +499,29 @@ class JSONLLMAdapter:
             result.append({"id": model_id, "display": display})
         return result
 
+    def next_models_query(self, response: dict[str, Any]) -> dict[str, str] | None:
+        if self.response_format == "anthropic":
+            if type(response.get("has_more")) is not bool:
+                raise ExternalError("Anthropic 模型列表缺少 has_more")
+            if not response["has_more"]:
+                return None
+            token = response.get("last_id")
+            parameter = "after_id"
+        elif self.response_format == "gemini":
+            token = response.get("nextPageToken")
+            if token is None or token == "":
+                return None
+            parameter = "pageToken"
+        else:
+            return None
+        if not isinstance(token, str) or not token:
+            raise ExternalError("模型分页游标不是非空字符串")
+        return {parameter: token}
+
     def extract_usage(self, response: Any) -> Usage | None:
+        if self.response_format != "json-pointer":
+            from .llm_native import extract_usage
+            return extract_usage(self.response_format, response)
         if self.usage_pointers is None:
             return None
         values: list[int] = []
@@ -456,8 +554,8 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
     if not isinstance(value, dict):
         raise ConfigError(f"LLM Adapter 顶层必须是 JSON 对象：{path}")
     schema_version = value.get("schema_version")
-    if schema_version != 3:
-        raise ConfigError("LLM Adapter schema_version 必须是 3")
+    if schema_version != ADAPTER_SCHEMA_VERSION:
+        raise ConfigError(f"LLM Adapter schema_version 必须是 {ADAPTER_SCHEMA_VERSION}")
     unknown = set(value) - _REQUIRED_ADAPTER_KEYS - _OPTIONAL_ADAPTER_KEYS
     missing = _REQUIRED_ADAPTER_KEYS - set(value)
     if unknown:
@@ -491,10 +589,19 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
     if not isinstance(body, dict):
         raise ConfigError("LLM Adapter body 必须是 JSON 对象")
     _validate_body(body)
-    pointer = value["response_content_pointer"]
-    if not isinstance(pointer, str) or not pointer.startswith("/"):
-        raise ConfigError("LLM Adapter response_content_pointer 必须是 JSON Pointer")
-    _parse_json_pointer(pointer)
+    from .llm_native import FORMATS
+    response_format = value["response_format"]
+    if not isinstance(response_format, str) or response_format not in FORMATS | {"json-pointer"}:
+        raise ConfigError("LLM Adapter response_format 无效")
+    native = response_format != "json-pointer"
+    mapping_fields = {"response_content_pointer", "response_finish_reason_pointer", "response_reasoning_content_pointer", "response_reasoning_content_pointers", "truncated_finish_reasons", "blocked_finish_reasons", "usage"}
+    if native and mapping_fields & value.keys():
+        raise ConfigError("原生 response_format 不允许声明响应解析映射")
+    pointer = value.get("response_content_pointer")
+    if not native:
+        if not isinstance(pointer, str) or not pointer.startswith("/"):
+            raise ConfigError("LLM Adapter response_content_pointer 必须是 JSON Pointer")
+        _parse_json_pointer(pointer)
     reasoning_pointer = value.get("response_reasoning_content_pointer")
     if "response_reasoning_content_pointers" in value:
         if reasoning_pointer is not None:
@@ -532,7 +639,7 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         value.get("blocked_finish_reasons", [])
     ):
         raise ConfigError("LLM Adapter 截断与拒绝的结束原因不能重叠")
-    streaming_spec = _validate_streaming_spec(value.get("streaming"))
+    streaming_spec = _validate_streaming_spec(value.get("streaming"), native=native)
     connection = value.get("connection")
     if connection is not None:
         if not isinstance(connection, dict) or set(connection) != {"base_url", "credential", "proxy_source"}:
@@ -549,6 +656,29 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
             raise ConfigError("LLM Adapter connection proxy_source 无效")
         if connection["proxy_source"] == "connection" and credential["kind"] != "chatgpt":
             raise ConfigError("该凭据类型没有授权连接代理")
+    minimum = value.get("max_output_tokens_minimum", 0)
+    if type(minimum) is not int or minimum < 0:
+        raise ConfigError("max_output_tokens_minimum 必须是非负整数")
+    effort = value.get("reasoning_effort")
+    if effort is not None:
+        if not isinstance(effort, dict) or set(effort) - {"body_pointer", "values", "aliases"} or not {"body_pointer", "values"} <= set(effort):
+            raise ConfigError("reasoning_effort 必须声明 body_pointer 和 values")
+        levels = effort["values"]
+        if not isinstance(levels, list) or not levels or any(not isinstance(level, str) or not level for level in levels) or len(set(levels)) != len(levels):
+            raise ConfigError("reasoning_effort.values 必须是互不重复的非空字符串数组")
+        aliases = effort.get("aliases", [])
+        if not isinstance(aliases, list):
+            raise ConfigError("reasoning_effort.aliases 必须是数组")
+        for effort_pointer in [effort["body_pointer"], *aliases]:
+            _validate_stream_pointer(effort_pointer, "reasoning_effort")
+        effort["aliases"] = aliases
+        for template in (body, (streaming_spec or {}).get("request_body", {})):
+            for effort_pointer in [effort["body_pointer"], *aliases]:
+                try:
+                    _resolve_json_pointer(template, effort_pointer)
+                except ExternalError:
+                    continue
+                raise ConfigError("Adapter 请求体不得重复配置声明的 Reasoning Effort 字段")
     digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     return JSONLLMAdapter(
         adapter_id=adapter_id,
@@ -653,7 +783,17 @@ def _validate_usage_mapping(
     return (pointers[0], pointers[1], pointers[2])
 
 
-def _validate_streaming_spec(value: Any) -> dict[str, Any] | None:
+def _validate_streaming_spec(value: Any, *, native: bool = False) -> dict[str, Any] | None:
+    if native and value is not None:
+        allowed = {"transport", "endpoint", "request_body", "allow_clean_eof"}
+        if not isinstance(value, dict) or set(value) - allowed or value.get("transport") != "sse":
+            raise ConfigError("原生 streaming 仅声明 SSE、endpoint、request_body 和 allow_clean_eof")
+        endpoint = _validate_endpoint(value.get("endpoint"), "streaming.endpoint")
+        body = value.get("request_body", {})
+        if not isinstance(body, dict) or type(value.get("allow_clean_eof", False)) is not bool:
+            raise ConfigError("原生 streaming 请求体或 EOF 声明无效")
+        _validate_body(body)
+        return {"transport": "sse", "endpoint": endpoint, "request_body": deepcopy(body), "allow_clean_eof": value.get("allow_clean_eof", False)}
     if value is None:
         return None
     if not isinstance(value, dict):
@@ -888,8 +1028,8 @@ def _render_body(value: Any, values: dict[str, Any]) -> Any:
             key: _render_body(child, values)
             for key, child in value.items()
             if not (
-                child == "${max_output_tokens}"
-                and values["max_output_tokens"] == 0
+                (child == "${max_output_tokens}" and values["max_output_tokens"] == 0)
+                or (child == "${temperature}" and values["temperature"] is None)
             )
         }
     if isinstance(value, list):
@@ -980,3 +1120,26 @@ def _resolve_json_pointer_tokens(value: Any, tokens: list[str]) -> Any:
     except (KeyError, IndexError) as exc:
         raise ExternalError("LLM 响应缺少配置的正文路径") from exc
     return current
+
+
+def _contains_key(value: Any, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(_contains_key(child, key) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_key(child, key) for child in value)
+    return False
+
+
+def _insert_body_value(body: dict[str, Any], pointer: str, value: Any) -> None:
+    tokens = _parse_json_pointer(pointer)
+    parent = body
+    for key in tokens[:-1]:
+        if key not in parent:
+            parent[key] = {}
+        child = parent[key]
+        if not isinstance(child, dict):
+            raise ConfigError("Reasoning Effort 请求路径必须经过 JSON 对象")
+        parent = child
+    if tokens[-1] in parent:
+        raise ConfigError("Reasoning Effort 请求字段与 Adapter body 冲突")
+    parent[tokens[-1]] = value

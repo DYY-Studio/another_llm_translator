@@ -142,6 +142,10 @@ python -m app.web
 
 这些 Preset 只是示例，使用前必须核对端点、模型和限流设置。
 
+在 Preset 编辑器中，“发送温度参数”控制是否使用项目的阶段温度。模型不支持温度时关闭此项。Reasoning Effort 从 Adapter 提供的等级中选择，“不发送”采用供应商默认行为；它不会自动调整温度或启用思考摘要。Gemini 等级控制需要支持 thinkingLevel 的模型，Gemini 2.5 示例保持“不发送”。
+
+输出上限的下限由 Adapter 定义。Anthropic 要求大于 0；OpenAI 官方 Chat API 使用 `openai-chat`，第三方兼容端点继续使用 `openai-compatible`。旧协议 Run 可查看，但需创建新 Run 继续工作。协议升级操作见[开发指南](DEVELOPMENT.md#全局-llm-协议升级)。
+
 ### 使用系统钥匙串
 
 在设置页的凭据管理中保存密钥（每行一个 API Key），再让 Preset 引用对应的钥匙串凭据。

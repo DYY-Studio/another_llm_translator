@@ -369,7 +369,7 @@ class LLMClient:
     def _audit_usage_missing(
         self, key_index: int, *, affects_global: bool = False
     ) -> None:
-        if self.adapter.usage_pointers is not None:
+        if self.adapter.usage_supported:
             if affects_global:
                 self.usage_complete = False
             self._key_audits[key_index]["usage_complete"] = False
@@ -395,7 +395,7 @@ class LLMClient:
         keys: list[dict[str, Any]] = []
         for entry in self._key_audits:
             usage = entry["usage"]
-            if self.adapter.usage_pointers is None:
+            if not self.adapter.usage_supported:
                 usage_value = None
             else:
                 usage_value = {
@@ -531,7 +531,7 @@ class LLMClient:
             terminal_spec = self.adapter.streaming_spec
             if terminal_spec is None:
                 raise ConfigError("LLM Adapter 未声明 streaming 规则")
-            sentinel = terminal_spec["terminal"].get("sentinel")
+            sentinel = self.adapter.stream_sentinel
             try:
                 async for data, received_bytes in _iter_sse_data(response):
                     if not data:
@@ -566,6 +566,7 @@ class LLMClient:
                             raise fatal
                     for key, value in self.adapter.extract_stream_usage(event).items():
                         usage_values[key] = value
+                    usage_values = self.adapter.complete_stream_usage(usage_values)
                     stream_error = self.adapter.stream_error_details(event)
                     if stream_error is not None:
                         raise _StreamRetryable(
@@ -584,7 +585,7 @@ class LLMClient:
                     )
                     content_parts.extend(self.adapter.stream_content_deltas(event))
                     reasoning_parts.extend(self.adapter.stream_reasoning_deltas(event))
-                    if self.adapter.stream_terminal(event):
+                    if finish_reason in self.adapter.blocked_finish_reasons or self.adapter.stream_terminal(event):
                         terminal = True
                         termination = "explicit"
                         break
@@ -627,9 +628,12 @@ class LLMClient:
                     first_event_latency_ms=first_event_latency_ms,
                     usage_values=usage_values,
                 ) from exc
+            if not terminal and self.adapter.stream_completed_at_eof(finish_reason):
+                terminal = True
+                termination = "explicit_eof"
             if not terminal and finish_reason in [
-                *self.adapter.definition.get("truncated_finish_reasons", []),
-                *self.adapter.definition.get("blocked_finish_reasons", []),
+                *self.adapter.truncated_finish_reasons,
+                *self.adapter.blocked_finish_reasons,
             ]:
                 terminal = True
                 termination = "finish_reason"
@@ -792,7 +796,12 @@ class LLMClient:
                 segment_id_map=segment_id_map,
             )
             diagnostics = current_diagnostics()
-            if response.content.strip():
+            if response.finish_reason in self.adapter.blocked_finish_reasons:
+                message = f"模型拒绝生成正文（{response.finish_reason}）"
+                if diagnostics is not None:
+                    diagnostics.fail_request(actual_id, "response_blocked")
+                raise ExternalError(message)
+            if response.content.strip() and response.finish_reason not in self.adapter.truncated_finish_reasons:
                 if diagnostics is not None:
                     diagnostics.complete_request(
                         actual_id,
@@ -800,21 +809,14 @@ class LLMClient:
                         reasoning_content=response.reasoning_content,
                     )
                 return response, actual_id
-            if response.finish_reason in self.adapter.definition.get(
-                "blocked_finish_reasons", []
-            ):
-                message = f"模型拒绝生成正文（{response.finish_reason}）"
-                if diagnostics is not None:
-                    diagnostics.fail_request(actual_id, "response_blocked")
-                raise ExternalError(message)
             kind = (
                 "truncated"
                 if response.finish_reason
-                in self.adapter.definition.get("truncated_finish_reasons", [])
+                in self.adapter.truncated_finish_reasons
                 else "unknown"
             )
             message = (
-                "正文为空：长度限制截断"
+                "响应因长度限制截断"
                 if kind == "truncated"
                 else "正文为空：原因未知"
             )
@@ -979,6 +981,8 @@ class LLMClient:
                     temperature=temperature,
                     max_output_tokens=effective_output,
                     stream=stream_enabled,
+                    send_temperature=self.config["llm"]["send_temperature"],
+                    reasoning_effort=self.config["llm"]["reasoning_effort"],
                     extra_body=self.config.get("_llm_extra_body"),
                     extra_headers=self.config.get("_llm_extra_headers"),
                     session_id=self.run_id,
@@ -1138,7 +1142,7 @@ class LLMClient:
                 attempt_stream_event_count = exc.event_count
                 attempt_stream_received_bytes = exc.received_bytes
                 attempt_stream_first_event_latency_ms = exc.first_event_latency_ms
-                if self.adapter.usage_pointers is not None:
+                if self.adapter.usage_supported:
                     self._record_stream_usage(
                         exc.usage_values,
                         key_index,
@@ -1266,7 +1270,7 @@ class LLMClient:
                 attempt_stream_event_count = exc.event_count
                 attempt_stream_received_bytes = exc.received_bytes
                 attempt_stream_first_event_latency_ms = exc.first_event_latency_ms
-                if self.adapter.usage_pointers is not None:
+                if self.adapter.usage_supported:
                     self._record_stream_usage(
                         exc.usage_values,
                         key_index,
@@ -1457,55 +1461,16 @@ class LLMClient:
             else:
                 self._audit_usage_missing(key_index, affects_global=True)
             if 200 <= response.status_code < 300:
-                debug = self.config["debug"]
-                if (
-                    debug["enabled"]
-                    and debug["inject_invalid_json_every"]
-                    and self.send_count % debug["inject_invalid_json_every"] == 0
-                ):
-                    self.adapter.replace_content(response_data, "{invalid json")
-                elif (
-                    debug["enabled"]
-                    and debug["inject_missing_segment_every"]
-                    and self.send_count % debug["inject_missing_segment_every"] == 0
-                ):
-                    try:
-                        content = self.adapter.parse_response(response_data).content
-                        lines = extract_jsonl_content(content).splitlines()
-                        segment_indexes = []
-                        for index, line in enumerate(lines):
-                            value = json.loads(line)
-                            if (
-                                isinstance(value, dict)
-                                and value.get("type") == "segment"
-                            ):
-                                segment_indexes.append(index)
-                        if segment_indexes:
-                            lines.pop(segment_indexes[-1])
-                            self.adapter.replace_content(
-                                response_data, "\n".join(lines)
-                            )
-                    except (
-                        KeyError,
-                        IndexError,
-                        TypeError,
-                        ValueError,
-                        json.JSONDecodeError,
-                    ):
-                        pass
                 await debug_attempt(
-                    request_id,
-                    send_attempt,
-                    payload,
-                    retry_round=attempt,
-                    key_index=key_index,
-                    response=response_data,
-                    status=response.status_code,
-                    parent_request_id=parent_request_id,
+                    request_id, send_attempt, payload, retry_round=attempt,
+                    key_index=key_index, response=response_data,
+                    status=response.status_code, parent_request_id=parent_request_id,
                 )
                 try:
                     parsed = self.adapter.parse_response(response_data)
-                    normalized = normalize_llm_response(parsed)
+                    normalized = _apply_debug_content_injections(
+                        normalize_llm_response(parsed), self.config["debug"], self.send_count,
+                    )
                 except Exception:
                     if diagnostics is not None:
                         diagnostics.fail_request(request_id, "response_parse_error")
@@ -1743,7 +1708,7 @@ class LLMClient:
         return self._retry_after_delay(response, attempt)
 
     def usage_summary(self) -> dict[str, Any] | None:
-        if self.adapter.usage_pointers is None:
+        if not self.adapter.usage_supported:
             return None
         available = self.usage_observed and self.usage_complete
         partial = self.usage_observed and not self.usage_complete
@@ -1762,7 +1727,7 @@ class LLMClient:
         *,
         affects_global: bool = True,
     ) -> None:
-        if self.adapter.usage_pointers is None:
+        if not self.adapter.usage_supported:
             return
         spec = self.adapter.streaming_spec
         if spec is None:
@@ -1770,26 +1735,19 @@ class LLMClient:
                 self.usage_complete = False
             self._audit_usage_missing(key_index, affects_global=affects_global)
             return
-        usage_spec = spec["usage"]
-        base_pointers = self.adapter.usage_pointers
-        if base_pointers is None:
-            if affects_global:
-                self.usage_complete = False
-            self._audit_usage_missing(key_index, affects_global=affects_global)
-            return
-        required = {
-            metric
-            for metric, pointer in zip(
-                ("input_tokens", "output_tokens", "total_tokens"),
-                base_pointers,
-            )
-            if pointer is not None
-        }
-        declared_stream_metrics = {
-            key.removesuffix("_pointers")
-            for key, pointers in usage_spec.items()
-            if pointers
-        }
+        if self.adapter.response_format != "json-pointer":
+            required = {"input_tokens", "output_tokens", "total_tokens"}
+            declared_stream_metrics = required
+        else:
+            base_pointers = self.adapter.usage_pointers
+            required = {
+                metric for metric, pointer in zip(
+                    ("input_tokens", "output_tokens", "total_tokens"), base_pointers or (),
+                ) if pointer is not None
+            }
+            declared_stream_metrics = {
+                key.removesuffix("_pointers") for key, pointers in spec["usage"].items() if pointers
+            }
         if not required or not required.issubset(declared_stream_metrics):
             if affects_global:
                 self.usage_complete = False

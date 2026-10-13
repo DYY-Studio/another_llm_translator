@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "adapter_id": "openai-responses",
   "endpoint": "/responses",
   "headers": {
@@ -13,45 +13,28 @@
     "stream": "${stream}",
     "store": false
   },
-  "response_content_pointer": "/output/-1/content/-1/text",
-  "response_finish_reason_pointer": "/incomplete_details/reason",
-  "truncated_finish_reasons": ["max_output_tokens"],
-  "blocked_finish_reasons": ["content_filter"],
   "models": {
     "endpoint": "/models",
     "response_models_pointer": "/data",
     "response_model_id": "id"
   },
-  "usage": {
-    "input_tokens_pointer": "/usage/input_tokens",
-    "output_tokens_pointer": "/usage/output_tokens",
-    "total_tokens_pointer": "/usage/total_tokens"
-  },
   "streaming": {
     "transport": "sse",
     "endpoint": "/responses",
-    "request_body": {},
-    "content_events": [
-      {
-        "pointer": "/delta",
-        "when": {"pointer": "/type", "equals": "response.output_text.delta"}
-      }
+    "request_body": {}
+  },
+  "reasoning_effort": {
+    "body_pointer": "/reasoning/effort",
+    "values": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
     ],
-    "reasoning_events": [],
-    "finish_reason_events": [{"pointer": "/response/incomplete_details/reason"}],
-    "terminal": {
-      "when": {"pointer": "/type", "equals": "response.completed"}
-    },
-    "error_events": [
-      {
-        "when": {"pointer": "/type", "equals": "error"},
-        "message_pointer": "/message"
-      }
-    ],
-    "usage": {
-      "input_tokens_pointers": ["/response/usage/input_tokens"],
-      "output_tokens_pointers": ["/response/usage/output_tokens"],
-      "total_tokens_pointers": ["/response/usage/total_tokens"]
-    }
-  }
+    "aliases": []
+  },
+  "response_format": "responses"
 }

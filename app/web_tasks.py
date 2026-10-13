@@ -27,6 +27,7 @@ from .execution import (
     choose_running_run,
     combine_usage,
     find_running_runs,
+    run_protocol_is_current,
     unavailable_usage,
 )
 from .llm_client import SlidingWindowLimiter
@@ -134,14 +135,23 @@ def _running_run(
         return None
     manifest = candidates[0]
     run_id = str(manifest["run_id"])
-    old_config = load_run_config(project / "runs" / run_id)
+    current_protocol = run_protocol_is_current(project, run_id)
+    if current_protocol:
+        previous = _endpoint_summary(load_run_config(project / "runs" / run_id))
+    else:
+        directory = project / "runs" / run_id
+        preset = json.loads((directory / "llm_preset.json").read_text(encoding="utf-8"))
+        adapter = json.loads((directory / "llm_adapter.json").read_text(encoding="utf-8"))
+        previous = {"model": preset["model"], "endpoint": endpoint_url(preset["base_url"], adapter["endpoint"], model=preset["model"])}
     result = {
         "run_id": run_id,
         "started_at": manifest.get("started_at"),
         "scope": manifest.get("scope"),
-        "previous": _endpoint_summary(old_config),
+        "previous": previous,
         "current": _endpoint_summary(current_config),
     }
+    if not current_protocol:
+        result.update(resume_compatible=False, resume_incompatibility_reason="旧 Run 使用旧 LLM 协议，请创建新 Run")
     if stage == "terminology":
         result["include_summaries"] = bool(manifest.get("include_summaries", False))
         result["include_draft_translation"] = bool(
@@ -236,8 +246,8 @@ def task_options(
             running_run["total_steps"] = selected * 2 + int(
                 running_run.get("final_review_target_count", 0)
             ) + int(running_run.get("containment_target_count", 0))
-            running_run["resume_compatible"] = compatible
-            running_run["resume_incompatibility_reason"] = reason
+            running_run["resume_incompatibility_reason"] = running_run.get("resume_incompatibility_reason") or reason
+            running_run["resume_compatible"] = running_run.get("resume_compatible", True) and compatible
         return {
             "stage": stage,
             "final_review": final_review,
