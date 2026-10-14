@@ -786,6 +786,10 @@ LLM Prompt 的 `/api/v1/prompts/{stage}/default?language=...` GET 直接读取�
 
 重复审查预检与任务启动接收布尔值 `exclude_punctuation_only` 和 `screening_enabled`，均默认 `true`；预检返回 `excluded_punctuation_groups`，Run 保存本次选择与排除数量。关闭初筛时 `decision_model` 为 `null`，不读取初筛 Prompt 或 Preset，也不保存其快照。
 
+预检与启动支持 `run_action`：`resume` 续用、`decline` 结束旧 Run 并新建。预检的 `running_run` 沿用共享未完成 Run 描述，并包含已保存步骤数和总步骤数；`completed` 表示已完成审查的出现数，预检估算在续用模式下只统计未完成步骤。预检返回实际采用的 `only_file` 和两个筛选开关；续用模式恢复原值，启动时再次检查执行指纹与 Run 身份。
+
+支持续作的 Run 保存 `repetition_checkpoint: 1`。`repetition_checkpoints/{group_id}.json` 按组原子保存 `screening`、`confidence`，比较完成后增加 `result`（`proposals`、`keep`、`uncertain`），不复制原文或上下文。失败和取消保持 Run 为 `running`，记录 `last_interruption`，使用共享 continuation 快照和用量汇总；旧 Run 未声明检查点能力时不能续用。
+
 `repetition_consistency` 是独立 Prompt 资源，使用标准 Prefix、中段、Suffix 装配；模型连接沿用翻译 Preset。输入包含 `source`、`translations`、`target_language`、共享 `context` 与 `terms`、`files`，以及 `occurrences`。每次出现携带短 ID、File/part、位置、从零开始的译文索引、前后文引用和术语引用。`file` 是项目文件顺序中从 1 开始的索引，`files` 将本请求涉及的索引映射到文件名；`position` 是文件内从 0 开始的 Segment 序号，包含空片段。术语正文仅发送一次，命中的别名保存在各次出现的术语引用 `aliases` 中；术语引用的 `source_relations` 按顺序对应 `entity_knowledge.items`，关系以该次出现的局部上下文为基准。
 
 响应为单个 JSON 对象，包含 `groups`、`keep`、`uncertain`。每个统一子组含 `members`、`target`、`apply`、`reason`；成员至少两个，`target` 必须是组内成员并选择其现有译文，`apply` 是 `members` 的无重复子集，可以为空，`reason` 使用目标语言。各次出现的短 ID 必须完整、不重复地划入子组或保留、待审列表。该协议不输出 JSONL 或结束记录。

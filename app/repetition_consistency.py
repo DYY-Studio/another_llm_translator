@@ -83,7 +83,7 @@ def load_checkpoints(run_dir: Path, plan: dict[str, Any]) -> dict[str, Any]:
         except (OSError, ValueError) as exc:
             raise StorageError("无法读取重复译文续作检查点") from exc
         if (not isinstance(value, dict) or set(value) not in ({"screening", "confidence"}, {"screening", "confidence", "result"})
-            or value["screening"] not in {"compare", "skip", "refusal", "disabled", "over_budget"}
+            or not isinstance(value["screening"], str) or value["screening"] not in {"compare", "skip", "refusal", "disabled", "over_budget"}
             or ("result" in value and (not isinstance(value["result"], dict) or set(value["result"]) != {"proposals", "keep", "uncertain"}))):
             raise StorageError("重复译文续作检查点无效")
         result[group["id"]] = value
@@ -376,7 +376,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                             answer = (await decision.choose(screening_payload(group), [screen]))["value"] if decision else None
                             saved.update(screening=("refusal" if answer.refused else answer.choice) if answer else "disabled",
                                          confidence=answer.confidence if answer else None)
-                            if decision:
+                            if decision and saved["screening"] != "skip":
                                 atomic_write_json(checkpoint_path(run_dir, group["id"]), saved)
                                 checkpoints[group["id"]] = dict(saved)
                         if saved["screening"] == "skip":
@@ -421,7 +421,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
         finalize_run(project, run_dir, status="running", warnings=["执行已取消，可续作" if isinstance(exc, asyncio.CancelledError) else str(exc)],
                      completed=completed, failed=total - completed, usage=combine_usage(llm_usage, (decision.usage_summary() if decision else None)), usage_invoked=not resume_id or model_invoked)
         manifest = read_json(project, run_dir / "manifest.json")
-        manifest.update(completed_at=None, last_interruption={"at": utc_now(), "error_code": getattr(exc, "code", "cancelled"),
+        manifest.update(completed_at=None, last_interruption={"at": utc_now(), "error_code": getattr(exc, "code", "cancelled" if isinstance(exc, asyncio.CancelledError) else "internal_error"),
             "reason": "cancelled" if isinstance(exc, asyncio.CancelledError) else str(exc),
             "completed_steps": sum((int("screening" in c) if plan["screening_enabled"] else 0) + int("result" in c) for c in checkpoints.values()),
             "total_steps": len(plan["groups"]) * (2 if plan["screening_enabled"] else 1)})
