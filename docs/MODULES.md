@@ -60,6 +60,7 @@ FastAPI 应用装配、鉴权、生命周期、静态资源和 route 注册。�
 - `web_decision_prompt_routes.py`：插件声明驱动的 Decision 提示词编辑与命名模板。
 - `web_project_routes.py`：项目创建、打开、删除、File 管理与替换。
 - `web_segment_routes.py`：Segment 浏览、编辑和阶段结果重置。
+- `web_repetition_routes.py`：重复译文审查预检、草案读取、人工选择、应用和撤销入口。
 - `web_term_routes.py`：术语扫描、编辑、交换、发布与自动决策入口。
 - `web_summary_routes.py`：内容概括选择、运行、聚合、阅读和 Markdown 导出。
 - `web_task_routes.py`：阶段任务启动、状态、诊断和取消。
@@ -81,7 +82,7 @@ Route 只校验 HTTP 输入并调用共享后端。请求模型集中在 `web_pa
 ### `app/sqlite_storage.py`
 
 项目数据库的唯一持久化实现，负责 schema 初始化/迁移、事务、File/Segment、术语、阶段结果、
-Run 索引、术语说明的事务性升级、请求元数据共享、Adapter 状态及术语载荷无损压缩和内容概括记录；集中保存按摘要值去重的概括源文本快照，读取时还原生成时原文与切片身份。
+Run 索引、术语说明的事务性升级、重复译文应用与撤销事务、请求元数据共享、Adapter 状态及术语载荷无损压缩和内容概括记录；集中保存按摘要值去重的概括源文本快照，读取时还原生成时原文与切片身份。
 维护与源内容、Adapter 状态同事务更新的 Segment 格式计数投影，供 Web 读取，避免还原完整 Adapter 状态。
 批量解析应用正文的精确引用，业务副本与持久化载荷分离。调用者通过明确方法读写，不在 route 或阶段模块中直接拼接 SQL。
 
@@ -137,6 +138,12 @@ Run 索引、术语说明的事务性升级、请求元数据共享、Adapter �
 - `summary_provenance.py`：概括依赖构建与校验、过期原因和翻译上下文可用性判定，以及普通联合扫描与粗翻联合扫描共享的片段保存和整段采用。
 
 内容概括复用阶段执行、LLM、存储和 Document Adapter 边界，不建立另一套项目或请求框架。
+
+### 重复译文一致性审查
+
+- `repetition_consistency.py`：完整 Segment 候选检测、预算预检、Decision 初筛、按组上下文比较及不可变草案保存。原文上下文按内容去重，成员与各请求使用引用；复用共享 Run、模型客户端与有限并发调度。
+- `repetition_drafts.py`：人工选择、输入依赖检查、译文校验、应用与撤销。生命周期、审核选择及实际改动引用存入 Run，正文从共享草案译文读取，避免为撤销保留历史结果链。
+- `web/src/components/RepetitionReview.tsx`：按需加载的草案审核面板，重复组及出现位置分页，上下文展开后渲染。
 
 ## 6. LLM 通信
 
