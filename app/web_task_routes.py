@@ -733,6 +733,8 @@ def register_task_routes(
             stages = tuple(value for value in stages if not (value == "translation" and payload.include_draft_translation))
             if payload.aggregate_full_summaries:
                 stages = (*stages, "content_summary")
+            if payload.include_repetition_consistency:
+                stages = (*stages, "translation")
         require_project_plan_session(request, project(name), stages)
         scope = Scope(
             from_file=payload.from_file,
@@ -800,6 +802,8 @@ def register_task_routes(
             checked_stages = tuple(value for value in checked_stages if not (value == "translation" and include_draft_translation))
             if aggregate_full_summaries:
                 checked_stages = (*checked_stages, "content_summary")
+            if include_repetition_consistency:
+                checked_stages = (*checked_stages, "translation")
         require_project_plan_session(request, project(name), checked_stages)
         return task_options(
             project(name),

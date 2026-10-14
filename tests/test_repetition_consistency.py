@@ -1399,3 +1399,23 @@ async def test_empty_application_group_does_not_block_other_groups_when_stale(tm
     assert (await apply_draft(project, confirm=True))["changed"] == 1
     assert latest_stage_states(project, "translation", [first])[first]["completed"]["text"] == "人工更新"
 
+def test_continuous_repetition_checks_translation_plan_session_on_lan(tmp_path, monkeypatch):
+    from app.web import create_app
+    from app.server_config import default_server_config
+    from fastapi.testclient import TestClient
+    project = repetition_project(tmp_path, monkeypatch)
+    settings = default_server_config()
+    settings["lan"] = {"enabled": True, "bind_address": "0.0.0.0"}
+    monkeypatch.setattr(config, "load_project_config", lambda root, *, stage: {
+        "llm": {"credential": {"kind": "chatgpt" if stage == "translation" else "env"}}})
+    app = create_app(projects_root=project.parent, server_config=settings)
+    with TestClient(app, client=("192.168.1.20", 12345)) as client:
+        options = client.get("/api/v1/projects/repetition/task-options/continuous", params={
+            "stages": "proofreading", "include_repetition_consistency": True})
+        assert options.status_code == 401
+        assert "ChatGPT Plan" in options.json()["error"]
+        started = client.post("/api/v1/projects/repetition/tasks", json={
+            "stage": "continuous", "stages": ["proofreading"], "include_repetition_consistency": True,
+            "apply_repetition_consistency": True})
+        assert started.status_code == 401
+        assert "ChatGPT Plan" in started.json()["error"]
