@@ -50,7 +50,7 @@ def transport(*, choice: str = "compare", invalid: bool = False, requests: list 
                 "probabilities": {"compare": int(choice == "compare"),
                                   "skip": int(choice == "skip")}}
             return httpx.Response(200, json={"model": "test-model", "answers": {"value": answer}})
-        result = {"groups": [{"members": ["1", "2"], "target": "1", "reason": "同一承诺重现"}],
+        result = {"groups": [{"members": ["1", "2"], "target": "1", "apply": ["1", "2"], "reason": "同一承诺重现"}],
                   "keep": ["3"], "uncertain": []}
         if invalid:
             result["groups"][0]["members"] = ["1", "unknown"]
@@ -482,3 +482,46 @@ def test_optional_punctuation_filter_only_removes_whole_equal_body_groups(tmp_pa
         assert filtered["evidence"] == {} and filtered["terms"] == {}
         assert filtered["estimated_requests"] == 0
     assert [latest_stage_states(project, "translation", [s["segment_id"]])[s["segment_id"]]["completed"]["text"] for s in segments] == variants
+
+
+def test_partial_application_and_manual_skipped_group(tmp_path, monkeypatch):
+    from app.repetition_consistency import current_draft, run_repetition
+    from app.repetition_drafts import apply_draft, save_choices, rollback_draft
+    project = repetition_project(tmp_path, monkeypatch)
+    generate(project)
+    save_choices(project, {"1-1": {"accepted": True, "target": "1", "apply": []}})
+    assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 0
+    async def skipped():
+        async with httpx.AsyncClient(transport=transport(choice="skip")) as client:
+            await run_repetition(project, Scope(), http_client=client)
+    asyncio.run(skipped())
+    draft = current_draft(project)
+    proposal = draft["groups"][0]["proposals"][0]
+    assert proposal["manual"] and not proposal["default_accepted"]
+    save_choices(project, {proposal["id"]: {"accepted": True, "target": "1", "apply": ["3"]}})
+    assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 1
+    segments = load_segments(project)
+    states = latest_stage_states(project, "translation", [s["segment_id"] for s in segments])
+    assert states[segments[3]["segment_id"]]["completed"]["text"] == "我会去接你"
+    assert states[segments[5]["segment_id"]]["completed"]["text"] == "我会来接你"
+    assert rollback_draft(project, confirm=True)["changed"] == 1
+
+
+def test_old_draft_remains_applicable_without_member_choices(tmp_path, monkeypatch):
+    from app.repetition_consistency import current_draft, draft_path
+    from app.repetition_drafts import apply_draft
+    project = repetition_project(tmp_path, monkeypatch)
+    generate(project)
+    draft = current_draft(project)
+    draft["groups"][0]["proposals"][0].pop("apply")
+    draft_path(project, draft["run_id"]).write_text(json.dumps(draft))
+    assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 1
+
+
+@pytest.mark.parametrize("members", [["unknown"], ["2", "2"]])
+def test_invalid_partial_application_fails(tmp_path, monkeypatch, members):
+    from app.repetition_drafts import save_choices
+    project = repetition_project(tmp_path, monkeypatch)
+    generate(project)
+    with pytest.raises(UsageError, match="应用成员"):
+        save_choices(project, {"1-1": {"accepted": True, "target": "1", "apply": members}})

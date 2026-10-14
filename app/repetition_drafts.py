@@ -37,10 +37,15 @@ def _choices(draft: dict[str, Any], values: Any) -> dict[str, Any]:
     if not isinstance(values, dict) or set(values) - proposals.keys():
         raise UsageError("草案审核选择含未知建议")
     for pid, value in values.items():
-        if (not isinstance(value, dict) or set(value) != {"accepted", "target"}
+        if (not isinstance(value, dict) or set(value) not in ({"accepted", "target"}, {"accepted", "target", "apply"})
             or type(value["accepted"]) is not bool or not isinstance(value["target"], str)
             or value["target"] not in proposals[pid]["members"]):
             raise UsageError("草案审核选择或目标译文无效")
+        if "apply" in value and (not isinstance(value["apply"], list)
+            or any(not isinstance(sid, str) for sid in value["apply"])
+            or len(set(value["apply"])) != len(value["apply"])
+            or set(value["apply"]) - set(proposals[pid]["members"])):
+            raise UsageError("草案应用成员无效")
     return values
 
 
@@ -109,7 +114,7 @@ async def apply_draft(project: Path, *, confirm: bool, run_id: str | None = None
             raise UsageError("草案审核选择已变化，请重新打开审核")
         accepted = [(g, p, choices.get(p["id"], {"accepted": True, "target": p["target"]}))
                     for g in draft["groups"] for p in g["proposals"]
-                    if choices.get(p["id"], {}).get("accepted", True)]
+                    if choices.get(p["id"], {}).get("accepted", p.get("default_accepted", True))]
         groups = list({g["id"]: g for g, _, _ in accepted}.values())
         segments = load_segments(project)
         indices = _indices(segments)
@@ -138,7 +143,7 @@ async def apply_draft(project: Path, *, confirm: bool, run_id: str | None = None
         for group, proposal, choice in accepted:
             occurrences = {o["id"]: o for o in group["occurrences"]}
             target = group["translations"][occurrences[choice["target"]]["variant"]]
-            for member in proposal["members"]:
+            for member in choice.get("apply", proposal.get("apply", proposal["members"])):
                 occurrence = occurrences[member]
                 sid = occurrence["segment_id"]
                 base = bases[sid]

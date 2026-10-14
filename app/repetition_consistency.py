@@ -51,6 +51,11 @@ def read_draft(project: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         raise StorageError("无法读取重复译文审查草案") from exc
     if not isinstance(draft, dict) or draft.get("run_id") != manifest["run_id"]:
         raise StorageError("重复译文审查草案身份无效")
+    for group in draft["groups"]:
+        if group["screening"] == "skip" and not group["proposals"]:
+            members = [o["id"] for o in group["occurrences"]]
+            group["proposals"] = [{"id": f"{group['id']}-manual", "members": members,
+                "target": members[0], "apply": members, "default_accepted": False, "reason": "", "manual": True}]
     return draft
 
 
@@ -224,11 +229,14 @@ def parse_comparison(content: str, group: dict[str, Any]) -> dict[str, Any]:
         members = [*value["keep"], *value["uncertain"]]
         proposals = []
         for i, item in enumerate(value["groups"], 1):
-            if (not isinstance(item, dict) or set(item) != {"members", "target", "reason"}
+            if (not isinstance(item, dict) or set(item) != {"members", "target", "reason", "apply"}
                 or not isinstance(item["members"], list) or len(item["members"]) < 2
                 or not isinstance(item["target"], str) or item["target"] not in item["members"]
                 or not isinstance(item["reason"], str) or not item["reason"].strip()):
                 raise ValueError("统一子组无效")
+            if (not isinstance(item["apply"], list) or any(not isinstance(sid, str) for sid in item["apply"])
+                or len(set(item["apply"])) != len(item["apply"]) or set(item["apply"]) - set(item["members"])):
+                raise ValueError("应用成员无效")
             members.extend(item["members"])
             proposals.append({"id": f"{group['id']}-{i}", **item})
         expected = {o["id"] for o in group["occurrences"]}
