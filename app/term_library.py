@@ -378,7 +378,7 @@ def _merge_and_publish_terms(
 ) -> dict[str, Any]:
     config = load_project_config(project)
     spec = term_normalization(config)
-    from .term_knowledge import empty_knowledge, publish_evidence, project_descriptions
+    from .term_knowledge import empty_knowledge, publish_evidence, project_descriptions, transfer_alias_evidence
     previous = load_terms(project)
     candidates = _ordered_term_candidates(project, task_id)
     merged: dict[str, dict[str, Any]] = {}
@@ -397,7 +397,6 @@ def _merge_and_publish_terms(
     terms = _build_term_rows(merged, alias_policy=alias_policy, spec=spec, alias_removals=removals)
     if apply_group_alias_removals(overrides, removals):
         overrides_data["overrides"] = [overrides[key] for key in sorted(overrides)]
-        write_json(project, project / "terminology" / "overrides.json", overrides_data)
     revision = int(previous["terms_revision"]) + 1 if previous else 1
     library = record_header(
         "terminology_library",
@@ -410,6 +409,7 @@ def _merge_and_publish_terms(
         knowledge=previous["knowledge"] if previous else empty_knowledge(),
     )
     publish_evidence(project, library, candidates, spec)
+    transfer_alias_evidence(library, spec)
     project_descriptions(project, library)
     active = read_json(project, project / "terminology" / "active_task.json")
     active["status"] = active_status

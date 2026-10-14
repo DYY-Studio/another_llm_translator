@@ -692,3 +692,54 @@ def test_automatic_upgrade_ends_unpublished_legacy_scan(tmp_path):
     sqlite_storage._SUPPORTED_CACHE.discard(database_path(project))
     sqlite_storage.ensure_supported(project)
     assert read_json(project, project / "terminology/active_task.json")["status"] == "reset"
+
+
+def test_scan_publication_transfers_new_alias_evidence(tmp_path: Path) -> None:
+    from app.sqlite_storage import read_json, write_json
+    from app.term_library import _merge_and_publish_terms
+    from app.term_knowledge import entity_view
+    from tests.helpers import scan_source_range
+
+    project = make_project(tmp_path)
+    data = library()
+    data['terms'][0].update(aliases=['Beta'], category='name', preferred_translation=None, conflicts={})
+    write_json(project, project / 'terminology/terms.json', record_header('terminology_library', 'test', **data))
+    write_json(project, project / 'terminology/overrides.json', record_header(
+        'terminology_overrides', 'test', overrides=[{'normalized': 'beta', 'source': 'Beta', 'disabled': True}]))
+    write_json(project, project / 'terminology/active_task.json', record_header(
+        'terminology_task', 'test', active_task_id='rescan', status='active'))
+    record = record_header('terminology_candidates', 'test', active_task_id='rescan',
+                           source_order={'segment_id': 'F0001-S000001', 'offset': 0},
+                           source_range=scan_source_range(project),
+                           terms=[{'source': 'Beta', 'description': '新身份', 'category': 'name'}])
+    append_jsonl(project, project / 'terminology/candidates.jsonl', record)
+    published = _merge_and_publish_terms(project, task_id='rescan', project_id='test', published_run_id='run')
+    fragment, = entity_view(project, published, 'alpha')['fragments']
+    assert fragment['owner'] == 'alpha'
+    assert fragment['original_owner'] == 'beta'
+    assert fragment['text'] == '新身份'
+    assert read_json(project, project / 'terminology/terms.json')['knowledge']['fragments'][fragment['id']]['owner'] == 'alpha'
+
+
+def test_scan_publication_failure_does_not_write_alias_cleanup(tmp_path: Path, monkeypatch) -> None:
+    from app.sqlite_storage import read_json, write_json
+    from app.term_library import _merge_and_publish_terms
+
+    project = make_project(tmp_path)
+    data = library()
+    data['terms'][0].update(aliases=['Beta'], category='name', preferred_translation=None, conflicts={})
+    data['terms'].append({'source': 'Beta', 'normalized': 'beta',
+                          'aliases': [], 'category': 'name', 'preferred_translation': None, 'conflicts': {}})
+    terms_path = project / 'terminology/terms.json'
+    overrides_path = project / 'terminology/overrides.json'
+    write_json(project, terms_path, record_header('terminology_library', 'test', **data))
+    write_json(project, overrides_path, record_header('terminology_overrides', 'test',
+               overrides=[{'normalized': 'alpha', 'source': 'Alpha', 'aliases': ['Beta']}]))
+    before = read_json(project, overrides_path)
+    def fail(*args, **kwargs):
+        raise UsageError('发布失败')
+    monkeypatch.setattr('app.term_knowledge.publish_evidence', fail)
+    with pytest.raises(UsageError, match='发布失败'):
+        _merge_and_publish_terms(project, task_id='scan', project_id='test', published_run_id='run')
+    assert read_json(project, overrides_path) == before
+    assert read_json(project, terms_path)['terms_revision'] == 1
