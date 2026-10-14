@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { translate, type Language } from "../i18n";
 import type { RunDecision, TaskOptions } from "../types";
 
@@ -12,15 +12,23 @@ function stageLabelKey(stage: TaskOptions["stage"]): string {
   return stage === "content_summary" ? "stage.contentSummary" : `stage.${stage}`;
 }
 
-export function RunDialog({
-  options,
-  onClose,
-  onStart,
-  onOpenOverview,
-  onDraftTranslationChange,
-  onSummariesChange,
-  language,
-}: {
+export interface RepetitionRunOptions {
+  candidate_groups: number; selected: number; over_budget_groups: number;
+  estimated_requests: number; estimated_input_tokens: number; decision_model: string; model: string;
+}
+
+function RunDialogFrame({ title, subtitle, onClose, children }: {
+  title: string; subtitle: string; onClose: () => void; children: ReactNode;
+}) {
+  return <div className="modal-backdrop" onMouseDown={onClose}>
+    <div aria-labelledby="run-dialog-title" aria-modal="true" className="modal run-dialog" role="dialog" onMouseDown={event => event.stopPropagation()}>
+      <div className="page-heading"><div><h2 id="run-dialog-title">{title}</h2><p>{subtitle}</p></div></div>
+      {children}
+    </div>
+  </div>;
+}
+
+type StageRunDialogProps = {
   options: TaskOptions;
   onClose: () => void;
   onStart: (decision: RunDecision) => void;
@@ -28,7 +36,39 @@ export function RunDialog({
   onDraftTranslationChange?: (enabled: boolean) => Promise<void>;
   onSummariesChange?: (enabled: boolean) => Promise<void>;
   language: Language;
+};
+
+export function RunDialog(props: StageRunDialogProps | {
+  repetitionOptions: RepetitionRunOptions; replaceDraft: boolean; busy: boolean; error: string;
+  language: Language; onClose: () => void; onStart: () => void;
 }) {
+  if (!("repetitionOptions" in props)) return <StageRunDialog {...props} />;
+  const { repetitionOptions: options, language, replaceDraft, busy, error, onClose, onStart } = props;
+  const t = (key: string, params: Record<string, string | number> = {}) => translate(`repetition.${key}`, language, params);
+  return <RunDialogFrame title={t("confirm.generate")} subtitle={t("hint")} onClose={busy ? () => {} : onClose}>
+    <div className="run-preset"><span>{t("models", { decision: options.decision_model, model: options.model })}</span></div>
+    <div className="run-decision-info">
+      <span>{t("estimate", { groups: options.candidate_groups, count: options.selected, requests: options.estimated_requests, tokens: options.estimated_input_tokens })}</span>
+      {!!options.over_budget_groups && <span>{t("overBudget", { count: options.over_budget_groups })}</span>}
+    </div>
+    {error && <p className="error-text" role="alert">{error}</p>}
+    {replaceDraft && <div className="warning-banner run-warning">{t("confirmReplace")}</div>}
+    <div className="modal-actions">
+      <button className="quiet-button" disabled={busy} onClick={onClose}>{translate("common.cancel", language)}</button>
+      <button className="primary-button" disabled={busy || !options.candidate_groups} onClick={onStart}>{translate("runDialog.run", language)}</button>
+    </div>
+  </RunDialogFrame>;
+}
+
+function StageRunDialog({
+  options,
+  onClose,
+  onStart,
+  onOpenOverview,
+  onDraftTranslationChange,
+  onSummariesChange,
+  language,
+}: StageRunDialogProps) {
   const [knowledgeConfirmed, setKnowledgeConfirmed] = useState(false);
   const [draftLoading, setDraftLoading] = useState(false);
   const [draftError, setDraftError] = useState("");
@@ -106,20 +146,10 @@ export function RunDialog({
   }
 
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <div
-        aria-labelledby="run-dialog-title"
-        aria-modal="true"
-        className="modal run-dialog"
-        role="dialog"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="page-heading">
-          <div>
-            <h2 id="run-dialog-title">{translate(decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(stageLabelKey(options.stage), language) })}</h2>
-            <p>{decisionMode ? translate("terms.decisionHint", language) : translate("runDialog.subtitle", language)}</p>
-          </div>
-        </div>
+    <RunDialogFrame
+      title={translate(decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(stageLabelKey(options.stage), language) })}
+      subtitle={decisionMode ? translate("terms.decisionHint", language) : translate("runDialog.subtitle", language)}
+      onClose={onClose}>
         <div className="run-preset" aria-label={translate("runDialog.currentPreset", language)}>
           <span>{translate("runDialog.currentPreset", language)}</span>
           <strong><code>{options.preset.id}</code></strong>
@@ -287,7 +317,6 @@ export function RunDialog({
             {translate("runDialog.run", language)}
           </button>
         </div>
-      </div>
-    </div>
+    </RunDialogFrame>
   );
 }

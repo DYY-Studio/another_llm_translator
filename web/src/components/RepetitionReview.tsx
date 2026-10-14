@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import type { ProjectOverview, TaskState } from "../types";
+import { RunDialog, type RepetitionRunOptions } from "./RunDialog";
 
 interface Choice { accepted: boolean; target: string }
 interface Occurrence {
@@ -18,10 +19,6 @@ interface Draft {
   evidence: Record<string, { source_key: string }>; sources: Record<string, string>;
 }
 interface ReviewState { draft: Draft | null; can_rollback: boolean; rollback_run_id: string | null }
-interface Options {
-  candidate_groups: number; selected: number; over_budget_groups: number;
-  estimated_requests: number; estimated_input_tokens: number; decision_model: string; model: string;
-}
 type Action = "generate" | "apply" | "discard" | "rollback";
 const PAGE_SIZE = 20;
 const GROUP_PAGE_SIZE = 10;
@@ -36,7 +33,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   const [state, setState] = useState<ReviewState | null>(null);
   const [task, setTask] = useState<TaskState | null>(null);
   const [onlyFile, setOnlyFile] = useState("");
-  const [options, setOptions] = useState<Options | null>(null);
+  const [options, setOptions] = useState<RepetitionRunOptions | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -91,7 +88,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   async function inspect() {
     setBusy(true); setError(""); setMessage("");
     try {
-      setOptions(await api<Options>(`${base}/options${onlyFile ? `?only_file=${encodeURIComponent(onlyFile)}` : ""}`));
+      setOptions(await api<RepetitionRunOptions>(`${base}/options${onlyFile ? `?only_file=${encodeURIComponent(onlyFile)}` : ""}`));
       setConfirm("generate");
     } catch (value) { setError(errorMessage(value, language)); }
     finally { setBusy(false); }
@@ -167,16 +164,9 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
         api<TaskState>(`/api/v1/tasks/${task.task_id}/cancel`, { method: "POST" }).then(setTask).catch(value => setError(errorMessage(value, language)));
       }}>{translate("common.cancel", language)}</button>}
     </div>}
-    {confirm && <section className="warning-banner">
+    {confirm && confirm !== "generate" && <section className="warning-banner">
       <p>{t(`confirm.${confirm}`)}</p>
-      {confirm === "generate" && options && <>
-        <p>{t("models", { decision: options.decision_model, model: options.model })}</p>
-        <p>{t("estimate", { groups: options.candidate_groups, count: options.selected,
-          requests: options.estimated_requests, tokens: options.estimated_input_tokens })}</p>
-        {!!options.over_budget_groups && <p>{t("overBudget", { count: options.over_budget_groups })}</p>}
-        {!!draft && <p>{t("confirmReplace")}</p>}
-      </>}
-      <div className="repetition-actions"><button className="primary-button" disabled={busy || (confirm === "generate" && !options?.candidate_groups)} onClick={() => void execute()}>{t("confirm")}</button>
+      <div className="repetition-actions"><button className="primary-button" disabled={busy} onClick={() => void execute()}>{t("confirm")}</button>
         <button className="quiet-button" disabled={busy} onClick={() => setConfirm(null)}>{translate("common.cancel", language)}</button></div>
     </section>}
     <div className="term-decision-content" ref={contentRef}>
@@ -201,6 +191,8 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
 
     </>}
     </div>
+    {confirm === "generate" && options && <RunDialog repetitionOptions={options} replaceDraft={!!draft} busy={busy} error={error}
+      language={language} onClose={() => setConfirm(null)} onStart={() => void execute()} />}
   </section>;
 }
 
