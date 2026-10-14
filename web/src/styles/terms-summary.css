@@ -167,8 +167,10 @@
 .modal .related-primary-options label.radio-option > span { min-width: 0; overflow-wrap: anywhere; }
 .modal .related-primary-options label.radio-option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
 .term-tab-panel { flex: 1; min-height: 0; overflow: auto; }
-.term-edit-panel { padding: 24px 30px; }
+.term-edit-panel { padding: 24px 30px; font-size: 13px; }
 .term-edit-panel > label { display: grid; gap: 7px; margin: 16px 0; font-size: 13px; font-weight: 650; }
+.term-alias-editor > strong, .entity-knowledge summary, .knowledge-item legend { font-weight: 650; }
+.knowledge-explanations > summary > strong { font-weight: inherit; }
 .term-edit-panel textarea { min-height: 100px; padding: 11px; resize: vertical; line-height: 1.55; }
 .conflict-box { padding: 12px; border: 1px solid var(--warning-border); border-radius: 6px; background: var(--warning-bg); color: var(--warning-text); font-size: 12px; }
 .choice-buttons { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
@@ -195,7 +197,8 @@
 .summary-focused-boundary { margin: 0 0 14px; color: var(--muted); overflow-wrap: anywhere; font-size: 13px; }
 
 .entity-knowledge { display: grid; gap: 10px; min-width: 0; padding-block: 12px; border-top: 1px solid var(--border); }
-.knowledge-explanations > summary > span { float: right; margin-left: 8px; }
+.knowledge-explanations > summary > span { float: right; margin-left: 8px; font-weight: 400; }
+.entity-knowledge small { font-size: 12px; }
 .knowledge-explanation-content { display: grid; gap: 10px; margin-top: 10px; }
 .knowledge-scroll { max-height: min(400px, 40vh); overflow: auto; scrollbar-gutter: stable; padding: 4px 8px 4px 0; }
 .knowledge-items { display: grid; gap: 10px; }
