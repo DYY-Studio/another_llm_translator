@@ -66,8 +66,8 @@ test("pairs entity explanations by entity and resolves only their own citations"
 });
 
 test("batched repetition overview scopes occurrence IDs and shares context", () => {
-  const occurrence = (id, variant) => ({id, file: 1, part: "document", position: 0, variant, previous: ["1"]});
-  const input = {files: {"1": "chapter.txt"}, context: {"1": "shared context"}, repetitions: [
+  const occurrence = (id, variant) => ({id, file: 1, part: 1, position: 0, variant, previous: ["1"]});
+  const input = {files: {"1": "chapter.txt"}, parts: {"1": "document"}, context: {"1": "shared context"}, repetitions: [
     {id: "a", source: "first", translations: ["A", "B"], occurrences: [occurrence("1", 0), occurrence("2", 1)]},
     {id: "b", source: "second", translations: ["C", "D"], occurrences: [occurrence("1", 0), occurrence("2", 1)]},
   ]};
@@ -79,6 +79,7 @@ test("batched repetition overview scopes occurrence IDs and shares context", () 
   assert.equal(values[1].occurrences[0].kept, true);
   assert.deepEqual(values[1].occurrences[0].previous, ["shared context"]);
   assert.equal(values[1].occurrences[0].filename, "chapter.txt");
+  assert.equal(values[1].occurrences[0].part, "document");
   const missing = parseRepetitionOverviews({input, response_content: JSON.stringify({repetitions: [result("a")]})});
   assert.equal(missing[0].invalid, false);
   assert.equal(missing[1].invalid, true);

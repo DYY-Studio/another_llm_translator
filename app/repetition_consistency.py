@@ -312,6 +312,7 @@ def screening_payload(group: dict[str, Any]) -> dict[str, Any]:
 
 def comparison_payload(groups: list[dict[str, Any]], evidence: dict[str, Any], sources: dict[str, str], language: str, terms: dict[str, Any]) -> dict[str, Any]:
     occurrences = [o for group in groups for o in group["occurrences"]]
+    part_ids = {key: i for i, key in enumerate(dict.fromkeys((o["file_index"], o["part_id"]) for o in occurrences), 1)}
     context_ids = dict.fromkeys(n for o in occurrences for n in (*o["previous"], *o["next"]))
     source_keys = dict.fromkeys(evidence[sid]["source_key"] for sid in context_ids)
     source_ids = {key: str(i) for i, key in enumerate(source_keys, 1)}
@@ -320,10 +321,11 @@ def comparison_payload(groups: list[dict[str, Any]], evidence: dict[str, Any], s
     short_terms = {tid: str(i) for i, tid in enumerate(used_terms, 1)}
     return {"target_language": language,
             "files": {key: name for group in groups for key, name in group["files"].items()},
+            "parts": {str(index): part for (_, part), index in part_ids.items()},
             "terms": {short_terms[tid]: terms[tid] for tid in used_terms},
             "context": {source_ids[key]: sources[key] for key in source_keys},
             "repetitions": [{"id": group["id"], "source": group["source"], "translations": group["translations"],
-                "occurrences": [{"id": o["id"], "file": o["file_index"], "part": o["part_id"],
+                "occurrences": [{"id": o["id"], "file": o["file_index"], "part": part_ids[(o["file_index"], o["part_id"])],
                     "position": o["line_index"], "variant": o["variant"], "terms": [{**ref, "id": short_terms[ref["id"]]} for ref in o["terms"]],
                     "previous": [short[sid] for sid in o["previous"]], "next": [short[sid] for sid in o["next"]]}
                     for o in group["occurrences"]]} for group in groups]}

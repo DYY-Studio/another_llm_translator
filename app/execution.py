@@ -551,8 +551,8 @@ _COMMON_SUFFIX: dict[str, str] = {
 
 _FIELD_PREFIX.update({
     "repetition.groups": {
-        "zh-CN": "repetitions: 本次请求的独立重复组数组，每组有唯一 id、source、translations 和 occurrences。occurrences 短 id 仅在所属重复组内有效，禁止跨组引用成员。files、context 和 terms 为整个请求共享的证据。",
-        "en": "repetitions: Independent repeated groups in this request, each with a unique id, source, translations, and occurrences. Occurrence short ids are local to their repeated group; never reference members across groups. files, context, and terms are shared evidence for the entire request.",
+        "zh-CN": "repetitions: 本次请求的独立重复组数组，每组有唯一 id、source、translations 和 occurrences。occurrences 短 id 仅在所属重复组内有效，禁止跨组引用成员。files、parts、context 和 terms 为整个请求共享的证据。",
+        "en": "repetitions: Independent repeated groups in this request, each with a unique id, source, translations, and occurrences. Occurrence short ids are local to their repeated group; never reference members across groups. files, parts, context, and terms are shared evidence for the entire request.",
     },
     "repetition.source": {
         "zh-CN": "repetitions[].source: 该重复组各次出现完全相同的原文。",
@@ -571,8 +571,8 @@ _FIELD_PREFIX.update({
         "en": "terms: Shared terminology, preferred translations, and entity knowledge indexed by short id. Each occurrence references entries matched in its source and local context; aliases lists the aliases matched there. source_relations aligns with entity_knowledge.items: before N, within, and after N locate knowledge sources relative to that occurrence's local context; N ranks positions within the entity. unsourced marks knowledge without source evidence.",
     },
     "repetition.occurrences": {
-        "zh-CN": "repetitions[].occurrences: 该重复组各次出现的短 id、文件、章节、位置、译文索引、上下文及术语引用。file 是项目文件顺序中从 1 开始的索引，files 将索引映射到文件名。part 是文件内的内容边界标识。position 是文件内从 0 开始的 Segment 序号，包含空片段，不是章节内序号或字符偏移。",
-        "en": "repetitions[].occurrences: Short id, file, part, position, translation index, context, and terminology references for each occurrence. file is the one-based index in project file order; files maps indices to filenames. part identifies a content boundary within the file. position is the zero-based Segment index within the file, counting empty segments, not an index within the part or a character offset.",
+        "zh-CN": "repetitions[].occurrences: 该重复组各次出现的短 id、文件、章节、位置、译文索引、上下文及术语引用。file 是项目文件顺序中从 1 开始的索引，files 将索引映射到文件名。part 是请求内 parts 表从 1 开始的索引，对应文件内的内容边界名称；每个 File/part 边界单独编号。position 是文件内从 0 开始的 Segment 序号，包含空片段，不是章节内序号或字符偏移。",
+        "en": "repetitions[].occurrences: Short id, file, part, position, translation index, context, and terminology references for each occurrence. file is the one-based index in project file order; files maps indices to filenames. part is a one-based index into the request's parts table of content boundary names; each File/part boundary receives its own index. position is the zero-based Segment index within the file, counting empty segments, not an index within the part or a character offset.",
     },
 })
 _TASK_PREFIX["repetition_consistency"] = {

@@ -54,6 +54,7 @@ function repetitionOverview(input: OverviewRecord, output: OverviewRecord, inval
   const translations = Array.isArray(input.translations) ? input.translations.map(text) : [];
   const contexts = object(input.context);
   const files = object(input.files);
+  const parts = object(input.parts);
   const occurrences = records(input.occurrences);
   const members = new Map(occurrences.map(item => [item.id, item]));
   const groups = records(output.groups);
@@ -69,7 +70,7 @@ function repetitionOverview(input: OverviewRecord, output: OverviewRecord, inval
     const target = applied ? members.get(proposal.target) : undefined;
     const context = (refs: unknown) => Array.isArray(refs) ? refs.map(id => text(contexts[String(id)])) : [];
     return {id: text(item.id), file: String(item.file), filename: text(files[String(item.file)]),
-      part: text(item.part), position: String(item.position), current: translations[Number(item.variant)] ?? "",
+      part: typeof item.part === "number" ? text(parts[String(item.part)]) : text(item.part), position: String(item.position), current: translations[Number(item.variant)] ?? "",
       result: target ? translations[Number(target.variant)] : null,
       uncertain: uncertain.has(item.id), kept: kept.has(item.id) || !!proposal && !applied,
       previous: context(item.previous), next: context(item.next)};

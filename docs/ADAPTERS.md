@@ -798,7 +798,7 @@ LLM Prompt 的 `/api/v1/prompts/{stage}/default?language=...` GET 直接读取�
 
 原始执行及每次 continuation 使用共享快照装配保存实际 LLM 与 Decision 资源；术语证据在 Run 中保存一次。失败和取消保持 Run 为 `running`，未完成出现不计为失败，`last_interruption` 记录错误、步骤进度及可取得的请求 ID。Run 收集去重的预检、续作和客户端警告，实际 LLM 调用保存带执行来源索引的密钥审计；使用共享用量累计，零请求续作保留已有用量。
 
-`repetition_consistency` 是独立 Prompt 资源，使用标准 Prefix、中段、Suffix 装配；模型连接沿用翻译 Preset。输入包含 `target_language`、请求内共享的 `context`、`terms`、`files`，以及 `repetitions` 数组。每个重复组含稳定的短 `id`、`source`、`translations` 与 `occurrences`；出现短 ID 仅在所属重复组内有效，不得跨组引用。每次出现携带短 ID、File/part、位置、从零开始的译文索引、前后文引用和术语引用。`file` 是项目文件顺序中从 1 开始的索引，`files` 将本请求涉及的索引映射到文件名；`position` 是文件内从 0 开始的 Segment 序号，包含空片段。术语正文仅发送一次，命中的别名保存在各次出现的术语引用 `aliases` 中；术语引用的 `source_relations` 按顺序对应 `entity_knowledge.items`，关系以该次出现的局部上下文为基准。
+`repetition_consistency` 是独立 Prompt 资源，使用标准 Prefix、中段、Suffix 装配；模型连接沿用翻译 Preset。输入包含 `target_language`、请求内共享的 `context`、`terms`、`files`、`parts`，以及 `repetitions` 数组。每个重复组含稳定的短 `id`、`source`、`translations` 与 `occurrences`；出现短 ID 仅在所属重复组内有效，不得跨组引用。每次出现携带短 ID、File/part、位置、从零开始的译文索引、前后文引用和术语引用。`file` 是项目文件顺序中从 1 开始的索引，`files` 将本请求涉及的索引映射到文件名；`part` 是请求内 `parts` 表从 1 开始的索引，表中声明内容边界名称，每个 File/part 边界单独编号；`position` 是文件内从 0 开始的 Segment 序号，包含空片段。术语正文仅发送一次，命中的别名保存在各次出现的术语引用 `aliases` 中；术语引用的 `source_relations` 按顺序对应 `entity_knowledge.items`，关系以该次出现的局部上下文为基准。
 
 响应为单个 JSON 对象，仅含 `repetitions` 数组，每个输入重复组恰好对应一个结果，含原样组 `id`、`groups`、`keep`、`uncertain`。每个统一子组含 `members`、`target`、`apply`、`reason`；成员至少两个，`target` 必须是组内成员并选择其现有译文，`apply` 是 `members` 的无重复子集，可以为空，`reason` 使用目标语言。各次出现的短 ID 必须完整、不重复地划入子组或保留、待审列表。该协议不输出 JSONL 或结束记录。
 

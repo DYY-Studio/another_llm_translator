@@ -81,6 +81,8 @@ def test_generation_detects_groups_and_sends_shared_evidence(tmp_path, monkeypat
     assert group["translations"] == ["我会来接你", "我会去接你"]
     assert len(group["occurrences"]) == 3
     assert payload["files"] == {"1": "source.txt"}
+    assert payload["parts"] == {"1": "document"}
+    assert all(item["part"] == 1 for repeated in payload["repetitions"] for item in repeated["occurrences"])
     assert [item["file"] for item in group["occurrences"]] == [1, 1, 1]
     assert [item["position"] for item in group["occurrences"]] == [1, 3, 5]
     from app.request_overview import llm_overview
@@ -765,6 +767,8 @@ def test_multiple_groups_share_request_evidence_and_exact_budget(tmp_path, monke
     assert [g["id"] for g in payload["repetitions"]] == ["1", "2"]
     assert len(payload["terms"]) == 1 and len(payload["context"]) == len(set(payload["context"].values()))
     assert payload["files"] == {"1": "source.txt"}
+    assert payload["parts"] == {"1": "document"}
+    assert all(item["part"] == 1 for repeated in payload["repetitions"] for item in repeated["occurrences"])
     assert plan["estimated_input_tokens"] == estimate_messages(requests[0]["messages"], plan["config"]["execution"]["token_safety_factor"])
     draft = repetition.current_draft(project)
     assert draft["groups"][0]["proposals"][0]["id"] == "1-1"
@@ -1419,3 +1423,16 @@ def test_continuous_repetition_checks_translation_plan_session_on_lan(tmp_path, 
             "apply_repetition_consistency": True})
         assert started.status_code == 401
         assert "ChatGPT Plan" in started.json()["error"]
+
+
+def test_part_indexes_keep_file_boundaries_distinct(tmp_path, monkeypatch):
+    from app.repetition_consistency import repetition_plan, comparison_payload
+    project = repetition_project(tmp_path, monkeypatch)
+    plan = repetition_plan(project, Scope())
+    group = plan["groups"][0]
+    group["files"]["2"] = "second.txt"
+    group["occurrences"][1]["file_index"] = 2
+    group["occurrences"][2]["part_id"] = "chapter.xhtml"
+    value = comparison_payload([group], plan["evidence"], plan["sources"], "zh-CN", plan["terms"])
+    assert value["parts"] == {"1": "document", "2": "document", "3": "chapter.xhtml"}
+    assert [(o["file"], o["part"]) for o in value["repetitions"][0]["occurrences"]] == [(1, 1), (2, 2), (1, 3)]
