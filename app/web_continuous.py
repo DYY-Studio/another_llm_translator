@@ -767,7 +767,7 @@ def inspect_continuous(
         )
 
     if include_repetition_consistency:
-        if not apply_repetition_consistency:
+        if normalized[-1] != "repetition_consistency" and not apply_repetition_consistency:
             blocking.append(_blocking("apply_repetition_consistency_required", "必须明确授权自动应用一致性审查建议", stage="repetition_consistency"))
         if read_repetition_run(project, ("pending",)) is not None:
             blocking.append(_blocking("pending_repetition_draft", "存在待处理一致性审查草案，请先人工处理", stage="repetition_consistency"))
@@ -1055,7 +1055,7 @@ async def run_continuous(
     if has_decision and normalized[-1] != "terminology_decision" and not apply_terminology_decision:
         raise UsageError("连续运行包含自动术语决策，必须明确授权应用决策")
 
-    if include_repetition_consistency and not apply_repetition_consistency:
+    if include_repetition_consistency and normalized[-1] != "repetition_consistency" and not apply_repetition_consistency:
         raise UsageError("必须明确授权自动应用一致性审查建议")
 
     planned = {
@@ -1172,14 +1172,15 @@ async def run_continuous(
                     needs_review = sum(len(group["uncertain"]) for group in draft["groups"])
                     summary = {**summary, "needs_review": needs_review}
                     step.update(_continuous_step_summary(stage, summary, run_id=summary["run_id"]))
-                    if needs_review:
+                    if needs_review and normalized[-1] != stage:
                         step["status"] = "waiting_review"
                         summaries[stage] = dict(summary)
                         emit(stage, "waiting_review", step)
                         break
-                    applied = await apply_draft_locked(project, confirm=True, run_id=summary["run_id"])
-                    summary = {**summary, "applied": applied}
-                    step["summary"] = dict(summary)
+                    if normalized[-1] != stage:
+                        applied = await apply_draft_locked(project, confirm=True, run_id=summary["run_id"])
+                        summary = {**summary, "applied": applied}
+                        step["summary"] = dict(summary)
             elif stage == "terminology_decision":
                 plan, skip_reason = _decision_plan_or_skip(
                     project,

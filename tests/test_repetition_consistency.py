@@ -1349,3 +1349,32 @@ async def test_continuous_repetition_checks_resume_evidence_after_translation(tm
     assert view["status"] == "failed"
     assert "证据已变化" in view["error"]["error"]
     assert repetition_resume(project, repetition_plan(project, Scope()))["run_id"] == old["run_id"]
+
+@pytest.mark.asyncio
+async def test_continuous_terminal_repetition_generates_draft_without_apply_authorization(tmp_path, monkeypatch):
+    from app.web_tasks import WebTaskManager
+    from app.repetition_consistency import current_draft, run_repetition
+    from app.web_continuous import inspect_continuous
+    project = repetition_project(tmp_path, monkeypatch)
+    options = inspect_continuous(project, ("translation",), include_repetition_consistency=True,
+        reuse_mixed_fingerprints=True)
+    assert not any(b["code"] == "apply_repetition_consistency_required" for b in options["blocking"])
+    async def translate(*args, **kwargs):
+        return {"selected": 8, "completed": 8, "failed": 0, "pending": 0}
+    async def repetition(*args, **kwargs):
+        async with httpx.AsyncClient(transport=transport()) as client:
+            return await run_repetition(*args, **kwargs, http_client=client)
+    async def forbidden_apply(*args, **kwargs):
+        pytest.fail("terminal repetition review must not apply its draft")
+    monkeypatch.setattr("app.web_continuous.run_translation", translate)
+    monkeypatch.setattr("app.web_continuous.run_repetition", repetition)
+    monkeypatch.setattr("app.web_continuous.apply_draft_locked", forbidden_apply)
+    manager = WebTaskManager()
+    task = await manager.start(project, "continuous", scope=Scope(), run_action=None,
+        reuse_mixed_fingerprints=True, continuous_stages=("translation",), include_repetition_consistency=True)
+    await manager.tasks[task["task_id"]].asyncio_task
+    view = manager.get(task["task_id"])
+    assert view["status"] == "completed", view.get("error")
+    assert view["steps"][-1]["status"] == "completed"
+    assert current_draft(project) is not None
+    assert "applied" not in view["steps"][-1]["summary"]

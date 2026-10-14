@@ -157,7 +157,7 @@ test("repetition review is optional and applies only with explicit authorization
     reuseMixedFingerprints: false, runActions: {}, includeDraftTranslation: false,
     includeSummaries: false, aggregateFullSummaries: false,
   };
-  const enabled = continuousPayload(["translation"], {
+  const enabled = continuousPayload(["translation", "proofreading"], {
     ...defaults, includeRepetitionConsistency: true, applyRepetitionConsistency: true,
     excludePunctuationOnly: false, screeningEnabled: true,
   });
@@ -165,6 +165,8 @@ test("repetition review is optional and applies only with explicit authorization
   assert.equal(enabled.apply_repetition_consistency, true);
   assert.equal(enabled.exclude_punctuation_only, false);
   assert.equal(enabled.screening_enabled, true);
+  const terminal = continuousPayload(["translation"], { ...defaults, includeRepetitionConsistency: true, applyRepetitionConsistency: true });
+  assert.equal(terminal.apply_repetition_consistency, false);
   const disabled = continuousPayload(["translation"], { ...defaults, applyRepetitionConsistency: true });
   assert.equal(disabled.include_repetition_consistency, false);
   assert.equal(disabled.apply_repetition_consistency, false);

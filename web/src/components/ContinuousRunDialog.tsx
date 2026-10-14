@@ -79,7 +79,7 @@ export function ContinuousRunDialog({
   for (const stage of stages) params.append("stages", stage);
   params.set("language", language);
   params.set("include_repetition_consistency", String(repetitionEnabled));
-  params.set("apply_repetition_consistency", String(repetitionEnabled && applyRepetitionConsistency));
+  params.set("apply_repetition_consistency", String(repetitionEnabled && stages.includes("proofreading") && applyRepetitionConsistency));
   params.set("exclude_punctuation_only", String(excludePunctuationOnly));
   params.set("screening_enabled", String(screeningEnabled));
   params.set("final_review", String(hasDecision && (terminalDecision ? finalReview : true)));
@@ -243,18 +243,16 @@ export function ContinuousRunDialog({
   }
 
   const repetitionStep = stepFor(options, "repetition_consistency");
-  const repetitionControl = <div className="run-decision-info run-generation-options">
-    <label className="config-toggle"><span><input type="checkbox" checked={repetitionEnabled} disabled={submitting} onChange={(event) => { setIncludeRepetitionConsistency(event.target.checked); setApplyRepetitionConsistency(false); }} />{translate("repetition.title", language)}</span></label>
-    {repetitionEnabled && <>
-      <small>{repetitionStep?.count_deferred ? translate("continuousRun.repetitionDeferred", language) : repetitionStep ? translate("continuousRun.repetitionCount", language, { count: repetitionStep.selected }) : translate("common.loading", language)}</small>
-      {repetitionStep?.preset && <small>{repetitionStep.preset.id} · {repetitionStep.preset.model}</small>}
-      <label className="config-toggle"><span><input type="checkbox" checked={excludePunctuationOnly} disabled={repetitionLocked} onChange={(event) => setExcludePunctuationOnly(event.target.checked)} />{translate("repetition.excludePunctuationOnly", language)}</span></label>
-      <label className="config-toggle"><span><input type="checkbox" checked={screeningEnabled} disabled={repetitionLocked} onChange={(event) => setScreeningEnabled(event.target.checked)} />{translate("repetition.screeningEnabled", language)}</span></label>
-      <label className="config-toggle"><span><input type="checkbox" checked={applyRepetitionConsistency} disabled={submitting} onChange={(event) => setApplyRepetitionConsistency(event.target.checked)} />{translate("continuousRun.applyRepetition", language)}</span></label>
-      <small>{translate("continuousRun.repetitionReviewHint", language)}</small>
-      {blocking.filter((item) => item.stage === "repetition_consistency").map((item) => <small className="error-text" key={item.code}>{item.message}</small>)}
-    </>}
-  </div>;
+  const repetitionControl = <label className={`continuous-run-stage ${repetitionEnabled ? "selected" : repetitionAvailable ? "next" : "disabled"}`}>
+    <input type="checkbox" checked={repetitionEnabled} disabled={submitting || !repetitionAvailable} onChange={(event) => { setIncludeRepetitionConsistency(event.target.checked); setApplyRepetitionConsistency(false); }} />
+    <span className="continuous-run-stage-main">
+      <strong>{translate("repetition.title", language)}</strong>
+      {repetitionEnabled && <>
+        <small>{repetitionStep?.preset && `${repetitionStep.preset.id} · ${repetitionStep.preset.model} · `}{repetitionStep?.count_deferred ? translate("continuousRun.repetitionDeferred", language) : repetitionStep ? translate("continuousRun.repetitionCount", language, { count: repetitionStep.selected }) : translate("common.loading", language)}</small>
+        {blocking.filter((item) => item.stage === "repetition_consistency").map((item) => <small className="error-text" key={item.code}>{item.message}</small>)}
+      </>}
+    </span>
+  </label>;
 
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
@@ -381,6 +379,22 @@ export function ContinuousRunDialog({
               )}
             </section>
           )}
+
+          {repetitionEnabled && <section className="continuous-run-section">
+            <h3>{translate("repetition.title", language)}</h3>
+            <label className="check-row">
+              <input type="checkbox" checked={excludePunctuationOnly} disabled={repetitionLocked} onChange={(event) => setExcludePunctuationOnly(event.target.checked)} />
+              <span>{translate("repetition.excludePunctuationOnly", language)}</span>
+            </label>
+            <label className="check-row">
+              <input type="checkbox" checked={screeningEnabled} disabled={repetitionLocked} onChange={(event) => setScreeningEnabled(event.target.checked)} />
+              <span>{translate("repetition.screeningEnabled", language)}</span>
+            </label>
+            {stages.includes("proofreading") && <label className="check-row">
+              <input type="checkbox" checked={applyRepetitionConsistency} disabled={submitting} onChange={(event) => setApplyRepetitionConsistency(event.target.checked)} />
+              <span>{translate("continuousRun.applyRepetition", language)}</span>
+            </label>}
+          </section>}
 
           {stages.includes("proofreading") && stages.at(-1) === "polishing" && (
             <p className="muted continuous-run-auto-apply">

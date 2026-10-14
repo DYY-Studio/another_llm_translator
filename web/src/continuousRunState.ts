@@ -130,7 +130,7 @@ export function continuousPayload(
   return {
     stage: "continuous" as const,
     include_repetition_consistency: Boolean(options.includeRepetitionConsistency),
-    apply_repetition_consistency: Boolean(options.includeRepetitionConsistency && options.applyRepetitionConsistency),
+    apply_repetition_consistency: Boolean(options.includeRepetitionConsistency && stages.includes("proofreading") && options.applyRepetitionConsistency),
     exclude_punctuation_only: options.excludePunctuationOnly ?? true,
     screening_enabled: options.screeningEnabled ?? false,
     stages,

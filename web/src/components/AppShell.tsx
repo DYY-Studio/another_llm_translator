@@ -348,7 +348,7 @@ export function AppShell({
             ) : task.usage.partial ? <span>{translate("run.tokensPartial", language, { input: task.usage.input_tokens, output: task.usage.output_tokens })}</span>
               : <span>{translate("run.tokensUnavailable", language)}</span>}
           </div>
-          {task.steps?.some((step) => step.status === "waiting_review") && <button className="quiet-button" onClick={onOpenRepetition}>{translate("continuousRun.openRepetition", language)}</button>}
+          {task.steps?.some((step) => step.stage === "repetition_consistency" && (step.status === "waiting_review" || (step.status === "completed" && !step.summary?.applied))) && <button className="quiet-button" onClick={onOpenRepetition}>{translate("continuousRun.openRepetition", language)}</button>}
           {(failed > 0 || task.error) && (
             <div className="run-tokens run-task-details">
               {failed > 0 && failureStage && <button className="run-failure-link" onClick={onShowFailures}>{translate("run.failedSegments", language, { count: failed })}</button>}
