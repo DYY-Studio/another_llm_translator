@@ -621,7 +621,7 @@ class WebTask:
     _final_review: bool = field(default=False, repr=False)
     _prompt_language: str | None = field(default=None, repr=False)
     _exclude_punctuation_only: bool = field(default=True, repr=False)
-    _screening_enabled: bool = field(default=True, repr=False)
+    _screening_enabled: bool = field(default=False, repr=False)
     _replace_draft: bool = field(default=False, repr=False)
     _acknowledge_manual_review: bool = field(default=False, repr=False)
     _include_summaries: bool = field(default=False, repr=False)
@@ -898,7 +898,7 @@ class WebTaskManager:
         ensure_unique: bool,
         prompt_language: str | None,
         exclude_punctuation_only: bool = True,
-        screening_enabled: bool = True,
+        screening_enabled: bool = False,
         include_summaries: bool = False,
         include_draft_translation: bool = False,
         aggregate_full_summaries: bool = False,
@@ -1368,7 +1368,7 @@ class WebTaskManager:
         run_action: str | None,
         prompt_language: str | None = None,
         exclude_punctuation_only: bool = True,
-        screening_enabled: bool = True,
+        screening_enabled: bool = False,
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
@@ -1462,7 +1462,7 @@ class WebTaskManager:
         run_action: str | None,
         prompt_language: str | None = None,
         exclude_punctuation_only: bool = True,
-        screening_enabled: bool = True,
+        screening_enabled: bool = False,
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,

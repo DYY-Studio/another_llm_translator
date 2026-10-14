@@ -27,7 +27,7 @@ def register_repetition_routes(*, app: FastAPI, project: Callable[[str], Path]) 
         return value
 
     @app.get("/api/v1/projects/{name}/repetition/options")
-    def options(name: str, only_file: str | None = None, language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = True, run_action: str | None = None) -> dict[str, Any]:
+    def options(name: str, only_file: str | None = None, language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False, run_action: str | None = None) -> dict[str, Any]:
         if run_action not in {None, "resume", "decline"}:
             raise UsageError("Run 选择必须是 resume 或 decline")
         root = project(name)

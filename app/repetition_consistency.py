@@ -122,7 +122,7 @@ def current_draft(project: Path) -> dict[str, Any] | None:
     return {**read_draft(project, manifest), "choices": manifest.get("choices", {})}
 
 
-def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = True) -> dict[str, Any]:
+def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False) -> dict[str, Any]:
     scope.validate()
     if scope.from_file or scope.only_segment or scope.segment_ids is not None or scope.force or scope.dry_run:
         raise UsageError("重复译文审查只支持整个项目或单个 File")
@@ -307,7 +307,7 @@ def parse_comparison(content: str, group: dict[str, Any]) -> dict[str, Any]:
         raise ExternalError(f"重复译文审查响应无效：{exc}") from exc
 
 
-async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = True, replace_draft: bool = False, run_action: str | None = None,
+async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False, replace_draft: bool = False, run_action: str | None = None,
                          http_client: httpx.AsyncClient | None = None,
                          limiter: SlidingWindowLimiter | KeyPool | None = None,
                          on_progress: Callable[[int, int, int], None] | None = None,

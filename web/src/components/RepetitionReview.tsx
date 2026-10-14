@@ -39,7 +39,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   const [task, setTask] = useState<TaskState | null>(null);
   const [onlyFile, setOnlyFile] = useState("");
   const [excludePunctuationOnly, setExcludePunctuationOnly] = useState(true);
-  const [screeningEnabled, setScreeningEnabled] = useState(true);
+  const [screeningEnabled, setScreeningEnabled] = useState(false);
   const [options, setOptions] = useState<RepetitionRunOptions | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -92,7 +92,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   function changePage(value: number) { setGroupPage(value); contentRef.current?.scrollTo({ top: 0 }); }
   function resetPages() { changePage(0); }
 
-  async function inspect(exclude = true, screening = true, action: "resume" | "decline" | null = null) {
+  async function inspect(exclude = true, screening = false, action: "resume" | "decline" | null = null) {
     setExcludePunctuationOnly(exclude); setScreeningEnabled(screening); setOptions(null); setConfirm("generate");
     setBusy(true); setError(""); setMessage("");
     try {

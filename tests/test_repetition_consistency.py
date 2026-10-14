@@ -64,13 +64,13 @@ def transport(*, choice: str = "compare", invalid: bool = False, requests: list 
 def test_generation_detects_groups_and_sends_shared_evidence(tmp_path, monkeypatch):
     from app.repetition_consistency import current_draft, repetition_plan, run_repetition
     project = repetition_project(tmp_path, monkeypatch)
-    plan = repetition_plan(project, Scope())
+    plan = repetition_plan(project, Scope(), screening_enabled=True)
     assert len(plan["groups"]) == 1
     assert plan["selected"] == 3
     requests = []
     async def run():
         async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
-            return await run_repetition(project, Scope(), http_client=client)
+            return await run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     result = asyncio.run(run())
     assert result["completed"] == 3
     draft = current_draft(project)
@@ -94,7 +94,7 @@ def test_screening_preserves_skip_and_refusal(tmp_path, monkeypatch, choice):
     requests = []
     async def run():
         async with httpx.AsyncClient(transport=transport(choice=choice, requests=requests)) as client:
-            await run_repetition(project, Scope(), http_client=client)
+            await run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     asyncio.run(run())
     assert len(requests) == (1 if choice == "skip" else 2)
     assert current_draft(project)["groups"][0]["screening"] == choice
@@ -105,7 +105,7 @@ def test_invalid_group_fails_without_replacing_existing_draft(tmp_path, monkeypa
     project = repetition_project(tmp_path, monkeypatch)
     async def run(invalid=False, replace=False):
         async with httpx.AsyncClient(transport=transport(invalid=invalid)) as client:
-            return await run_repetition(project, Scope(), http_client=client, replace_draft=replace)
+            return await run_repetition(project, Scope(), http_client=client, replace_draft=replace, screening_enabled=True)
     asyncio.run(run())
     old = current_draft(project)["run_id"]
     with pytest.raises(ExternalError):
@@ -133,7 +133,7 @@ def test_comparison_format_retry_recovers_and_links_requests(tmp_path, monkeypat
         return response
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await run_repetition(project, Scope(), http_client=client)
+            return await run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     result = asyncio.run(run())
     assert result["completed"] == 3
     assert len(requests) == 3  # One screening, then two comparison attempts.
@@ -146,12 +146,12 @@ def test_comparison_format_retry_recovers_and_links_requests(tmp_path, monkeypat
 def test_comparison_format_retry_exhaustion_preserves_screening(tmp_path, monkeypatch, limit):
     from app.repetition_consistency import repetition_plan, repetition_resume, run_repetition
     project = repetition_project(tmp_path, monkeypatch)
-    plan = repetition_plan(project, Scope())
+    plan = repetition_plan(project, Scope(), screening_enabled=True)
     plan["config"]["retry"]["format_max_attempts"] = limit
     requests = []
     async def run():
         async with httpx.AsyncClient(transport=transport(invalid=True, requests=requests)) as client:
-            await run_repetition(project, Scope(), prepared_plan=plan, http_client=client)
+            await run_repetition(project, Scope(), prepared_plan=plan, http_client=client, screening_enabled=True)
     with pytest.raises(ExternalError, match="响应无效"):
         asyncio.run(run())
     assert len(requests) == limit + 2
@@ -166,7 +166,7 @@ def test_missing_translation_fails_preflight(tmp_path, monkeypatch):
     append_stage_results(project, [record_header("stage_result", project_id, stage="translation",
         segment_id=segment["segment_id"], status="reset")])
     with pytest.raises(UsageError, match="完整翻译"):
-        repetition_plan(project, Scope())
+        repetition_plan(project, Scope(), screening_enabled=True)
 
 
 def test_over_budget_group_is_visible_without_sending_requests(tmp_path, monkeypatch):
@@ -180,7 +180,7 @@ def test_over_budget_group_is_visible_without_sending_requests(tmp_path, monkeyp
         pytest.fail("over-budget group must not send a request")
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as client:
-            await run_repetition(project, Scope(), http_client=client)
+            await run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     asyncio.run(run())
     group = current_draft(project)["groups"][0]
     assert group["screening"] == "over_budget"
@@ -191,7 +191,7 @@ def generate(project):
     from app.repetition_consistency import run_repetition
     async def run():
         async with httpx.AsyncClient(transport=transport()) as client:
-            await run_repetition(project, Scope(), http_client=client)
+            await run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     asyncio.run(run())
 
 
@@ -369,7 +369,7 @@ def test_comparison_injects_context_terms_with_local_relations_and_shared_snapsh
     requests = []
     async def run():
         async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
-            return await repetition.run_repetition(project, Scope(), http_client=client)
+            return await repetition.run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     result = asyncio.run(run())
     payload = json.loads(requests[1]["messages"][-1]["content"])
     first, second = payload["occurrences"][:2]
@@ -396,20 +396,20 @@ def test_comparison_obeys_character_knowledge_state(tmp_path, monkeypatch, statu
     monkeypatch.setattr(repetition, "load_terms", lambda _: character_library(project, status=status))
     if status == "stale":
         with pytest.raises(UsageError, match="过期"):
-            repetition.repetition_plan(project, Scope())
+            repetition.repetition_plan(project, Scope(), screening_enabled=True)
     else:
         async def run():
             async with httpx.AsyncClient(transport=transport()) as client:
-                return await repetition.run_repetition(project, Scope(), http_client=client)
+                return await repetition.run_repetition(project, Scope(), http_client=client, screening_enabled=True)
         assert any("待聚合" in warning for warning in asyncio.run(run())["warnings"])
 
 
 def test_term_injection_is_counted_in_preflight_budget(tmp_path, monkeypatch):
     from app import repetition_consistency as repetition
     project = repetition_project(tmp_path, monkeypatch)
-    before = repetition.repetition_plan(project, Scope())
+    before = repetition.repetition_plan(project, Scope(), screening_enabled=True)
     monkeypatch.setattr(repetition, "load_terms", lambda _: character_library(project, detail="角色信息" * 20000))
-    after = repetition.repetition_plan(project, Scope())
+    after = repetition.repetition_plan(project, Scope(), screening_enabled=True)
     assert not before["groups"][0]["over_budget"]
     assert after["groups"][0]["over_budget"]
     assert after["fingerprint"] != before["fingerprint"]
@@ -431,16 +431,16 @@ def test_repetition_prompts_are_editable_and_frozen_in_actual_requests(tmp_path,
         assert client.put(f"{base}/decision-prompts/repetition_screening", json={"content": custom}).status_code == 200
         assert client.put("/api/v1/decision-prompt-library/repetition_screening/story", json={"content": custom}).status_code == 200
         assert client.get("/api/v1/decision-prompt-library/repetition_screening/story").json()["content"] == custom
-        initial = repetition_plan(project, Scope(), prompt_language="en")["fingerprint"]
+        initial = repetition_plan(project, Scope(), prompt_language="en", screening_enabled=True)["fingerprint"]
         path = f"{base}/prompts/repetition_consistency"
         assert client.put(path, json={"language": "en", "content": "Prefer recurring promises."}).status_code == 200
         preview = client.get(path, params={"language": "en"}).json()["assembled"]
-    plan = repetition_plan(project, Scope(), prompt_language="en")
+    plan = repetition_plan(project, Scope(), prompt_language="en", screening_enabled=True)
     assert plan["fingerprint"] != initial
     requests = []
     async def run():
         async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
-            return await run_repetition(project, Scope(), prompt_language="en", http_client=client)
+            return await run_repetition(project, Scope(), prompt_language="en", http_client=client, screening_enabled=True)
     result = asyncio.run(run())
     assert requests[0]["questions"]["value"]["instructions"] == custom["instructions"]
     assert requests[1]["messages"][0]["content"] == preview
@@ -454,7 +454,7 @@ def test_repetition_prompt_missing_language_fails_without_fallback(tmp_path, mon
     project = repetition_project(tmp_path, monkeypatch)
     (project / "prompts" / "repetition_consistency.en.middle.txt").unlink()
     with pytest.raises(UsageError, match="Prompt"):
-        repetition_plan(project, Scope(), prompt_language="en")
+        repetition_plan(project, Scope(), prompt_language="en", screening_enabled=True)
 
 
 def test_updated_terminology_does_not_invalidate_existing_repetition_draft(tmp_path, monkeypatch):
@@ -521,8 +521,8 @@ def test_optional_punctuation_filter_only_removes_whole_equal_body_groups(tmp_pa
     append_stage_results(project, [record_header("stage_result", project_id, stage="translation",
         segment_id=s["segment_id"], status="completed", text=t, stage_fingerprint="test")
         for s, t in zip(segments, variants, strict=True)])
-    filtered = repetition_plan(project, Scope())
-    unfiltered = repetition_plan(project, Scope(), exclude_punctuation_only=False)
+    filtered = repetition_plan(project, Scope(), screening_enabled=True)
+    unfiltered = repetition_plan(project, Scope(), exclude_punctuation_only=False, screening_enabled=True)
     assert filtered["excluded_punctuation_groups"] == int(excluded)
     assert len(filtered["groups"]) == int(not excluded)
     assert len(unfiltered["groups"]) == 1 and len(unfiltered["groups"][0]["occurrences"]) == 3
@@ -542,7 +542,7 @@ def test_partial_application_and_manual_skipped_group(tmp_path, monkeypatch):
     assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 0
     async def skipped():
         async with httpx.AsyncClient(transport=transport(choice="skip")) as client:
-            await run_repetition(project, Scope(), http_client=client)
+            await run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     asyncio.run(skipped())
     draft = current_draft(project)
     proposal = draft["groups"][0]["proposals"][0]
@@ -585,13 +585,13 @@ def test_disabled_screening_needs_no_decision_resources_and_preserves_model_subs
     prompt = project / "decision_prompts" / "repetition_screening.json"
     prompt.parent.mkdir(exist_ok=True)
     prompt.write_text("invalid")
-    plan = repetition_plan(project, Scope(), screening_enabled=False)
+    plan = repetition_plan(project, Scope())
     assert plan["screen"] is None and plan["decision_preset"] is None
     assert plan["estimated_requests"] == 1
     requests = []
     async def run():
         async with httpx.AsyncClient(transport=transport(requests=requests, apply_members=[])) as client:
-            return await run_repetition(project, Scope(), screening_enabled=False, http_client=client)
+            return await run_repetition(project, Scope(), http_client=client)
     result = asyncio.run(run())
     assert len(requests) == 1 and "messages" in requests[0]
     assert not (project / "runs" / result["run_id"] / "decision_preset.json").exists()
@@ -607,10 +607,10 @@ def test_resume_reuses_screening_and_keeps_original_snapshots(tmp_path, monkeypa
     project = repetition_project(tmp_path, monkeypatch)
     async def run(invalid, action=None, requests=None):
         async with httpx.AsyncClient(transport=transport(invalid=invalid, requests=requests)) as client:
-            return await run_repetition(project, Scope(), http_client=client, run_action=action)
+            return await run_repetition(project, Scope(), http_client=client, run_action=action, screening_enabled=True)
     with pytest.raises(ExternalError):
         asyncio.run(run(True))
-    info = repetition_resume(project, repetition_plan(project, Scope()))
+    info = repetition_resume(project, repetition_plan(project, Scope(), screening_enabled=True))
     assert info["resume_compatible"] and info["completed_steps"] == 1
     run_dir = project / "runs" / info["run_id"]
     original_prompt = (run_dir / "prompt.txt").read_bytes()
@@ -628,13 +628,13 @@ def test_resume_rejects_changed_inputs_and_decline_starts_new_run(tmp_path, monk
     project = repetition_project(tmp_path, monkeypatch)
     async def run(invalid, action=None):
         async with httpx.AsyncClient(transport=transport(invalid=invalid)) as client:
-            return await run_repetition(project, Scope(), http_client=client, run_action=action)
+            return await run_repetition(project, Scope(), http_client=client, run_action=action, screening_enabled=True)
     with pytest.raises(ExternalError):
         asyncio.run(run(True))
-    info = repetition_resume(project, repetition_plan(project, Scope()))
+    info = repetition_resume(project, repetition_plan(project, Scope(), screening_enabled=True))
     middle = project / "prompts" / "repetition_consistency.zh-CN.middle.txt"
     middle.write_text(middle.read_text() + "\n补充判断说明")
-    assert not repetition_resume(project, repetition_plan(project, Scope()))["resume_compatible"]
+    assert not repetition_resume(project, repetition_plan(project, Scope(), screening_enabled=True))["resume_compatible"]
     with pytest.raises(UsageError, match="已变化"):
         asyncio.run(run(False, "resume"))
     result = asyncio.run(run(False, "decline"))
@@ -655,10 +655,10 @@ def test_completed_checkpoint_resume_needs_no_requests_and_keeps_usage(tmp_path,
     monkeypatch.setattr(repetition, "atomic_write_text", fail_publish)
     async def run(action=None, requests=None):
         async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
-            return await repetition.run_repetition(project, Scope(), run_action=action, http_client=client)
+            return await repetition.run_repetition(project, Scope(), run_action=action, http_client=client, screening_enabled=True)
     with pytest.raises(StorageError, match="publication probe"):
         asyncio.run(run())
-    info = repetition.repetition_resume(project, repetition.repetition_plan(project, Scope()))
+    info = repetition.repetition_resume(project, repetition.repetition_plan(project, Scope(), screening_enabled=True))
     assert info["completed"] == 3 and info["estimated_requests"] == 0
     manifest_path = project / "runs" / info["run_id"] / "manifest.json"
     previous_usage = read_json(project, manifest_path)["usage"]
@@ -714,19 +714,19 @@ def test_cancelled_comparison_resumes_after_screening(tmp_path, monkeypatch):
                 await asyncio.Future()
             return respond(request)
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-            task = asyncio.create_task(run_repetition(project, Scope(), http_client=client))
+            task = asyncio.create_task(run_repetition(project, Scope(), http_client=client, screening_enabled=True))
             await comparing.wait()
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
     asyncio.run(interrupted())
-    info = repetition_resume(project, repetition_plan(project, Scope()))
+    info = repetition_resume(project, repetition_plan(project, Scope(), screening_enabled=True))
     assert info["completed_steps"] == 1
     manifest = read_json(project, project / "runs" / info["run_id"] / "manifest.json")
     assert manifest["completed_at"] is None and manifest["last_interruption"]["reason"] == "cancelled"
     requests = []
     async def resume():
         async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
-            await run_repetition(project, Scope(), run_action="resume", http_client=client)
+            await run_repetition(project, Scope(), run_action="resume", http_client=client, screening_enabled=True)
     asyncio.run(resume())
     assert len(requests) == 1 and "messages" in requests[0]
