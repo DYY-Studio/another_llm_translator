@@ -591,11 +591,13 @@ export function SegmentWorkspace({
     termMembers.set(term.primary_source, members);
   }
 
+  if (repetitionOpen && stage === "translation") return <Suspense fallback={<section className="term-decision-workspace">{translate("common.loading", language)}</section>}><RepetitionReview key={projectId} project={project} files={overview.files} language={language}
+        onClose={() => setRepetitionOpen(false)} onChanged={async () => { await onRefresh(); await reloadIndex(); }} /></Suspense>;
+
   return (
     <div className="workspace">
       <section className="segment-browser">
         <div className="filters">
-          {stage === "translation" && <button onClick={() => setRepetitionOpen(true)}>{translate("repetition.title", language)}</button>}
           <select value={boundary} onChange={(event) => {
             setBoundary(event.target.value);
             setBatchMessage("");
@@ -626,6 +628,7 @@ export function SegmentWorkspace({
               )}
               <button className="danger-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "reset", scope: "selected" })}>{translate("workspace.clearSelected", language)}</button>
               <button className="danger-button" disabled={!total} onClick={() => setBatchAction({ kind: "reset", scope: "filtered" })}>{translate("workspace.clearAll", language)}</button>
+              {stage === "translation" && <button className="quiet-button" onClick={() => setRepetitionOpen(true)}>{translate("repetition.title", language)}</button>}
             </div>
           </div>
           {batchMessage && <span className="success-text">{batchMessage}</span>}
@@ -759,8 +762,6 @@ export function SegmentWorkspace({
           onConfirm={runBatch}
         />
       )}
-      {repetitionOpen && <Suspense fallback={<Modal ariaLabel={translate("repetition.title", language)}>{translate("common.loading", language)}</Modal>}><RepetitionReview key={projectId} project={project} files={overview.files} language={language}
-        onClose={() => setRepetitionOpen(false)} onChanged={async () => { await onRefresh(); await reloadIndex(); }} /></Suspense>}
     </div>
   );
 }

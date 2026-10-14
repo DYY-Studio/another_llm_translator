@@ -122,10 +122,7 @@
 .modal label.check-row { display: flex; }
 .modal input[type=file] { padding: 7px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
-.repetition-modal { width: min(960px, calc(100vw - 32px)); }
-.repetition-modal h2 { margin-top: 0; }
 .repetition-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-block: 12px; }
-.repetition-actions input { flex: 1 1 180px; }
 .repetition-actions select { max-width: 100%; }
 .repetition-group { display: grid; gap: 12px; }
 .repetition-group .repetition-actions { margin-block: 0; }
@@ -133,6 +130,8 @@
 .repetition-group label { display: grid; gap: 6px; min-width: 0; }
 .repetition-group select { width: 100%; min-width: 0; }
 .repetition-text { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin-block: 8px; }
+.repetition-filters { grid-template-columns: minmax(0, 1fr) auto auto; }
+.repetition-filters .term-decision-pages { padding: 0; }
 .replacement-modal { width: min(560px, calc(100vw - 32px)); }
 .replacement-heading h2 { margin: 0 0 6px; }
 .replacement-heading p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }

@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import type { ProjectOverview, TaskState } from "../types";
-import { Modal } from "./Modal";
 
 interface Choice { accepted: boolean; target: string }
 interface Occurrence {
@@ -25,6 +24,7 @@ interface Options {
 }
 type Action = "generate" | "apply" | "discard" | "rollback";
 const PAGE_SIZE = 20;
+const GROUP_PAGE_SIZE = 10;
 const isRunning = (task: TaskState | null) => !!task && ["queued", "running", "cancelling"].includes(task.status);
 
 export function RepetitionReview({ project, files, language, onClose, onChanged }: {
@@ -44,8 +44,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [groupPage, setGroupPage] = useState(0);
-  const [page, setPage] = useState(0);
-  const [openContexts, setOpenContexts] = useState<Record<string, boolean>>({});
+  const contentRef = useRef<HTMLDivElement>(null);
   const active = isRunning(task);
   const draft = state?.draft;
   const groups = useMemo(() => (draft?.groups ?? []).filter(g => (
@@ -53,9 +52,6 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
       || (filter === "uncertain" && g.uncertain.length > 0) || (filter === "skip" && g.screening === "skip"))
     && (!search || g.source.includes(search) || g.translations.some(text => text.includes(search)))
   )), [draft, filter, search]);
-  const group = groups[groupPage];
-  const occurrenceById = useMemo(() => new Map(group?.occurrences.map(o => [o.id, o]) ?? []), [group]);
-  const proposalByMember = useMemo(() => new Map(group?.proposals.flatMap(p => p.members.map(id => [id, p] as const)) ?? []), [group]);
   const acceptedCount = draft?.groups.reduce((n, g) => n + g.proposals.filter(p => draft.choices[p.id]?.accepted !== false).length, 0) ?? 0;
 
   useEffect(() => {
@@ -89,7 +85,8 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
     return () => { alive = false; clearTimeout(timer); };
   }, [task?.task_id, active, base, language]);
 
-  function resetPages() { setGroupPage(0); setPage(0); setOpenContexts({}); }
+  function changePage(value: number) { setGroupPage(value); contentRef.current?.scrollTo({ top: 0 }); }
+  function resetPages() { changePage(0); }
 
   async function inspect() {
     setBusy(true); setError(""); setMessage("");
@@ -140,21 +137,28 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
     finally { setBusy(false); }
   }
 
-  return <Modal ariaLabel={t("title")} className="repetition-modal">
-    <header className="term-decision-proposal-heading"><h2>{t("title")}</h2>
-      <button className="quiet-button" disabled={busy} onClick={onClose}>{t("close")}</button></header>
-    <p>{t("hint")}</p>
+  const proposalCount = draft?.groups.reduce((n, g) => n + g.proposals.length, 0) ?? 0;
+  const pageCount = Math.max(1, Math.ceil(groups.length / GROUP_PAGE_SIZE));
+
+  return <section className="term-decision-workspace">
+    <header className="page-heading settings-action-heading term-decision-action-heading">
+      <div><p className="term-decision-back"><button className="link-button" onClick={onClose}>← {t("back")}</button></p>
+        <h1>{t("title")}</h1><p>{t("hint")}</p></div>
+      <div className="button-group">
+        {draft && <button className="danger-button" disabled={busy || active || !!confirm} onClick={() => setConfirm("discard")}>{t("discard")}</button>}
+        <button className={draft ? "quiet-button" : "primary-button"} disabled={busy || active || !!confirm} onClick={() => void inspect()}>{draft ? t("replace") : t("generate")}</button>
+        {draft && <button className="primary-button" disabled={busy || active || !acceptedCount || !!confirm} onClick={() => setConfirm("apply")}>{t("apply", { count: acceptedCount })}</button>}
+        {state?.can_rollback && <button className="quiet-button" disabled={busy || active || !!confirm} onClick={() => setConfirm("rollback")}>{t("rollback")}</button>}
+      </div>
+    </header>
     {error && <div className="error-banner" role="alert">{error}</div>}
     {message && <div className="warning-banner" role="status">{message}</div>}
     <div className="repetition-actions">
-      <select aria-label={t("scope")} value={onlyFile} disabled={busy || active || !!confirm} onChange={e => { setOnlyFile(e.target.value); setOptions(null); }}>
+      <label htmlFor="repetition-scope">{t("scope")}</label>
+      <select id="repetition-scope" value={onlyFile} disabled={busy || active || !!confirm} onChange={e => { setOnlyFile(e.target.value); setOptions(null); }}>
         <option value="">{translate("workspace.allFiles", language)}</option>
         {files.map(f => <option value={f.file_id} key={f.file_id}>{f.name}</option>)}
       </select>
-      <button className="quiet-button" disabled={busy || active || !!confirm} onClick={() => void inspect()}>{draft ? t("replace") : t("generate")}</button>
-      <button className="primary-button" disabled={busy || active || !draft || !acceptedCount || !!confirm} onClick={() => setConfirm("apply")}>{t("apply", { count: acceptedCount })}</button>
-      <button className="quiet-button" disabled={busy || active || !draft || !!confirm} onClick={() => setConfirm("discard")}>{t("discard")}</button>
-      <button className="quiet-button" disabled={busy || active || !state?.can_rollback || !!confirm} onClick={() => setConfirm("rollback")}>{t("rollback")}</button>
     </div>
     {task && <div className="repetition-actions" role="status">
       <span>{t(`status.${task.status}`)} {task.completed_segments}/{task.total_segments}</span>
@@ -175,17 +179,42 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
       <div className="repetition-actions"><button className="primary-button" disabled={busy || (confirm === "generate" && !options?.candidate_groups)} onClick={() => void execute()}>{t("confirm")}</button>
         <button className="quiet-button" disabled={busy} onClick={() => setConfirm(null)}>{translate("common.cancel", language)}</button></div>
     </section>}
+    <div className="term-decision-content" ref={contentRef}>
     {!state ? <p>{translate("common.loading", language)}</p> : !draft ? <p>{t("noDraft")}</p> : <>
-      <div className="repetition-actions">
+      <div className="term-decision-summary"><span>{t("groupCount", { count: draft.groups.length })}</span>
+        <span>{t("acceptedCount", { count: acceptedCount })}</span><span>{t("rejectedCount", { count: proposalCount - acceptedCount })}</span></div>
+      <div className="term-decision-filters term-decision-sticky repetition-filters">
         <input aria-label={t("search")} placeholder={t("search")} value={search} onChange={e => { setSearch(e.target.value); resetPages(); }} />
         <select aria-label={t("filter")} value={filter} onChange={e => { setFilter(e.target.value); resetPages(); }}>
           {["all", "suggested", "uncertain", "skip"].map(value => <option key={value} value={value}>{t(`filter.${value}`)}</option>)}
         </select>
-        <button className="quiet-button" disabled={groupPage === 0} onClick={() => { setGroupPage(n => n - 1); setPage(0); setOpenContexts({}); }}>{t("previousGroup")}</button>
-        <span>{groups.length ? groupPage + 1 : 0}/{groups.length}</span>
-        <button className="quiet-button" disabled={groupPage + 1 >= groups.length} onClick={() => { setGroupPage(n => n + 1); setPage(0); setOpenContexts({}); }}>{t("nextGroup")}</button>
+        <nav className="term-decision-pages" aria-label={t("pagination")}>
+          <button disabled={groupPage === 0} onClick={() => changePage(groupPage - 1)}>‹</button>
+          <span>{groupPage + 1} / {pageCount}</span>
+          <button disabled={groupPage + 1 >= pageCount} onClick={() => changePage(groupPage + 1)}>›</button>
+        </nav>
       </div>
-      {group && <section className="repetition-group" key={group.id}>
+      <div className="term-decision-list">{groups.slice(groupPage * GROUP_PAGE_SIZE, (groupPage + 1) * GROUP_PAGE_SIZE).map(group =>
+        <GroupCard key={`${draft.run_id}:${group.id}`} group={group} draft={draft} files={files} language={language}
+          disabled={busy || active || !!confirm} onChoose={choose} />)}</div>
+      {!groups.length && <p className="diagnostics-empty">{t("noMatch")}</p>}
+
+    </>}
+    </div>
+  </section>;
+}
+
+function GroupCard({ group, draft, files, language, disabled, onChoose }: {
+  group: Group; draft: Draft; files: ProjectOverview["files"]; language: Language; disabled: boolean;
+  onChoose: (proposal: Proposal, choice: Choice) => Promise<void>;
+}) {
+  const t = (key: string, params: Record<string, string | number> = {}) => translate(`repetition.${key}`, language, params);
+  const [page, setPage] = useState(0);
+  const [openContexts, setOpenContexts] = useState<Record<string, boolean>>({});
+  const occurrenceById = useMemo(() => new Map(group.occurrences.map(o => [o.id, o])), [group]);
+  const proposalByMember = useMemo(() => new Map(group.proposals.flatMap(p => p.members.map(id => [id, p] as const))), [group]);
+  const uncertain = useMemo(() => new Set(group.uncertain), [group]);
+  return <section className="term-decision-proposal repetition-group" key={group.id}>
         <h3>{t("source")}</h3><pre className="repetition-text">{group.source}</pre>
         <p>{t(`screening.${group.screening}`)}</p>
         {group.proposals.map(proposal => {
@@ -194,10 +223,10 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
           const variants = [...new Map(members.map(o => [o.variant, o])).values()];
           return <article className={`term-decision-proposal ${choice.accepted ? "" : "rejected"}`} key={proposal.id}>
             <div className="repetition-actions"><strong>{t("unify", { count: members.length })}</strong>
-              <button className="quiet-button" disabled={busy || active || !!confirm} onClick={() => void choose(proposal, { ...choice, accepted: !choice.accepted })}>
+              <button className="quiet-button" disabled={disabled} onClick={() => void onChoose(proposal, { ...choice, accepted: !choice.accepted })}>
                 {t(choice.accepted ? "reject" : "restore")}</button></div>
-            <label>{t("target")}<select value={members.find(o => o.id === choice.target)?.variant} disabled={busy || active || !!confirm}
-              onChange={e => { const member = variants.find(o => o.variant === Number(e.target.value)); if (member) void choose(proposal, { ...choice, target: member.id }); }}>
+            <label>{t("target")}<select value={members.find(o => o.id === choice.target)?.variant} disabled={disabled}
+              onChange={e => { const member = variants.find(o => o.variant === Number(e.target.value)); if (member) void onChoose(proposal, { ...choice, target: member.id }); }}>
               {variants.map(o => <option key={o.variant} value={o.variant}>{group.translations[o.variant]}</option>)}
             </select></label>
             <p>{proposal.reason}</p>
@@ -216,7 +245,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
             <small>{files.find(f => f.file_id === o.file_id)?.name ?? o.file_id} / {o.part_id} / {o.segment_id}
               {o.origin === "web" && ` (${t("manual")})`}</small>
             <div className="decision-state-pair"><div><strong>{t("before")}</strong><pre className="repetition-text">{group.translations[o.variant]}</pre></div>
-              <div><strong>{target ? t("after") : group.uncertain.includes(o.id) ? t("needsReview") : t("keep")}</strong>
+              <div><strong>{target ? t("after") : uncertain.has(o.id) ? t("needsReview") : t("keep")}</strong>
                 <pre className="repetition-text">{group.translations[target?.variant ?? o.variant]}</pre></div></div>
             <details onToggle={e => { const open = e.currentTarget.open; setOpenContexts(current => ({ ...current, [o.id]: open })); }}>
               <summary>{t("context")}</summary>
@@ -225,7 +254,5 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
             </details>
           </article>;
         })}
-      </section>}
-    </>}
-  </Modal>;
+      </section>;
 }
