@@ -32,7 +32,7 @@ def register_repetition_routes(*, app: FastAPI, project: Callable[[str], Path]) 
             raise UsageError("Run 选择必须是 resume 或 decline")
         root = project(name)
         runs = find_running_runs(root, STAGE)
-        if runs and run_action != "decline" and runs[0].get("repetition_checkpoint") == 1:
+        if runs and run_action != "decline" and runs[0].get("repetition_checkpoint") == 2:
             original = runs[0]
             only_file = original["scope"]["only_file"]
             exclude_punctuation_only = original["exclude_punctuation_only"]

@@ -34,6 +34,7 @@ from .user_config import effective_path
 
 STAGE = "repetition_consistency"
 DRAFT_FILE = "repetition_draft.json"
+PROTOCOL_VERSION = 1
 
 
 def repetition_resume(project: Path, plan: dict[str, Any]) -> dict[str, Any] | None:
@@ -41,8 +42,9 @@ def repetition_resume(project: Path, plan: dict[str, Any]) -> dict[str, Any] | N
     if not runs:
         return None
     run = runs[0]
-    compatible = run.get("repetition_checkpoint") == 1 and run["stage_fingerprint"] == plan["fingerprint"]
-    reason = None if compatible else "Run 缺少续作检查点，或原文、译文、术语及执行设置已变化，请结束旧 Run 并新建"
+    compatible = (run.get("repetition_checkpoint") == 2 and run.get("repetition_protocol") == PROTOCOL_VERSION
+                  and run.get("repetition_input_fingerprint") == plan["input_fingerprint"])
+    reason = None if compatible else "Run 检查点或协议不兼容，或原文、译文及术语证据已变化，请结束旧 Run 并新建"
     try:
         checkpoints = load_checkpoints(project / "runs" / run["run_id"], plan) if compatible else {}
     except StorageError as exc:
@@ -50,7 +52,7 @@ def repetition_resume(project: Path, plan: dict[str, Any]) -> dict[str, Any] | N
         compatible = False
         reason = f"{exc}，请结束旧 Run 并新建"
     completed = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
-    remaining = [g for g in plan["groups"] if "result" not in checkpoints.get(g["id"], {}) and not g["over_budget"]]
+    remaining = [g for g in plan["groups"] if "result" not in checkpoints.get(g["id"], {}) and not group_over_budget(g, plan, checkpoints.get(g["id"], {}))]
     comparison = [g for g in remaining if checkpoints.get(g["id"], {}).get("screening") != "skip"]
     batches = comparison_batches(comparison, plan)
     requests = len(batches)
@@ -59,7 +61,8 @@ def repetition_resume(project: Path, plan: dict[str, Any]) -> dict[str, Any] | N
         unscreened = [g for g in remaining if "screening" not in checkpoints.get(g["id"], {})]
         requests += len(unscreened)
         tokens += sum(g["screening_input_tokens"] for g in unscreened)
-    return {"run_id": run["run_id"], "scope": run["scope"], "prompt_language": run.get("prompt_language"),
+    latest_execution = (run.get("continuations") or [run])[-1]["stage_fingerprint"]
+    return {"execution_changed": latest_execution != plan["fingerprint"], "run_id": run["run_id"], "scope": run["scope"], "prompt_language": run.get("prompt_language"),
             "screening_enabled": run.get("screening_enabled"), "exclude_punctuation_only": run.get("exclude_punctuation_only"),
             "resume_compatible": compatible, "resume_incompatibility_reason": reason,
             "completed": completed, "completed_steps": sum((int("screening" in c) if plan["screening_enabled"] else 0) + int("result" in c) for c in checkpoints.values()),
@@ -73,6 +76,8 @@ def checkpoint_path(run_dir: Path, group_id: str) -> Path:
 
 def load_checkpoints(run_dir: Path, plan: dict[str, Any]) -> dict[str, Any]:
     result = {}
+    manifest = read_json(run_dir.parent.parent, run_dir / "manifest.json")
+    last_index = len(manifest.get("continuations", [])) + 1
     for group in plan["groups"]:
         path = checkpoint_path(run_dir, group["id"])
         if not path.exists():
@@ -81,12 +86,40 @@ def load_checkpoints(run_dir: Path, plan: dict[str, Any]) -> dict[str, Any]:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise StorageError("无法读取重复译文续作检查点") from exc
-        if (not isinstance(value, dict) or set(value) not in ({"screening", "confidence"}, {"screening", "confidence", "result"})
+        fields = {"screening", "confidence", "screening_execution_index"}
+        if (not isinstance(value, dict) or set(value) not in (fields, fields | {"result", "comparison_execution_index"})
             or not isinstance(value["screening"], str) or value["screening"] not in {"compare", "skip", "refusal", "disabled", "over_budget"}
             or ("result" in value and (not isinstance(value["result"], dict) or set(value["result"]) != {"proposals", "keep", "uncertain"}))):
             raise StorageError("重复译文续作检查点无效")
-        result[group["id"]] = value
+        for field, invoked in (("screening_execution_index", value["screening"] in {"compare", "skip", "refusal"}),
+                               ("comparison_execution_index", value.get("comparison_execution_index") is not None)):
+            index = value.get(field)
+            if invoked:
+                if type(index) is not int or not 1 <= index <= last_index:
+                    raise StorageError("重复译文检查点执行来源无效")
+                directory = run_dir if index == 1 else run_dir / "continuations" / f"{index - 1:04d}"
+                resource = directory / ("decision_prompts/repetition_screening.json" if field == "screening_execution_index" else "prompt.txt")
+                if not resource.is_file():
+                    raise StorageError("重复译文检查点执行快照缺失")
+            elif index is not None:
+                raise StorageError("重复译文检查点执行来源无效")
+        if "result" in value and value["screening"] != "skip" and value["comparison_execution_index"] is None:
+            if value["screening_execution_index"] is not None:
+                result[group["id"]] = {key: value[key] for key in fields}
+        else:
+            result[group["id"]] = value
     return result
+
+
+def group_over_budget(group: dict[str, Any], plan: dict[str, Any], saved: dict[str, Any]) -> bool:
+    if "result" in saved or saved.get("screening") == "skip":
+        return False
+    if "screening" not in saved:
+        return group["over_budget"]
+    config = plan["config"]
+    tokens = group["comparison_input_tokens"]
+    itpm = config["execution"]["input_tokens_per_minute"]
+    return tokens >= config["llm"]["context_window_tokens"] - config["llm"]["context_safety_margin_tokens"] or (itpm > 0 and tokens > itpm)
 
 
 def digest(value: Any) -> str:
@@ -140,6 +173,7 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
             str(decision_preset_path(Path(), preset_id)), builtin_root=config_module.APP_ROOT))
         if preset["preset_id"] != preset_id:
             raise UsageError("Decision Preset ID 与配置不一致")
+        config["_decision_preset_definitions"][preset_id] = preset
     segments = load_segments(project)
     files = load_source_files(project)
     file_indices = {f["file_id"]: i for i, f in enumerate(files, 1)}
@@ -234,12 +268,16 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
         group["over_budget"] = (screening_enabled and screening_tokens > decision_limit) or comparison_tokens >= llm_limit or (itpm > 0 and comparison_tokens > itpm)
         groups.append(group)
     selected_count = sum(len(g["occurrences"]) for g in groups)
-    fingerprint = digest({"scope": {"only_file": scope.only_file}, "screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only, "groups": groups, "evidence": evidence, "terms": terms, "terms_revision": terms_revision, "llm": config["_llm_preset_hash"],
-                          "temperature": config["llm"]["temperature_translation"], "retry": config["retry"], "batch_target": config["execution"]["target_chunk_input_tokens"],
-                          "decision": preset, "target_language": config["project"]["target_language"], "prompt": prompt,
-                          "screen": screen_content})
+    input_fingerprint = digest({"scope": {"only_file": scope.only_file}, "screening_enabled": screening_enabled,
+        "exclude_punctuation_only": exclude_punctuation_only, "target_language": config["project"]["target_language"],
+        "groups": [{key: value for key, value in group.items() if key not in {"screening_input_tokens", "comparison_input_tokens", "over_budget"}} for group in groups],
+        "evidence": evidence, "terms": terms, "terms_revision": terms_revision})
+    fingerprint = digest({"input": input_fingerprint, "protocol": PROTOCOL_VERSION,
+        "llm": config["_llm_preset_hash"], "adapter": config["_llm_adapter_hash"],
+        "temperature": config["llm"]["temperature_translation"], "retry": config["retry"],
+        "execution": config["execution"], "decision": preset, "prompt": prompt, "screen": screen_content})
     plan = {"screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only, "excluded_punctuation_groups": excluded_punctuation_groups, "config": config, "prompt": prompt, "language": language, "screen": screen, "terms": terms, "terms_revision": terms_revision, "warnings": warnings, "decision_preset": preset, "groups": groups, "evidence": evidence, "sources": sources,
-            "selected": selected_count, "fingerprint": fingerprint}
+            "selected": selected_count, "fingerprint": fingerprint, "input_fingerprint": input_fingerprint}
     eligible = [g for g in groups if not g["over_budget"]]
     batches = comparison_batches(eligible, plan)
     plan["estimated_requests"] = len(batches) + (len(eligible) if screening_enabled else 0)
@@ -382,19 +420,18 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
     if resume_id:
         checkpoints = load_checkpoints(project / "runs" / resume_id, plan)
         reused = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
-        run_id, run_dir, _ = continue_run(project, resume_id, config=config, stage=STAGE, fingerprint=plan["fingerprint"],
+        run_id, run_dir, continuation_index = continue_run(project, resume_id, config=config, stage=STAGE, fingerprint=plan["fingerprint"],
             prompt=prompt, scope=scope, selected_count=total, requested_count=total - reused, reused_count=reused)
     else:
+        continuation_index = 0
         checkpoints = {}
         run_id, run_dir = create_run(project, config=config, stage=STAGE, fingerprint=plan["fingerprint"],
             prompt=prompt, selected_count=total, requested_count=total, reused_count=0,
-            details={"screening_enabled": plan["screening_enabled"], "exclude_punctuation_only": plan["exclude_punctuation_only"], "excluded_punctuation_groups": plan["excluded_punctuation_groups"], "prompt_language": plan["language"], "terms_revision": plan["terms_revision"], "repetition_checkpoint": 1, "usage_invocation_count": 0, "draft_status": "generating", "scope": {"only_file": scope.only_file}, "choices": {}})
+            details={"screening_enabled": plan["screening_enabled"], "exclude_punctuation_only": plan["exclude_punctuation_only"], "excluded_punctuation_groups": plan["excluded_punctuation_groups"], "prompt_language": plan["language"], "terms_revision": plan["terms_revision"], "repetition_checkpoint": 2, "repetition_protocol": PROTOCOL_VERSION, "repetition_input_fingerprint": plan["input_fingerprint"], "usage_invocation_count": 0, "draft_status": "generating", "scope": {"only_file": scope.only_file}, "choices": {}})
         atomic_write_text(run_dir / "repetition_terms.json", json.dumps({
             "terms_revision": plan["terms_revision"], "terms": plan["terms"],
             "groups": {g["id"]: {o["id"]: o["terms"] for o in g["occurrences"]} for g in plan["groups"]},
         }, ensure_ascii=False, separators=(",", ":")) + "\n")
-        if plan["decision_preset"]:
-            atomic_write_json(run_dir / "decision_preset.json", plan["decision_preset"])
     llm_usage: dict[str, Any] | None = None
     model_invoked = False
     completed = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
@@ -415,9 +452,11 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
             async with LLMClient(config, limiter, run_dir=run_dir, project_id=metadata["project_id"],
                                  run_id=run_id, stage=STAGE, client=http_client, on_usage=record_usage) as llm:
                 groups = [dict(group) for group in plan["groups"]]
-                def save_result(group, result):
+                def save_result(group, result, *, comparison=False):
                     nonlocal completed
-                    saved = {"screening": group["screening"], "confidence": group.get("confidence"), "result": result}
+                    saved = {"screening": group["screening"], "confidence": group.get("confidence"),
+                        "screening_execution_index": group.get("screening_execution_index"), "result": result,
+                        "comparison_execution_index": continuation_index + 1 if comparison else None}
                     atomic_write_json(checkpoint_path(run_dir, group["id"]), saved)
                     checkpoints[group["id"]] = saved
                     group.update(result)
@@ -429,10 +468,11 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                     nonlocal model_invoked
                     saved = dict(checkpoints.get(group["id"], {}))
                     if "result" in saved:
-                        group.update(screening=saved["screening"], confidence=saved.get("confidence"), **saved["result"])
+                        group.update(screening=saved["screening"], confidence=saved.get("confidence"), over_budget=False, **saved["result"])
                         return None
+                    group["over_budget"] = group_over_budget(group, plan, saved)
                     if group["over_budget"]:
-                        group.update(screening="over_budget", confidence=None)
+                        group.update(screening=saved.get("screening", "over_budget"), confidence=saved.get("confidence"), screening_execution_index=saved.get("screening_execution_index"))
                         save_result(group, {"proposals": [], "keep": [], "uncertain": [o["id"] for o in group["occurrences"]]})
                         return None
                     if "screening" not in saved:
@@ -440,11 +480,11 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                             model_invoked = True
                         answer = (await decision.choose(screening_payload(group), [screen]))["value"] if decision else None
                         saved.update(screening=("refusal" if answer.refused else answer.choice) if answer else "disabled",
-                                     confidence=answer.confidence if answer else None)
+                                     confidence=answer.confidence if answer else None, screening_execution_index=continuation_index + 1 if answer else None)
                         if decision and saved["screening"] != "skip":
                             atomic_write_json(checkpoint_path(run_dir, group["id"]), saved)
                             checkpoints[group["id"]] = dict(saved)
-                    group.update(screening=saved["screening"], confidence=saved.get("confidence"))
+                    group.update(screening=saved["screening"], confidence=saved.get("confidence"), screening_execution_index=saved.get("screening_execution_index"))
                     if saved["screening"] == "skip":
                         save_result(group, {"proposals": [], "keep": [o["id"] for o in group["occurrences"]], "uncertain": []})
                         return None
@@ -465,7 +505,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                         results, error = parse_comparisons(response.content, pending)
                         for group in pending:
                             if group["id"] in results:
-                                save_result(group, results[group["id"]])
+                                save_result(group, results[group["id"]], comparison=True)
                         pending = [group for group in pending if group["id"] not in results]
                         if not pending:
                             return
@@ -483,6 +523,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                 batches = comparison_batches([group for group in screened if group is not None], plan)
                 await run_bounded(batches, compare_batch, max_parallel=config["execution"]["max_parallel"])
         for group in groups:
+            group.pop("screening_execution_index", None)
             group.pop("screening_input_tokens")
             group.pop("comparison_input_tokens")
             for occurrence in group["occurrences"]:
