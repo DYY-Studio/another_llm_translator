@@ -6,6 +6,7 @@ const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
     "repetition.title": "重复译文一致性审查",
     "repetition.screeningEnabled": "使用 Decision 初筛",
+    "repetition.resumeSteps": "已保存 {completed} / {total} 个步骤，续作只请求未完成部分",
     "repetition.screening.disabled": "未使用初筛，直接比较",
     "repetition.comparisonModel": "上下文比较：{model}",
     "repetition.manualUnify": "手动统一",
@@ -1475,6 +1476,7 @@ const messages: Record<Language, Record<string, string>> = {
   en: {
     "repetition.title": "Repeated translation consistency",
     "repetition.screeningEnabled": "Use Decision screening",
+    "repetition.resumeSteps": "Saved {completed} / {total} steps; resume requests only unfinished work",
     "repetition.screening.disabled": "Compared without screening",
     "repetition.comparisonModel": "Context comparison: {model}",
     "repetition.manualUnify": "Unify manually",

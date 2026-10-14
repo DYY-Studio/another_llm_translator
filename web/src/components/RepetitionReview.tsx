@@ -92,11 +92,12 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   function changePage(value: number) { setGroupPage(value); contentRef.current?.scrollTo({ top: 0 }); }
   function resetPages() { changePage(0); }
 
-  async function inspect(exclude = true, screening = true) {
+  async function inspect(exclude = true, screening = true, action: "resume" | "decline" | null = null) {
     setExcludePunctuationOnly(exclude); setScreeningEnabled(screening); setOptions(null); setConfirm("generate");
     setBusy(true); setError(""); setMessage("");
     try {
-      setOptions(await api<RepetitionRunOptions>(`${base}/options?language=${language}&exclude_punctuation_only=${exclude}&screening_enabled=${screening}${onlyFile ? `&only_file=${encodeURIComponent(onlyFile)}` : ""}`));
+      const next = await api<RepetitionRunOptions>(`${base}/options?language=${language}&exclude_punctuation_only=${exclude}&screening_enabled=${screening}${action ? `&run_action=${action}` : ""}${onlyFile ? `&only_file=${encodeURIComponent(onlyFile)}` : ""}`);
+      setOptions(next); setExcludePunctuationOnly(next.exclude_punctuation_only); setScreeningEnabled(next.screening_enabled);
       setConfirm("generate");
     } catch (value) { setError(errorMessage(value, language)); }
     finally { setBusy(false); }
@@ -122,7 +123,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
     try {
       if (confirm === "generate") {
         setTask(await api<TaskState>(`/api/v1/projects/${encodeURIComponent(project)}/tasks`, {
-          method: "POST", body: JSON.stringify({ stage: "repetition_consistency", language, only_file: onlyFile || null,
+          method: "POST", body: JSON.stringify({ stage: "repetition_consistency", language, only_file: options?.only_file ?? null, run_action: options?.run_action ?? null,
             replace_draft: !!draft, exclude_punctuation_only: excludePunctuationOnly, screening_enabled: screeningEnabled }),
         }));
       } else {
@@ -204,8 +205,9 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
       </div>
     </div>}
     {confirm === "generate" && <RunDialog repetitionOptions={options} replaceDraft={!!draft} busy={busy} error={error}
-      language={language} excludePunctuationOnly={excludePunctuationOnly} onExcludePunctuationOnly={value => void inspect(value, screeningEnabled)}
-      screeningEnabled={screeningEnabled} onScreeningEnabled={value => void inspect(excludePunctuationOnly, value)}
+      language={language} excludePunctuationOnly={excludePunctuationOnly} onExcludePunctuationOnly={value => void inspect(value, screeningEnabled, options?.run_action ?? null)}
+      screeningEnabled={screeningEnabled} onScreeningEnabled={value => void inspect(excludePunctuationOnly, value, options?.run_action ?? null)}
+      onRunAction={action => void inspect(excludePunctuationOnly, screeningEnabled, action)}
       onClose={() => setConfirm(null)} onStart={() => void execute()} />}
   </section>;
 }

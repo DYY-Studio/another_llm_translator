@@ -26,7 +26,7 @@ from .llm_keys import KeyPool
 from .project import load_segments, load_source_files
 from .sqlite_storage import (atomic_write_json, atomic_write_text, latest_stage_states, read_json,
                              read_repetition_run, utc_now)
-from .sqlite_storage import write_repetition_state
+from .sqlite_storage import write_json, write_repetition_state
 from .term_library import load_terms, term_normalization
 from .term_matching import _TermMatchCache
 from .user_config import effective_path
@@ -49,10 +49,22 @@ def repetition_resume(project: Path, plan: dict[str, Any]) -> dict[str, Any] | N
         compatible = False
         reason = f"{exc}，请结束旧 Run 并新建"
     completed = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
+    requests = tokens = 0
+    for group in plan["groups"]:
+        saved = checkpoints.get(group["id"], {})
+        if "result" in saved or group["over_budget"]:
+            continue
+        if plan["screening_enabled"] and "screening" not in saved:
+            requests += 1
+            tokens += group["screening_input_tokens"]
+        if saved.get("screening") != "skip":
+            requests += 1
+            tokens += group["comparison_input_tokens"]
     return {"run_id": run["run_id"], "scope": run["scope"], "prompt_language": run.get("prompt_language"),
             "screening_enabled": run.get("screening_enabled"), "exclude_punctuation_only": run.get("exclude_punctuation_only"),
             "resume_compatible": compatible, "resume_incompatibility_reason": reason,
             "completed": completed, "completed_steps": sum((int("screening" in c) if plan["screening_enabled"] else 0) + int("result" in c) for c in checkpoints.values()),
+            "estimated_requests": requests, "estimated_input_tokens": tokens,
             "total_steps": len(plan["groups"]) * (2 if plan["screening_enabled"] else 1)}
 
 
@@ -366,6 +378,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                                          confidence=answer.confidence if answer else None)
                             if decision:
                                 atomic_write_json(checkpoint_path(run_dir, group["id"]), saved)
+                                checkpoints[group["id"]] = dict(saved)
                         if saved["screening"] == "skip":
                             result = {"proposals": [], "keep": [o["id"] for o in group["occurrences"]], "uncertain": []}
                         else:
@@ -376,6 +389,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                             result = parse_comparison(response.content, group)
                     saved["result"] = result
                     atomic_write_json(checkpoint_path(run_dir, group["id"]), saved)
+                    checkpoints[group["id"]] = dict(saved)
                     group.update(screening=saved["screening"], confidence=saved.get("confidence"), **result)
                     completed += len(group["occurrences"])
                     if on_progress:
@@ -384,6 +398,8 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                 groups = await run_bounded(plan["groups"], compare,
                     max_parallel=config["execution"]["max_parallel"])
         for group in groups:
+            group.pop("screening_input_tokens")
+            group.pop("comparison_input_tokens")
             for occurrence in group["occurrences"]:
                 occurrence.pop("terms")
         draft = {"run_id": run_id, "groups": groups, "evidence": plan["evidence"], "sources": plan["sources"], "scope": {"only_file": scope.only_file}, "created_at": utc_now()}
@@ -391,6 +407,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
         usage = combine_usage(llm_usage, (decision.usage_summary() if decision else None)) if (decision and decision.records) or llm_usage else unavailable_usage()
         usage = finalize_run(project, run_dir, status="completed", completed=total, failed=0, usage=usage, usage_invoked=not resume_id or model_invoked)
         manifest = read_json(project, run_dir / "manifest.json")
+        manifest.pop("last_interruption", None)
         manifest["draft_status"] = "pending"
         manifests = [manifest]
         if old:
@@ -403,6 +420,12 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
     except BaseException as exc:
         finalize_run(project, run_dir, status="running", warnings=["执行已取消，可续作" if isinstance(exc, asyncio.CancelledError) else str(exc)],
                      completed=completed, failed=total - completed, usage=combine_usage(llm_usage, (decision.usage_summary() if decision else None)), usage_invoked=not resume_id or model_invoked)
+        manifest = read_json(project, run_dir / "manifest.json")
+        manifest.update(completed_at=None, last_interruption={"at": utc_now(), "error_code": getattr(exc, "code", "cancelled"),
+            "reason": "cancelled" if isinstance(exc, asyncio.CancelledError) else str(exc),
+            "completed_steps": sum((int("screening" in c) if plan["screening_enabled"] else 0) + int("result" in c) for c in checkpoints.values()),
+            "total_steps": len(plan["groups"]) * (2 if plan["screening_enabled"] else 1)})
+        write_json(project, run_dir / "manifest.json", manifest)
         raise
 
 

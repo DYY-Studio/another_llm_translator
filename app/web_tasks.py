@@ -968,12 +968,17 @@ class WebTaskManager:
                 if active.status in {"queued", "running", "cancelling"}:
                     raise UsageError(f"项目已有后台任务：{active.task_id}")
         if stage == "repetition_consistency":
-            from .repetition_consistency import repetition_plan
-            if run_action is not None or reuse_mixed_fingerprints:
-                raise UsageError("重复译文审查不支持续用或复用结果")
+            from .repetition_consistency import repetition_plan, repetition_resume
+            if reuse_mixed_fingerprints:
+                raise UsageError("重复译文审查不支持跨 Run 复用结果")
             plan = repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled)
-            return _StartDecision(selected_count=plan["selected"], running_run_id=None,
-                fingerprints=((stage, plan["fingerprint"]),), selection_snapshots=(), running_runs=(),
+            running = repetition_resume(project, plan)
+            if running and run_action is None:
+                raise UsageError("发现未完成 Run，必须选择续用或结束旧 Run 并新建")
+            if run_action == "resume" and (not running or not running["resume_compatible"]):
+                raise UsageError(running["resume_incompatibility_reason"] if running else "没有可续作的重复译文 Run")
+            return _StartDecision(selected_count=plan["selected"], running_run_id=running["run_id"] if running else None,
+                fingerprints=((stage, plan["fingerprint"]),), selection_snapshots=(), running_runs=_running_runs_snapshot(project, (stage,)),
                 plan=None if ensure_unique else plan)
         selected_count = 0
         running_run_id: str | None = None
@@ -1699,7 +1704,7 @@ class WebTaskManager:
                     )
                 elif state.stage == "repetition_consistency":
                     from .repetition_consistency import run_repetition
-                    summary = await run_repetition(state.project, scope, replace_draft=replace_draft,
+                    summary = await run_repetition(state.project, scope, replace_draft=replace_draft, run_action=run_action,
                         on_progress=progress, on_usage=usage_changed,
                         limiter=next(iter(shared_limiters.values())), prepared_plan=decision.plan)
                 elif state.stage == "translation":

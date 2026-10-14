@@ -596,3 +596,92 @@ def test_resume_rejects_changed_inputs_and_decline_starts_new_run(tmp_path, monk
     assert result["run_id"] != info["run_id"]
     old = read_json(project, project / "runs" / info["run_id"] / "manifest.json")
     assert old["status"] == "interrupted"
+
+
+def test_completed_checkpoint_resume_needs_no_requests_and_keeps_usage(tmp_path, monkeypatch):
+    from app import repetition_consistency as repetition
+    from app.errors import StorageError
+    project = repetition_project(tmp_path, monkeypatch)
+    original_write = repetition.atomic_write_text
+    def fail_publish(path, text):
+        if path.name == repetition.DRAFT_FILE:
+            raise StorageError("publication probe")
+        return original_write(path, text)
+    monkeypatch.setattr(repetition, "atomic_write_text", fail_publish)
+    async def run(action=None, requests=None):
+        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+            return await repetition.run_repetition(project, Scope(), run_action=action, http_client=client)
+    with pytest.raises(StorageError, match="publication probe"):
+        asyncio.run(run())
+    info = repetition.repetition_resume(project, repetition.repetition_plan(project, Scope()))
+    assert info["completed"] == 3 and info["estimated_requests"] == 0
+    manifest_path = project / "runs" / info["run_id"] / "manifest.json"
+    previous_usage = read_json(project, manifest_path)["usage"]
+    monkeypatch.setattr(repetition, "atomic_write_text", original_write)
+    requests = []
+    result = asyncio.run(run("resume", requests))
+    assert requests == []
+    assert result["usage"] == previous_usage
+
+
+def test_web_resume_options_and_managed_start(tmp_path, monkeypatch):
+    from app.web import create_app
+    from app.web_tasks import WebTaskManager
+    from app.repetition_consistency import run_repetition, current_draft
+    from fastapi.testclient import TestClient
+    project = repetition_project(tmp_path, monkeypatch)
+    async def fail():
+        async with httpx.AsyncClient(transport=transport(invalid=True)) as client:
+            await run_repetition(project, Scope(), http_client=client, screening_enabled=False, prompt_language="en")
+    with pytest.raises(ExternalError):
+        asyncio.run(fail())
+    with TestClient(create_app(projects_root=project.parent)) as client:
+        options = client.get(f"/api/v1/projects/{project.name}/repetition/options?language=en").json()
+        assert options["run_action"] == "resume" and options["screening_enabled"] is False
+        assert options["running_run"]["resume_compatible"] and options["estimated_requests"] == 1
+    original_client = httpx.AsyncClient
+    requests = []
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: original_client(*args, **kwargs, transport=transport(requests=requests)))
+    async def resume():
+        manager = WebTaskManager()
+        with pytest.raises(UsageError, match="必须选择"):
+            await manager.start(project, "repetition_consistency", scope=Scope(), reuse_mixed_fingerprints=False,
+                                run_action=None, prompt_language="en", screening_enabled=False)
+        state = await manager.start(project, "repetition_consistency", scope=Scope(), reuse_mixed_fingerprints=False,
+                                    run_action="resume", prompt_language="en", screening_enabled=False)
+        await manager.tasks[state["task_id"]].asyncio_task
+        assert manager.get(state["task_id"])["status"] == "completed"
+        await manager.shutdown()
+    asyncio.run(resume())
+    assert len(requests) == 1
+    assert current_draft(project)["run_id"] == options["running_run"]["run_id"]
+
+
+def test_cancelled_comparison_resumes_after_screening(tmp_path, monkeypatch):
+    from app.repetition_consistency import run_repetition, repetition_plan, repetition_resume
+    project = repetition_project(tmp_path, monkeypatch)
+    async def interrupted():
+        comparing = asyncio.Event()
+        respond = transport().handler
+        async def handle(request):
+            if request.url.path != "/custom/path":
+                comparing.set()
+                await asyncio.Future()
+            return respond(request)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            task = asyncio.create_task(run_repetition(project, Scope(), http_client=client))
+            await comparing.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    asyncio.run(interrupted())
+    info = repetition_resume(project, repetition_plan(project, Scope()))
+    assert info["completed_steps"] == 1
+    manifest = read_json(project, project / "runs" / info["run_id"] / "manifest.json")
+    assert manifest["completed_at"] is None and manifest["last_interruption"]["reason"] == "cancelled"
+    requests = []
+    async def resume():
+        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+            await run_repetition(project, Scope(), run_action="resume", http_client=client)
+    asyncio.run(resume())
+    assert len(requests) == 1 and "messages" in requests[0]
