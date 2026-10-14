@@ -33,6 +33,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   const [state, setState] = useState<ReviewState | null>(null);
   const [task, setTask] = useState<TaskState | null>(null);
   const [onlyFile, setOnlyFile] = useState("");
+  const [excludePunctuationOnly, setExcludePunctuationOnly] = useState(true);
   const [options, setOptions] = useState<RepetitionRunOptions | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -85,10 +86,11 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   function changePage(value: number) { setGroupPage(value); contentRef.current?.scrollTo({ top: 0 }); }
   function resetPages() { changePage(0); }
 
-  async function inspect() {
+  async function inspect(exclude = true) {
+    setExcludePunctuationOnly(exclude); setOptions(null); setConfirm("generate");
     setBusy(true); setError(""); setMessage("");
     try {
-      setOptions(await api<RepetitionRunOptions>(`${base}/options?language=${language}${onlyFile ? `&only_file=${encodeURIComponent(onlyFile)}` : ""}`));
+      setOptions(await api<RepetitionRunOptions>(`${base}/options?language=${language}&exclude_punctuation_only=${exclude}${onlyFile ? `&only_file=${encodeURIComponent(onlyFile)}` : ""}`));
       setConfirm("generate");
     } catch (value) { setError(errorMessage(value, language)); }
     finally { setBusy(false); }
@@ -115,7 +117,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
       if (confirm === "generate") {
         setTask(await api<TaskState>(`/api/v1/projects/${encodeURIComponent(project)}/tasks`, {
           method: "POST", body: JSON.stringify({ stage: "repetition_consistency", language, only_file: onlyFile || null,
-            replace_draft: !!draft }),
+            replace_draft: !!draft, exclude_punctuation_only: excludePunctuationOnly }),
         }));
       } else {
         const result = await api<{ changed?: number; warnings: string[]; validation_warning_count?: number }>(`${base}/${confirm}`, {
@@ -191,8 +193,9 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
 
     </>}
     </div>
-    {confirm === "generate" && options && <RunDialog repetitionOptions={options} replaceDraft={!!draft} busy={busy} error={error}
-      language={language} onClose={() => setConfirm(null)} onStart={() => void execute()} />}
+    {confirm === "generate" && <RunDialog repetitionOptions={options} replaceDraft={!!draft} busy={busy} error={error}
+      language={language} excludePunctuationOnly={excludePunctuationOnly} onExcludePunctuationOnly={value => void inspect(value)}
+      onClose={() => setConfirm(null)} onStart={() => void execute()} />}
   </section>;
 }
 

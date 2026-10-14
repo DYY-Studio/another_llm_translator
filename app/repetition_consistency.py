@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import unicodedata
 from collections import defaultdict
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -60,7 +61,7 @@ def current_draft(project: Path) -> dict[str, Any] | None:
     return {**read_draft(project, manifest), "choices": manifest.get("choices", {})}
 
 
-def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None = None) -> dict[str, Any]:
+def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True) -> dict[str, Any]:
     scope.validate()
     if scope.from_file or scope.only_segment or scope.segment_ids is not None or scope.force or scope.dry_run:
         raise UsageError("重复译文审查只支持整个项目或单个 File")
@@ -92,17 +93,28 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
         by_source[str(s["source"])].append(s)
     candidates = [items for items in by_source.values() if len(items) > 1
                   and len({bases[str(s["segment_id"])]["text"] for s in items}) > 1]
+    excluded_punctuation_groups = 0
+    if exclude_punctuation_only:
+        retained = []
+        for items in candidates:
+            variants = {bases[str(s["segment_id"])]["text"] for s in items}
+            bodies = {"".join(c for c in text if not unicodedata.category(c).startswith("P")) for text in variants}
+            if len(bodies) == 1:
+                excluded_punctuation_groups += 1
+            else:
+                retained.append(items)
+        candidates = retained
     by_part: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    for s in segments:
+    for s in segments if candidates else []:
         if not s["is_empty"]:
             by_part[(s["file_id"], s["part_id"])].append(s)
     positions = {str(s["segment_id"]): (items, i)
                  for items in by_part.values() for i, s in enumerate(items)}
-    library = load_terms(project)
+    library = load_terms(project) if candidates else None
     terms_revision = library["terms_revision"] if library else None
     warnings: list[str] = []
     term_cache = _TermMatchCache(library, term_normalization(config),
-        int(config["terminology"]["max_terms_per_segment"]), segments=segments, warnings=warnings)
+        int(config["terminology"]["max_terms_per_segment"]), segments=segments, warnings=warnings) if candidates else None
     terms: dict[str, dict[str, Any]] = {}
     term_ids: dict[str, str] = {}
     evidence: dict[str, dict[str, Any]] = {}
@@ -160,11 +172,11 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
             estimated_requests += 2
         groups.append(group)
     selected_count = sum(len(g["occurrences"]) for g in groups)
-    fingerprint = digest({"groups": groups, "evidence": evidence, "terms": terms, "terms_revision": terms_revision, "llm": config["_llm_preset_hash"],
+    fingerprint = digest({"exclude_punctuation_only": exclude_punctuation_only, "groups": groups, "evidence": evidence, "terms": terms, "terms_revision": terms_revision, "llm": config["_llm_preset_hash"],
                           "temperature": config["llm"]["temperature_translation"], "retry": config["retry"],
                           "decision": preset, "target_language": config["project"]["target_language"], "prompt": prompt,
                           "screen": screen_content})
-    return {"config": config, "prompt": prompt, "language": language, "screen": screen, "terms": terms, "terms_revision": terms_revision, "warnings": warnings, "decision_preset": preset, "groups": groups, "evidence": evidence, "sources": sources,
+    return {"exclude_punctuation_only": exclude_punctuation_only, "excluded_punctuation_groups": excluded_punctuation_groups, "config": config, "prompt": prompt, "language": language, "screen": screen, "terms": terms, "terms_revision": terms_revision, "warnings": warnings, "decision_preset": preset, "groups": groups, "evidence": evidence, "sources": sources,
             "selected": selected_count, "fingerprint": fingerprint, "estimated_requests": estimated_requests,
             "estimated_input_tokens": input_tokens}
 
@@ -222,7 +234,7 @@ def parse_comparison(content: str, group: dict[str, Any]) -> dict[str, Any]:
         raise ExternalError(f"重复译文审查响应无效：{exc}") from exc
 
 
-async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | None = None, replace_draft: bool = False,
+async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, replace_draft: bool = False,
                          http_client: httpx.AsyncClient | None = None,
                          limiter: SlidingWindowLimiter | KeyPool | None = None,
                          on_progress: Callable[[int, int, int], None] | None = None,
@@ -231,14 +243,14 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
     old = read_repetition_run(project, ("pending",))
     if old and not replace_draft:
         raise UsageError("已有待审核草案，必须明确选择替换")
-    plan = prepared_plan if prepared_plan is not None else repetition_plan(project, scope, prompt_language=prompt_language)
+    plan = prepared_plan if prepared_plan is not None else repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only)
     config = plan["config"]
     prompt, screen = plan["prompt"], plan["screen"]
     total = plan["selected"]
     metadata = read_json(project, project / "project.json")
     run_id, run_dir = create_run(project, config=config, stage=STAGE, fingerprint=plan["fingerprint"],
         prompt=prompt, selected_count=total, requested_count=total, reused_count=0,
-        details={"prompt_language": plan["language"], "terms_revision": plan["terms_revision"], "draft_status": "generating", "scope": {"only_file": scope.only_file}, "choices": {}})
+        details={"exclude_punctuation_only": plan["exclude_punctuation_only"], "excluded_punctuation_groups": plan["excluded_punctuation_groups"], "prompt_language": plan["language"], "terms_revision": plan["terms_revision"], "draft_status": "generating", "scope": {"only_file": scope.only_file}, "choices": {}})
     atomic_write_text(run_dir / "repetition_terms.json", json.dumps({
         "terms_revision": plan["terms_revision"], "terms": plan["terms"],
         "groups": {g["id"]: {o["id"]: o["terms"] for o in g["occurrences"]} for g in plan["groups"]},
@@ -295,7 +307,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
             old["draft_status"] = "replaced"
             manifests.append(old)
         warnings = [*plan["warnings"], *write_repetition_state(project, records=[], manifests=manifests)]
-        return {"stage": STAGE, "run_id": run_id, "selected": total, "completed": total,
+        return {"excluded_punctuation_groups": plan["excluded_punctuation_groups"], "stage": STAGE, "run_id": run_id, "selected": total, "completed": total,
                 "failed": 0, "pending": 0, "usage": usage, "warnings": warnings,
                 "proposal_count": sum(len(g["proposals"]) for g in groups)}
     except BaseException as exc:

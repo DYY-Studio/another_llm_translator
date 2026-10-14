@@ -26,9 +26,9 @@ def register_repetition_routes(*, app: FastAPI, project: Callable[[str], Path]) 
         return value
 
     @app.get("/api/v1/projects/{name}/repetition/options")
-    def options(name: str, only_file: str | None = None, language: str | None = None) -> dict[str, Any]:
-        plan = repetition_plan(project(name), Scope(only_file=only_file), prompt_language=language)
-        return {"candidate_groups": len(plan["groups"]), "selected": plan["selected"],
+    def options(name: str, only_file: str | None = None, language: str | None = None, exclude_punctuation_only: bool = True) -> dict[str, Any]:
+        plan = repetition_plan(project(name), Scope(only_file=only_file), prompt_language=language, exclude_punctuation_only=exclude_punctuation_only)
+        return {"excluded_punctuation_groups": plan["excluded_punctuation_groups"], "candidate_groups": len(plan["groups"]), "selected": plan["selected"],
                 "over_budget_groups": sum(g["over_budget"] for g in plan["groups"]),
                 "estimated_requests": plan["estimated_requests"], "estimated_input_tokens": plan["estimated_input_tokens"],
                 "decision_model": plan["decision_preset"]["model"], "model": plan["config"]["llm"]["model"]}

@@ -48,7 +48,7 @@ def transport(*, choice: str = "compare", invalid: bool = False, requests: list 
             answer = {"type": "refusal"} if choice == "refusal" else {
                 "type": "choice", "choice": choice, "confidence": 1,
                 "probabilities": {"compare": int(choice == "compare"),
-                                  "skip": int(choice == "skip"), "uncertain": int(choice == "uncertain")}}
+                                  "skip": int(choice == "skip")}}
             return httpx.Response(200, json={"model": "test-model", "answers": {"value": answer}})
         result = {"groups": [{"members": ["1", "2"], "target": "1", "reason": "同一承诺重现"}],
                   "keep": ["3"], "uncertain": []}
@@ -80,8 +80,8 @@ def test_generation_detects_groups_and_sends_shared_evidence(tmp_path, monkeypat
     assert all("source" not in item and "translation" not in item for item in payload["occurrences"])
 
 
-@pytest.mark.parametrize("choice", ["skip", "uncertain", "refusal"])
-def test_screening_preserves_uncertain_and_refusal(tmp_path, monkeypatch, choice):
+@pytest.mark.parametrize("choice", ["skip", "refusal"])
+def test_screening_preserves_skip_and_refusal(tmp_path, monkeypatch, choice):
     from app.repetition_consistency import current_draft, run_repetition
     project = repetition_project(tmp_path, monkeypatch)
     requests = []
@@ -271,7 +271,8 @@ def test_repetition_tasks_use_existing_manager_and_cancel(tmp_path, monkeypatch)
     asyncio.run(run())
 
 
-def test_managed_generation_publishes_draft_and_does_not_retain_queued_evidence(tmp_path, monkeypatch):
+@pytest.mark.parametrize("exclude_punctuation_only", [True, False])
+def test_managed_generation_publishes_draft_and_does_not_retain_queued_evidence(tmp_path, monkeypatch, exclude_punctuation_only):
     from app.web_tasks import WebTaskManager
     from app.repetition_consistency import current_draft
     project = repetition_project(tmp_path, monkeypatch)
@@ -282,14 +283,16 @@ def test_managed_generation_publishes_draft_and_does_not_retain_queued_evidence(
     async def run():
         manager = WebTaskManager()
         state = await manager.start(project, "repetition_consistency", scope=Scope(),
-                                    reuse_mixed_fingerprints=False, run_action=None, prompt_language="en")
+                                    reuse_mixed_fingerprints=False, run_action=None, prompt_language="en", exclude_punctuation_only=exclude_punctuation_only)
         retained = manager.tasks[state["task_id"]]
         assert retained._start_decision.plan is None
         await retained.asyncio_task
         assert manager.get(state["task_id"])["status"] == "completed"
         draft = current_draft(project)
         assert draft["groups"][0]["proposals"]
-        assert read_json(project, project / "runs" / draft["run_id"] / "manifest.json")["prompt_language"] == "en"
+        manifest = read_json(project, project / "runs" / draft["run_id"] / "manifest.json")
+        assert manifest["prompt_language"] == "en"
+        assert manifest["exclude_punctuation_only"] is exclude_punctuation_only
         await manager.shutdown()
     asyncio.run(run())
 
@@ -369,7 +372,7 @@ def test_repetition_prompts_are_editable_and_frozen_in_actual_requests(tmp_path,
         prompts = client.get("/api/v1/decision-prompts").json()["prompts"]
         assert any(p["validator_id"] == "repetition_screening" for p in prompts)
         decision = client.get(f"{base}/decision-prompts/repetition_screening").json()
-        assert decision["content"]["instructions"].startswith("Assess")
+        assert decision["content"]["instructions"].startswith("Filter out")
         custom = {**decision["content"], "instructions": "这部作品中的承诺值得比较"}
         assert client.put(f"{base}/decision-prompts/repetition_screening", json={"content": custom}).status_code == 200
         assert client.put("/api/v1/decision-prompt-library/repetition_screening/story", json={"content": custom}).status_code == 200
@@ -447,3 +450,30 @@ def test_apply_epub_uses_persisted_adapter_state_and_run_options(tmp_path, monke
     assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == texts[0]
     assert rollback_draft(project, confirm=True)["changed"] == 1
     assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == texts[1]
+
+
+@pytest.mark.parametrize("variants,excluded", [
+    (["「一样。」", "一样", "一样！"], True),
+    (["一样？", "一样…", "一样，"], True),
+    (["一样", "一样 ", "一样"], False),
+    (["一样", "一样。", "不同"], False),
+    (["1+2", "12", "12"], False),
+])
+def test_optional_punctuation_filter_only_removes_whole_equal_body_groups(tmp_path, monkeypatch, variants, excluded):
+    from app.repetition_consistency import repetition_plan
+    project = repetition_project(tmp_path, monkeypatch)
+    segments = [s for s in load_segments(project) if s["source"] == "承诺"]
+    project_id = read_json(project, project / "project.json")["project_id"]
+    append_stage_results(project, [record_header("stage_result", project_id, stage="translation",
+        segment_id=s["segment_id"], status="completed", text=t, stage_fingerprint="test")
+        for s, t in zip(segments, variants, strict=True)])
+    filtered = repetition_plan(project, Scope())
+    unfiltered = repetition_plan(project, Scope(), exclude_punctuation_only=False)
+    assert filtered["excluded_punctuation_groups"] == int(excluded)
+    assert len(filtered["groups"]) == int(not excluded)
+    assert len(unfiltered["groups"]) == 1 and len(unfiltered["groups"][0]["occurrences"]) == 3
+    assert filtered["fingerprint"] != unfiltered["fingerprint"]
+    if excluded:
+        assert filtered["evidence"] == {} and filtered["terms"] == {}
+        assert filtered["estimated_requests"] == 0
+    assert [latest_stage_states(project, "translation", [s["segment_id"]])[s["segment_id"]]["completed"]["text"] for s in segments] == variants

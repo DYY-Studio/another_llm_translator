@@ -620,6 +620,7 @@ class WebTask:
     _run_action: str | None = field(default=None, repr=False)
     _final_review: bool = field(default=False, repr=False)
     _prompt_language: str | None = field(default=None, repr=False)
+    _exclude_punctuation_only: bool = field(default=True, repr=False)
     _replace_draft: bool = field(default=False, repr=False)
     _acknowledge_manual_review: bool = field(default=False, repr=False)
     _include_summaries: bool = field(default=False, repr=False)
@@ -895,6 +896,7 @@ class WebTaskManager:
         acknowledge_manual_review: bool,
         ensure_unique: bool,
         prompt_language: str | None,
+        exclude_punctuation_only: bool = True,
         include_summaries: bool = False,
         include_draft_translation: bool = False,
         aggregate_full_summaries: bool = False,
@@ -967,7 +969,7 @@ class WebTaskManager:
             from .repetition_consistency import repetition_plan
             if run_action is not None or reuse_mixed_fingerprints:
                 raise UsageError("重复译文审查不支持续用或复用结果")
-            plan = repetition_plan(project, scope, prompt_language=prompt_language)
+            plan = repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only)
             return _StartDecision(selected_count=plan["selected"], running_run_id=None,
                 fingerprints=((stage, plan["fingerprint"]),), selection_snapshots=(), running_runs=(),
                 plan=None if ensure_unique else plan)
@@ -1320,6 +1322,7 @@ class WebTaskManager:
                     apply_terminology_decision=state._apply_terminology_decision,
                     prompt_language=state._prompt_language,
                     replace_draft=state._replace_draft,
+                    exclude_punctuation_only=state._exclude_punctuation_only,
                     acknowledge_manual_review=state._acknowledge_manual_review,
                     include_summaries=state._include_summaries,
                     include_draft_translation=state._include_draft_translation,
@@ -1356,6 +1359,7 @@ class WebTaskManager:
         reuse_mixed_fingerprints: bool,
         run_action: str | None,
         prompt_language: str | None = None,
+        exclude_punctuation_only: bool = True,
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
@@ -1390,6 +1394,7 @@ class WebTaskManager:
                 acknowledge_manual_review=acknowledge_manual_review,
                 ensure_unique=True,
                 prompt_language=prompt_language,
+                exclude_punctuation_only=exclude_punctuation_only,
                 include_summaries=include_summaries,
                 include_draft_translation=include_draft_translation,
                 aggregate_full_summaries=aggregate_full_summaries,
@@ -1419,6 +1424,7 @@ class WebTaskManager:
             state.steps = [dict(step) for step in decision.continuous_steps]
             state._prompt_language = prompt_language
             state._replace_draft = replace_draft
+            state._exclude_punctuation_only = exclude_punctuation_only
             state._acknowledge_manual_review = acknowledge_manual_review
             state._include_summaries = include_summaries
             state._include_draft_translation = include_draft_translation
@@ -1444,6 +1450,7 @@ class WebTaskManager:
         reuse_mixed_fingerprints: bool,
         run_action: str | None,
         prompt_language: str | None = None,
+        exclude_punctuation_only: bool = True,
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
@@ -1551,6 +1558,7 @@ class WebTaskManager:
                     acknowledge_manual_review=acknowledge_manual_review,
                     ensure_unique=False,
                     prompt_language=prompt_language,
+                    exclude_punctuation_only=exclude_punctuation_only,
                     include_summaries=include_summaries,
                     include_draft_translation=include_draft_translation,
                     aggregate_full_summaries=aggregate_full_summaries,

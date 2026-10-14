@@ -5,6 +5,9 @@ export type Language = "zh-CN" | "en";
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
     "repetition.title": "实验：重复译文一致性审查",
+    "repetition.excludePunctuationOnly": "排除仅标点不同的译文",
+    "repetition.punctuationFilterHint": "去掉所有 Unicode 标点后正文相同的重复组会被排除，包括问号、感叹号等差异",
+    "repetition.punctuationExcluded": "已排除 {count} 个仅标点差异组",
     "repetition.comparisonPrompt": "重复译文上下文比较",
     "repetition.screeningPrompt": "重复译文初筛",
     "repetition.back": "返回翻译",
@@ -46,7 +49,6 @@ const messages: Record<Language, Record<string, string>> = {
     "repetition.source": "重复原文",
     "repetition.screening.compare": "初筛建议比较",
     "repetition.screening.skip": "初筛认为无需比较",
-    "repetition.screening.uncertain": "初筛不确定，已继续比较",
     "repetition.screening.refusal": "初筛拒答，已继续比较",
     "repetition.screening.over_budget": "超过预算，待人工处理",
     "repetition.unify": "建议统一 {count} 处",
@@ -1465,6 +1467,9 @@ const messages: Record<Language, Record<string, string>> = {
   },
   en: {
     "repetition.title": "Experiment: repeated translation consistency",
+    "repetition.excludePunctuationOnly": "Exclude punctuation-only differences",
+    "repetition.punctuationFilterHint": "Exclude groups whose translations match after removing all Unicode punctuation, including question and exclamation marks",
+    "repetition.punctuationExcluded": "Excluded {count} punctuation-only groups",
     "repetition.comparisonPrompt": "Repeated translation context comparison",
     "repetition.screeningPrompt": "Repeated translation screening",
     "repetition.back": "Back to translation",
@@ -1506,7 +1511,6 @@ const messages: Record<Language, Record<string, string>> = {
     "repetition.source": "Repeated source",
     "repetition.screening.compare": "Screening recommends comparison",
     "repetition.screening.skip": "Screening found no comparison value",
-    "repetition.screening.uncertain": "Screening uncertain; comparison completed",
     "repetition.screening.refusal": "Screening refused; comparison completed",
     "repetition.screening.over_budget": "Over budget; needs manual review",
     "repetition.unify": "Unify {count} occurrences",

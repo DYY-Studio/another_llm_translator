@@ -761,6 +761,7 @@ def register_task_routes(
                 else None
             ),
             replace_draft=payload.replace_draft,
+            exclude_punctuation_only=payload.exclude_punctuation_only,
             acknowledge_manual_review=payload.acknowledge_manual_review,
             include_summaries=payload.include_summaries,
             include_draft_translation=payload.include_draft_translation,
