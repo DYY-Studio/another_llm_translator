@@ -412,3 +412,38 @@ def test_updated_terminology_does_not_invalidate_existing_repetition_draft(tmp_p
     assert result["changed"] == 1
     sid = load_segments(project)[3]["segment_id"]
     assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["terms_revision"] == 8
+
+
+def test_apply_epub_uses_persisted_adapter_state_and_run_options(tmp_path, monkeypatch):
+    from app import plugins
+    from app.repetition_drafts import apply_draft, rollback_draft
+    from tests.test_documents import make_epub
+    repetition_project(tmp_path, monkeypatch)
+    source = tmp_path / "repeated.epub"
+    make_epub(source, xhtml=('<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Story</title></head>'
+        '<body><p>承诺</p><p>承诺</p><p>承诺</p></body></html>').encode())
+    run_options = {"ruby_mode": "short_xml", "inline_format_mode": "markers", "inline_format_policy": "strict"}
+    project, _ = init_project([str(source)], name="epub-repetition", document_adapter_id="epub",
+        adapter_options={"epub": run_options}, app_root=tmp_path / "app-root", projects_root=tmp_path / "projects")
+    path = project / "config.toml"
+    path.write_text(path.read_text().replace('[decision]\npreset = ""', '[decision]\npreset = "local"'))
+    segments = load_segments(project)
+    project_id = read_json(project, project / "project.json")["project_id"]
+    texts = ["我会来接你", "我会去接你", "我会去接你"]
+    append_stage_results(project, [record_header("stage_result", project_id, stage="translation",
+        segment_id=s["segment_id"], status="completed", text=text, origin="web", stage_fingerprint="test")
+        for s, text in zip(segments, texts, strict=True)])
+    generate(project)
+    observed = []
+    original = plugins.normalize_document_output
+    def capture(adapter, **kwargs):
+        observed.append((kwargs["opaque_state"], kwargs["run_options"]))
+        return original(adapter, **kwargs)
+    monkeypatch.setattr(plugins, "normalize_document_output", capture)
+    assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 1
+    assert len(observed) == 1 and observed[0][0] is not None
+    assert observed[0][1] == run_options
+    sid = segments[1]["segment_id"]
+    assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == texts[0]
+    assert rollback_draft(project, confirm=True)["changed"] == 1
+    assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == texts[1]

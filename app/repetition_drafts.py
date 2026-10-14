@@ -15,7 +15,7 @@ from .project import load_segments, load_source_files
 from .repetition_consistency import current_draft, read_draft, segment_signature
 from .sqlite_storage import (latest_stage_states, read_json, read_repetition_run,
                              record_header, utc_now, write_repetition_state)
-from .stage_runtime import prompt_middle_digests
+from .stage_runtime import document_prompt_context, prompt_middle_digests
 from .term_library import load_terms, term_normalization
 from .term_matching import _TermMatchCache
 from .translation_validation import TranslationValidationContext, validate_translation_text
@@ -121,6 +121,8 @@ async def apply_draft(project: Path, *, confirm: bool, run_id: str | None = None
         config = load_project_config(project, stage="translation")
         metadata = read_json(project, project / "project.json")
         files = load_source_files(project)
+        file_by_id = {str(f["file_id"]): f for f in files}
+        adapter_contexts = {}
         library = load_terms(project)
         warnings: list[str] = []
         cache = _TermMatchCache(library, term_normalization(config), config["terminology"]["max_terms_per_segment"],
@@ -143,7 +145,13 @@ async def apply_draft(project: Path, *, confirm: bool, run_id: str | None = None
                 if base["text"] == target:
                     continue
                 item = by_id[sid]
-                text = normalize_model_text(files, item, target, "translation")
+                file_id = str(item["file_id"])
+                if file_id not in adapter_contexts:
+                    _, state, run_options = document_prompt_context(project, file_by_id[file_id])
+                    adapter_contexts[file_id] = (state, run_options)
+                state, run_options = adapter_contexts[file_id]
+                model_item = {**item, "_adapter_state": state, "_adapter_run_options": run_options}
+                text = normalize_model_text(files, model_item, target, "translation")
                 if text != target:
                     raise UsageError("目标译文需要文档格式转换，不能直接统一，请人工编辑")
                 neighbors, position = indices[sid]
