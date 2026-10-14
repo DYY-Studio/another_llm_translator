@@ -19,7 +19,7 @@ from .decision import DecisionClient, DecisionQuestion, decision_preset_path, lo
 from .decision_prompt import get_declaration, resolve_prompt
 from .stage_runtime import _prompt, _prompt_language
 from .errors import ExternalError, StorageError, UsageError
-from .execution import (Scope, combine_usage, create_run, estimate_messages, finalize_run,
+from .execution import (Scope, choose_running_run, combine_usage, continue_run, create_run, estimate_messages, finalize_run, find_running_runs,
                         render_messages, run_bounded, select_scope, unavailable_usage)
 from .llm_client import LLMClient, SlidingWindowLimiter
 from .llm_keys import KeyPool
@@ -33,6 +33,49 @@ from .user_config import effective_path
 
 STAGE = "repetition_consistency"
 DRAFT_FILE = "repetition_draft.json"
+
+
+def repetition_resume(project: Path, plan: dict[str, Any]) -> dict[str, Any] | None:
+    runs = find_running_runs(project, STAGE)
+    if not runs:
+        return None
+    run = runs[0]
+    compatible = run.get("repetition_checkpoint") == 1 and run["stage_fingerprint"] == plan["fingerprint"]
+    reason = None if compatible else "Run 缺少续作检查点，或原文、译文、术语及执行设置已变化，请结束旧 Run 并新建"
+    try:
+        checkpoints = load_checkpoints(project / "runs" / run["run_id"], plan) if compatible else {}
+    except StorageError as exc:
+        checkpoints = {}
+        compatible = False
+        reason = f"{exc}，请结束旧 Run 并新建"
+    completed = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
+    return {"run_id": run["run_id"], "scope": run["scope"], "prompt_language": run.get("prompt_language"),
+            "screening_enabled": run.get("screening_enabled"), "exclude_punctuation_only": run.get("exclude_punctuation_only"),
+            "resume_compatible": compatible, "resume_incompatibility_reason": reason,
+            "completed": completed, "completed_steps": sum((int("screening" in c) if plan["screening_enabled"] else 0) + int("result" in c) for c in checkpoints.values()),
+            "total_steps": len(plan["groups"]) * (2 if plan["screening_enabled"] else 1)}
+
+
+def checkpoint_path(run_dir: Path, group_id: str) -> Path:
+    return run_dir / "repetition_checkpoints" / f"{group_id}.json"
+
+
+def load_checkpoints(run_dir: Path, plan: dict[str, Any]) -> dict[str, Any]:
+    result = {}
+    for group in plan["groups"]:
+        path = checkpoint_path(run_dir, group["id"])
+        if not path.exists():
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise StorageError("无法读取重复译文续作检查点") from exc
+        if (not isinstance(value, dict) or set(value) not in ({"screening", "confidence"}, {"screening", "confidence", "result"})
+            or value["screening"] not in {"compare", "skip", "refusal", "disabled", "over_budget"}
+            or ("result" in value and (not isinstance(value["result"], dict) or set(value["result"]) != {"proposals", "keep", "uncertain"}))):
+            raise StorageError("重复译文续作检查点无效")
+        result[group["id"]] = value
+    return result
 
 
 def digest(value: Any) -> str:
@@ -176,6 +219,8 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
         screening_tokens = decision.request_plan(screening_payload(group), [screen])[1] if decision else 0
         messages = render_messages(prompt, comparison_payload(group, evidence, sources, config["project"]["target_language"], terms))
         comparison_tokens = estimate_messages(messages, config["execution"]["token_safety_factor"])
+        group["screening_input_tokens"] = screening_tokens
+        group["comparison_input_tokens"] = comparison_tokens
         itpm = config["execution"]["input_tokens_per_minute"]
         group["over_budget"] = (screening_enabled and screening_tokens > decision_limit) or comparison_tokens >= llm_limit or (itpm > 0 and comparison_tokens > itpm)
         if not group["over_budget"]:
@@ -183,7 +228,7 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
             estimated_requests += 2 if screening_enabled else 1
         groups.append(group)
     selected_count = sum(len(g["occurrences"]) for g in groups)
-    fingerprint = digest({"screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only, "groups": groups, "evidence": evidence, "terms": terms, "terms_revision": terms_revision, "llm": config["_llm_preset_hash"],
+    fingerprint = digest({"scope": {"only_file": scope.only_file}, "screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only, "groups": groups, "evidence": evidence, "terms": terms, "terms_revision": terms_revision, "llm": config["_llm_preset_hash"],
                           "temperature": config["llm"]["temperature_translation"], "retry": config["retry"],
                           "decision": preset, "target_language": config["project"]["target_language"], "prompt": prompt,
                           "screen": screen_content})
@@ -249,7 +294,7 @@ def parse_comparison(content: str, group: dict[str, Any]) -> dict[str, Any]:
         raise ExternalError(f"重复译文审查响应无效：{exc}") from exc
 
 
-async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = True, replace_draft: bool = False,
+async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = True, replace_draft: bool = False, run_action: str | None = None,
                          http_client: httpx.AsyncClient | None = None,
                          limiter: SlidingWindowLimiter | KeyPool | None = None,
                          on_progress: Callable[[int, int, int], None] | None = None,
@@ -263,17 +308,31 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
     prompt, screen = plan["prompt"], plan["screen"]
     total = plan["selected"]
     metadata = read_json(project, project / "project.json")
-    run_id, run_dir = create_run(project, config=config, stage=STAGE, fingerprint=plan["fingerprint"],
-        prompt=prompt, selected_count=total, requested_count=total, reused_count=0,
-        details={"screening_enabled": plan["screening_enabled"], "exclude_punctuation_only": plan["exclude_punctuation_only"], "excluded_punctuation_groups": plan["excluded_punctuation_groups"], "prompt_language": plan["language"], "terms_revision": plan["terms_revision"], "draft_status": "generating", "scope": {"only_file": scope.only_file}, "choices": {}})
-    atomic_write_text(run_dir / "repetition_terms.json", json.dumps({
-        "terms_revision": plan["terms_revision"], "terms": plan["terms"],
-        "groups": {g["id"]: {o["id"]: o["terms"] for o in g["occurrences"]} for g in plan["groups"]},
-    }, ensure_ascii=False, separators=(",", ":")) + "\n")
-    if plan["decision_preset"]:
-        atomic_write_json(run_dir / "decision_preset.json", plan["decision_preset"])
+    running = repetition_resume(project, plan)
+    if running and run_action == "resume" and not running["resume_compatible"]:
+        raise UsageError(running["resume_incompatibility_reason"])
+    resume_id, run_warnings = choose_running_run(project, STAGE, action=run_action, dry_run=False, interactive=False)
+    if resume_id:
+        checkpoints = load_checkpoints(project / "runs" / resume_id, plan)
+        reused = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
+        run_id, run_dir, _ = continue_run(project, resume_id, config=config, stage=STAGE, fingerprint=plan["fingerprint"],
+            prompt=prompt, scope=scope, selected_count=total, requested_count=total - reused, reused_count=reused)
+    else:
+        checkpoints = {}
+        run_id, run_dir = create_run(project, config=config, stage=STAGE, fingerprint=plan["fingerprint"],
+            prompt=prompt, selected_count=total, requested_count=total, reused_count=0,
+            details={"screening_enabled": plan["screening_enabled"], "exclude_punctuation_only": plan["exclude_punctuation_only"], "excluded_punctuation_groups": plan["excluded_punctuation_groups"], "prompt_language": plan["language"], "terms_revision": plan["terms_revision"], "repetition_checkpoint": 1, "usage_invocation_count": 0, "draft_status": "generating", "scope": {"only_file": scope.only_file}, "choices": {}})
+        atomic_write_text(run_dir / "repetition_terms.json", json.dumps({
+            "terms_revision": plan["terms_revision"], "terms": plan["terms"],
+            "groups": {g["id"]: {o["id"]: o["terms"] for o in g["occurrences"]} for g in plan["groups"]},
+        }, ensure_ascii=False, separators=(",", ":")) + "\n")
+        if plan["decision_preset"]:
+            atomic_write_json(run_dir / "decision_preset.json", plan["decision_preset"])
     llm_usage: dict[str, Any] | None = None
-    completed = 0
+    model_invoked = False
+    completed = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
+    if on_progress:
+        on_progress(completed, 0, total)
     def record_usage(value):
         nonlocal llm_usage
         llm_usage = value
@@ -289,21 +348,35 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
             async with LLMClient(config, limiter, run_dir=run_dir, project_id=metadata["project_id"],
                                  run_id=run_id, stage=STAGE, client=http_client, on_usage=record_usage) as llm:
                 async def compare(group):
-                    nonlocal completed
+                    nonlocal completed, model_invoked
                     group = dict(group)
+                    saved = dict(checkpoints.get(group["id"], {}))
+                    if "result" in saved:
+                        group.update(screening=saved["screening"], confidence=saved.get("confidence"), **saved["result"])
+                        return group
                     if group["over_budget"]:
-                        group.update(screening="over_budget", proposals=[], keep=[], uncertain=[o["id"] for o in group["occurrences"]])
+                        saved.update(screening="over_budget", confidence=None)
+                        result = {"proposals": [], "keep": [], "uncertain": [o["id"] for o in group["occurrences"]]}
                     else:
-                        answer = (await decision.choose(screening_payload(group), [screen]))["value"] if decision else None
-                        group["screening"] = ("refusal" if answer.refused else answer.choice) if answer else "disabled"
-                        group["confidence"] = answer.confidence if answer else None
-                        if answer and answer.choice == "skip":
-                            group.update(proposals=[], keep=[o["id"] for o in group["occurrences"]], uncertain=[])
+                        if "screening" not in saved:
+                            if decision:
+                                model_invoked = True
+                            answer = (await decision.choose(screening_payload(group), [screen]))["value"] if decision else None
+                            saved.update(screening=("refusal" if answer.refused else answer.choice) if answer else "disabled",
+                                         confidence=answer.confidence if answer else None)
+                            if decision:
+                                atomic_write_json(checkpoint_path(run_dir, group["id"]), saved)
+                        if saved["screening"] == "skip":
+                            result = {"proposals": [], "keep": [o["id"] for o in group["occurrences"]], "uncertain": []}
                         else:
                             messages = render_messages(prompt, comparison_payload(group, plan["evidence"], plan["sources"], config["project"]["target_language"], plan["terms"]))
+                            model_invoked = True
                             response, _ = await llm.chat(messages=messages, temperature=config["llm"]["temperature_translation"],
                                 estimated_input_tokens=estimate_messages(messages, config["execution"]["token_safety_factor"]))
-                            group.update(parse_comparison(response.content, group))
+                            result = parse_comparison(response.content, group)
+                    saved["result"] = result
+                    atomic_write_json(checkpoint_path(run_dir, group["id"]), saved)
+                    group.update(screening=saved["screening"], confidence=saved.get("confidence"), **result)
                     completed += len(group["occurrences"])
                     if on_progress:
                         on_progress(completed, 0, total)
@@ -316,20 +389,20 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
         draft = {"run_id": run_id, "groups": groups, "evidence": plan["evidence"], "sources": plan["sources"], "scope": {"only_file": scope.only_file}, "created_at": utc_now()}
         atomic_write_text(draft_path(project, run_id), json.dumps(draft, ensure_ascii=False, separators=(",", ":")) + "\n")
         usage = combine_usage(llm_usage, (decision.usage_summary() if decision else None)) if (decision and decision.records) or llm_usage else unavailable_usage()
-        finalize_run(project, run_dir, status="completed", completed=total, failed=0, usage=usage)
+        usage = finalize_run(project, run_dir, status="completed", completed=total, failed=0, usage=usage, usage_invoked=not resume_id or model_invoked)
         manifest = read_json(project, run_dir / "manifest.json")
         manifest["draft_status"] = "pending"
         manifests = [manifest]
         if old:
             old["draft_status"] = "replaced"
             manifests.append(old)
-        warnings = [*plan["warnings"], *write_repetition_state(project, records=[], manifests=manifests)]
+        warnings = [*run_warnings, *plan["warnings"], *write_repetition_state(project, records=[], manifests=manifests)]
         return {"excluded_punctuation_groups": plan["excluded_punctuation_groups"], "stage": STAGE, "run_id": run_id, "selected": total, "completed": total,
                 "failed": 0, "pending": 0, "usage": usage, "warnings": warnings,
                 "proposal_count": sum(len(g["proposals"]) for g in groups)}
     except BaseException as exc:
-        finalize_run(project, run_dir, status="interrupted" if isinstance(exc, asyncio.CancelledError) else "failed",
-                     completed=completed, failed=total - completed, usage=combine_usage(llm_usage, (decision.usage_summary() if decision else None)))
+        finalize_run(project, run_dir, status="running", warnings=["执行已取消，可续作" if isinstance(exc, asyncio.CancelledError) else str(exc)],
+                     completed=completed, failed=total - completed, usage=combine_usage(llm_usage, (decision.usage_summary() if decision else None)), usage_invoked=not resume_id or model_invoked)
         raise
 
 

@@ -555,3 +555,44 @@ def test_disabled_screening_needs_no_decision_resources_and_preserves_model_subs
     assert draft["groups"][0]["proposals"][0]["apply"] == []
     save_choices(project, {"1-1": {"accepted": True, "target": "1", "apply": ["2"]}})
     assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 1
+
+
+def test_resume_reuses_screening_and_keeps_original_snapshots(tmp_path, monkeypatch):
+    from app.repetition_consistency import run_repetition, repetition_plan, repetition_resume, current_draft
+    project = repetition_project(tmp_path, monkeypatch)
+    async def run(invalid, action=None, requests=None):
+        async with httpx.AsyncClient(transport=transport(invalid=invalid, requests=requests)) as client:
+            return await run_repetition(project, Scope(), http_client=client, run_action=action)
+    with pytest.raises(ExternalError):
+        asyncio.run(run(True))
+    info = repetition_resume(project, repetition_plan(project, Scope()))
+    assert info["resume_compatible"] and info["completed_steps"] == 1
+    run_dir = project / "runs" / info["run_id"]
+    original_prompt = (run_dir / "prompt.txt").read_bytes()
+    requests = []
+    result = asyncio.run(run(False, "resume", requests))
+    assert result["run_id"] == info["run_id"]
+    assert len(requests) == 1 and "messages" in requests[0]
+    assert (run_dir / "prompt.txt").read_bytes() == original_prompt
+    assert len(read_json(project, run_dir / "manifest.json")["continuations"]) == 1
+    assert current_draft(project)["run_id"] == info["run_id"]
+
+
+def test_resume_rejects_changed_inputs_and_decline_starts_new_run(tmp_path, monkeypatch):
+    from app.repetition_consistency import run_repetition, repetition_plan, repetition_resume
+    project = repetition_project(tmp_path, monkeypatch)
+    async def run(invalid, action=None):
+        async with httpx.AsyncClient(transport=transport(invalid=invalid)) as client:
+            return await run_repetition(project, Scope(), http_client=client, run_action=action)
+    with pytest.raises(ExternalError):
+        asyncio.run(run(True))
+    info = repetition_resume(project, repetition_plan(project, Scope()))
+    middle = project / "prompts" / "repetition_consistency.zh-CN.middle.txt"
+    middle.write_text(middle.read_text() + "\n补充判断说明")
+    assert not repetition_resume(project, repetition_plan(project, Scope()))["resume_compatible"]
+    with pytest.raises(UsageError, match="已变化"):
+        asyncio.run(run(False, "resume"))
+    result = asyncio.run(run(False, "decline"))
+    assert result["run_id"] != info["run_id"]
+    old = read_json(project, project / "runs" / info["run_id"] / "manifest.json")
+    assert old["status"] == "interrupted"
