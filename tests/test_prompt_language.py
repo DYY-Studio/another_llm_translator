@@ -791,6 +791,8 @@ def test_combined_prefix_explains_only_active_fields_once(language, mode):
     fields = {"target_language", "reference_context"}
     if "term" in types or "summary" in types:
         fields.add("source_segments")
+    if "summary" in types:
+        fields.add("source_segments[].id")
     if "segment" in types:
         fields |= {
             "segments[].source",
@@ -833,6 +835,12 @@ def test_result_protocols_share_one_end_rule(language, mode):
             else '一条或多条 type="summary"' in prompt
         )
 
+    types = response_record_types(mode)
+    for record_type, middle in (("term", "term middle"), ("summary", "summary middle"), ("segment", "translation middle")):
+        assert (middle in prompt) == (record_type in types)
+    order_rule = "概括记录必须在术语记录之前。" if language == "zh-CN" else "Summary records must precede terminology records."
+    assert (order_rule in prompt) == ("summary" in types and "term" in types)
+
 
 @pytest.mark.parametrize("language", ["zh-CN", "en"])
 def test_decision_prompt_previews_match_runtime_phase_contracts(tmp_path, language):
@@ -873,3 +881,40 @@ def test_decision_prompt_previews_match_runtime_phase_contracts(tmp_path, langua
     assert full_prompt("terminology_decision", "middle", language) == full_prompt(
         "terminology_decision", "middle", language, phase="adjudication",
     )
+
+
+@pytest.mark.parametrize("language", ["zh-CN", "en"])
+def test_forced_term_declaration_keeps_terms_only_protocol(language):
+    prompt = full_prompt("terminology", "custom policy", language, require_term_declaration=True)
+    assert prompt.count('{"type":"no_terms"}') == 1
+    assert prompt.count('{"type":"end"}') == 1
+    assert 'type="term"' in prompt
+    assert 'type="summary"' not in prompt
+
+
+@pytest.mark.parametrize("language", ["zh-CN", "en"])
+def test_editable_policies_are_not_forced_by_fixed_prompt(tmp_path, language):
+    project = create_project_sync(tmp_path)
+    policy_texts = {
+        "terminology": "身份、属性、关系及变化" if language == "zh-CN" else "identity, attributes, relationships and changes",
+        "translation": "全篇实体说明" if language == "zh-CN" else "full-work entity explanations",
+        "proofreading": "全篇实体说明" if language == "zh-CN" else "full-work entity explanations",
+        "polishing": "全篇实体说明" if language == "zh-CN" else "full-work entity explanations",
+        "content_summary": "一段简洁、连贯" if language == "zh-CN" else "one concise, coherent",
+    }
+    for stage, policy in policy_texts.items():
+        middle = (project / "prompts" / f"{stage}.{language}.middle.txt").read_text().strip()
+        custom = full_prompt(stage, "CUSTOM_POLICY", language)
+        assert policy in middle and policy not in custom
+        assert full_prompt(stage, middle, language) == custom.replace("CUSTOM_POLICY", middle)
+    scan = full_prompt("terminology", "CUSTOM_POLICY", language)
+    gender_policy = "人物性别仅在可靠时" if language == "zh-CN" else "Put gender in category only when reliable"
+    assert gender_policy not in scan
+    scan_middle = (project / "prompts" / f"terminology.{language}.middle.txt").read_text()
+    assert gender_policy in scan_middle
+    naming_middle = (project / "prompts" / f"terminology_decision.{language}.middle.txt").read_text()
+    assert ("合并重复或语义等价的描述" if language == "zh-CN" else "Merge duplicate or semantically equivalent descriptions") not in naming_middle
+    summary_middle = (project / "prompts" / f"fragment_summary.{language}.middle.txt").read_text()
+    assert "refs" not in summary_middle
+    summary = full_prompt("fragment_summary", summary_middle, language)
+    assert "source_segments[].id:" in summary and "refs" in summary

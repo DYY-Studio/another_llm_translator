@@ -1,3 +1,5 @@
 Proofread the source against the current translation, focusing on mistranslation, omission, negation or tense errors, wrong references, terminology inconsistency, and obvious grammar problems.
 
 Make changes only for substantive problems, not personal stylistic preference.
+
+Use full-work entity explanations to disambiguate the current source, interpreting local names, identity and relationships with source_relation. Preserve the original wording and suspense without inserting knowledge revealed later into the translation.
