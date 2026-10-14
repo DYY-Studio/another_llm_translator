@@ -81,6 +81,8 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
         raise UsageError("Decision Preset ID 与配置不一致")
     segments = load_segments(project)
     files = load_source_files(project)
+    file_indices = {f["file_id"]: i for i, f in enumerate(files, 1)}
+    file_names = {f["file_id"]: f["original_name"] for f in files}
     if scope.only_file and scope.only_file not in {f["file_id"] for f in files}:
         raise UsageError("未知 File")
     selected = select_scope(segments, files, scope)
@@ -156,11 +158,13 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
                     terms[tid] = term
                 matched_ids.append({"id": tid, "aliases": aliases, "source_relations": relations})
             occurrences.append({"id": str(i), "terms": matched_ids, "segment_id": sid,
+                "file_index": file_indices[s["file_id"]],
                 "file_id": s["file_id"], "part_id": s["part_id"], "line_index": s["line_index"],
                 "signature": segment_signature(s), "base_result_id": bases[sid]["record_id"],
                 "origin": bases[sid].get("restored_origin", bases[sid].get("origin")), "variant": variant_indices[bases[sid]["text"]],
                 "previous": context_ids[:min(3, position)], "next": context_ids[min(3, position):]})
         group = {"id": str(number), "source": str(items[0]["source"]),
+                 "files": {str(file_indices[s["file_id"]]): file_names[s["file_id"]] for s in items},
                  "translations": variants, "occurrences": occurrences}
         _, screening_tokens = decision.request_plan(screening_payload(group), [screen])
         messages = render_messages(prompt, comparison_payload(group, evidence, sources, config["project"]["target_language"], terms))
@@ -201,9 +205,10 @@ def comparison_payload(group: dict[str, Any], evidence: dict[str, Any], sources:
     used_terms = dict.fromkeys(ref["id"] for o in group["occurrences"] for ref in o["terms"])
     short_terms = {tid: str(i) for i, tid in enumerate(used_terms, 1)}
     return {"source": group["source"], "translations": group["translations"], "target_language": language,
+            "files": group["files"],
             "terms": {short_terms[tid]: terms[tid] for tid in used_terms},
             "context": {source_ids[key]: sources[key] for key in source_keys},
-            "occurrences": [{"id": o["id"], "file": o["file_id"], "part": o["part_id"],
+            "occurrences": [{"id": o["id"], "file": o["file_index"], "part": o["part_id"],
                              "position": o["line_index"], "variant": o["variant"], "terms": [{**ref, "id": short_terms[ref["id"]]} for ref in o["terms"]],
                              "previous": [short[sid] for sid in o["previous"]],
                              "next": [short[sid] for sid in o["next"]]} for o in group["occurrences"]]}

@@ -210,6 +210,14 @@
 .overview-term p { width: 100%; }
 .overview-reference { padding-block: 10px; }
 .overview-reference summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.overview-repetition-reason { padding-block: 12px; border-bottom: 1px solid var(--row-border); }
+.overview-repetition-reason strong { font-size: 12px; }
+.overview-repetition-context { margin-top: 12px; }
+.overview-repetition-context summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.overview-repetition-context > .overview-cell { margin-block: 14px; padding-left: 12px; border-left: 2px solid var(--row-border); }
+.overview-repetition-context > .overview-cell h4 { margin-bottom: 8px; }
+.overview-repetition-source { padding: 12px; border: 1px solid var(--row-border); }
+.overview-repetition-source p { font-weight: 600; }
 .overview-decision-questions > article { padding: 10px 0; border-bottom: 1px solid var(--row-border); }
 .overview-question-heading, .overview-answer, .overview-scores, .overview-request-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; overflow-wrap: anywhere; }
 .overview-answer { margin-block: 8px; }

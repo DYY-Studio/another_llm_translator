@@ -77,6 +77,11 @@ def test_generation_detects_groups_and_sends_shared_evidence(tmp_path, monkeypat
     assert payload["source"] == "承诺"
     assert payload["translations"] == ["我会来接你", "我会去接你"]
     assert len(payload["occurrences"]) == 3
+    assert payload["files"] == {"1": "source.txt"}
+    assert [item["file"] for item in payload["occurrences"]] == [1, 1, 1]
+    assert [item["position"] for item in payload["occurrences"]] == [1, 3, 5]
+    from app.request_overview import llm_overview
+    assert llm_overview(requests[1]["messages"])["input"] == payload
     assert all("source" not in item and "translation" not in item for item in payload["occurrences"])
 
 

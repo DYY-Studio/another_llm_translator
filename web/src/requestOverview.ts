@@ -15,6 +15,37 @@ export function object(value: unknown): OverviewRecord {
 export function text(value: unknown): string { return typeof value === "string" ? value : ""; }
 export function records(value: unknown): OverviewRecord[] { return Array.isArray(value) ? value.map(object) : []; }
 
+export function parseRepetitionOverview(snapshot: RequestOverviewSnapshot) {
+  const input = object(snapshot.input);
+  let output: OverviewRecord = {};
+  let invalid = false;
+  if (snapshot.response_content) {
+    try { output = object(JSON.parse(snapshot.response_content)); }
+    catch { invalid = true; }
+    if (!Array.isArray(output.groups) || !Array.isArray(output.keep) || !Array.isArray(output.uncertain)) invalid = true;
+  }
+  const translations = Array.isArray(input.translations) ? input.translations.map(text) : [];
+  const contexts = object(input.context);
+  const files = object(input.files);
+  const occurrences = records(input.occurrences);
+  const members = new Map(occurrences.map(item => [item.id, item]));
+  const proposals = new Map(records(output.groups).flatMap(group => Array.isArray(group.members) ? group.members.map(id => [id, group] as const) : []));
+  const uncertain = new Set(Array.isArray(output.uncertain) ? output.uncertain : []);
+  const kept = new Set(Array.isArray(output.keep) ? output.keep : []);
+  return {source: text(input.source), invalid,
+    groups: records(output.groups).map(group => ({members: Array.isArray(group.members) ? group.members.map(text) : [], reason: text(group.reason)})),
+    occurrences: occurrences.map(item => {
+    const proposal = proposals.get(item.id);
+    const target = proposal ? members.get(proposal.target) : undefined;
+    const context = (refs: unknown) => Array.isArray(refs) ? refs.map(id => text(contexts[String(id)])) : [];
+    return {id: text(item.id), file: String(item.file), filename: text(files[String(item.file)]),
+      part: text(item.part), position: String(item.position), current: translations[Number(item.variant)] ?? "",
+      result: target ? translations[Number(target.variant)] : null,
+      uncertain: uncertain.has(item.id), kept: kept.has(item.id),
+      previous: context(item.previous), next: context(item.next)};
+  })};
+}
+
 export function parseRequestOverview(snapshot: RequestOverviewSnapshot) {
   const input = object(snapshot.input);
   const output: OverviewRecord[] = [];

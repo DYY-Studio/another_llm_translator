@@ -567,8 +567,8 @@ _FIELD_PREFIX.update({
         "en": "terms: Shared terminology, preferred translations, and entity knowledge indexed by short id. Each occurrence references entries matched in its source and local context; aliases lists the aliases matched there. source_relations aligns with entity_knowledge.items: before N, within, and after N locate knowledge sources relative to that occurrence's local context; N ranks positions within the entity. unsourced marks knowledge without source evidence.",
     },
     "repetition.occurrences": {
-        "zh-CN": "occurrences: 各次出现的短 id、文件、章节、位置、译文索引、上下文及术语引用。文件或章节相同本身不证明属于同一次话语。",
-        "en": "occurrences: Short id, file, part, position, translation index, context, and terminology references for each occurrence. Sharing a file or part does not by itself establish the same speech event.",
+        "zh-CN": "occurrences: 各次出现的短 id、文件、章节、位置、译文索引、上下文及术语引用。file 是项目文件顺序中从 1 开始的索引，files 将索引映射到文件名。part 是文件内的内容边界标识。position 是文件内从 0 开始的 Segment 序号，包含空片段，不是章节内序号或字符偏移。文件或章节相同本身不证明属于同一次话语。",
+        "en": "occurrences: Short id, file, part, position, translation index, context, and terminology references for each occurrence. file is the one-based index in project file order; files maps indices to filenames. part identifies a content boundary within the file. position is the zero-based Segment index within the file, counting empty segments, not an index within the part or a character offset. Sharing a file or part does not by itself establish the same speech event.",
     },
 })
 _TASK_PREFIX["repetition_consistency"] = {

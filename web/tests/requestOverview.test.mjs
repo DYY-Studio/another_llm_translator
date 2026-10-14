@@ -1,7 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseRequestOverview } from "../src/requestOverview.ts";
+import { parseRequestOverview, parseRepetitionOverview } from "../src/requestOverview.ts";
 const snapshot = (input, records) => ({request_kind: "llm", input, segment_id_map: {"1": "SEG-1", "2": "SEG-2"}, response_content: records.map(JSON.stringify).join("\n")});
+test("repetition overview resolves shared translations and context by occurrence ID", () => {
+  const input = {source: "promise", files: {"2": "chapter.txt"}, translations: ["come", "go"], context: {"1": "before", "2": "after"},
+    occurrences: [{id: "1", file: 2, part: "document", position: 4, variant: 0, previous: ["1"], next: ["2"]},
+      {id: "2", file: 2, part: "document", position: 9, variant: 1}, {id: "3", variant: 1}]};
+  const value = parseRepetitionOverview({input, response_content: JSON.stringify({groups: [{members: ["2", "1"], target: "1", reason: "same event"}], keep: [], uncertain: ["3"]})});
+  assert.equal(value.invalid, false);
+  assert.deepEqual(value.groups, [{members: ["2", "1"], reason: "same event"}]);
+  assert.equal(value.occurrences[1].result, "come");
+  assert.equal(value.occurrences[0].filename, "chapter.txt");
+  assert.deepEqual(value.occurrences[0].previous, ["before"]);
+  assert.deepEqual(value.occurrences[0].next, ["after"]);
+  assert.equal(value.occurrences[2].uncertain, true);
+  assert.equal(parseRepetitionOverview({input}).occurrences[0].result, null);
+  assert.equal(parseRepetitionOverview({input, response_content: "invalid"}).invalid, true);
+});
 test("pairs segments by ID, never output order, and flags duplicates", () => {
   const input = {segments: [{id:"1", source:"one"}, {id:"2", source:"two", current_text:"old"}]};
   const value = parseRequestOverview(snapshot(input, [{type:"segment",id:"2", status:"suggested",suggested_text:"new"}, {type:"segment",id:"1",translation:"一"}, {type:"end"}]));
