@@ -120,7 +120,9 @@ async def test_knowledge_run_uses_bounded_parallel_batches(tmp_path, monkeypatch
 
     async def handler(request):
         nonlocal active, maximum
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        messages = json.loads(request.content)["messages"]
+        payload = json.loads(messages[1]["content"])
+        assert messages[0]["content"] == _prompt(project, "zh-CN")["knowledge"]
         assert payload["phase"] == "knowledge"
         assert len(payload["entities"]) == 1
         calls.extend(e["entity"] for e in payload["entities"])

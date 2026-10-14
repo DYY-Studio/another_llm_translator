@@ -37,7 +37,6 @@ _COMMON_PROTOCOL = {
         '{"type":"decision","normalized":"academy","action":"keep","reason":"保持当前决定"}\n'
         '{"type":"decision","normalized":"incidental","action":"disable","reason":"普通词"}\n'
         '{"type":"decision","normalized":"uncertain","action":"needs_review","reason":"证据不足"}\n'
-        '{"type":"end"}'
     ),
     "en": (
         "Follow this output contract. "
@@ -63,7 +62,6 @@ _COMMON_PROTOCOL = {
         '{"type":"decision","normalized":"academy","action":"keep","reason":"keep current decision"}\n'
         '{"type":"decision","normalized":"incidental","action":"disable","reason":"ordinary word"}\n'
         '{"type":"decision","normalized":"uncertain","action":"needs_review","reason":"insufficient evidence"}\n'
-        '{"type":"end"}'
     ),
 }
 
@@ -114,19 +112,10 @@ _PHASE_PROTOCOL = {
 }
 
 
-_DESCRIPTION_CONTEXT = {
-    "zh-CN": "description 是有效说明片段的只读拼接文本，方括号标明原术语归属；applied_description 是已应用实体说明，仅供对照。片段可能重复、存在分歧或描述不同位置的情况，须结合原文判断，不得把排列顺序当作事实发生时间。两者均不得修改，说明只能在最后的 knowledge 阶段更新。",
-    "en": "description joins valid explanation fragments as read-only text; brackets identify the original term. applied_description is the applied entity explanation for comparison. Fragments may repeat, disagree or describe different source positions; assess them against source evidence and do not treat their order as event chronology. Neither field may be changed; explanations may only be updated in the final knowledge phase.",
+_KNOWLEDGE_PROTOCOL = {
+    "zh-CN": '为 entities 中每个实体恰好输出一条 {"type":"entity_knowledge","entity":"对应 entity","items":[{"text":"目标语说明","refs":["K1"]}],"reason":"更新理由"}。items 可以为空。允许实体结果乱序。每条说明必须引用对应实体 fragments 中至少一个 id，禁止跨实体引用，不得引用 current_items 或虚构引用。不修改名称、译名或分组。',
+    "en": 'Output exactly one record for each entity in entities: {"type":"entity_knowledge","entity":"input entity","items":[{"text":"target-language explanation","refs":["K1"]}],"reason":"reason"}. items may be empty. Entity records may be unordered. Each item must cite at least one id from its own fragments; cross-entity refs are forbidden; never cite current_items or invent refs. Do not change names, translations or groups.',
 }
-
-
-def terminology_decision_protocol(language: str, *, phase: str) -> str:
-    if phase == "knowledge":
-        return {
-            "zh-CN": '为 entities 中每个实体恰好输出一条 {"type":"entity_knowledge","entity":"对应 entity","items":[{"text":"目标语说明","refs":["K1"]}],"reason":"更新理由"} 和末行 {"type":"end"}。items 可以为空。允许实体结果乱序。每条说明必须引用对应实体 fragments 中至少一个 id，禁止跨实体引用，不得引用 current_items 或虚构引用。不修改名称、译名或分组。',
-            "en": 'Output exactly one record for each entity in entities: {"type":"entity_knowledge","entity":"input entity","items":[{"text":"target-language explanation","refs":["K1"]}],"reason":"reason"}, followed by {"type":"end"}. items may be empty. Entity records may be unordered. Each item must cite at least one id from its own fragments; cross-entity refs are forbidden; never cite current_items or invent refs. Do not change names, translations or groups.',
-        }[language]
-    return f"{_PHASE_PROTOCOL[phase][language]}\n{_COMMON_PROTOCOL[language]}\n{_DESCRIPTION_CONTEXT[language]}"
 
 
 _FINAL_REVIEW_PROTOCOL = {
@@ -146,9 +135,8 @@ _FINAL_REVIEW_PROTOCOL = {
         "update 必须实际修改术语状态，并会重新启用术语；如果当前术语 disabled，空 changes 仅用于重新启用，其他 update 的 changes 不得为空且不得是 no-op。"
         "仍存在 category 或 preferred_translation 冲突时不得 keep；update 必须为每个冲突字段提供非空决议，disable 则通过禁用术语解决冲突。"
         "disable 表示禁用术语。证据不足时也必须在 keep、update、disable 中选择最可靠的最终决定，禁止输出 needs_review。"
-        "完整 JSONL 示例："
+        "记录示例："
         '{"type":"decision","normalized":"alice","action":"keep","reason":"确认当前状态"}\n'
-        '{"type":"end"}'
     ),
     "en": (
         "Follow this final-review output contract. terms[] are the only decision targets; "
@@ -166,15 +154,23 @@ _FINAL_REVIEW_PROTOCOL = {
         "if the current term is disabled, empty changes are allowed only to re-enable it. Other update changes must be non-empty and not a no-op. "
         "If category or preferred_translation conflicts remain, keep is invalid; update must provide a non-empty decision for every conflicted field, "
         "and disable resolves the conflict by disabling the term. disable disables the term. Even with limited evidence, choose the most reliable "
-        "final decision among keep, update, and disable; never output needs_review. Complete JSONL example: "
+        "final decision among keep, update, and disable; never output needs_review. Record example: "
         '{"type":"decision","normalized":"alice","action":"keep","reason":"confirm current state"}\n'
-        '{"type":"end"}'
     ),
 }
 
 
-def terminology_final_review_protocol(language: str) -> str:
-    return f"{_FINAL_REVIEW_PROTOCOL[language]}\n{_DESCRIPTION_CONTEXT[language]}"
+_PROTOCOL_PARTS = {
+    "adjudication": (_PHASE_PROTOCOL["adjudication"], _COMMON_PROTOCOL),
+    "consistency": (_PHASE_PROTOCOL["consistency"], _COMMON_PROTOCOL),
+    "containment": (_PHASE_PROTOCOL["containment"], _COMMON_PROTOCOL),
+    "final_review": (_FINAL_REVIEW_PROTOCOL,),
+    "knowledge": (_KNOWLEDGE_PROTOCOL,),
+}
+
+
+def terminology_decision_protocol(language: str, *, phase: str) -> str:
+    return "\n".join(part[language] for part in _PROTOCOL_PARTS[phase])
 
 
 _CONTENT_RETRY_GUIDANCE = {

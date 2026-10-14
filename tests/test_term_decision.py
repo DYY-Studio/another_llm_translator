@@ -602,10 +602,14 @@ async def test_decision_carries_fragment_descriptions_through_final_review(tmp_p
         assert payload["anchors"][0]["description"] is None
         assert "description" not in payload["terms"][0]["evidence"]
 
+    from app.term_decision import _prompt
+    prompts = _prompt(project, "zh-CN", final_review=True)
     phases = []
 
     def handler(request):
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        messages = json.loads(request.content)["messages"]
+        payload = json.loads(messages[1]["content"])
+        assert messages[0]["content"] == prompts[payload["phase"]]
         phases.append(payload["phase"])
         records = []
         for term in payload["terms"]:

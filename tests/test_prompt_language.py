@@ -832,3 +832,44 @@ def test_result_protocols_share_one_end_rule(language, mode):
             if language == "en"
             else '一条或多条 type="summary"' in prompt
         )
+
+
+@pytest.mark.parametrize("language", ["zh-CN", "en"])
+def test_decision_prompt_previews_match_runtime_phase_contracts(tmp_path, language):
+    from app.term_decision import _prompt
+
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root))
+    runtime = _prompt(project, language, final_review=True)
+    preview = client.get(
+        "/api/v1/projects/sample/prompts/terminology_decision",
+        params={"language": language},
+    ).json()["assembled_phases"]
+    knowledge = client.get(
+        "/api/v1/projects/sample/prompts/terminology_knowledge",
+        params={"language": language},
+    ).json()["assembled"]
+    assert {**preview, "knowledge": knowledge} == runtime
+    for phase, prompt in runtime.items():
+        prefix, _, suffix = prompt.split("\n\n", 2)
+        assert prompt.count('{"type":"end"}') == 1
+        assert "target_language:" in prefix
+        if phase == "knowledge":
+            assert "validation_feedback" in prefix
+            assert "validation_repair" not in prefix
+            assert "entities:" in prefix and "source_range:" in prefix
+            assert '"refs":["K1"]' in suffix
+            assert "decision_terms" not in prefix
+        else:
+            assert "validation_repair" in prefix
+            assert "description" in prefix and "applied_description" in prefix
+            assert "current_items:" not in prefix
+            assert '"type":"decision"' in suffix
+            assert "alias、description" not in prefix
+            assert "alias, description" not in prefix
+        if phase == "final_review":
+            restriction = "禁止输出 needs_review" if language == "zh-CN" else "never output needs_review"
+            assert restriction in suffix
+    assert full_prompt("terminology_decision", "middle", language) == full_prompt(
+        "terminology_decision", "middle", language, phase="adjudication",
+    )
