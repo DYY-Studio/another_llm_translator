@@ -1419,7 +1419,7 @@ def _migration_history_rows(project: Path) -> dict[str, list[tuple[object, ...]]
     with sqlite3.connect(project / "project.sqlite") as database:
         return {
             table: [
-                tuple(row)
+                tuple(zlib.decompress(value).decode("utf-8") if isinstance(value, bytes) else value for value in row)
                 for row in database.execute(
                     f"SELECT * FROM {table} ORDER BY rowid"
                 ).fetchall()
@@ -1855,14 +1855,14 @@ def test_v3_payloads_keep_only_nonrelational_fields(tmp_path: Path) -> None:
                 ).fetchone()[0]
             ),
             "terminology_candidates": json.loads(
-                database.execute(
+                zlib.decompress(database.execute(
                     "SELECT payload_json FROM terminology_candidates"
-                ).fetchone()[0]
+                ).fetchone()[0])
             ),
             "terms": json.loads(
-                database.execute(
+                zlib.decompress(database.execute(
                     "SELECT payload_json FROM terms_state WHERE key='terms'"
-                ).fetchone()[0]
+                ).fetchone()[0])
             ),
             "overrides": json.loads(
                 database.execute(

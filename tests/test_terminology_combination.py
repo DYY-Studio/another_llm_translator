@@ -54,7 +54,12 @@ async def test_completed_legacy_scan_allows_other_outputs(
         await run_terminology(project, Scope(), http_client=client)
         # Represent a completed scan created before candidate ordering existed.
         with sqlite3.connect(database_path(project)) as connection:
-            connection.execute("UPDATE terminology_candidates SET payload_json = json_remove(payload_json, '$.source_order')")
+            import zlib
+            for row_id, payload in connection.execute("SELECT rowid, payload_json FROM terminology_candidates").fetchall():
+                value = json.loads(zlib.decompress(payload))
+                value.pop("source_order", None)
+                connection.execute("UPDATE terminology_candidates SET payload_json = ? WHERE rowid = ?",
+                                   (zlib.compress(json.dumps(value).encode()), row_id))
         library = load_terms(project)
         candidates = read_jsonl(project, project / "terminology" / "candidates.jsonl")
         if include_summaries:

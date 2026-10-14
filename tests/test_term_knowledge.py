@@ -128,9 +128,11 @@ def test_migration_preserves_old_explanations_without_fabricating_sources(tmp_pa
     write_json(project, project / "terminology" / "overrides.json", record_header("terminology_overrides", "test",
                overrides=[{"normalized": "alpha", "description": "人工决定"},
                           {"normalized": "beta", "source": "Beta", "description": "已移除资料", "disabled": True}]))
-    import sqlite3
+    import sqlite3, zlib
     from app import sqlite_storage
     with sqlite3.connect(database_path(project)) as connection:
+        raw = zlib.decompress(connection.execute("SELECT payload_json FROM terms_state WHERE key='terms'").fetchone()[0]).decode()
+        connection.execute("UPDATE terms_state SET payload_json=? WHERE key='terms'", (raw,))
         connection.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
     sqlite_storage._SUPPORTED_CACHE.discard(database_path(project))
     migrated = load_terms(project)
@@ -247,7 +249,13 @@ async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(
     from app.sqlite_storage import database_path
     import sqlite3
     with sqlite3.connect(database_path(project)) as connection:
-        connection.execute("UPDATE terminology_candidates SET payload_json=json_set(payload_json,'$.terms',json(?)) WHERE record_id=?", (json.dumps(record["terms"]),record["record_id"]))
+        import zlib
+        payload = json.loads(zlib.decompress(connection.execute(
+            "SELECT payload_json FROM terminology_candidates WHERE record_id=?", (record["record_id"],)
+        ).fetchone()[0]))
+        payload["terms"] = record["terms"]
+        connection.execute("UPDATE terminology_candidates SET payload_json=? WHERE record_id=?",
+                           (zlib.compress(json.dumps(payload).encode()), record["record_id"]))
     publish_evidence(project, data, [record], term_normalization(load_project_config(project)))
     meta = read_json(project, project / "project.json")
     write_json(project, project / "terminology" / "terms.json", record_header("terminology_library", meta["project_id"], **data))

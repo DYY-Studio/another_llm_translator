@@ -794,6 +794,14 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
                     connection.execute("UPDATE runs SET payload_json = ? WHERE run_id = ?",
                                        (_run_residual(payload), row["run_id"]))
             _refresh_segment_format_counts(connection)
+        cursor = connection.execute(
+            "SELECT sequence, payload_json FROM terminology_candidates WHERE typeof(payload_json) = 'text'"
+        )
+        while rows := cursor.fetchmany(500):
+            connection.executemany(
+                "UPDATE terminology_candidates SET payload_json = ? WHERE sequence = ?",
+                [(zlib.compress(row["payload_json"].encode("utf-8")), row["sequence"]) for row in rows],
+            )
         migrated_term_runs = _migrate_term_knowledge_to_v8(connection, project)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
@@ -991,8 +999,12 @@ def _hydrate_scan(
 
 
 def _hydrate_candidate(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
+    try:
+        payload = _load(zlib.decompress(row["payload_json"]).decode("utf-8"))
+    except (zlib.error, TypeError, UnicodeDecodeError) as exc:
+        raise StorageError(f"术语候选压缩数据无效：{row['record_id']}") from exc
     return _with_common_header(
-        _load(str(row["payload_json"])),
+        payload,
         project_id=project_id,
         record_type="terminology_candidates",
         record_id=str(row["record_id"]),
@@ -1044,12 +1056,24 @@ def _hydrate_chunk(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
     )
 
 
+def _terms_payload(value: dict[str, Any]) -> str | bytes:
+    payload = _residual(value, _TERMS_RESIDUAL_FIELDS)
+    return zlib.compress(payload.encode("utf-8")) if value.get("record_type") == "terminology_library" else payload
+
+
 def _hydrate_terms(
     row: sqlite3.Row, project_id: str | None
 ) -> dict[str, Any]:
     key = str(row["key"])
+    if key == "terms":
+        try:
+            payload = zlib.decompress(row["payload_json"]).decode("utf-8")
+        except (zlib.error, TypeError, UnicodeDecodeError) as exc:
+            raise StorageError("术语库压缩数据无效") from exc
+    else:
+        payload = str(row["payload_json"])
     return _with_common_header(
-        _load(str(row["payload_json"])),
+        _load(payload),
         project_id=project_id,
         record_type=_terms_record_type(key),
     )
@@ -1226,11 +1250,15 @@ def _migrate_term_knowledge_to_v8(connection: sqlite3.Connection, project: Path)
     )
 
     project_id = _project_id(connection)
-    records = {str(row["key"]): _hydrate_terms(row, project_id)
+    records = {str(row["key"]): _with_common_header(
+                   _load(row["payload_json"] if isinstance(row["payload_json"], str) else zlib.decompress(row["payload_json"]).decode("utf-8")),
+                   project_id=project_id, record_type=_terms_record_type(str(row["key"])))
                for row in connection.execute("SELECT key, payload_json FROM terms_state")}
     library = records.get("terms")
     if library is not None and "knowledge" in library:
         require_knowledge(library)
+        connection.execute("UPDATE terms_state SET payload_json = ? WHERE key = 'terms'",
+                           (_terms_payload(library),))
         return []
     changed_runs = []
     reason = "实体说明结构已升级，旧术语任务已结束，旧草案已作废，请新建 Run"
@@ -1251,7 +1279,7 @@ def _migrate_term_knowledge_to_v8(connection: sqlite3.Connection, project: Path)
     if active_task and active_task.get("status") in {"active", "partial_published"}:
         active_task.update(status="reset", updated_at=utc_now(), error_message=reason)
         connection.execute("UPDATE terms_state SET payload_json = ? WHERE key = 'active_task'",
-                           (_residual(active_task, _TERMS_RESIDUAL_FIELDS),))
+                           (_terms_payload(active_task),))
     if library is None:
         return changed_runs
     overrides = records.get("overrides", {"overrides": []})
@@ -1279,7 +1307,7 @@ def _migrate_term_knowledge_to_v8(connection: sqlite3.Connection, project: Path)
     connection.executemany(
         "INSERT INTO terms_state(key, payload_json) VALUES (?, ?) "
         "ON CONFLICT(key) DO UPDATE SET payload_json = excluded.payload_json",
-        [(key, _residual(value, _TERMS_RESIDUAL_FIELDS))
+        [(key, _terms_payload(value))
          for key, value in (("terms", library), ("overrides", overrides))],
     )
     return changed_runs
@@ -2477,7 +2505,7 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
                     "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
                     (
                         kind,
-                        _residual(value, _TERMS_RESIDUAL_FIELDS),
+                        _terms_payload(value),
                     ),
                 )
             elif kind == "run_manifest":
@@ -2521,12 +2549,12 @@ def clear_terminology_state(project: Path, overrides: dict[str, Any]) -> None:
         with connection:
             from .term_knowledge import empty_knowledge
             previous = connection.execute("SELECT payload_json FROM terms_state WHERE key = 'terms'").fetchone()
-            revision = int(_load(previous["payload_json"]).get("terms_revision", 0)) if previous else 0
+            revision = int(_load(zlib.decompress(previous["payload_json"]).decode("utf-8")).get("terms_revision", 0)) if previous else 0
             library = record_header("terminology_library", _project_id(connection),
                                     terms_revision=revision + 1, terms=[], knowledge=empty_knowledge())
             connection.execute("INSERT INTO terms_state(key, payload_json) VALUES ('terms', ?) "
                                "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
-                               (_residual(library, _TERMS_RESIDUAL_FIELDS),))
+                               (_terms_payload(library),))
             connection.execute("DELETE FROM terms_state WHERE key = 'active_task'")
             connection.execute("DELETE FROM terminology_scans")
             pinned: set[str] = set()
@@ -2545,7 +2573,7 @@ def clear_terminology_state(project: Path, overrides: dict[str, Any]) -> None:
                 "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
                 (
                     "overrides",
-                    _residual(overrides, _TERMS_RESIDUAL_FIELDS),
+                    _terms_payload(overrides),
                 ),
             )
     except sqlite3.Error as exc:
@@ -2570,8 +2598,8 @@ def write_terminology_decision_state(
                 "INSERT INTO terms_state(key, payload_json) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
                 [
-                    ("terms", _residual(terms, _TERMS_RESIDUAL_FIELDS)),
-                    ("overrides", _residual(overrides, _TERMS_RESIDUAL_FIELDS)),
+                    ("terms", _terms_payload(terms)),
+                    ("overrides", _terms_payload(overrides)),
                 ],
             )
             connection.execute(
@@ -2714,7 +2742,7 @@ def _insert_candidates(connection: sqlite3.Connection, records: Iterable[dict[st
             (
                 str(item["record_id"]),
                 str(item["active_task_id"]),
-                _residual(item, _CANDIDATE_RESIDUAL_FIELDS),
+                zlib.compress(_residual(item, _CANDIDATE_RESIDUAL_FIELDS).encode("utf-8")),
             )
             for item in records
         ],
@@ -3732,7 +3760,7 @@ def write_terminology_publication(
             connection.executemany(
                 "INSERT INTO terms_state(key,payload_json) VALUES (?,?) "
                 "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
-                [(key, _residual(value, _TERMS_RESIDUAL_FIELDS)) for key, value in documents],
+                [(key, _terms_payload(value)) for key, value in documents],
             )
     finally:
         connection.close()
