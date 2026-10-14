@@ -12,7 +12,8 @@ interface Occurrence {
 interface Proposal { id: string; members: string[]; target: string; apply?: string[]; default_accepted?: boolean; manual?: boolean; reason: string }
 function proposalChoice(draft: Draft, proposal: Proposal) {
   const choice = draft.choices[proposal.id] ?? {accepted: proposal.default_accepted ?? true, target: proposal.target};
-  return {...choice, apply: choice.apply ?? proposal.apply ?? proposal.members};
+  const apply = choice.apply ?? proposal.apply ?? proposal.members;
+  return {...choice, accepted: choice.accepted && apply.length > 0, apply};
 }
 interface Group {
   id: string; source: string; translations: string[]; occurrences: Occurrence[];
@@ -229,7 +230,8 @@ function GroupCard({ group, draft, files, language, disabled, onChoose }: {
           return <article className={`term-decision-proposal ${choice.accepted ? "" : "rejected"}`} key={proposal.id}>
             <div className="repetition-actions repetition-heading"><div><strong>{proposal.manual ? t("manualUnify") : t("unify", { count: members.length })}</strong>
               <small> {t("enabledCount", {count: choice.accepted ? choice.apply.length : 0, total: members.length})}</small></div>
-              <button className="quiet-button" disabled={disabled} onClick={() => void onChoose(proposal, { ...choice, accepted: !choice.accepted })}>
+              <button className="quiet-button" disabled={disabled} onClick={() => void onChoose(proposal, { ...choice, accepted: !choice.accepted,
+                apply: !choice.accepted && !choice.apply.length ? proposal.members : choice.apply })}>
                 {t(choice.accepted ? "reject" : "restore")}</button></div>
             <label>{t("target")}<select value={members.find(o => o.id === choice.target)?.variant} disabled={disabled}
               onChange={e => { const member = variants.find(o => o.variant === Number(e.target.value)); if (member) void onChoose(proposal, { ...choice, target: member.id }); }}>
@@ -252,15 +254,15 @@ function GroupCard({ group, draft, files, language, disabled, onChoose }: {
           const enabled = !!choice?.accepted && choice.apply.includes(o.id);
           const target = enabled && choice ? occurrenceById.get(choice.target) : null;
           return <article className="term-decision-proposal" key={o.id}>
-            <div className="repetition-actions repetition-heading">
+            <div className="repetition-actions repetition-occurrence-heading">
               <small>{files.find(f => f.file_id === o.file_id)?.name ?? o.file_id} / {o.part_id} / {o.segment_id}
                 {o.origin === "web" && ` (${t("manual")})`}</small>
               {proposal && choice && <label className="repetition-apply-toggle"><input type="checkbox" checked={enabled} disabled={disabled}
                 onChange={event => { const selected = new Set(choice.accepted ? choice.apply : []); if (event.target.checked) selected.add(o.id); else selected.delete(o.id);
-                  void onChoose(proposal, {...choice, accepted: true, apply: [...selected]}); }} />{t("applyOccurrence")}</label>}
+                  void onChoose(proposal, {...choice, accepted: selected.size > 0, apply: [...selected]}); }} />{t("applyOccurrence")}</label>}
             </div>
             <div className="decision-state-pair"><div><strong>{t("before")}</strong><pre className="repetition-text">{group.translations[o.variant]}</pre></div>
-              <div><strong>{target ? t("after") : uncertain.has(o.id) ? t("needsReview") : t("keep")}</strong>
+              <div className={`repetition-result ${enabled ? "is-applied" : ""}`}><strong>{target ? t("after") : uncertain.has(o.id) ? t("needsReview") : t("keep")}</strong>
                 <pre className="repetition-text">{group.translations[target?.variant ?? o.variant]}</pre></div></div>
             <details className="overview-repetition-context" onToggle={e => { const open = e.currentTarget.open; setOpenContexts(current => ({ ...current, [o.id]: open })); }}>
               <summary>{t("context")}</summary>
