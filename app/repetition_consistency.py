@@ -21,7 +21,7 @@ from .execution import (Scope, combine_usage, create_run, estimate_messages, fin
 from .llm_client import LLMClient, SlidingWindowLimiter
 from .llm_keys import KeyPool
 from .project import load_segments, load_source_files
-from .sqlite_storage import (atomic_write_json, latest_stage_states, read_json,
+from .sqlite_storage import (atomic_write_json, atomic_write_text, latest_stage_states, read_json,
                              read_repetition_run, utc_now)
 from .sqlite_storage import write_repetition_state
 from .user_config import effective_path
@@ -204,11 +204,12 @@ async def run_repetition(project: Path, scope: Scope, *, replace_draft: bool = F
                          http_client: httpx.AsyncClient | None = None,
                          limiter: SlidingWindowLimiter | KeyPool | None = None,
                          on_progress: Callable[[int, int, int], None] | None = None,
-                         on_usage: Callable[[dict[str, Any] | None], None] | None = None) -> dict[str, Any]:
+                         on_usage: Callable[[dict[str, Any] | None], None] | None = None,
+                         prepared_plan: dict[str, Any] | None = None) -> dict[str, Any]:
     old = read_repetition_run(project, ("pending",))
     if old and not replace_draft:
         raise UsageError("已有待审核草案，必须明确选择替换")
-    plan = repetition_plan(project, scope)
+    plan = prepared_plan if prepared_plan is not None else repetition_plan(project, scope)
     config = plan["config"]
     total = plan["selected"]
     metadata = read_json(project, project / "project.json")
@@ -255,7 +256,7 @@ async def run_repetition(project: Path, scope: Scope, *, replace_draft: bool = F
                 groups = await run_bounded(plan["groups"], compare,
                     max_parallel=config["execution"]["max_parallel"])
         draft = {"run_id": run_id, "groups": groups, "evidence": plan["evidence"], "sources": plan["sources"], "scope": {"only_file": scope.only_file}, "created_at": utc_now()}
-        atomic_write_json(draft_path(project, run_id), draft)
+        atomic_write_text(draft_path(project, run_id), json.dumps(draft, ensure_ascii=False, separators=(",", ":")) + "\n")
         usage = combine_usage(llm_usage, decision.usage_summary()) if decision.records or llm_usage else unavailable_usage()
         finalize_run(project, run_dir, status="completed", completed=total, failed=0, usage=usage)
         manifest = read_json(project, run_dir / "manifest.json")

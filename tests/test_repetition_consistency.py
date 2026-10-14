@@ -269,3 +269,24 @@ def test_repetition_tasks_use_existing_manager_and_cancel(tmp_path, monkeypatch)
         await manager.shutdown()
         assert manager.get(state["task_id"])["status"] == "cancelled"
     asyncio.run(run())
+
+
+def test_managed_generation_publishes_draft_and_does_not_retain_queued_evidence(tmp_path, monkeypatch):
+    from app.web_tasks import WebTaskManager
+    from app.repetition_consistency import current_draft
+    project = repetition_project(tmp_path, monkeypatch)
+    original_client = httpx.AsyncClient
+    def client(*args, **kwargs):
+        return original_client(*args, **kwargs, transport=transport())
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    async def run():
+        manager = WebTaskManager()
+        state = await manager.start(project, "repetition_consistency", scope=Scope(),
+                                    reuse_mixed_fingerprints=False, run_action=None)
+        retained = manager.tasks[state["task_id"]]
+        assert retained._start_decision.plan is None
+        await retained.asyncio_task
+        assert manager.get(state["task_id"])["status"] == "completed"
+        assert current_draft(project)["groups"][0]["proposals"]
+        await manager.shutdown()
+    asyncio.run(run())

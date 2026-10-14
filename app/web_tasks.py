@@ -969,7 +969,8 @@ class WebTaskManager:
                 raise UsageError("重复译文审查不支持续用或复用结果")
             plan = repetition_plan(project, scope)
             return _StartDecision(selected_count=plan["selected"], running_run_id=None,
-                fingerprints=((stage, plan["fingerprint"]),), selection_snapshots=(), running_runs=(), plan=plan)
+                fingerprints=((stage, plan["fingerprint"]),), selection_snapshots=(), running_runs=(),
+                plan=None if ensure_unique else plan)
         selected_count = 0
         running_run_id: str | None = None
         decision_plan_snapshot: dict[str, Any] | None = None
@@ -1684,7 +1685,7 @@ class WebTaskManager:
                     from .repetition_consistency import run_repetition
                     summary = await run_repetition(state.project, scope, replace_draft=replace_draft,
                         on_progress=progress, on_usage=usage_changed,
-                        limiter=next(iter(shared_limiters.values())))
+                        limiter=next(iter(shared_limiters.values())), prepared_plan=decision.plan)
                 elif state.stage == "translation":
                     summary = await run_translation(
                         state.project,
