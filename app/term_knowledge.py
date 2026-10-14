@@ -34,7 +34,7 @@ def navigation_fragment(fragment: dict[str, Any]) -> dict[str, Any]:
 def require_knowledge(library: dict[str, Any]) -> dict[str, Any]:
     knowledge = library.get("knowledge")
     if not isinstance(knowledge, dict) or knowledge.get("version") != 1:
-        raise UsageError("旧术语库需要迁移：python scripts/migrate_term_knowledge.py PROJECT")
+        raise UsageError("术语库缺少有效的实体说明结构")
     return knowledge
 
 

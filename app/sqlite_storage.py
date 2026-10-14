@@ -17,7 +17,7 @@ from typing import Any, Iterable
 from .errors import ProjectError, StorageError, UsageError
 from .stage_result_retention import prune_stage_results
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 STAGES = frozenset(
     {
@@ -741,7 +741,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             (str(version),),
         )
         return None
-    elif version not in {3, 4, 5, 6, SCHEMA_VERSION}:
+    elif version not in {3, 4, 5, 6, 7, SCHEMA_VERSION}:
         raise ProjectError(
             f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
         )
@@ -757,8 +757,9 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         # version check and sqlite's online backup.
         connection.execute("BEGIN IMMEDIATE")
         backup_path = _backup_before_schema_upgrade(project, version)
-        for kind in ("base", "suggestion"):
-            connection.execute(f"DROP INDEX IF EXISTS stage_results_{kind}_reference")
+        if version < 7:
+            for kind in ("base", "suggestion"):
+                connection.execute(f"DROP INDEX IF EXISTS stage_results_{kind}_reference")
         _create_tables(connection)
         if version < 5:
             _migrate_to_v5(connection, project)
@@ -766,32 +767,34 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             _migrate_summary_storage_to_v6(connection, project)
         elif version < 7:
             _migrate_summary_hashes_to_v7(connection, project)
-        for row in connection.execute(
-            "SELECT file_id, payload_json FROM adapter_states WHERE typeof(payload_json) = 'text'"
-        ).fetchall():
-            raw = row["payload_json"]
-            _load(raw)
-            connection.execute(
-                "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
-                (zlib.compress(raw.encode("utf-8")), row["file_id"]),
-            )
-        metadata_cache: dict[str, int] = {}
-        for table in ("stage_results", "terminology_scans"):
-            updates = []
-            for row in connection.execute(f"SELECT sequence, payload_json FROM {table}"):
-                value = _load(row["payload_json"])
-                if any(key in value for key in _REQUEST_METADATA_FIELDS):
-                    updates.append((_request_residual(connection, value, (), metadata_cache), row["sequence"]))
-                    if len(updates) == 500:
-                        connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
-                        updates.clear()
-            connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
-        for row in connection.execute("SELECT run_id, payload_json FROM runs"):
-            payload = _load(row["payload_json"])
-            if "terminology_modes" in payload:
-                connection.execute("UPDATE runs SET payload_json = ? WHERE run_id = ?",
-                                   (_run_residual(payload), row["run_id"]))
-        _refresh_segment_format_counts(connection)
+        if version < 7:
+            for row in connection.execute(
+                "SELECT file_id, payload_json FROM adapter_states WHERE typeof(payload_json) = 'text'"
+            ).fetchall():
+                raw = row["payload_json"]
+                _load(raw)
+                connection.execute(
+                    "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+                    (zlib.compress(raw.encode("utf-8")), row["file_id"]),
+                )
+            metadata_cache: dict[str, int] = {}
+            for table in ("stage_results", "terminology_scans"):
+                updates = []
+                for row in connection.execute(f"SELECT sequence, payload_json FROM {table}"):
+                    value = _load(row["payload_json"])
+                    if any(key in value for key in _REQUEST_METADATA_FIELDS):
+                        updates.append((_request_residual(connection, value, (), metadata_cache), row["sequence"]))
+                        if len(updates) == 500:
+                            connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
+                            updates.clear()
+                connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
+            for row in connection.execute("SELECT run_id, payload_json FROM runs"):
+                payload = _load(row["payload_json"])
+                if "terminology_modes" in payload:
+                    connection.execute("UPDATE runs SET payload_json = ? WHERE run_id = ?",
+                                       (_run_residual(payload), row["run_id"]))
+            _refresh_segment_format_counts(connection)
+        migrated_term_runs = _migrate_term_knowledge_to_v8(connection, project)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -802,6 +805,11 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         connection.rollback()
         raise
     try:
+        for run_id in migrated_term_runs:
+            manifest = project / "runs" / run_id / "manifest.json"
+            if manifest.is_file():
+                row = connection.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+                atomic_write_json(manifest, _hydrate_run(row, _project_id(connection)))
         if version < 6:
             project_id = _project_id(connection)
             for row in connection.execute(
@@ -810,9 +818,10 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
                 manifest = project / "runs" / str(row["run_id"]) / "manifest.json"
                 if manifest.is_file():
                     atomic_write_json(manifest, _hydrate_run(row, project_id))
-        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        connection.execute("VACUUM")
-        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if version < 7:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            connection.execute("VACUUM")
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     except (OSError, sqlite3.Error) as exc:
         raise StorageError(
             f"SQLite 已迁移，但快照整理或压缩失败：{project}；升级前备份位于 {backup_path}: {exc}"
@@ -1207,6 +1216,73 @@ def _summary_source_texts(
         result.update(connection.execute(
             f"SELECT digest, text FROM summary_source_texts WHERE digest IN ({','.join('?' for _ in batch)})", batch))
     return result
+
+
+def _migrate_term_knowledge_to_v8(connection: sqlite3.Connection, project: Path) -> list[str]:
+    """Convert scalar explanations in the schema upgrade transaction."""
+    from .term_knowledge import (
+        add_unsourced, empty_knowledge, entity_members, project_descriptions,
+        require_knowledge, save_items,
+    )
+
+    project_id = _project_id(connection)
+    records = {str(row["key"]): _hydrate_terms(row, project_id)
+               for row in connection.execute("SELECT key, payload_json FROM terms_state")}
+    library = records.get("terms")
+    if library is not None and "knowledge" in library:
+        require_knowledge(library)
+        return []
+    changed_runs = []
+    reason = "实体说明结构已升级，旧术语任务已结束，旧草案已作废，请新建 Run"
+    for row in connection.execute(
+        "SELECT * FROM runs WHERE stage IN ('terminology', 'terminology_decision') "
+        "AND (status = 'running' OR json_extract(payload_json, '$.decision_status') IN ('pending', 'generating'))"
+    ).fetchall():
+        run = _hydrate_run(row, project_id)
+        if run["status"] == "running":
+            run.update(status="interrupted", completed_at=utc_now())
+        if run.get("decision_status") in {"pending", "generating"}:
+            run.update(decision_status="discarded", discarded_at=utc_now())
+        run["error_message"] = reason
+        connection.execute("UPDATE runs SET status = ?, payload_json = ? WHERE run_id = ?",
+                           (run["status"], _run_residual(run), row["run_id"]))
+        changed_runs.append(str(row["run_id"]))
+    active_task = records.get("active_task")
+    if active_task and active_task.get("status") in {"active", "partial_published"}:
+        active_task.update(status="reset", updated_at=utc_now(), error_message=reason)
+        connection.execute("UPDATE terms_state SET payload_json = ? WHERE key = 'active_task'",
+                           (_residual(active_task, _TERMS_RESIDUAL_FIELDS),))
+    if library is None:
+        return changed_runs
+    overrides = records.get("overrides", {"overrides": []})
+    knowledge = empty_knowledge()
+    library["knowledge"] = knowledge
+    texts = {term["normalized"]: term.get("description", "") for term in library["terms"]}
+    for override in overrides["overrides"]:
+        if "description" in override:
+            texts[override["normalized"]] = override.pop("description")
+    refs = {owner: add_unsourced(knowledge, owner, text, "legacy")
+            for owner, text in texts.items() if text}
+    known = {key: {**fragment, "id": key, "source_range": None, "valid": True, "_positions": {}}
+             for key, fragment in knowledge["fragments"].items()}
+    for root, members in entity_members(library).items():
+        save_items(project, library, root, [
+            {"text": texts[key], "fragment_ids": [refs[key]]} for key in members if key in refs
+        ], all_evidence=known)
+    active = {term["normalized"] for term in library["terms"]}
+    for owner in refs.keys() - active:
+        archived = {**library, "terms": [*library["terms"], {"normalized": owner, "group_primary": None}]}
+        save_items(project, archived, owner, [{"text": texts[owner], "fragment_ids": [refs[owner]]}],
+                   all_evidence=known)
+    project_descriptions(project, library, all_evidence=known)
+    library["terms_revision"] += 1
+    connection.executemany(
+        "INSERT INTO terms_state(key, payload_json) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET payload_json = excluded.payload_json",
+        [(key, _residual(value, _TERMS_RESIDUAL_FIELDS))
+         for key, value in (("terms", library), ("overrides", overrides))],
+    )
+    return changed_runs
 
 
 def _migrate_summary_hashes_to_v7(connection: sqlite3.Connection, project: Path) -> None:

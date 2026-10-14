@@ -120,7 +120,6 @@ def test_items_validate_references_and_explicit_manual_items(tmp_path: Path) -> 
 
 
 def test_migration_preserves_old_explanations_without_fabricating_sources(tmp_path: Path) -> None:
-    from scripts.migrate_term_knowledge import migrate
     from app.sqlite_storage import read_json, write_json, database_path
     from app.term_library import load_terms
     project = make_project(tmp_path)
@@ -129,11 +128,15 @@ def test_migration_preserves_old_explanations_without_fabricating_sources(tmp_pa
     write_json(project, project / "terminology" / "overrides.json", record_header("terminology_overrides", "test",
                overrides=[{"normalized": "alpha", "description": "人工决定"},
                           {"normalized": "beta", "source": "Beta", "description": "已移除资料", "disabled": True}]))
-    with pytest.raises(UsageError, match="迁移"):
-        load_terms(project)
-    backup = migrate(project)
+    import sqlite3
+    from app import sqlite_storage
+    with sqlite3.connect(database_path(project)) as connection:
+        connection.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
+    sqlite_storage._SUPPORTED_CACHE.discard(database_path(project))
+    migrated = load_terms(project)
+    backup, = (project / "snapshots" / "storage_migrations").glob("*.sqlite")
     assert backup.is_file()
-    import sqlite3, json
+    import json
     with sqlite3.connect(backup) as connection:
         old = json.loads(connection.execute("SELECT payload_json FROM terms_state WHERE key='terms'").fetchone()[0])
     assert "knowledge" not in old
@@ -565,3 +568,119 @@ def test_reordered_reviewed_evidence_is_stale_even_when_not_cited(tmp_path: Path
     from app.project import reorder_project_files
     reorder_project_files(project, ["F0002", "F0001"])
     assert entity_view(project, data, "alpha")["status"] == "stale"
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_automatic_migration_ends_old_tasks_atomically_and_opens_silently(tmp_path, monkeypatch, fail):
+    import json
+    import sqlite3
+    from app import sqlite_storage, term_knowledge
+    from app.errors import StorageError
+    from app.sqlite_storage import database_path, read_json, write_json
+
+    project = make_project(tmp_path)
+    terms = record_header("terminology_library", "test", terms_revision=3, terms=[
+        {"source": "Alpha", "normalized": "alpha", "description": "组主说明", "group_primary": None},
+        {"source": "Ally", "normalized": "ally", "description": "成员说明", "group_primary": "alpha"},
+    ])
+    write_json(project, project / "terminology/terms.json", terms)
+    write_json(project, project / "terminology/active_task.json",
+               record_header("terminology_task", "test", status="partial_published"))
+    runs = [("old-scan", "terminology", "running", None),
+            ("old-draft", "terminology_decision", "completed", "pending"),
+            ("old-generating", "terminology_decision", "running", "generating"),
+            ("translation", "translation", "running", None)]
+    for run_id, stage, status, decision in runs:
+        value = record_header("run", "test", run_id=run_id, stage=stage, status=status)
+        if decision:
+            value["decision_status"] = decision
+        write_json(project, project / "runs" / run_id / "manifest.json", value)
+    with sqlite3.connect(database_path(project)) as db:
+        db.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
+        before_terms = db.execute("SELECT key,payload_json FROM terms_state ORDER BY key").fetchall()
+        before_runs = db.execute("SELECT run_id,status,payload_json FROM runs ORDER BY run_id").fetchall()
+    sqlite_storage._SUPPORTED_CACHE.discard(database_path(project))
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Migration must not read scan evidence or rebuild Segment metadata")
+
+    monkeypatch.setattr(term_knowledge, "evidence", unexpected)
+    monkeypatch.setattr(sqlite_storage, "_refresh_segment_format_counts", unexpected)
+    if fail:
+        def fail_projection(*args, **kwargs):
+            raise StorageError("migration probe failed")
+        monkeypatch.setattr(term_knowledge, "project_descriptions", fail_projection)
+        with pytest.raises(StorageError, match="migration probe failed"):
+            sqlite_storage.ensure_supported(project)
+        with sqlite3.connect(database_path(project)) as db:
+            assert db.execute("SELECT key,payload_json FROM terms_state ORDER BY key").fetchall() == before_terms
+            assert db.execute("SELECT run_id,status,payload_json FROM runs ORDER BY run_id").fetchall() == before_runs
+            assert db.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+        assert database_path(project) not in sqlite_storage._SUPPORTED_CACHE
+    else:
+        from fastapi.testclient import TestClient
+        from app.web import create_app
+        client = TestClient(create_app(projects_root=project.parent))
+        response = client.post("/api/v1/projects/open", json={"path": str(project)})
+        assert response.status_code == 200, response.text
+        assert response.json()["warnings"] == []
+        assert read_json(project, project / "terminology/active_task.json")["status"] == "reset"
+        for run_id, stage, status, decision in runs:
+            run = read_json(project, project / "runs" / run_id / "manifest.json")
+            assert run["status"] == ("interrupted" if status == "running" and stage != "translation" else status)
+            if decision:
+                assert run["decision_status"] == "discarded"
+            if stage != "translation":
+                assert json.loads((project / "runs" / run_id / "manifest.json").read_text()) == run
+        migrated = read_json(project, project / "terminology/terms.json")
+        assert migrated["terms_revision"] == 4
+        assert len(migrated["knowledge"]["entities"]) == 1
+        assert {item["text"] for item in migrated["knowledge"]["entities"]["alpha"]["items"]} == {"组主说明", "成员说明"}
+        assert all("description_items" not in term for term in migrated["terms"])
+        assert client.post("/api/v1/projects/open", json={"path": str(project)}).status_code == 200
+        assert read_json(project, project / "terminology/terms.json") == migrated
+    backup, = (project / "snapshots/storage_migrations").glob("*.sqlite")
+    with sqlite3.connect(backup) as db:
+        assert db.execute("SELECT key,payload_json FROM terms_state ORDER BY key").fetchall() == before_terms
+        assert db.execute("SELECT run_id,status,payload_json FROM runs ORDER BY run_id").fetchall() == before_runs
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_storage_upgrade_preserves_current_knowledge_and_pending_tasks(tmp_path):
+    import sqlite3
+    from app import sqlite_storage
+    from app.sqlite_storage import database_path, read_json, write_json
+
+    project = make_project(tmp_path)
+    value = record_header("terminology_library", "test", **library())
+    active = record_header("terminology_task", "test", status="active")
+    run = record_header("run", "test", run_id="new-draft", stage="terminology_decision",
+                        status="running", decision_status="generating")
+    write_json(project, project / "terminology/terms.json", value)
+    write_json(project, project / "terminology/active_task.json", active)
+    write_json(project, project / "runs/new-draft/manifest.json", run)
+    before = [read_json(project, project / path) for path in
+              ("terminology/terms.json", "terminology/active_task.json", "runs/new-draft/manifest.json")]
+    with sqlite3.connect(database_path(project)) as db:
+        db.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
+    sqlite_storage._SUPPORTED_CACHE.discard(database_path(project))
+    sqlite_storage.ensure_supported(project)
+    assert [read_json(project, project / path) for path in
+            ("terminology/terms.json", "terminology/active_task.json", "runs/new-draft/manifest.json")] == before
+
+
+
+def test_automatic_upgrade_ends_unpublished_legacy_scan(tmp_path):
+    import sqlite3
+    from app import sqlite_storage
+    from app.sqlite_storage import database_path, read_json, write_json
+
+    project = make_project(tmp_path)
+    write_json(project, project / "terminology/active_task.json",
+               record_header("terminology_task", "test", status="active"))
+    with sqlite3.connect(database_path(project)) as db:
+        db.execute("DELETE FROM terms_state WHERE key='terms'")
+        db.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
+    sqlite_storage._SUPPORTED_CACHE.discard(database_path(project))
+    sqlite_storage.ensure_supported(project)
+    assert read_json(project, project / "terminology/active_task.json")["status"] == "reset"

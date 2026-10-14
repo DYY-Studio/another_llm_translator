@@ -113,7 +113,7 @@ def test_v6_migration_shares_request_metadata_without_changing_records(tmp_path:
     assert read_jsonl(project, project / "stages" / "translation.jsonl") == [stage]
     assert read_jsonl(project, project / "terminology" / "scans.jsonl") == [scan]
     with sqlite3.connect(project / "project.sqlite") as database:
-        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
         for table in ("stage_results", "terminology_scans"):
             payload = json.loads(database.execute(f"SELECT payload_json FROM {table}").fetchone()[0])
             assert payload["_request_meta"] > 0
@@ -208,7 +208,7 @@ def test_v6_adapter_state_compresses_on_open_preserving_history(
         packed = database.execute("SELECT payload_json FROM adapter_states").fetchone()[0]
         assert isinstance(packed, bytes)
         assert zlib.decompress(packed).decode("utf-8") == raw
-        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
     assert read_adapter_state(project, "F0001") == expected
     assert sqlite_storage._take_migration_backup_notice(project) is None
     assert ensure_supported(project) is None
@@ -2323,7 +2323,7 @@ def test_v6_upgrade_groups_modes_and_replaces_full_reference_indexes(tmp_path: P
         indexes = {row[1]: row[4] for row in database.execute("PRAGMA index_list(stage_results)")}
         assert indexes["stage_results_base_reference"] == indexes["stage_results_suggestion_reference"] == 1
         assert "terminology_modes" not in json.loads(database.execute("SELECT payload_json FROM runs").fetchone()[0])
-        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
         plans = [row[3] for row in database.execute("EXPLAIN QUERY PLAN SELECT record_id FROM stage_results WHERE json_extract(payload_json,'$.base_result_id') IN (?) OR json_extract(payload_json,'$.suggestion_result_id') IN (?)", ("parent", "parent"))]
         assert any("stage_results_base_reference" in plan for plan in plans)
         assert any("stage_results_suggestion_reference" in plan for plan in plans)

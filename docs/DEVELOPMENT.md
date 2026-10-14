@@ -328,24 +328,16 @@ pytest 探针不替代真实 PBS 源归档探针或 packaged `.app` 外部插件
 
 数据库升级前备份位于项目的 `snapshots/storage_migrations/`。SQLite v5→v6 将概括源文本集中
 去重，精简摘要依赖和 Run 范围副本，并在事务提交后压缩数据库。v5 项目不会重新执行 EPUB
-运行协议升级，也不会改变已有 Run 的状态。
+运行协议升级；概括存储转换不改变 Run 状态。
 SQLite v6→v7 省略概括切片中相同的文本哈希，读取时恢复完整字段，保留不同的原文、模型输入及完整段落哈希。
 v7 的 Adapter 状态以 zlib 压缩的 UTF-8 JSON BLOB 保存，业务读写接口保持完整 JSON 对象。
 v6→v7 将阶段结果和术语扫描中完全相同的 `run_id`、`request_id`、`created_at`、`stage_fingerprint` 组合集中保存到 `request_metadata`，记录保存 `_request_meta` 引用，读取时恢复完整字段及缺失/null 的区别。删除最后一条引用记录时，SQLite 触发器通过非空引用索引回收对应元数据。
 迁移按500条分批转换，在同一个升级事务中提交；范围读取只加载记录引用的共享元数据，并保持一致的读取快照。
 v7 的阶段父引用索引仅保存非空引用；Run 中相同的 `terminology_modes` 按模式值分组保存为 `_terminology_mode_groups`，业务读取和 manifest 快照恢复完整的 Segment→模式映射。
 
+SQLite v7→v8 在打开项目时自动将旧术语说明转换为无来源实体说明，保留人工覆盖和已移除术语的说明，不从旧候选推断引用。旧活动扫描和运行中的术语 Run 会结束，待处理旧草案作废；已使用实体说明结构的项目保留现有任务及草案。转换与版本更新在同一事务中提交，失败整体回滚。此升级不重复压缩历史阶段记录，也不执行 VACUUM。
+
 使用项目临时副本验证打开时升级，比较迁移前后的摘要 ID、源范围、历史 Markdown 导出及过期判断，
 检查 `PRAGMA integrity_check`、文件体积与升级前备份；迁移失败应保留旧 schema 和记录。
 若提交后快照整理或压缩失败，错误会说明数据库已升级及备份位置。
 存储回归使用 `python -m pytest -q tests/test_sqlite_storage.py tests/test_summary_provenance.py`。
-
-## 一次性术语说明迁移
-
-在旧版中先完成或结束活动扫描和运行中的术语 Run，处理旧决策草案，然后在当前源码目录使用项目虚拟环境运行：
-
-```bash
-.venv/bin/python scripts/migrate_term_knowledge.py /absolute/path/to/project
-```
-
-脚本在项目写锁内先执行 SQLite 在线备份，保存新结构并输出备份位置。未满足前置条件或重复迁移会明确失败。产品语义见[实体说明](MINIMAL.md#实体说明实验)。
