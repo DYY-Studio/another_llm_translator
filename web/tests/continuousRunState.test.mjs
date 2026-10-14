@@ -59,7 +59,7 @@ test("continuous payload forces middle decision review and explicit apply", () =
   );
 });
 
-test("terminal decision keeps optional final review and does not authorize apply", () => {
+test("terminal decision keeps optional final review and automatic application", () => {
   assert.deepEqual(
     continuousPayload(["terminology", "terminology_decision"], {
       finalReview: true,
@@ -79,7 +79,7 @@ test("terminal decision keeps optional final review and does not authorize apply
       screening_enabled: false,
       stages: ["terminology", "terminology_decision"],
       final_review: true,
-      apply_terminology_decision: false,
+      apply_terminology_decision: true,
       force: true,
       reuse_mixed_fingerprints: false,
       run_actions: {},
@@ -166,7 +166,7 @@ test("repetition review is optional and applies only with explicit authorization
   assert.equal(enabled.exclude_punctuation_only, false);
   assert.equal(enabled.screening_enabled, true);
   const terminal = continuousPayload(["translation"], { ...defaults, includeRepetitionConsistency: true, applyRepetitionConsistency: true });
-  assert.equal(terminal.apply_repetition_consistency, false);
+  assert.equal(terminal.apply_repetition_consistency, true);
   const disabled = continuousPayload(["translation"], { ...defaults, applyRepetitionConsistency: true });
   assert.equal(disabled.include_repetition_consistency, false);
   assert.equal(disabled.apply_repetition_consistency, false);

@@ -79,11 +79,11 @@ export function ContinuousRunDialog({
   for (const stage of stages) params.append("stages", stage);
   params.set("language", language);
   params.set("include_repetition_consistency", String(repetitionEnabled));
-  params.set("apply_repetition_consistency", String(repetitionEnabled && stages.includes("proofreading") && applyRepetitionConsistency));
+  params.set("apply_repetition_consistency", String(repetitionEnabled && applyRepetitionConsistency));
   params.set("exclude_punctuation_only", String(excludePunctuationOnly));
   params.set("screening_enabled", String(screeningEnabled));
   params.set("final_review", String(hasDecision && (terminalDecision ? finalReview : true)));
-  params.set("apply_terminology_decision", String(decisionInMiddle && applyTerminologyDecision));
+  params.set("apply_terminology_decision", String(hasDecision && applyTerminologyDecision));
   params.set("include_draft_translation", String(includeDraftTranslation));
   params.set("include_summaries", String(includeSummaries));
   params.set("aggregate_full_summaries", String(aggregateFullSummaries));
@@ -371,12 +371,10 @@ export function ContinuousRunDialog({
                   <span>{translate("continuousRun.terminalFinalReview", language)}</span>
                 </label>
               )}
-              {decisionInMiddle && (
-                <label className="check-row">
-                  <input type="checkbox" checked={applyTerminologyDecision} onChange={(event) => setApplyTerminologyDecision(event.target.checked)} disabled={submitting} />
-                  <span>{translate(includeDraftTranslation ? "continuousRun.applyDecisionAfterDraft" : "continuousRun.applyDecision", language)}</span>
-                </label>
-              )}
+              <label className="check-row">
+                <input type="checkbox" checked={applyTerminologyDecision} onChange={(event) => setApplyTerminologyDecision(event.target.checked)} disabled={submitting} />
+                <span>{translate("continuousRun.applyDecision", language)}</span>
+              </label>
             </section>
           )}
 
@@ -390,10 +388,10 @@ export function ContinuousRunDialog({
               <input type="checkbox" checked={screeningEnabled} disabled={repetitionLocked} onChange={(event) => setScreeningEnabled(event.target.checked)} />
               <span>{translate("repetition.screeningEnabled", language)}</span>
             </label>
-            {stages.includes("proofreading") && <label className="check-row">
+            <label className="check-row">
               <input type="checkbox" checked={applyRepetitionConsistency} disabled={submitting} onChange={(event) => setApplyRepetitionConsistency(event.target.checked)} />
               <span>{translate("continuousRun.applyRepetition", language)}</span>
-            </label>}
+            </label>
           </section>}
 
           {stages.includes("proofreading") && stages.at(-1) === "polishing" && (

@@ -1172,12 +1172,12 @@ async def run_continuous(
                     needs_review = sum(len(group["uncertain"]) for group in draft["groups"])
                     summary = {**summary, "needs_review": needs_review}
                     step.update(_continuous_step_summary(stage, summary, run_id=summary["run_id"]))
-                    if needs_review and normalized[-1] != stage:
+                    if needs_review and apply_repetition_consistency:
                         step["status"] = "waiting_review"
                         summaries[stage] = dict(summary)
                         emit(stage, "waiting_review", step)
                         break
-                    if normalized[-1] != stage:
+                    if apply_repetition_consistency:
                         applied = await apply_draft_locked(project, confirm=True, run_id=summary["run_id"])
                         summary = {**summary, "applied": applied}
                         step["summary"] = dict(summary)
@@ -1224,13 +1224,13 @@ async def run_continuous(
                         final_review=decision_final_review,
                     )
                     if (
-                        normalized[-1] != "terminology_decision"
+                        apply_terminology_decision
                         and int(summary.get("needs_review", 0)) > 0
                     ):
                         raise UsageError(
                             "自动术语决策仍有人工待办，无法自动应用"
                         )
-                    if normalized[-1] != "terminology_decision":
+                    if apply_terminology_decision:
                         _ensure_downstream_fingerprints_after_decision(
                             project,
                             tuple(value for value in normalized if value != "content_summary" and not (value == "translation" and include_draft_translation)),

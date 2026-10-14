@@ -126,8 +126,6 @@ export function SegmentWorkspace({
   pendingJump,
   onJumpConsumed,
   onFindTerm,
-  openRepetition,
-  onRepetitionOpened,
 }: {
   project: string;
   projectId: string;
@@ -139,8 +137,6 @@ export function SegmentWorkspace({
   pendingJump?: { search: string; segmentId: string } | null;
   onJumpConsumed?: () => void;
   onFindTerm: (source: string) => void;
-  openRepetition?: boolean;
-  onRepetitionOpened?: () => void;
 }) {
   const statusLabels: Record<string, string> = Object.fromEntries(
     (stage === "translation"
@@ -150,12 +146,6 @@ export function SegmentWorkspace({
   );
   const selection = useClassicSelection();
   const [repetitionOpen, setRepetitionOpen] = useState(false);
-  useEffect(() => {
-    if (openRepetition && stage === "translation") {
-      setRepetitionOpen(true);
-      onRepetitionOpened?.();
-    }
-  }, [openRepetition, stage, onRepetitionOpened]);
   const [boundary, setBoundary] = useState("all");
   const [status, setStatus] = useState("all");
   const [search, setSearch] = useState("");
@@ -781,8 +771,6 @@ function SegmentTermRow({ term, role, language, onFindTerm }: {
   role?: "primary" | "member";
   language: Language;
   onFindTerm: (source: string) => void;
-  openRepetition?: boolean;
-  onRepetitionOpened?: () => void;
 }) {
   return (
     <button className="segment-term" type="button" aria-label={term.source} onClick={() => onFindTerm(term.source)}>

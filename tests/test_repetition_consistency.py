@@ -1355,7 +1355,8 @@ async def test_continuous_repetition_checks_resume_evidence_after_translation(tm
     assert repetition_resume(project, repetition_plan(project, Scope()))["run_id"] == old["run_id"]
 
 @pytest.mark.asyncio
-async def test_continuous_terminal_repetition_generates_draft_without_apply_authorization(tmp_path, monkeypatch):
+@pytest.mark.parametrize("auto_apply", [False, True])
+async def test_continuous_terminal_repetition_optional_application(tmp_path, monkeypatch, auto_apply):
     from app.web_tasks import WebTaskManager
     from app.repetition_consistency import current_draft, run_repetition
     from app.web_continuous import inspect_continuous
@@ -1372,16 +1373,18 @@ async def test_continuous_terminal_repetition_generates_draft_without_apply_auth
         pytest.fail("terminal repetition review must not apply its draft")
     monkeypatch.setattr("app.web_continuous.run_translation", translate)
     monkeypatch.setattr("app.web_continuous.run_repetition", repetition)
-    monkeypatch.setattr("app.web_continuous.apply_draft_locked", forbidden_apply)
+    if not auto_apply:
+        monkeypatch.setattr("app.web_continuous.apply_draft_locked", forbidden_apply)
     manager = WebTaskManager()
     task = await manager.start(project, "continuous", scope=Scope(), run_action=None,
-        reuse_mixed_fingerprints=True, continuous_stages=("translation",), include_repetition_consistency=True)
+        reuse_mixed_fingerprints=True, continuous_stages=("translation",), include_repetition_consistency=True,
+        apply_repetition_consistency=auto_apply)
     await manager.tasks[task["task_id"]].asyncio_task
     view = manager.get(task["task_id"])
     assert view["status"] == "completed", view.get("error")
     assert view["steps"][-1]["status"] == "completed"
-    assert current_draft(project) is not None
-    assert "applied" not in view["steps"][-1]["summary"]
+    assert (current_draft(project) is None) is auto_apply
+    assert ("applied" in view["steps"][-1]["summary"]) is auto_apply
 
 @pytest.mark.asyncio
 async def test_empty_application_group_does_not_block_other_groups_when_stale(tmp_path, monkeypatch):
