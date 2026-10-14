@@ -139,7 +139,7 @@
 .repetition-group .repetition-apply-toggle { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .repetition-result { min-width: 0; padding: 4px 10px; border-left: 3px solid var(--row-border); }
 .repetition-result.is-applied { border-left-color: var(--accent); background: var(--accent-soft); }
-.repetition-result.is-applied > strong { color: var(--accent-text); }
+.repetition-result.is-applied > strong, .repetition-result.is-applied > h4 { color: var(--accent-text); }
 .repetition-occurrences { display: grid; align-content: start; gap: 8px; max-height: min(640px, 65vh); overflow: auto; }
 .repetition-occurrences > .term-decision-proposal { padding: 10px 14px; gap: 8px; }
 .repetition-occurrences .decision-state-pair .repetition-text { margin-block: 4px 0; }

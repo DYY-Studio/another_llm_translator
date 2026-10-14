@@ -4,8 +4,8 @@ import type { TermDecisionState } from "../types";
 import { compactSegmentReferences } from "../segmentReferences";
 import { TermDecisionChanges } from "./TermDecisionChanges";
 
-function SourceBlock({ values, title }: {values: string[]; title?: string}) {
-  return <section className="overview-cell">{title && <h4>{title}</h4>}{values.map((value, index) => <p key={index}>{value}</p>)}</section>;
+function SourceBlock({ values, title, className = "" }: {values: string[]; title?: string; className?: string}) {
+  return <section className={`overview-cell ${className}`}>{title && <h4>{title}</h4>}{values.map((value, index) => <p key={index}>{value}</p>)}</section>;
 }
 function termState(item: OverviewRecord): TermDecisionState {
   return {normalized: text(item.normalized), source: text(item.source), category: text(item.category) || null,
@@ -62,7 +62,7 @@ export function RequestOverview({ snapshot, language, truncated = false }: {snap
         <span className="overview-row-number">{item.id}</span>
         <div className="overview-cell"><small>{item.file} / {item.filename} / {item.part} / Position {item.position}</small>
           <div className="overview-pair"><SourceBlock title={t("before")} values={[item.current]} />
-            <SourceBlock title={item.result !== null ? t("after") : item.uncertain ? t("needsReview") : item.kept ? t("keep") : translate("overview.noResult", language)} values={[item.result ?? item.current]} /></div>
+            <SourceBlock className={`repetition-result${item.result !== null ? " is-applied" : ""}`} title={item.result !== null ? t("after") : item.uncertain ? t("needsReview") : item.kept ? t("keep") : translate("overview.noResult", language)} values={[item.result ?? item.current]} /></div>
           <details className="overview-repetition-context"><summary>{t("context")}</summary>
             <SourceBlock title={t("previousContext")} values={item.previous} />
             <div className="overview-repetition-source"><SourceBlock title={t("source")} values={[value.source]} /></div>
