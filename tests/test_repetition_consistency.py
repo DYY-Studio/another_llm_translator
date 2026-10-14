@@ -668,12 +668,16 @@ def test_completed_checkpoint_resume_needs_no_requests_and_keeps_usage(tmp_path,
     info = repetition.repetition_resume(project, repetition.repetition_plan(project, Scope(), screening_enabled=True))
     assert info["completed"] == 3 and info["estimated_requests"] == 0
     manifest_path = project / "runs" / info["run_id"] / "manifest.json"
-    previous_usage = read_json(project, manifest_path)["usage"]
+    previous = read_json(project, manifest_path)
+    previous_usage = previous["usage"]
     monkeypatch.setattr(repetition, "atomic_write_text", original_write)
     requests = []
     result = asyncio.run(run("resume", requests))
     assert requests == []
     assert result["usage"] == previous_usage
+    current = read_json(project, manifest_path)
+    assert current["usage_invocation_count"] == previous["usage_invocation_count"]
+    assert current.get("key_audits") == previous.get("key_audits")
 
 
 def test_web_resume_options_and_managed_start(tmp_path, monkeypatch):
@@ -1070,3 +1074,86 @@ def test_cancelled_split_keeps_completed_child_for_resume(tmp_path, monkeypatch)
     assert asyncio.run(resume())["completed"] == 6
     assert len(requests) == 1
     assert [g["id"] for g in json.loads(requests[0]["messages"][-1]["content"])["repetitions"]] == ["2"]
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_run_collects_warnings_usage_audit_and_interruption(tmp_path, monkeypatch, invalid):
+    from app import repetition_consistency as repetition
+    project = repetition_project(tmp_path, monkeypatch)
+    monkeypatch.setattr(repetition, "load_terms", lambda _: character_library(project, status="pending"))
+    path = project / "config.toml"
+    path.write_text(path.read_text().replace('empty_truncated_mode = "split"', 'empty_truncated_mode = "retry"'))
+    requests = []
+    responder = transport(invalid=invalid, requests=requests)
+    def respond(request):
+        response = responder.handle_request(request)
+        if len(requests) == 1:
+            body = response.json()
+            body["choices"][0].update(message={"content": ""}, finish_reason="length")
+            return httpx.Response(200, json=body)
+        return response
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await repetition.run_repetition(project, Scope(), http_client=client)
+    if invalid:
+        with pytest.raises(ExternalError):
+            asyncio.run(run())
+        info = repetition.repetition_resume(project, repetition.repetition_plan(project, Scope()))
+        run_id = info["run_id"]
+    else:
+        result = asyncio.run(run())
+        run_id = result["run_id"]
+    manifest = read_json(project, project / "runs" / run_id / "manifest.json")
+    assert any("待聚合" in value for value in manifest["warnings"])
+    assert any("原样重试" in value for value in manifest["warnings"])
+    assert len(manifest["warnings"]) == len(set(manifest["warnings"]))
+    assert manifest["key_audits"][0]["execution_index"] == 1
+    assert manifest["usage"]["available"] and manifest["usage"]["total_tokens"] == 30 * len(requests)
+    assert manifest["usage_invocation_count"] == 1 and manifest["failed_segment_count"] == 0
+    if invalid:
+        assert manifest["status"] == "running" and manifest["completed_at"] is None
+        assert manifest["last_interruption"]["reason"] == "format_error"
+        assert manifest["last_interruption"]["request_id"].startswith("REQ-")
+    else:
+        assert manifest["warnings"] == result["warnings"]
+
+
+def test_preflight_reports_execution_change_and_remaining_budget(tmp_path, monkeypatch):
+    from app.repetition_consistency import run_repetition
+    from app.web import create_app
+    from fastapi.testclient import TestClient
+    project = repetition_project(tmp_path, monkeypatch)
+    async def run():
+        async with httpx.AsyncClient(transport=transport(invalid=True)) as client:
+            await run_repetition(project, Scope(), http_client=client)
+    with pytest.raises(ExternalError):
+        asyncio.run(run())
+    path = project / "prompts" / "repetition_consistency.zh-CN.middle.txt"
+    path.write_text(path.read_text() + "\n修改说明")
+    with TestClient(create_app(projects_root=project.parent, app_root=config.APP_ROOT)) as client:
+        value = client.get(f"/api/v1/projects/{project.name}/repetition/options").json()
+    assert value["run_action"] == "resume"
+    assert value["running_run"]["resume_compatible"] and value["running_run"]["execution_changed"]
+    assert value["estimated_requests"] == 1
+
+
+def test_failed_publication_transition_does_not_double_count_usage(tmp_path, monkeypatch):
+    from app import repetition_consistency as repetition
+    from app.errors import StorageError
+    project = repetition_project(tmp_path, monkeypatch)
+    original_write = repetition.write_repetition_state
+    def fail_transition(*args, **kwargs):
+        raise StorageError("transition probe")
+    monkeypatch.setattr(repetition, "write_repetition_state", fail_transition)
+    async def run(action=None):
+        async with httpx.AsyncClient(transport=transport()) as client:
+            return await repetition.run_repetition(project, Scope(), run_action=action, http_client=client)
+    with pytest.raises(StorageError, match="transition probe"):
+        asyncio.run(run())
+    info = repetition.repetition_resume(project, repetition.repetition_plan(project, Scope()))
+    manifest = read_json(project, project / "runs" / info["run_id"] / "manifest.json")
+    assert manifest["usage"]["total_tokens"] == 30 and manifest["usage_invocation_count"] == 1
+    assert len(manifest["key_audits"]) == 1
+    monkeypatch.setattr(repetition, "write_repetition_state", original_write)
+    result = asyncio.run(run("resume"))
+    assert result["usage"] == manifest["usage"]

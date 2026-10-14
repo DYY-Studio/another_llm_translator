@@ -67,6 +67,7 @@ def repetition_resume(project: Path, plan: dict[str, Any]) -> dict[str, Any] | N
             "resume_compatible": compatible, "resume_incompatibility_reason": reason,
             "completed": completed, "completed_steps": sum((int("screening" in c) if plan["screening_enabled"] else 0) + int("result" in c) for c in checkpoints.values()),
             "estimated_requests": requests, "estimated_input_tokens": tokens,
+            "over_budget_groups": sum(group_over_budget(g, plan, checkpoints.get(g["id"], {})) for g in plan["groups"]),
             "total_steps": len(plan["groups"]) * (2 if plan["screening_enabled"] else 1)}
 
 
@@ -104,6 +105,8 @@ def load_checkpoints(run_dir: Path, plan: dict[str, Any]) -> dict[str, Any]:
             elif index is not None:
                 raise StorageError("重复译文检查点执行来源无效")
         if "result" in value and value["screening"] != "skip" and value["comparison_execution_index"] is None:
+            if value["result"] != {"proposals": [], "keep": [], "uncertain": [o["id"] for o in group["occurrences"]]}:
+                raise StorageError("重复译文检查点缺少比较执行来源")
             if value["screening_execution_index"] is not None:
                 result[group["id"]] = {key: value[key] for key in fields}
         else:
@@ -432,25 +435,38 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
             "terms_revision": plan["terms_revision"], "terms": plan["terms"],
             "groups": {g["id"]: {o["id"]: o["terms"] for o in g["occurrences"]} for g in plan["groups"]},
         }, ensure_ascii=False, separators=(",", ":")) + "\n")
-    llm_usage: dict[str, Any] | None = None
-    model_invoked = False
+    active_llm: LLMClient | None = None
+    usage_recorded = False
     completed = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
     if on_progress:
         on_progress(completed, 0, total)
-    def record_usage(value):
-        nonlocal llm_usage
-        llm_usage = value
-        if on_usage:
-            on_usage(llm_usage)
     decision = DecisionClient(plan["decision_preset"], retry=config["retry"], project_id=metadata["project_id"],
                               run_id=run_id, stage=STAGE, debug_directory=run_dir / "debug") if plan["screening_enabled"] else None
     limiter = limiter or SlidingWindowLimiter(config["execution"]["requests_per_minute"], config["execution"]["input_tokens_per_minute"])
+    def finalize_execution(status, extra_warnings=()):
+        nonlocal usage_recorded
+        manifest = read_json(project, run_dir / "manifest.json")
+        warnings = list(dict.fromkeys([*manifest.get("warnings", []), *run_warnings, *plan["warnings"],
+            *(active_llm.warnings if active_llm else []), *extra_warnings]))
+        parts = []
+        if active_llm is not None and active_llm.send_count:
+            parts.append(active_llm.usage_summary() or unavailable_usage())
+        if decision is not None and decision.records:
+            parts.append(decision.usage_summary() or unavailable_usage())
+        usage = combine_usage(*parts) if len(parts) == 2 else parts[0] if parts else unavailable_usage()
+        key_audit = active_llm.key_audit_summary(execution_index=continuation_index + 1) if not usage_recorded and active_llm is not None and active_llm._api_keys is not None and active_llm.send_count else None
+        usage = finalize_run(project, run_dir, status=status, completed=completed, failed=0,
+            usage=usage, usage_invoked=bool(parts) and not usage_recorded, warnings=warnings, key_audit=key_audit)
+        usage_recorded = True
+        return usage, warnings
+
     try:
         async with httpx.AsyncClient(proxy=plan["decision_preset"]["proxy_url"] or None) if decision and http_client is None else _borrow_client(http_client) as decision_http:
             if decision:
                 decision.http_client = decision_http
             async with LLMClient(config, limiter, run_dir=run_dir, project_id=metadata["project_id"],
-                                 run_id=run_id, stage=STAGE, client=http_client, on_usage=record_usage) as llm:
+                                 run_id=run_id, stage=STAGE, client=http_client, on_usage=on_usage) as llm:
+                active_llm = llm
                 groups = [dict(group) for group in plan["groups"]]
                 def save_result(group, result, *, comparison=False):
                     nonlocal completed
@@ -465,7 +481,6 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                         on_progress(completed, 0, total)
 
                 async def screen_group(group):
-                    nonlocal model_invoked
                     saved = dict(checkpoints.get(group["id"], {}))
                     if "result" in saved:
                         group.update(screening=saved["screening"], confidence=saved.get("confidence"), over_budget=False, **saved["result"])
@@ -476,8 +491,6 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                         save_result(group, {"proposals": [], "keep": [], "uncertain": [o["id"] for o in group["occurrences"]]})
                         return None
                     if "screening" not in saved:
-                        if decision:
-                            model_invoked = True
                         answer = (await decision.choose(screening_payload(group), [screen]))["value"] if decision else None
                         saved.update(screening=("refusal" if answer.refused else answer.choice) if answer else "disabled",
                                      confidence=answer.confidence if answer else None, screening_execution_index=continuation_index + 1 if answer else None)
@@ -491,11 +504,9 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                     return group
 
                 async def compare_batch(batch, parent_request_id=None):
-                    nonlocal model_invoked
                     pending, estimated = batch
                     for attempt in range(config["retry"]["format_max_attempts"] + 1):
                         messages = comparison_messages(pending, plan)
-                        model_invoked = True
                         if attempt:
                             estimated = estimate_messages(messages, config["execution"]["token_safety_factor"])
                         try:
@@ -526,7 +537,9 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                         if diagnostics is not None:
                             diagnostics.fail_request(request_id, error)
                         if attempt >= config["retry"]["format_max_attempts"]:
-                            raise ExternalError(error)
+                            failure = ExternalError(error)
+                            failure.params = {"reason": "format_error", "request_id": request_id}
+                            raise failure
                         llm.logger.warning("format correction request=%s attempt=%d error=%s", request_id, attempt + 1, error)
                         if diagnostics is not None:
                             diagnostics.retried(request_id)
@@ -543,8 +556,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                 occurrence.pop("terms")
         draft = {"run_id": run_id, "groups": groups, "evidence": plan["evidence"], "sources": plan["sources"], "scope": {"only_file": scope.only_file}, "created_at": utc_now()}
         atomic_write_text(draft_path(project, run_id), json.dumps(draft, ensure_ascii=False, separators=(",", ":")) + "\n")
-        usage = combine_usage(llm_usage, (decision.usage_summary() if decision else None)) if (decision and decision.records) or llm_usage else unavailable_usage()
-        usage = finalize_run(project, run_dir, status="completed", completed=total, failed=0, usage=usage, usage_invoked=not resume_id or model_invoked)
+        usage, warnings = finalize_execution("completed")
         manifest = read_json(project, run_dir / "manifest.json")
         manifest.pop("last_interruption", None)
         manifest["draft_status"] = "pending"
@@ -552,18 +564,20 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
         if old:
             old["draft_status"] = "replaced"
             manifests.append(old)
-        warnings = [*run_warnings, *plan["warnings"], *write_repetition_state(project, records=[], manifests=manifests)]
+        warnings = list(dict.fromkeys([*warnings, *write_repetition_state(project, records=[], manifests=manifests)]))
         return {"excluded_punctuation_groups": plan["excluded_punctuation_groups"], "stage": STAGE, "run_id": run_id, "selected": total, "completed": total,
                 "failed": 0, "pending": 0, "usage": usage, "warnings": warnings,
                 "proposal_count": sum(len(g["proposals"]) for g in groups)}
     except BaseException as exc:
-        finalize_run(project, run_dir, status="running", warnings=["执行已取消，可续作" if isinstance(exc, asyncio.CancelledError) else str(exc)],
-                     completed=completed, failed=total - completed, usage=combine_usage(llm_usage, (decision.usage_summary() if decision else None)), usage_invoked=not resume_id or model_invoked)
+        finalize_execution("running", ["执行已取消，可续作" if isinstance(exc, asyncio.CancelledError) else str(exc)])
         manifest = read_json(project, run_dir / "manifest.json")
         manifest.update(completed_at=None, last_interruption={"at": utc_now(), "error_code": getattr(exc, "code", "cancelled" if isinstance(exc, asyncio.CancelledError) else "internal_error"),
-            "reason": "cancelled" if isinstance(exc, asyncio.CancelledError) else str(exc),
+            "reason": "cancelled" if isinstance(exc, asyncio.CancelledError) else getattr(exc, "params", {}).get("reason", str(exc)),
             "completed_steps": sum((int("screening" in c) if plan["screening_enabled"] else 0) + int("result" in c) for c in checkpoints.values()),
             "total_steps": len(plan["groups"]) * (2 if plan["screening_enabled"] else 1)})
+        request_id = getattr(exc, "request_id", None) or getattr(exc, "params", {}).get("request_id")
+        if request_id:
+            manifest["last_interruption"]["request_id"] = request_id
         write_json(project, run_dir / "manifest.json", manifest)
         raise
 

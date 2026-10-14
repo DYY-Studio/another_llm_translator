@@ -52,6 +52,7 @@ function UnfinishedRunChoice({ run, action, onChange, decisionMode = false, sele
                 {run.resume_incompatibility_reason}
               </div>
             )}
+            {run.resume_compatible !== false && action === "resume" && run.execution_changed && <div className="warning-banner run-warning">{translate("runDialog.resumeChangedHint", language)}</div>}
             <label className="radio-option decision-option">
               <input
                 type="radio"

@@ -46,7 +46,7 @@ def register_repetition_routes(*, app: FastAPI, project: Callable[[str], Path]) 
         return {"excluded_punctuation_groups": plan["excluded_punctuation_groups"], "candidate_groups": len(plan["groups"]), "selected": plan["selected"],
                 "running_run": running, "run_action": action, "only_file": only_file, "screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only,
                 "completed": running["completed"] if resuming else 0,
-                "over_budget_groups": sum(g["over_budget"] for g in plan["groups"]),
+                "over_budget_groups": running["over_budget_groups"] if resuming else sum(g["over_budget"] for g in plan["groups"]),
                 "estimated_requests": running["estimated_requests"] if resuming else plan["estimated_requests"], "estimated_input_tokens": running["estimated_input_tokens"] if resuming else plan["estimated_input_tokens"],
                 "preset": {"id": plan["config"]["_llm_preset_id"], "model": plan["config"]["llm"]["model"]},
                 "decision_model": plan["decision_preset"]["model"] if plan["decision_preset"] else None, "model": plan["config"]["llm"]["model"]}

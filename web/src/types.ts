@@ -724,6 +724,7 @@ export interface ContinuousTaskOptions {
 }
 
 export interface RunningRun {
+  execution_changed?: boolean;
   include_summaries?: boolean;
   include_draft_translation?: boolean;
   run_id: string;
