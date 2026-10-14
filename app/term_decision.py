@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 
+from .prompt_resources import ProjectPrompts
 from .config import load_project_config
 
 
@@ -112,7 +113,7 @@ def _prompt_language(project: Path, requested: str | None) -> str:
     language = requested or resolve_language()
     if language not in SUPPORTED_LANGUAGES:
         language = "zh-CN"
-    if not (project / "prompts" / prompt_file(STAGE, language)).is_file():
+    if not ProjectPrompts(project).path(STAGE, language).is_file():
         language = "zh-CN"
     return language
 
@@ -120,8 +121,9 @@ def _prompt(
     project: Path, language: str, *, final_review: bool = False
 ) -> dict[str, str]:
     prompts = {}
+    resources = ProjectPrompts(project)
     for resource in (STAGE, "terminology_knowledge"):
-        path = project / "prompts" / prompt_file(resource, language)
+        path = resources.path(resource, language)
         try:
             middle = path.read_text(encoding="utf-8")
         except OSError as exc:

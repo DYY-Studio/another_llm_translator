@@ -16,6 +16,7 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 
 from .errors import ConfigError, UsageError
 from .locking import project_write_lock
+from .prompt_resources import ProjectPrompts
 from .plugins import (
     document_adapter_replacement_options,
     document_adapter_summaries,
@@ -262,8 +263,9 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
 
 
     def project_repair_needed_read_only(root: Path) -> bool:
+        resources = ProjectPrompts(root, builtin_root=app_root)
         prompt_missing = any(
-            not (root / "prompts" / prompt_file(stage, language)).is_file()
+            not resources.path(stage, language).is_file()
             for language in PROMPT_LANGUAGES
             for stage in PROMPT_RESOURCE_STAGES
         )

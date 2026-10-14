@@ -531,8 +531,10 @@ def bundle_hash(app_root: Path = APP_ROOT) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def _copy_bundle(source_root: Path, target: Path) -> None:
+def _copy_bundle(source_root: Path, target: Path, *, inherited: set[str] | frozenset[str] = frozenset()) -> None:
     for relative, source in _bundle_source(source_root).items():
+        if relative.parent == Path("prompts") and relative.name in inherited:
+            continue
         destination = target / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
@@ -542,11 +544,15 @@ def ensure_missing_summary_prompts(
     project: Path, *, app_root: Path = APP_ROOT
 ) -> list[str]:
     """Restore missing prompt resources while preserving project edits."""
+    from .prompt_resources import ProjectPrompts
+    resources = ProjectPrompts(project, builtin_root=app_root)
     bundle = _bundle_source(app_root)
     missing: list[tuple[Path, Path]] = []
     for language in PROMPT_LANGUAGES:
         for stage in PROMPT_RESOURCE_STAGES:
             relative = Path("prompts") / prompt_file(stage, language)
+            if relative.name in resources.inherited:
+                continue
             source = bundle[relative]
             if not source.is_file():
                 raise ConfigError(f"全局模板缺失：{relative}")
@@ -1769,7 +1775,8 @@ def sync_global_templates(
         backup.mkdir(parents=True, exist_ok=False)
         shutil.copy2(project / "config.toml", backup / "config.toml")
         shutil.copytree(project / "prompts", backup / "prompts")
-        _copy_bundle(app_root, project)
+        from .prompt_resources import ProjectPrompts
+        _copy_bundle(app_root, project, inherited=ProjectPrompts(project, metadata=metadata).inherited)
         warnings.append(f"已更新项目模板；备份位于 {backup}")
     else:
         warnings.append("已保留项目模板")
