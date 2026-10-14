@@ -1378,3 +1378,24 @@ async def test_continuous_terminal_repetition_generates_draft_without_apply_auth
     assert view["steps"][-1]["status"] == "completed"
     assert current_draft(project) is not None
     assert "applied" not in view["steps"][-1]["summary"]
+
+@pytest.mark.asyncio
+async def test_empty_application_group_does_not_block_other_groups_when_stale(tmp_path, monkeypatch):
+    from app.repetition_consistency import run_repetition, current_draft
+    from app.repetition_drafts import apply_draft
+    project = multiple_groups_project(tmp_path, monkeypatch)
+    def respond(request):
+        body = transport().handler(request).json()
+        answer = json.loads(body["choices"][0]["message"]["content"])
+        answer["repetitions"][0]["groups"][0]["apply"] = []
+        body["choices"][0]["message"]["content"] = json.dumps(answer)
+        return httpx.Response(200, json=body)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        await run_repetition(project, Scope(), http_client=client)
+    draft = current_draft(project)
+    first = draft["groups"][0]["occurrences"][0]["segment_id"]
+    append_stage_results(project, [record_header("stage_result", read_json(project, project / "project.json")["project_id"],
+        stage="translation", segment_id=first, status="completed", text="人工更新", origin="web")])
+    assert (await apply_draft(project, confirm=True))["changed"] == 1
+    assert latest_stage_states(project, "translation", [first])[first]["completed"]["text"] == "人工更新"
+

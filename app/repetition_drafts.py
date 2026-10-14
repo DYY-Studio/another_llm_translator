@@ -120,7 +120,8 @@ async def apply_draft_locked(project: Path, *, confirm: bool, run_id: str | None
         raise UsageError("草案审核选择已变化，请重新打开审核")
     accepted = [(g, p, choices.get(p["id"], {"accepted": True, "target": p["target"]}))
                 for g in draft["groups"] for p in g["proposals"]
-                if choices.get(p["id"], {}).get("accepted", p.get("default_accepted", True))]
+                if choices.get(p["id"], {}).get("accepted", p.get("default_accepted", True))
+                and choices.get(p["id"], {}).get("apply", p.get("apply", p["members"]))]
     groups = list({g["id"]: g for g, _, _ in accepted}.values())
     segments = load_segments(project)
     indices = _indices(segments)
