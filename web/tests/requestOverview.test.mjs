@@ -25,3 +25,25 @@ test("incomplete JSONL preserves valid records and reports incomplete results", 
   assert.ok(value.issues.length);
   assert.equal(value.complete,false);
 });
+test("pairs entity explanations by entity and resolves only their own citations", () => {
+  const input = {entities: [
+    {entity:"alice",members:["alice","ally"],current_items:[{text:"旧说明"}],fragments:[{id:"K1",text:"船长"}]},
+    {entity:"bob",members:["bob"],current_items:[],fragments:[{id:"K2",text:"船员"}]},
+  ]};
+  const alice = {type:"entity_knowledge",entity:"alice",items:[{text:"船长",refs:["K1"]}],reason:"整理"};
+  const bob = {type:"entity_knowledge",entity:"bob",items:[],reason:"无有效说明"};
+  const value = parseRequestOverview(snapshot(input,[bob,alice,{type:"end"}]));
+  assert.equal(value.entities[0].result.items[0].text,"船长");
+  assert.equal(value.entities[0].fragments[0].id,"K1");
+  assert.deepEqual(value.entities[1].result.items,[]);
+  assert.deepEqual(value.issues,[]);
+  for (const output of [[alice,alice,bob], [alice], [alice,bob,{...bob,entity:"unknown"}],
+    [{...alice,items:[{text:"错误引用",refs:["K2"]}]},bob],
+    [{...alice,items:[{text:"错误格式",refs:"K1"}]},bob]]) {
+    const bad = parseRequestOverview(snapshot(input,[...output,{type:"end"}]));
+    assert.ok(bad.issues.length);
+  }
+  const pending = parseRequestOverview({request_kind:"llm",input});
+  assert.equal(pending.entities[0].result,null);
+  assert.deepEqual(pending.issues,[]);
+});

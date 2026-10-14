@@ -23,8 +23,11 @@ export function parseRequestOverview(snapshot: RequestOverviewSnapshot) {
   for (const line of content.split("\n").filter((line) => line.trim())) {
     try {
       const item = object(JSON.parse(line));
-      const valid = ["segment", "term", "no_terms", "summary", "decision", "end"].includes(text(item.type))
+      const valid = ["segment", "term", "no_terms", "summary", "decision", "entity_knowledge", "end"].includes(text(item.type))
         && (item.type !== "segment" || (typeof item.id === "string" && (typeof item.translation === "string" || item.status === "accepted" || (item.status === "suggested" && typeof item.suggested_text === "string"))))
+        && (item.type !== "entity_knowledge" || (typeof item.entity === "string" && Array.isArray(item.items)
+          && item.items.every((raw) => { const entry = object(raw); return typeof entry.text === "string"
+            && Array.isArray(entry.refs) && entry.refs.every((ref) => typeof ref === "string"); })))
         && (item.type !== "summary" || typeof item.text === "string")
         && (item.type !== "decision" || (typeof item.normalized === "string" && ["keep", "update", "disable", "needs_review"].includes(text(item.action))));
       if (!valid) issues.push("invalid");
@@ -50,9 +53,34 @@ export function parseRequestOverview(snapshot: RequestOverviewSnapshot) {
     if (!targetIds.has(text(item.normalized))) issues.push("unknown");
     if (decisionResults.filter((other) => other.normalized === item.normalized).length > 1) issues.push("duplicate");
   }
+  const entityResults = new Map<string, OverviewRecord[]>();
+  const entityIds = new Set(records(input.entities).map((item) => text(item.entity)));
+  for (const item of output.filter((item) => item.type === "entity_knowledge")) {
+    const key = text(item.entity);
+    if (!entityIds.has(key)) issues.push("unknown");
+    const matches = entityResults.get(key) ?? [];
+    matches.push(item);
+    entityResults.set(key, matches);
+  }
+  const entities = records(input.entities).map((item) => {
+    const entity = text(item.entity);
+    const fragments = records(item.fragments);
+    const refs = new Set(fragments.map((fragment) => text(fragment.id)));
+    const matches = entityResults.get(entity) ?? [];
+    let result = matches.length === 1 ? matches[0] : null;
+    if (matches.length > 1) issues.push("duplicate");
+    if (content && !matches.length) issues.push("missing");
+    if (result && records(result.items).some((entry) => !Array.isArray(entry.refs) || !entry.refs.length
+      || entry.refs.some((ref) => !refs.has(ref)))) {
+      issues.push("invalid");
+      result = null;
+    }
+    return {entity, members: Array.isArray(item.members) ? item.members.map(text) : [],
+      fragments, currentItems: records(item.current_items), result};
+  });
   const complete = output.at(-1)?.type === "end";
   if (content && !complete) issues.push("incomplete");
-  return {input, pairs, sources, issues, complete,
+  return {input, pairs, sources, entities, issues, complete,
     terms: output.filter((item) => item.type === "term"), noTerms: output.some((item) => item.type === "no_terms"),
     summaries: output.filter((item) => item.type === "summary"), decisions: output.filter((item) => item.type === "decision")};
 }

@@ -689,3 +689,18 @@ async def test_cli_logs_to_stderr_and_project_file_while_stdout_is_json(
     assert "command complete command=inspect" in captured.err
     file_log = (project / "logs" / "app.log").read_text(encoding="utf-8")
     assert "command complete command=inspect" in file_log
+
+
+def test_entity_knowledge_request_overview_preserves_batch_input_and_response() -> None:
+    from app.request_overview import llm_overview
+    from app.execution import render_messages
+
+    payload = {'phase': 'knowledge', 'entities': [
+        {'entity': 'alice', 'members': ['alice'], 'current_items': [],
+         'fragments': [{'id': 'K1', 'text': '船长', 'owner': 'alice', 'source_range': None}]},
+    ]}
+    content = llm_jsonl([{'type': 'entity_knowledge', 'entity': 'alice',
+                         'items': [{'text': '船长', 'refs': ['K1']}], 'reason': '源文支持'}])
+    overview = llm_overview(render_messages('整理说明', payload), content=content)
+    assert overview['input'] == payload
+    assert overview['response_content'] == content

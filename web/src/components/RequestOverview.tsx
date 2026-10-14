@@ -64,7 +64,7 @@ export function RequestOverview({ snapshot, language, truncated = false }: {snap
   return <div className="request-overview">
     {truncated && <p className="warning-banner">{translate("overview.truncated", language)}</p>}
     {snapshot.error && <p className="warning-banner">{snapshot.error}</p>}
-    <div className="overview-coverage">{translate("overview.coverage", language, {count: snapshot.request_kind === "decision" ? snapshot.questions?.length ?? 0 : isTermDecision ? targets.length : value.pairs.length || value.sources.length || summariesInput.length})}</div>
+    <div className="overview-coverage">{translate("overview.coverage", language, {count: snapshot.request_kind === "decision" ? snapshot.questions?.length ?? 0 : value.entities.length || (isTermDecision ? targets.length : value.pairs.length || value.sources.length || summariesInput.length)})}</div>
     {snapshot.request_kind === "decision" ? <DecisionOverview snapshot={snapshot} language={language} /> : <>
       {value.issues.length > 0 && <p className="warning-banner">{translate("overview.incomplete", language)}</p>}
       {value.pairs.map((pair, index) => <article className="overview-segment" key={`${pair.id}:${index}`}>
@@ -87,6 +87,31 @@ export function RequestOverview({ snapshot, language, truncated = false }: {snap
           {!value.terms.length && <span className="muted">{translate(value.noTerms ? "overview.noTerms" : "overview.noResult", language)}</span>}
         </section>
       </div>}
+      {value.entities.map((entity) => <article className="term-decision-proposal" key={entity.entity}>
+        <header className="term-decision-proposal-heading"><strong>{entity.entity}</strong><span>{entity.members.join(" · ")}</span></header>
+        <div className="overview-pair">
+          <section className="overview-cell">
+            {entity.currentItems.length > 0 && <details><summary>{translate("knowledge.before", language)}</summary>
+              {entity.currentItems.map((item, index) => <p key={index}>{text(item.text)}</p>)}
+            </details>}
+            <h4>{translate("knowledge.fragments", language)} ({entity.fragments.length})</h4>
+            {entity.fragments.map((fragment) => <article className="overview-term" key={text(fragment.id)}>
+              <strong>{text(fragment.id)}</strong><small>{text(fragment.original_source) || text(fragment.owner)}</small>
+              <p>{text(fragment.text)}</p>
+              {fragment.source_range === null && <small>{translate("knowledge.noSource", language)}</small>}
+            </article>)}
+          </section>
+          <section className="overview-cell"><h4>{translate("overview.knowledgeResult", language)}</h4>
+            {!entity.result ? <span className="muted">{translate("overview.noResult", language)}</span> : <>
+              {records(entity.result.items).map((item, index) => <article className="overview-term" key={index}>
+                <p>{text(item.text)}</p><small>{translate("knowledge.references", language)}: {Array.isArray(item.refs) ? item.refs.map(text).join(", ") : ""}</small>
+              </article>)}
+              {!records(entity.result.items).length && <span className="muted">{translate("overview.emptyKnowledge", language)}</span>}
+              <p className="decision-reason">{text(entity.result.reason)}</p>
+            </>}
+          </section>
+        </div>
+      </article>)}
       {isTermDecision && <div className="term-decision-list">{before.map((state) => {
         const matches = value.decisions.filter((item) => item.normalized === state.normalized);
         const result = matches.length === 1 ? matches[0] : null;
