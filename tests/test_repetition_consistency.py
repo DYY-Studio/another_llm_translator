@@ -115,3 +115,95 @@ def test_missing_translation_fails_preflight(tmp_path, monkeypatch):
         segment_id=segment["segment_id"], status="reset")])
     with pytest.raises(UsageError, match="完整翻译"):
         repetition_plan(project, Scope())
+
+
+def generate(project):
+    from app.repetition_consistency import run_repetition
+    async def run():
+        async with httpx.AsyncClient(transport=transport()) as client:
+            await run_repetition(project, Scope(), http_client=client)
+    asyncio.run(run())
+
+
+def test_apply_undo_survives_history_maintenance(tmp_path, monkeypatch):
+    from app.repetition_drafts import apply_draft, rollback_draft
+    from app.sqlite_storage import maintain_project_database
+    project = repetition_project(tmp_path, monkeypatch)
+    generate(project)
+    sid = load_segments(project)[3]["segment_id"]
+    result = asyncio.run(apply_draft(project, confirm=True))
+    assert result["changed"] == 1
+    assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == "我会来接你"
+    maintain_project_database(project)
+    rollback_draft(project, confirm=True)
+    assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == "我会去接你"
+    with pytest.raises(UsageError, match="撤销"):
+        rollback_draft(project, confirm=True)
+
+
+def test_later_affected_edit_blocks_undo_but_unrelated_edit_does_not(tmp_path, monkeypatch):
+    from app.repetition_drafts import apply_draft, rollback_draft
+    from app.web_store import WebStore
+    project = repetition_project(tmp_path, monkeypatch)
+    generate(project)
+    asyncio.run(apply_draft(project, confirm=True))
+    store = WebStore(project)
+    store.save_translation({"segment_id": load_segments(project)[0]["segment_id"], "text": "修改无关译文"})
+    assert rollback_draft(project, confirm=True)["changed"] == 1
+    generate(project)
+    asyncio.run(apply_draft(project, confirm=True))
+    sid = load_segments(project)[3]["segment_id"]
+    store.save_translation({"segment_id": sid, "text": "用户后来修改"})
+    with pytest.raises(UsageError, match="变化"):
+        rollback_draft(project, confirm=True)
+    assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == "用户后来修改"
+
+
+@pytest.mark.parametrize("change", ["base", "context"])
+def test_changed_group_base_or_context_blocks_entire_apply(tmp_path, monkeypatch, change):
+    from app.repetition_drafts import apply_draft
+    from app.web_store import WebStore
+    import sqlite3
+    project = repetition_project(tmp_path, monkeypatch)
+    generate(project)
+    sid = load_segments(project)[3]["segment_id"]
+    before = latest_stage_states(project, "translation", [sid])[sid]["completed"]["record_id"]
+    if change == "base":
+        WebStore(project).save_translation({"segment_id": load_segments(project)[1]["segment_id"], "text": "新基准"})
+    else:
+        with sqlite3.connect(project / "project.sqlite") as connection:
+            connection.execute("UPDATE segments SET source = ? WHERE segment_id = ?",
+                               ("改变判断所用上下文", load_segments(project)[0]["segment_id"]))
+    with pytest.raises(UsageError, match="过期"):
+        asyncio.run(apply_draft(project, confirm=True))
+    assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["record_id"] == before
+
+
+def test_application_and_draft_state_roll_back_together_on_storage_failure(tmp_path, monkeypatch):
+    from app.repetition_drafts import apply_draft
+    from app.repetition_consistency import current_draft
+    import sqlite3
+    project = repetition_project(tmp_path, monkeypatch)
+    generate(project)
+    sid = load_segments(project)[3]["segment_id"]
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.execute("CREATE TRIGGER fail_consistency_update BEFORE UPDATE ON runs "
+                           "BEGIN SELECT RAISE(ABORT, 'transaction probe'); END")
+    from app.errors import StorageError
+    with pytest.raises(StorageError):
+        asyncio.run(apply_draft(project, confirm=True))
+    assert current_draft(project) is not None
+    assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == "我会去接你"
+
+
+def test_saved_rejection_and_alternative_target(tmp_path, monkeypatch):
+    from app.repetition_drafts import apply_draft, save_choices
+    project = repetition_project(tmp_path, monkeypatch)
+    generate(project)
+    save_choices(project, {"1-1": {"accepted": False, "target": "2"}})
+    assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 0
+    generate(project)
+    save_choices(project, {"1-1": {"accepted": True, "target": "2"}})
+    assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 1
+    sid = load_segments(project)[1]["segment_id"]
+    assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == "我会去接你"
