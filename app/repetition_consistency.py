@@ -132,6 +132,7 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
             matched_ids = []
             local_items = [*neighbors[max(0, position - 3):position], s, *neighbors[position + 1:position + 4]]
             for term in term_cache.for_items(local_items):
+                aliases = term.pop("aliases")
                 relations = []
                 if "entity_knowledge" in term:
                     relations = [item.pop("source_relation") for item in term["entity_knowledge"]["items"]]
@@ -141,7 +142,7 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
                     tid = str(len(terms) + 1)
                     term_ids[key] = tid
                     terms[tid] = term
-                matched_ids.append({"id": tid, "source_relations": relations})
+                matched_ids.append({"id": tid, "aliases": aliases, "source_relations": relations})
             occurrences.append({"id": str(i), "terms": matched_ids, "segment_id": sid,
                 "file_id": s["file_id"], "part_id": s["part_id"], "line_index": s["line_index"],
                 "signature": segment_signature(s), "base_result_id": bases[sid]["record_id"],
@@ -191,7 +192,7 @@ def comparison_payload(group: dict[str, Any], evidence: dict[str, Any], sources:
             "terms": {short_terms[tid]: terms[tid] for tid in used_terms},
             "context": {source_ids[key]: sources[key] for key in source_keys},
             "occurrences": [{"id": o["id"], "file": o["file_id"], "part": o["part_id"],
-                             "position": o["line_index"], "variant": o["variant"], "terms": [{"id": short_terms[ref["id"]], "source_relations": ref["source_relations"]} for ref in o["terms"]],
+                             "position": o["line_index"], "variant": o["variant"], "terms": [{**ref, "id": short_terms[ref["id"]]} for ref in o["terms"]],
                              "previous": [short[sid] for sid in o["previous"]],
                              "next": [short[sid] for sid in o["next"]]} for o in group["occurrences"]]}
 

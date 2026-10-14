@@ -294,19 +294,20 @@ def test_managed_generation_publishes_draft_and_does_not_retain_queued_evidence(
     asyncio.run(run())
 
 
-def character_library(project, *, status="current", detail="角色设定"):
+def character_library(project, *, status="current", detail="角色设定", aliases=()):
     from app.term_knowledge import source_range
     segments = load_segments(project)
     refs = source_range([segments[5]], {s["segment_id"]: s for s in segments}, {})
     return {"terms_revision": 7, "terms": [{"source": "前文", "normalized": "前文",
-        "aliases": [], "preferred_translation": "前文译文", "entity_key": "前文",
+        "aliases": list(aliases), "preferred_translation": "前文译文", "entity_key": "前文",
         "knowledge_status": status, "description_items": [{"text": detail, "sources": [refs]}]}]}
 
 
-def test_comparison_injects_context_terms_with_local_relations_and_shared_snapshot(tmp_path, monkeypatch):
+@pytest.mark.parametrize("aliases", [[], ["相同"]])
+def test_comparison_injects_context_terms_with_local_relations_and_shared_snapshot(tmp_path, monkeypatch, aliases):
     from app import repetition_consistency as repetition
     project = repetition_project(tmp_path, monkeypatch)
-    library = character_library(project)
+    library = character_library(project, aliases=aliases)
     monkeypatch.setattr(repetition, "load_terms", lambda _: library)
     requests = []
     async def run():
@@ -320,6 +321,8 @@ def test_comparison_injects_context_terms_with_local_relations_and_shared_snapsh
     assert first_term["preferred_translation"] == "前文译文"
     assert first["terms"][0]["source_relations"][0] == ["after 1"]
     assert second["terms"][0]["source_relations"][0] == ["within"]
+    assert first["terms"][0]["aliases"] == []
+    assert second["terms"][0]["aliases"] == aliases
     assert first_term == second_term
     assert len(payload["terms"]) == 1
     snapshot = json.loads((project / "runs" / result["run_id"] / "repetition_terms.json").read_text())

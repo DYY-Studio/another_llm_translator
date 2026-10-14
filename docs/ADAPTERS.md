@@ -307,7 +307,7 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 同一复核组合中发生的修改作为整体建议接受或拒绝；复核不能修改受保护条目，不能通过修改制造新的未确认包含冲突。
 此复核位于可选自动终审之后，仍可产生待审项。当前决策规则版本为 11；旧规则草案须重新生成，不作转换。
 
-固定 Prefix 按阶段声明输入字段、只读参考与任务，固定 Suffix 按阶段声明输出协议并统一追加一次 JSONL 结束约束。可编辑中段位于两者之间，负责信息取舍、详略与表达策略；来源边界、引用及输出覆盖要求由固定协议定义。联合模式声明参与阶段和附加输出协议；设置预览与实际请求共用组装入口，固定规则版本纳入 fingerprint。名称与关系阶段的 `description` 和 `applied_description` 均为只读。
+固定 Prefix 按阶段声明输入字段、只读参考与任务，固定 Suffix 按阶段声明输出协议；JSONL 响应追加一次结束约束。可编辑中段位于两者之间，负责信息取舍、详略与表达策略；来源边界、引用及输出覆盖要求由固定协议定义。联合模式声明参与阶段和附加输出协议；设置预览与实际请求共用组装入口，固定规则版本纳入 fingerprint。名称与关系阶段的 `description` 和 `applied_description` 均为只读。
 
 ### 实体说明决策与接口
 
@@ -772,8 +772,16 @@ Segment ID、证据摘要、耗时和用量；生成与校验用量合并汇总�
 
 插件可通过 `PluginDescriptor.decision_prompts` 声明 `DecisionPromptDeclaration(validator_id, choice_ids, default)`；未声明的插件不提供编辑入口。声明必须属于本插件的校验器且不重复，固定选项为 2 至 255 个唯一非空 ID。`default` 提供一份默认内容，只含非空 `instructions` 和按固定 ID 填写非空描述的 `criteria`。宿主不允许用户增删选项。逐段校验器从 `context.decision_prompts[validator_id]` 取得运行时冻结内容，动态问题定位由校验器附加。
 
+内置任务 `repetition_screening` 同样使用该编辑契约，固定选项为 `compare`、`skip`、`uncertain`；该标识由宿主保留，不属于翻译校验器，也不受校验器启用配置控制。Decision 的判断说明和选项描述为完整可编辑内容，不追加 Prefix 或 Suffix，无语言限制。
+
 Decision 提示词资源接口使用 `/api/v1/global/decision-prompts/{validator_id}` 与 `/api/v1/projects/{name}/decision-prompts/{validator_id}`：GET 读取有效内容，项目响应附 `global_sync`（available、same；全局无效时附 error），PUT 接收 `{content}`，项目 DELETE 删除覆盖。`/api/v1/decision-prompts` 列举已加载声明。命名模板由 `/api/v1/decision-prompt-library/{validator_id}` 列举，其 `/{prompt_id}` 提供 GET、PUT `{content}` 和 DELETE。
 
-`/api/v1/decision-prompts/{validator_id}/default` GET 读取插件默认内容，供用户显式加载草稿，便于修正无效覆盖。Run 在 `decision_prompts/{validator_id}.json` 保存 `{choice_ids, content}` 快照，加载时检查与已安装声明一致。
+`/api/v1/decision-prompts/{validator_id}/default` GET 读取声明默认内容，供用户显式加载草稿，便于修正无效覆盖。Run 在 `decision_prompts/{validator_id}.json` 保存 `{choice_ids, content}` 快照，加载时检查与已安装声明一致。
 
 LLM Prompt 的 `/api/v1/prompts/{stage}/default?language=...` GET 直接读取程序分发的原始 Prompt，组合预览也只使用内置资源，不读取用户全局覆盖。资源缺失时明确失败。
+
+### 重复译文上下文比较
+
+`repetition_consistency` 是独立 Prompt 资源，使用标准 Prefix、中段、Suffix 装配；模型连接沿用翻译 Preset。输入包含 `source`、`translations`、`target_language`、共享 `context` 与 `terms`，以及 `occurrences`。每次出现携带短 ID、File/part、位置、从零开始的译文索引、前后文引用和术语引用。术语正文仅发送一次，命中的别名保存在各次出现的术语引用 `aliases` 中；术语引用的 `source_relations` 按顺序对应 `entity_knowledge.items`，关系以该次出现的局部上下文为基准。
+
+响应为单个 JSON 对象，包含 `groups`、`keep`、`uncertain`。每个统一子组含 `members`、`target`、`reason`；成员至少两个，`target` 必须是组内成员并选择其现有译文，`reason` 使用目标语言。各次出现的短 ID 必须完整、不重复地划入子组或保留、待审列表。该协议不输出 JSONL 或结束记录。

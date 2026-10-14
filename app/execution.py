@@ -563,8 +563,8 @@ _FIELD_PREFIX.update({
         "en": "context: Shared source context indexed by short id, referenced in order by each occurrence's previous and next.",
     },
     "repetition.terms": {
-        "zh-CN": "terms: 短 id 索引的共享术语、别名、推荐译法及实体说明。每次出现的 terms 引用适用于其原文与局部上下文的条目。source_relations 与 entity_knowledge.items 按顺序对应，before N、within、after N 表示说明来源相对该次局部上下文的位置，N 为该实体内部的位置顺序；unsourced 表示无原文依据的说明。",
-        "en": "terms: Shared terminology, aliases, preferred translations, and entity knowledge indexed by short id. Each occurrence references entries matched in its source and local context. source_relations aligns with entity_knowledge.items: before N, within, and after N locate knowledge sources relative to that occurrence's local context; N ranks positions within the entity. unsourced marks knowledge without source evidence.",
+        "zh-CN": "terms: 短 id 索引的共享术语、推荐译法及实体说明。每次出现的 terms 引用适用于其原文与局部上下文的条目，aliases 为该次命中的别名。source_relations 与 entity_knowledge.items 按顺序对应，before N、within、after N 表示说明来源相对该次局部上下文的位置，N 为该实体内部的位置顺序；unsourced 表示无原文依据的说明。",
+        "en": "terms: Shared terminology, preferred translations, and entity knowledge indexed by short id. Each occurrence references entries matched in its source and local context; aliases lists the aliases matched there. source_relations aligns with entity_knowledge.items: before N, within, and after N locate knowledge sources relative to that occurrence's local context; N ranks positions within the entity. unsourced marks knowledge without source evidence.",
     },
     "repetition.occurrences": {
         "zh-CN": "occurrences: 各次出现的短 id、文件、章节、位置、译文索引、上下文及术语引用。文件或章节相同本身不证明属于同一次话语。",

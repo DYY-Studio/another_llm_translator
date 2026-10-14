@@ -57,7 +57,7 @@ FastAPI 应用装配、鉴权、生命周期、静态资源和 route 注册。�
 
 - `web_chatgpt_routes.py`：ChatGPT 状态、本机连接管理与 Plan 局域网会话边界。
 - `web_resource_routes.py`：全局配置、Prompt、Adapter、Preset、凭据和服务设置。
-- `web_decision_prompt_routes.py`：插件声明驱动的 Decision 提示词编辑与命名模板。
+- `web_decision_prompt_routes.py`：内置与插件声明驱动的 Decision 提示词编辑与命名模板。
 - `web_project_routes.py`：项目创建、打开、删除、File 管理与替换。
 - `web_segment_routes.py`：Segment 浏览、编辑和阶段结果重置。
 - `web_repetition_routes.py`：重复译文审查预检、草案读取、人工选择、应用和撤销入口。
@@ -141,7 +141,7 @@ Run 索引、术语说明的事务性升级、重复译文应用与撤销事务�
 
 ### 重复译文一致性审查
 
-- `repetition_consistency.py`：完整 Segment 候选检测、预算预检、Decision 初筛、按组上下文比较及不可变草案保存。原文上下文按内容去重，成员与各请求使用引用；复用共享 Run、模型客户端与有限并发调度。
+- `repetition_consistency.py`：完整 Segment 候选检测、预算预检、Decision 初筛、按组上下文比较及不可变草案保存。原文上下文与术语正文按内容去重，实体说明来源关系按各次局部上下文计算；提示词复用声明式装配和 Decision 资源解析，执行证据保存为 Run 快照。复用共享 Run、模型客户端与有限并发调度。
 - `repetition_drafts.py`：人工选择、输入依赖检查、译文校验、应用与撤销。生命周期、审核选择及实际改动引用存入 Run，正文从共享草案译文读取，避免为撤销保留历史结果链。
 - `web/src/components/RepetitionReview.tsx`：按需加载的草案审核面板，重复组及出现位置分页，上下文展开后渲染。
 
@@ -271,4 +271,4 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 
 ### `app/decision_prompt.py`
 
-声明并校验插件拥有的 Decision 提示词，解析项目／全局覆盖与插件默认内容，加载运行快照。固定选项来自插件声明；动态问题定位与结果处理属于校验器。
+声明并校验内置任务与插件拥有的 Decision 提示词，解析项目／全局覆盖与声明默认内容，加载运行快照。固定选项来自声明；动态问题定位与结果处理属于调用任务或校验器。
