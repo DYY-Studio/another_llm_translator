@@ -113,6 +113,51 @@ def test_invalid_group_fails_without_replacing_existing_draft(tmp_path, monkeypa
     assert current_draft(project)["run_id"] == old
 
 
+@pytest.mark.parametrize("invalid_content", ["{", json.dumps({"groups": [], "keep": ["1"], "uncertain": []})])
+def test_comparison_format_retry_recovers_and_links_requests(tmp_path, monkeypatch, invalid_content):
+    from app.repetition_consistency import current_draft, run_repetition
+    from app.llm_client import LLMClient
+    project = repetition_project(tmp_path, monkeypatch)
+    requests, links = [], []
+    valid_transport = transport(requests=requests)
+    original_chat = LLMClient.chat
+    async def chat(self, **kwargs):
+        response, request_id = await original_chat(self, **kwargs)
+        links.append((request_id, kwargs.get("parent_request_id")))
+        return response, request_id
+    monkeypatch.setattr(LLMClient, "chat", chat)
+    def respond(request):
+        response = valid_transport.handle_request(request)
+        if len(requests) == 2:
+            return httpx.Response(200, json={"choices": [{"message": {"content": invalid_content}, "finish_reason": "stop"}]})
+        return response
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await run_repetition(project, Scope(), http_client=client)
+    result = asyncio.run(run())
+    assert result["completed"] == 3
+    assert len(requests) == 3  # One screening, then two comparison attempts.
+    assert requests[1]["messages"] == requests[2]["messages"]
+    assert links[0][1] is None and links[1][1] == links[0][0]
+    assert len(current_draft(project)["groups"][0]["proposals"]) == 1
+
+
+@pytest.mark.parametrize("limit", [0, 1])
+def test_comparison_format_retry_exhaustion_preserves_screening(tmp_path, monkeypatch, limit):
+    from app.repetition_consistency import repetition_plan, repetition_resume, run_repetition
+    project = repetition_project(tmp_path, monkeypatch)
+    plan = repetition_plan(project, Scope())
+    plan["config"]["retry"]["format_max_attempts"] = limit
+    requests = []
+    async def run():
+        async with httpx.AsyncClient(transport=transport(invalid=True, requests=requests)) as client:
+            await run_repetition(project, Scope(), prepared_plan=plan, http_client=client)
+    with pytest.raises(ExternalError, match="响应无效"):
+        asyncio.run(run())
+    assert len(requests) == limit + 2
+    assert repetition_resume(project, plan)["completed_steps"] == 1
+
+
 def test_missing_translation_fails_preflight(tmp_path, monkeypatch):
     from app.repetition_consistency import repetition_plan
     project = repetition_project(tmp_path, monkeypatch)

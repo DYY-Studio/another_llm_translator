@@ -17,6 +17,7 @@ from . import config as config_module
 from .config import load_project_config
 from .decision import DecisionClient, DecisionQuestion, decision_preset_path, load_decision_preset
 from .decision_prompt import get_declaration, resolve_prompt
+from .diagnostics import current_diagnostics
 from .stage_runtime import _prompt, _prompt_language
 from .errors import ExternalError, StorageError, UsageError
 from .execution import (Scope, choose_running_run, combine_usage, continue_run, create_run, estimate_messages, finalize_run, find_running_runs,
@@ -384,9 +385,24 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                         else:
                             messages = render_messages(prompt, comparison_payload(group, plan["evidence"], plan["sources"], config["project"]["target_language"], plan["terms"]))
                             model_invoked = True
-                            response, _ = await llm.chat(messages=messages, temperature=config["llm"]["temperature_translation"],
-                                estimated_input_tokens=estimate_messages(messages, config["execution"]["token_safety_factor"]))
-                            result = parse_comparison(response.content, group)
+                            parent_request_id = None
+                            estimated = estimate_messages(messages, config["execution"]["token_safety_factor"])
+                            for attempt in range(config["retry"]["format_max_attempts"] + 1):
+                                response, request_id = await llm.chat(messages=messages, temperature=config["llm"]["temperature_translation"],
+                                    estimated_input_tokens=estimated, parent_request_id=parent_request_id)
+                                try:
+                                    result = parse_comparison(response.content, group)
+                                    break
+                                except ExternalError as exc:
+                                    diagnostics = current_diagnostics()
+                                    if diagnostics is not None:
+                                        diagnostics.fail_request(request_id, str(exc))
+                                    if attempt >= config["retry"]["format_max_attempts"]:
+                                        raise
+                                    llm.logger.warning("format correction request=%s attempt=%d error=%s", request_id, attempt + 1, exc)
+                                    if diagnostics is not None:
+                                        diagnostics.retried(request_id)
+                                    parent_request_id = request_id
                     saved["result"] = result
                     atomic_write_json(checkpoint_path(run_dir, group["id"]), saved)
                     checkpoints[group["id"]] = dict(saved)
