@@ -150,7 +150,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
         {state?.can_rollback && <button className="quiet-button" disabled={busy || active || !!confirm} onClick={() => setConfirm("rollback")}>{t("rollback")}</button>}
       </div>
     </header>
-    {error && <div className="error-banner" role="alert">{error}</div>}
+    {error && !confirm && <div className="error-banner" role="alert">{error}</div>}
     {message && <div className="warning-banner" role="status">{message}</div>}
     <div className="repetition-actions">
       <label htmlFor="repetition-scope">{t("scope")}</label>
@@ -166,11 +166,6 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
         api<TaskState>(`/api/v1/tasks/${task.task_id}/cancel`, { method: "POST" }).then(setTask).catch(value => setError(errorMessage(value, language)));
       }}>{translate("common.cancel", language)}</button>}
     </div>}
-    {confirm && confirm !== "generate" && <section className="warning-banner">
-      <p>{t(`confirm.${confirm}`)}</p>
-      <div className="repetition-actions"><button className="primary-button" disabled={busy} onClick={() => void execute()}>{t("confirm")}</button>
-        <button className="quiet-button" disabled={busy} onClick={() => setConfirm(null)}>{translate("common.cancel", language)}</button></div>
-    </section>}
     <div className="term-decision-content" ref={contentRef}>
     {!state ? <p>{translate("common.loading", language)}</p> : !draft ? <p>{t("noDraft")}</p> : <>
       <div className="term-decision-summary"><span>{t("groupCount", { count: draft.groups.length })}</span>
@@ -193,6 +188,16 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
 
     </>}
     </div>
+    {confirm && confirm !== "generate" && <div className="modal-backdrop" onMouseDown={() => { if (!busy) setConfirm(null); }}>
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="repetition-confirm-title" onMouseDown={event => event.stopPropagation()}>
+        <h2 id="repetition-confirm-title">{t(`confirm.${confirm}`)}</h2>
+        {error && <div className="error-banner" role="alert">{error}</div>}
+        <div className="modal-actions">
+          <button className="quiet-button" disabled={busy} onClick={() => setConfirm(null)}>{translate("common.cancel", language)}</button>
+          <button className="primary-button" disabled={busy} onClick={() => void execute()}>{t("confirm")}</button>
+        </div>
+      </div>
+    </div>}
     {confirm === "generate" && <RunDialog repetitionOptions={options} replaceDraft={!!draft} busy={busy} error={error}
       language={language} excludePunctuationOnly={excludePunctuationOnly} onExcludePunctuationOnly={value => void inspect(value)}
       onClose={() => setConfirm(null)} onStart={() => void execute()} />}

@@ -4,7 +4,7 @@ export type Language = "zh-CN" | "en";
 
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
-    "repetition.title": "实验：重复译文一致性审查",
+    "repetition.title": "重复译文一致性审查",
     "repetition.excludePunctuationOnly": "排除仅标点不同的译文",
     "repetition.punctuationFilterHint": "去掉所有 Unicode 标点后正文相同的重复组会被排除，包括问号、感叹号等差异",
     "repetition.punctuationExcluded": "已排除 {count} 个仅标点差异组",
@@ -1467,7 +1467,7 @@ const messages: Record<Language, Record<string, string>> = {
     "dialog.openHint": "只打开此目录，不扫描父目录，也不会移动项目。",
   },
   en: {
-    "repetition.title": "Experiment: repeated translation consistency",
+    "repetition.title": "Repeated translation consistency",
     "repetition.excludePunctuationOnly": "Exclude punctuation-only differences",
     "repetition.punctuationFilterHint": "Exclude groups whose translations match after removing all Unicode punctuation, including question and exclamation marks",
     "repetition.punctuationExcluded": "Excluded {count} punctuation-only groups",
