@@ -951,3 +951,122 @@ def test_budget_increase_revisits_deferred_group_on_resume(tmp_path, monkeypatch
     requests = []
     assert asyncio.run(run("resume", requests))["completed"] == 3
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("kind", ["context", "truncated", "unknown"])
+def test_comparison_splits_complete_groups_and_links_children(tmp_path, monkeypatch, kind):
+    from app.errors import ContextLengthError
+    from app.llm_client import LLMClient
+    from app.repetition_consistency import run_repetition
+    project = multiple_groups_project(tmp_path, monkeypatch)
+    path = project / "config.toml"
+    path.write_text(path.read_text().replace('empty_unknown_mode = "retry"', 'empty_unknown_mode = "split"'))
+    requests, links = [], []
+    respond_valid = transport(requests=requests)
+    original_chat = LLMClient.chat
+    async def chat(self, **kwargs):
+        try:
+            response, request_id = await original_chat(self, **kwargs)
+        except ContextLengthError as error:
+            links.append((error.request_id, kwargs.get("parent_request_id")))
+            raise
+        links.append((request_id, kwargs.get("parent_request_id")))
+        return response, request_id
+    monkeypatch.setattr(LLMClient, "chat", chat)
+    def respond(request):
+        response = respond_valid.handle_request(request)
+        if len(requests) == 1:
+            if kind == "context":
+                return httpx.Response(400, text="context_length_exceeded: maximum context tokens")
+            return httpx.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "length" if kind == "truncated" else "stop"}]})
+        return response
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await run_repetition(project, Scope(), http_client=client)
+    assert asyncio.run(run())["completed"] == 6
+    assert len(requests) == 3
+    ids = [[g["id"] for g in json.loads(request["messages"][-1]["content"])["repetitions"]] for request in requests]
+    assert ids == [["1", "2"], ["1"], ["2"]]
+    assert links[0][1] is None and links[1][1] == links[2][1] == links[0][0]
+    assert all(len(g["occurrences"]) == 3 for request in requests[1:] for g in json.loads(request["messages"][-1]["content"])["repetitions"])
+
+
+@pytest.mark.parametrize("kind", ["context", "truncated"])
+def test_single_comparison_group_is_not_split(tmp_path, monkeypatch, kind):
+    from app.repetition_consistency import repetition_plan, repetition_resume, run_repetition
+    project = repetition_project(tmp_path, monkeypatch)
+    requests = []
+    def respond(request):
+        requests.append(request)
+        if kind == "context":
+            return httpx.Response(400, text="context_length_exceeded: maximum context tokens")
+        return httpx.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await run_repetition(project, Scope(), http_client=client)
+    with pytest.raises(ExternalError, match="不能继续拆分"):
+        asyncio.run(run())
+    assert len(requests) == 1
+    assert repetition_resume(project, repetition_plan(project, Scope()))["completed"] == 0
+
+
+def test_empty_split_budget_is_inherited(tmp_path, monkeypatch):
+    from app.repetition_consistency import repetition_plan, run_repetition
+    project = multiple_groups_project(tmp_path, monkeypatch)
+    plan = repetition_plan(project, Scope())
+    plan["config"]["retry"]["empty_truncated_max_attempts"] = 1
+    calls = []
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await run_repetition(project, Scope(), prepared_plan=plan, http_client=client)
+    with pytest.raises(ExternalError, match="预算已耗尽"):
+        asyncio.run(run())
+    assert len(calls) == 2
+
+
+def test_hard_budget_accepts_exact_limit(tmp_path, monkeypatch):
+    from app.repetition_consistency import repetition_plan
+    from tests.helpers import use_llm_preset
+    project = repetition_project(tmp_path, monkeypatch)
+    initial = repetition_plan(project, Scope())
+    limit = initial["groups"][0]["comparison_input_tokens"]
+    use_llm_preset(tmp_path, context_window_tokens=limit + 10, context_safety_margin_tokens=10,
+                   target_chunk_input_tokens=limit, input_tokens_per_minute=limit)
+    plan = repetition_plan(project, Scope())
+    assert not plan["groups"][0]["over_budget"] and plan["estimated_requests"] == 1
+
+
+def test_cancelled_split_keeps_completed_child_for_resume(tmp_path, monkeypatch):
+    from app.repetition_consistency import repetition_plan, repetition_resume, run_repetition
+    project = multiple_groups_project(tmp_path, monkeypatch)
+    requests = []
+    respond_valid = transport(requests=requests)
+    async def cancel_run():
+        second_child = asyncio.Event()
+        async def respond(request):
+            response = respond_valid.handle_request(request)
+            if len(requests) == 1:
+                return httpx.Response(400, text="context_length_exceeded: maximum context tokens")
+            if len(requests) == 3:
+                second_child.set()
+                await asyncio.Future()
+            return response
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            task = asyncio.create_task(run_repetition(project, Scope(), http_client=client))
+            await second_child.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    asyncio.run(cancel_run())
+    info = repetition_resume(project, repetition_plan(project, Scope()))
+    assert info["completed"] == 3 and info["estimated_requests"] == 1
+    requests.clear()
+    async def resume():
+        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+            return await run_repetition(project, Scope(), run_action="resume", http_client=client)
+    assert asyncio.run(resume())["completed"] == 6
+    assert len(requests) == 1
+    assert [g["id"] for g in json.loads(requests[0]["messages"][-1]["content"])["repetitions"]] == ["2"]

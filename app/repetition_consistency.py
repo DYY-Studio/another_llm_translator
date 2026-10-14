@@ -19,10 +19,10 @@ from .decision import DecisionClient, DecisionQuestion, decision_preset_path, lo
 from .decision_prompt import get_declaration, resolve_prompt
 from .diagnostics import current_diagnostics
 from .stage_runtime import _prompt, _prompt_language
-from .errors import ExternalError, StorageError, UsageError
+from .errors import ContextLengthError, ExternalError, StorageError, UsageError
 from .execution import (Scope, choose_running_run, combine_usage, continue_run, create_run, estimate_messages, finalize_run, find_running_runs,
                         render_messages, run_bounded, select_scope, unavailable_usage)
-from .llm_client import LLMClient, SlidingWindowLimiter
+from .llm_client import empty_response_split_scope, LLMClient, SlidingWindowLimiter
 from .llm_keys import KeyPool
 from .project import load_segments, load_source_files
 from .sqlite_storage import (atomic_write_json, atomic_write_text, latest_stage_states, read_json,
@@ -119,7 +119,7 @@ def group_over_budget(group: dict[str, Any], plan: dict[str, Any], saved: dict[s
     config = plan["config"]
     tokens = group["comparison_input_tokens"]
     itpm = config["execution"]["input_tokens_per_minute"]
-    return tokens >= config["llm"]["context_window_tokens"] - config["llm"]["context_safety_margin_tokens"] or (itpm > 0 and tokens > itpm)
+    return tokens > config["llm"]["context_window_tokens"] - config["llm"]["context_safety_margin_tokens"] or (itpm > 0 and tokens > itpm)
 
 
 def digest(value: Any) -> str:
@@ -265,7 +265,7 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
         group["screening_input_tokens"] = screening_tokens
         group["comparison_input_tokens"] = comparison_tokens
         itpm = config["execution"]["input_tokens_per_minute"]
-        group["over_budget"] = (screening_enabled and screening_tokens > decision_limit) or comparison_tokens >= llm_limit or (itpm > 0 and comparison_tokens > itpm)
+        group["over_budget"] = (screening_enabled and screening_tokens > decision_limit) or comparison_tokens > llm_limit or (itpm > 0 and comparison_tokens > itpm)
         groups.append(group)
     selected_count = sum(len(g["occurrences"]) for g in groups)
     input_fingerprint = digest({"scope": {"only_file": scope.only_file}, "screening_enabled": screening_enabled,
@@ -324,7 +324,7 @@ def comparison_messages(groups: list[dict[str, Any]], plan: dict[str, Any]) -> l
 def comparison_batches(groups: list[dict[str, Any]], plan: dict[str, Any]) -> list[tuple[list[dict[str, Any]], int]]:
     config = plan["config"]
     limits = [config["execution"]["target_chunk_input_tokens"],
-        config["llm"]["context_window_tokens"] - config["llm"]["context_safety_margin_tokens"] - 1]
+        config["llm"]["context_window_tokens"] - config["llm"]["context_safety_margin_tokens"]]
     if config["execution"]["input_tokens_per_minute"] > 0:
         limits.append(config["execution"]["input_tokens_per_minute"])
     target = min(limits)
@@ -490,18 +490,31 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                         return None
                     return group
 
-                async def compare_batch(batch):
+                async def compare_batch(batch, parent_request_id=None):
                     nonlocal model_invoked
                     pending, estimated = batch
-                    parent_request_id = None
                     for attempt in range(config["retry"]["format_max_attempts"] + 1):
                         messages = comparison_messages(pending, plan)
                         model_invoked = True
                         if attempt:
                             estimated = estimate_messages(messages, config["execution"]["token_safety_factor"])
-                        response, request_id = await llm.chat(messages=messages, temperature=config["llm"]["temperature_translation"],
-                            estimated_input_tokens=estimated,
-                            parent_request_id=parent_request_id)
+                        try:
+                            response, request_id = await llm.chat(messages=messages, temperature=config["llm"]["temperature_translation"],
+                                estimated_input_tokens=estimated, parent_request_id=parent_request_id)
+                        except ContextLengthError as exc:
+                            if len(pending) == 1:
+                                exc.args = (f"{exc}；单个完整重复组不能继续拆分",)
+                                raise
+                            llm.logger.warning("context split parent_request=%s groups=%d", exc.request_id, len(pending))
+                            diagnostics = current_diagnostics()
+                            if diagnostics is not None:
+                                diagnostics.retried(exc.request_id)
+                            midpoint = len(pending) // 2
+                            for child in (pending[:midpoint], pending[midpoint:]):
+                                child_estimate = estimate_messages(comparison_messages(child, plan), config["execution"]["token_safety_factor"])
+                                with empty_response_split_scope(exc):
+                                    await compare_batch((child, child_estimate), exc.request_id)
+                            return
                         results, error = parse_comparisons(response.content, pending)
                         for group in pending:
                             if group["id"] in results:
