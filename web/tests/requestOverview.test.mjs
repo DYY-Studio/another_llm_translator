@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseRequestOverview, parseRepetitionOverview } from "../src/requestOverview.ts";
+import { parseRequestOverview, parseRepetitionOverview, parseRepetitionOverviews } from "../src/requestOverview.ts";
 const snapshot = (input, records) => ({request_kind: "llm", input, segment_id_map: {"1": "SEG-1", "2": "SEG-2"}, response_content: records.map(JSON.stringify).join("\n")});
 test("repetition overview resolves shared translations and context by occurrence ID", () => {
   const input = {source: "promise", files: {"2": "chapter.txt"}, translations: ["come", "go"], context: {"1": "before", "2": "after"},
@@ -63,4 +63,25 @@ test("pairs entity explanations by entity and resolves only their own citations"
   const pending = parseRequestOverview({request_kind:"llm",input});
   assert.equal(pending.entities[0].result,null);
   assert.deepEqual(pending.issues,[]);
+});
+
+test("batched repetition overview scopes occurrence IDs and shares context", () => {
+  const occurrence = (id, variant) => ({id, file: 1, part: "document", position: 0, variant, previous: ["1"]});
+  const input = {files: {"1": "chapter.txt"}, context: {"1": "shared context"}, repetitions: [
+    {id: "a", source: "first", translations: ["A", "B"], occurrences: [occurrence("1", 0), occurrence("2", 1)]},
+    {id: "b", source: "second", translations: ["C", "D"], occurrences: [occurrence("1", 0), occurrence("2", 1)]},
+  ]};
+  const result = id => ({id, groups: [{members: ["1", "2"], target: "1", apply: ["2"], reason: id}], keep: [], uncertain: []});
+  const values = parseRepetitionOverviews({input, response_content: JSON.stringify({repetitions: [result("b"), result("a")]})});
+  assert.deepEqual(values.map(value => value.id), ["a", "b"]);
+  assert.equal(values[0].occurrences[1].result, "A");
+  assert.equal(values[1].occurrences[1].result, "C");
+  assert.equal(values[1].occurrences[0].kept, true);
+  assert.deepEqual(values[1].occurrences[0].previous, ["shared context"]);
+  assert.equal(values[1].occurrences[0].filename, "chapter.txt");
+  const missing = parseRepetitionOverviews({input, response_content: JSON.stringify({repetitions: [result("a")]})});
+  assert.equal(missing[0].invalid, false);
+  assert.equal(missing[1].invalid, true);
+  assert.equal(missing[1].occurrences[1].result, null);
+  assert.equal(parseRepetitionOverviews({input, response_content: "invalid"})[0].invalid, true);
 });

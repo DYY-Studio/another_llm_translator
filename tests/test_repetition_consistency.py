@@ -16,10 +16,10 @@ from tests.test_decision import preset
 from tests.test_foundation import make_app_root
 
 
-def repetition_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def repetition_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, source_text: str = "前文\n承诺\n后文\n承诺\n另一个场景\n承诺\n相同\n相同", texts: list[str] | None = None) -> Path:
     root = make_app_root(tmp_path)
     source = tmp_path / "source.txt"
-    source.write_text("前文\n承诺\n后文\n承诺\n另一个场景\n承诺\n相同\n相同", encoding="utf-8-sig")
+    source.write_text(source_text, encoding="utf-8-sig")
     project, _ = init_project([str(source)], name="repetition", app_root=root,
                               projects_root=tmp_path / "projects")
     assert project is not None
@@ -30,7 +30,7 @@ def repetition_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (decision_root / "local.json").write_text(json.dumps(preset()))
     monkeypatch.setenv("LLM_API_KEY", "test")
     monkeypatch.setenv("DECISION_TEST_KEY", "test")
-    texts = ["前文译文", "我会来接你", "后文译文", "我会去接你", "另一个场景译文", "我会去接你", "相同译文", "相同译文"]
+    texts = texts if texts is not None else ["前文译文", "我会来接你", "后文译文", "我会去接你", "另一个场景译文", "我会去接你", "相同译文", "相同译文"]
     project_id = read_json(project, project / "project.json")["project_id"]
     append_stage_results(project, [record_header("stage_result", project_id,
         stage="translation", segment_id=s["segment_id"], status="completed",
@@ -56,7 +56,7 @@ def transport(*, choice: str = "compare", invalid: bool = False, requests: list 
             result["groups"][0]["apply"] = apply_members
         if invalid:
             result["groups"][0]["members"] = ["1", "unknown"]
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}, "finish_reason": "stop"}],
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"repetitions": [{"id": group["id"], **result} for group in json.loads(body["messages"][-1]["content"])["repetitions"]]})}, "finish_reason": "stop"}],
                                        "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}})
     return httpx.MockTransport(respond)
 
@@ -76,15 +76,16 @@ def test_generation_detects_groups_and_sends_shared_evidence(tmp_path, monkeypat
     draft = current_draft(project)
     assert len(draft["groups"][0]["proposals"]) == 1
     payload = json.loads(requests[1]["messages"][-1]["content"])
-    assert payload["source"] == "承诺"
-    assert payload["translations"] == ["我会来接你", "我会去接你"]
-    assert len(payload["occurrences"]) == 3
+    group = payload["repetitions"][0]
+    assert group["source"] == "承诺"
+    assert group["translations"] == ["我会来接你", "我会去接你"]
+    assert len(group["occurrences"]) == 3
     assert payload["files"] == {"1": "source.txt"}
-    assert [item["file"] for item in payload["occurrences"]] == [1, 1, 1]
-    assert [item["position"] for item in payload["occurrences"]] == [1, 3, 5]
+    assert [item["file"] for item in group["occurrences"]] == [1, 1, 1]
+    assert [item["position"] for item in group["occurrences"]] == [1, 3, 5]
     from app.request_overview import llm_overview
     assert llm_overview(requests[1]["messages"])["input"] == payload
-    assert all("source" not in item and "translation" not in item for item in payload["occurrences"])
+    assert all("source" not in item and "translation" not in item for item in group["occurrences"])
 
 
 @pytest.mark.parametrize("choice", ["skip", "refusal"])
@@ -372,7 +373,7 @@ def test_comparison_injects_context_terms_with_local_relations_and_shared_snapsh
             return await repetition.run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     result = asyncio.run(run())
     payload = json.loads(requests[1]["messages"][-1]["content"])
-    first, second = payload["occurrences"][:2]
+    first, second = payload["repetitions"][0]["occurrences"][:2]
     first_term = payload["terms"][first["terms"][0]["id"]]
     second_term = payload["terms"][second["terms"][0]["id"]]
     assert first_term["preferred_translation"] == "前文译文"
@@ -730,3 +731,109 @@ def test_cancelled_comparison_resumes_after_screening(tmp_path, monkeypatch):
             await run_repetition(project, Scope(), run_action="resume", http_client=client, screening_enabled=True)
     asyncio.run(resume())
     assert len(requests) == 1 and "messages" in requests[0]
+
+
+def multiple_groups_project(tmp_path, monkeypatch):
+    return repetition_project(tmp_path, monkeypatch, source_text="前文\n承诺\n独白\n承诺\n独白\n承诺\n独白",
+        texts=["前文译文", "我会来接你", "独白甲", "我会去接你", "独白乙", "我会去接你", "独白乙"])
+
+
+def test_multiple_groups_share_request_evidence_and_exact_budget(tmp_path, monkeypatch):
+    from app import repetition_consistency as repetition
+    from app.execution import estimate_messages
+    project = multiple_groups_project(tmp_path, monkeypatch)
+    monkeypatch.setattr(repetition, "load_terms", lambda _: character_library(project))
+    plan = repetition.repetition_plan(project, Scope())
+    requests = []
+    async def run():
+        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+            return await repetition.run_repetition(project, Scope(), prepared_plan=plan, http_client=client)
+    result = asyncio.run(run())
+    assert result["completed"] == 6
+    assert len(requests) == plan["estimated_requests"] == 1
+    payload = json.loads(requests[0]["messages"][-1]["content"])
+    assert [g["id"] for g in payload["repetitions"]] == ["1", "2"]
+    assert len(payload["terms"]) == 1 and len(payload["context"]) == len(set(payload["context"].values()))
+    assert payload["files"] == {"1": "source.txt"}
+    assert plan["estimated_input_tokens"] == estimate_messages(requests[0]["messages"], plan["config"]["execution"]["token_safety_factor"])
+    draft = repetition.current_draft(project)
+    assert draft["groups"][0]["proposals"][0]["id"] == "1-1"
+    assert draft["groups"][1]["proposals"][0]["id"] == "2-1"
+
+
+@pytest.mark.parametrize("failure", ["missing", "duplicate", "members"])
+def test_batch_retry_preserves_valid_group_and_sends_only_invalid_group(tmp_path, monkeypatch, failure):
+    from app.repetition_consistency import checkpoint_path, current_draft, run_repetition
+    project = multiple_groups_project(tmp_path, monkeypatch)
+    requests = []
+    responder = transport(requests=requests)
+    def respond(request):
+        response = responder.handle_request(request)
+        body = response.json()
+        if len(requests) == 1:
+            output = json.loads(body["choices"][0]["message"]["content"])
+            if failure == "missing":
+                output["repetitions"].pop()
+            elif failure == "duplicate":
+                output["repetitions"].append(output["repetitions"][1])
+            else:
+                output["repetitions"][1]["keep"] = ["unknown"]
+            body["choices"][0]["message"]["content"] = json.dumps(output)
+            return httpx.Response(200, json=body)
+        run_dir = next((project / "runs").iterdir())
+        saved = json.loads(checkpoint_path(run_dir, "1").read_text())
+        assert "result" in saved and not checkpoint_path(run_dir, "2").exists()
+        assert [g["id"] for g in json.loads(requests[-1]["messages"][-1]["content"])["repetitions"]] == ["2"]
+        return response
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await run_repetition(project, Scope(), http_client=client)
+    assert asyncio.run(run())["completed"] == 6
+    assert len(requests) == 2 and len(current_draft(project)["groups"]) == 2
+
+
+def test_batch_exhaustion_resumes_only_incomplete_group(tmp_path, monkeypatch):
+    from app.repetition_consistency import repetition_plan, repetition_resume, run_repetition
+    project = multiple_groups_project(tmp_path, monkeypatch)
+    requests = []
+    responder = transport(requests=requests)
+    def fail_second(request):
+        body = responder.handle_request(request).json()
+        output = json.loads(body["choices"][0]["message"]["content"])
+        for group in output["repetitions"]:
+            if group["id"] == "2":
+                group["keep"] = ["unknown"]
+        body["choices"][0]["message"]["content"] = json.dumps(output)
+        return httpx.Response(200, json=body)
+    async def run(handler, action=None):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await run_repetition(project, Scope(), run_action=action, http_client=client)
+    with pytest.raises(ExternalError):
+        asyncio.run(run(fail_second))
+    info = repetition_resume(project, repetition_plan(project, Scope()))
+    assert info["completed"] == 3 and info["completed_steps"] == 1 and info["estimated_requests"] == 1
+    requests.clear()
+    result = asyncio.run(run(responder.handler, "resume"))
+    assert result["run_id"] == info["run_id"] and result["completed"] == 6
+    assert len(requests) == 1
+    assert [g["id"] for g in json.loads(requests[0]["messages"][-1]["content"])["repetitions"]] == ["2"]
+
+
+def test_batch_budget_keeps_groups_whole_and_reuses_configured_target(tmp_path, monkeypatch):
+    from app import repetition_consistency as repetition
+    project = multiple_groups_project(tmp_path, monkeypatch)
+    initial = repetition.repetition_plan(project, Scope())
+    config_value = initial["config"]
+    config_value["execution"]["target_chunk_input_tokens"] = max(g["comparison_input_tokens"] for g in initial["groups"]) - 1
+    monkeypatch.setattr(repetition, "load_project_config", lambda *args, **kwargs: config_value)
+    plan = repetition.repetition_plan(project, Scope())
+    assert plan["estimated_requests"] == 2 and plan["fingerprint"] != initial["fingerprint"]
+    requests = []
+    async def run():
+        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+            return await repetition.run_repetition(project, Scope(), prepared_plan=plan, http_client=client)
+    assert asyncio.run(run())["completed"] == 6
+    assert len(requests) == 2
+    for request in requests:
+        groups = json.loads(request["messages"][-1]["content"])["repetitions"]
+        assert len(groups) == 1 and len(groups[0]["occurrences"]) == 3

@@ -24,6 +24,33 @@ export function parseRepetitionOverview(snapshot: RequestOverviewSnapshot) {
     catch { invalid = true; }
     if (!Array.isArray(output.groups) || !Array.isArray(output.keep) || !Array.isArray(output.uncertain)) invalid = true;
   }
+  return repetitionOverview(input, output, invalid);
+}
+
+export function parseRepetitionOverviews(snapshot: RequestOverviewSnapshot) {
+  const input = object(snapshot.input);
+  let output: OverviewRecord = {};
+  let invalid = false;
+  if (snapshot.response_content) {
+    try { output = object(JSON.parse(snapshot.response_content)); }
+    catch { invalid = true; }
+    if (!Array.isArray(output.repetitions)) invalid = true;
+  }
+  const results = new Map<string, OverviewRecord[]>();
+  for (const item of records(output.repetitions)) {
+    const id = text(item.id);
+    results.set(id, [...(results.get(id) ?? []), item]);
+  }
+  return records(input.repetitions).map(group => {
+    const matches = results.get(text(group.id)) ?? [];
+    const result = matches.length === 1 ? matches[0] : {};
+    const incomplete = !!snapshot.response_content && (matches.length !== 1 || !Array.isArray(result.groups)
+      || !Array.isArray(result.keep) || !Array.isArray(result.uncertain));
+    return {id: text(group.id), ...repetitionOverview({...input, ...group}, result, invalid || incomplete)};
+  });
+}
+
+function repetitionOverview(input: OverviewRecord, output: OverviewRecord, invalid: boolean) {
   const translations = Array.isArray(input.translations) ? input.translations.map(text) : [];
   const contexts = object(input.context);
   const files = object(input.files);

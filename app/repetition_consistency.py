@@ -50,17 +50,15 @@ def repetition_resume(project: Path, plan: dict[str, Any]) -> dict[str, Any] | N
         compatible = False
         reason = f"{exc}，请结束旧 Run 并新建"
     completed = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
-    requests = tokens = 0
-    for group in plan["groups"]:
-        saved = checkpoints.get(group["id"], {})
-        if "result" in saved or group["over_budget"]:
-            continue
-        if plan["screening_enabled"] and "screening" not in saved:
-            requests += 1
-            tokens += group["screening_input_tokens"]
-        if saved.get("screening") != "skip":
-            requests += 1
-            tokens += group["comparison_input_tokens"]
+    remaining = [g for g in plan["groups"] if "result" not in checkpoints.get(g["id"], {}) and not g["over_budget"]]
+    comparison = [g for g in remaining if checkpoints.get(g["id"], {}).get("screening") != "skip"]
+    batches = comparison_batches(comparison, plan)
+    requests = len(batches)
+    tokens = sum(estimate for _, estimate in batches)
+    if plan["screening_enabled"]:
+        unscreened = [g for g in remaining if "screening" not in checkpoints.get(g["id"], {})]
+        requests += len(unscreened)
+        tokens += sum(g["screening_input_tokens"] for g in unscreened)
     return {"run_id": run["run_id"], "scope": run["scope"], "prompt_language": run.get("prompt_language"),
             "screening_enabled": run.get("screening_enabled"), "exclude_punctuation_only": run.get("exclude_punctuation_only"),
             "resume_compatible": compatible, "resume_incompatibility_reason": reason,
@@ -185,8 +183,6 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
     evidence: dict[str, dict[str, Any]] = {}
     sources: dict[str, str] = {}
     groups = []
-    input_tokens = 0
-    estimated_requests = 0
     decision = DecisionClient(preset) if preset else None
     llm_limit = config["llm"]["context_window_tokens"] - config["llm"]["context_safety_margin_tokens"]
     decision_limit = preset["context_window_tokens"] - preset["context_safety_margin_tokens"] if preset else 0
@@ -230,24 +226,25 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
                  "files": {str(file_indices[s["file_id"]]): file_names[s["file_id"]] for s in items},
                  "translations": variants, "occurrences": occurrences}
         screening_tokens = decision.request_plan(screening_payload(group), [screen])[1] if decision else 0
-        messages = render_messages(prompt, comparison_payload(group, evidence, sources, config["project"]["target_language"], terms))
+        messages = render_messages(prompt, comparison_payload([group], evidence, sources, config["project"]["target_language"], terms))
         comparison_tokens = estimate_messages(messages, config["execution"]["token_safety_factor"])
         group["screening_input_tokens"] = screening_tokens
         group["comparison_input_tokens"] = comparison_tokens
         itpm = config["execution"]["input_tokens_per_minute"]
         group["over_budget"] = (screening_enabled and screening_tokens > decision_limit) or comparison_tokens >= llm_limit or (itpm > 0 and comparison_tokens > itpm)
-        if not group["over_budget"]:
-            input_tokens += screening_tokens + comparison_tokens
-            estimated_requests += 2 if screening_enabled else 1
         groups.append(group)
     selected_count = sum(len(g["occurrences"]) for g in groups)
     fingerprint = digest({"scope": {"only_file": scope.only_file}, "screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only, "groups": groups, "evidence": evidence, "terms": terms, "terms_revision": terms_revision, "llm": config["_llm_preset_hash"],
-                          "temperature": config["llm"]["temperature_translation"], "retry": config["retry"],
+                          "temperature": config["llm"]["temperature_translation"], "retry": config["retry"], "batch_target": config["execution"]["target_chunk_input_tokens"],
                           "decision": preset, "target_language": config["project"]["target_language"], "prompt": prompt,
                           "screen": screen_content})
-    return {"screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only, "excluded_punctuation_groups": excluded_punctuation_groups, "config": config, "prompt": prompt, "language": language, "screen": screen, "terms": terms, "terms_revision": terms_revision, "warnings": warnings, "decision_preset": preset, "groups": groups, "evidence": evidence, "sources": sources,
-            "selected": selected_count, "fingerprint": fingerprint, "estimated_requests": estimated_requests,
-            "estimated_input_tokens": input_tokens}
+    plan = {"screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only, "excluded_punctuation_groups": excluded_punctuation_groups, "config": config, "prompt": prompt, "language": language, "screen": screen, "terms": terms, "terms_revision": terms_revision, "warnings": warnings, "decision_preset": preset, "groups": groups, "evidence": evidence, "sources": sources,
+            "selected": selected_count, "fingerprint": fingerprint}
+    eligible = [g for g in groups if not g["over_budget"]]
+    batches = comparison_batches(eligible, plan)
+    plan["estimated_requests"] = len(batches) + (len(eligible) if screening_enabled else 0)
+    plan["estimated_input_tokens"] = sum(estimate for _, estimate in batches) + sum(g["screening_input_tokens"] for g in eligible)
+    return plan
 
 
 def segment_signature(segment: dict[str, Any]) -> str:
@@ -262,26 +259,83 @@ def screening_payload(group: dict[str, Any]) -> dict[str, Any]:
     return {"source": group["source"], "translations": group["translations"], "counts": counts}
 
 
-def comparison_payload(group: dict[str, Any], evidence: dict[str, Any], sources: dict[str, str], language: str, terms: dict[str, Any]) -> dict[str, Any]:
-    context_ids = dict.fromkeys(n for o in group["occurrences"] for n in (*o["previous"], *o["next"]))
+def comparison_payload(groups: list[dict[str, Any]], evidence: dict[str, Any], sources: dict[str, str], language: str, terms: dict[str, Any]) -> dict[str, Any]:
+    occurrences = [o for group in groups for o in group["occurrences"]]
+    context_ids = dict.fromkeys(n for o in occurrences for n in (*o["previous"], *o["next"]))
     source_keys = dict.fromkeys(evidence[sid]["source_key"] for sid in context_ids)
     source_ids = {key: str(i) for i, key in enumerate(source_keys, 1)}
     short = {sid: source_ids[evidence[sid]["source_key"]] for sid in context_ids}
-    used_terms = dict.fromkeys(ref["id"] for o in group["occurrences"] for ref in o["terms"])
+    used_terms = dict.fromkeys(ref["id"] for o in occurrences for ref in o["terms"])
     short_terms = {tid: str(i) for i, tid in enumerate(used_terms, 1)}
-    return {"source": group["source"], "translations": group["translations"], "target_language": language,
-            "files": group["files"],
+    return {"target_language": language,
+            "files": {key: name for group in groups for key, name in group["files"].items()},
             "terms": {short_terms[tid]: terms[tid] for tid in used_terms},
             "context": {source_ids[key]: sources[key] for key in source_keys},
-            "occurrences": [{"id": o["id"], "file": o["file_index"], "part": o["part_id"],
-                             "position": o["line_index"], "variant": o["variant"], "terms": [{**ref, "id": short_terms[ref["id"]]} for ref in o["terms"]],
-                             "previous": [short[sid] for sid in o["previous"]],
-                             "next": [short[sid] for sid in o["next"]]} for o in group["occurrences"]]}
+            "repetitions": [{"id": group["id"], "source": group["source"], "translations": group["translations"],
+                "occurrences": [{"id": o["id"], "file": o["file_index"], "part": o["part_id"],
+                    "position": o["line_index"], "variant": o["variant"], "terms": [{**ref, "id": short_terms[ref["id"]]} for ref in o["terms"]],
+                    "previous": [short[sid] for sid in o["previous"]], "next": [short[sid] for sid in o["next"]]}
+                    for o in group["occurrences"]]} for group in groups]}
 
 
-def parse_comparison(content: str, group: dict[str, Any]) -> dict[str, Any]:
+def comparison_messages(groups: list[dict[str, Any]], plan: dict[str, Any]) -> list[dict[str, str]]:
+    return render_messages(plan["prompt"], comparison_payload(groups, plan["evidence"], plan["sources"],
+        plan["config"]["project"]["target_language"], plan["terms"]))
+
+
+def comparison_batches(groups: list[dict[str, Any]], plan: dict[str, Any]) -> list[tuple[list[dict[str, Any]], int]]:
+    config = plan["config"]
+    limits = [config["execution"]["target_chunk_input_tokens"],
+        config["llm"]["context_window_tokens"] - config["llm"]["context_safety_margin_tokens"] - 1]
+    if config["execution"]["input_tokens_per_minute"] > 0:
+        limits.append(config["execution"]["input_tokens_per_minute"])
+    target = min(limits)
+    factor = config["execution"]["token_safety_factor"]
+    batches = []
+    current = []
+    estimate = 0
+    for group in groups:
+        candidate = [*current, group]
+        candidate_estimate = estimate_messages(comparison_messages(candidate, plan), factor)
+        if current and candidate_estimate > target:
+            batches.append((current, estimate))
+            current = [group]
+            estimate = group["comparison_input_tokens"]
+        else:
+            current, estimate = candidate, candidate_estimate
+    if current:
+        batches.append((current, estimate))
+    return batches
+
+
+def parse_comparisons(content: str, groups: list[dict[str, Any]]) -> tuple[dict[str, Any], str | None]:
+    expected = {g["id"] for g in groups}
     try:
         value = json.loads(content)
+        if not isinstance(value, dict) or set(value) != {"repetitions"} or not isinstance(value["repetitions"], list):
+            raise ValueError("repetitions 字段无效")
+        entries: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for item in value["repetitions"]:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str) or item["id"] not in expected:
+                raise ValueError("未知或无效的重复组 ID")
+            entries[item["id"]].append(item)
+    except (ValueError, TypeError) as exc:
+        return {}, f"重复译文审查响应无效：{exc}"
+    results, errors = {}, []
+    for group in groups:
+        items = entries.get(group["id"], [])
+        if len(items) != 1:
+            errors.append(f"组 {group['id']} 缺失或重复")
+            continue
+        try:
+            results[group["id"]] = parse_comparison({k: v for k, v in items[0].items() if k != "id"}, group)
+        except ExternalError as exc:
+            errors.append(f"组 {group['id']}：{exc}")
+    return results, "; ".join(errors[:3]) if errors else None
+
+
+def parse_comparison(value: Any, group: dict[str, Any]) -> dict[str, Any]:
+    try:
         if not isinstance(value, dict) or set(value) != {"groups", "keep", "uncertain"}:
             raise ValueError("字段无效")
         if any(not isinstance(value[key], list) for key in value):
@@ -360,59 +414,74 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                 decision.http_client = decision_http
             async with LLMClient(config, limiter, run_dir=run_dir, project_id=metadata["project_id"],
                                  run_id=run_id, stage=STAGE, client=http_client, on_usage=record_usage) as llm:
-                async def compare(group):
-                    nonlocal completed, model_invoked
-                    group = dict(group)
-                    saved = dict(checkpoints.get(group["id"], {}))
-                    if "result" in saved:
-                        group.update(screening=saved["screening"], confidence=saved.get("confidence"), **saved["result"])
-                        return group
-                    if group["over_budget"]:
-                        saved.update(screening="over_budget", confidence=None)
-                        result = {"proposals": [], "keep": [], "uncertain": [o["id"] for o in group["occurrences"]]}
-                    else:
-                        if "screening" not in saved:
-                            if decision:
-                                model_invoked = True
-                            answer = (await decision.choose(screening_payload(group), [screen]))["value"] if decision else None
-                            saved.update(screening=("refusal" if answer.refused else answer.choice) if answer else "disabled",
-                                         confidence=answer.confidence if answer else None)
-                            if decision and saved["screening"] != "skip":
-                                atomic_write_json(checkpoint_path(run_dir, group["id"]), saved)
-                                checkpoints[group["id"]] = dict(saved)
-                        if saved["screening"] == "skip":
-                            result = {"proposals": [], "keep": [o["id"] for o in group["occurrences"]], "uncertain": []}
-                        else:
-                            messages = render_messages(prompt, comparison_payload(group, plan["evidence"], plan["sources"], config["project"]["target_language"], plan["terms"]))
-                            model_invoked = True
-                            parent_request_id = None
-                            estimated = estimate_messages(messages, config["execution"]["token_safety_factor"])
-                            for attempt in range(config["retry"]["format_max_attempts"] + 1):
-                                response, request_id = await llm.chat(messages=messages, temperature=config["llm"]["temperature_translation"],
-                                    estimated_input_tokens=estimated, parent_request_id=parent_request_id)
-                                try:
-                                    result = parse_comparison(response.content, group)
-                                    break
-                                except ExternalError as exc:
-                                    diagnostics = current_diagnostics()
-                                    if diagnostics is not None:
-                                        diagnostics.fail_request(request_id, str(exc))
-                                    if attempt >= config["retry"]["format_max_attempts"]:
-                                        raise
-                                    llm.logger.warning("format correction request=%s attempt=%d error=%s", request_id, attempt + 1, exc)
-                                    if diagnostics is not None:
-                                        diagnostics.retried(request_id)
-                                    parent_request_id = request_id
-                    saved["result"] = result
+                groups = [dict(group) for group in plan["groups"]]
+                def save_result(group, result):
+                    nonlocal completed
+                    saved = {"screening": group["screening"], "confidence": group.get("confidence"), "result": result}
                     atomic_write_json(checkpoint_path(run_dir, group["id"]), saved)
-                    checkpoints[group["id"]] = dict(saved)
-                    group.update(screening=saved["screening"], confidence=saved.get("confidence"), **result)
+                    checkpoints[group["id"]] = saved
+                    group.update(result)
                     completed += len(group["occurrences"])
                     if on_progress:
                         on_progress(completed, 0, total)
+
+                async def screen_group(group):
+                    nonlocal model_invoked
+                    saved = dict(checkpoints.get(group["id"], {}))
+                    if "result" in saved:
+                        group.update(screening=saved["screening"], confidence=saved.get("confidence"), **saved["result"])
+                        return None
+                    if group["over_budget"]:
+                        group.update(screening="over_budget", confidence=None)
+                        save_result(group, {"proposals": [], "keep": [], "uncertain": [o["id"] for o in group["occurrences"]]})
+                        return None
+                    if "screening" not in saved:
+                        if decision:
+                            model_invoked = True
+                        answer = (await decision.choose(screening_payload(group), [screen]))["value"] if decision else None
+                        saved.update(screening=("refusal" if answer.refused else answer.choice) if answer else "disabled",
+                                     confidence=answer.confidence if answer else None)
+                        if decision and saved["screening"] != "skip":
+                            atomic_write_json(checkpoint_path(run_dir, group["id"]), saved)
+                            checkpoints[group["id"]] = dict(saved)
+                    group.update(screening=saved["screening"], confidence=saved.get("confidence"))
+                    if saved["screening"] == "skip":
+                        save_result(group, {"proposals": [], "keep": [o["id"] for o in group["occurrences"]], "uncertain": []})
+                        return None
                     return group
-                groups = await run_bounded(plan["groups"], compare,
-                    max_parallel=config["execution"]["max_parallel"])
+
+                async def compare_batch(batch):
+                    nonlocal model_invoked
+                    pending, estimated = batch
+                    parent_request_id = None
+                    for attempt in range(config["retry"]["format_max_attempts"] + 1):
+                        messages = comparison_messages(pending, plan)
+                        model_invoked = True
+                        if attempt:
+                            estimated = estimate_messages(messages, config["execution"]["token_safety_factor"])
+                        response, request_id = await llm.chat(messages=messages, temperature=config["llm"]["temperature_translation"],
+                            estimated_input_tokens=estimated,
+                            parent_request_id=parent_request_id)
+                        results, error = parse_comparisons(response.content, pending)
+                        for group in pending:
+                            if group["id"] in results:
+                                save_result(group, results[group["id"]])
+                        pending = [group for group in pending if group["id"] not in results]
+                        if not pending:
+                            return
+                        diagnostics = current_diagnostics()
+                        if diagnostics is not None:
+                            diagnostics.fail_request(request_id, error)
+                        if attempt >= config["retry"]["format_max_attempts"]:
+                            raise ExternalError(error)
+                        llm.logger.warning("format correction request=%s attempt=%d error=%s", request_id, attempt + 1, error)
+                        if diagnostics is not None:
+                            diagnostics.retried(request_id)
+                        parent_request_id = request_id
+
+                screened = await run_bounded(groups, screen_group, max_parallel=config["execution"]["max_parallel"])
+                batches = comparison_batches([group for group in screened if group is not None], plan)
+                await run_bounded(batches, compare_batch, max_parallel=config["execution"]["max_parallel"])
         for group in groups:
             group.pop("screening_input_tokens")
             group.pop("comparison_input_tokens")
