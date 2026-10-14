@@ -112,7 +112,7 @@ def _stable_digest(value: Any) -> str:
 
 
 def stage_fingerprint_snapshot(project: Path, stage: str) -> str:
-    config = load_project_config(project, stage="translation" if stage == "repetition_consistency" else stage)
+    config = load_project_config(project, stage=stage)
     library = load_terms(project)
     terms_revision = (
         int(library["terms_revision"])
@@ -523,7 +523,7 @@ def inspect_continuous(
     selections = {
         stage: list(selection)
         for stage in normalized
-        if stage != "terminology_decision"
+        if stage not in {"terminology_decision", "repetition_consistency"}
     }
     if "terminology_decision" in normalized:
         selections["terminology_decision"] = (
@@ -992,9 +992,9 @@ def _ensure_downstream_fingerprints_after_decision(
         if not segment["is_empty"]
     )
     for stage in stages:
-        if stage in {"terminology", "terminology_decision"}:
+        if stage in {"terminology", "terminology_decision", "repetition_consistency"}:
             continue
-        config = load_project_config(project, stage="translation" if stage == "repetition_consistency" else stage)
+        config = load_project_config(project, stage=stage)
         summary = stage_summary(
             project,
             stage,
@@ -1088,11 +1088,13 @@ async def run_continuous(
             current_value = usage_by_stage.get(stage_name)
             value = (
                 combine_usage(base, current_value)
-                if base is not None
-                else current_value
+                if base is not None and current_value is not None
+                else base if base is not None else current_value
             )
-            aggregate = combine_usage(aggregate, value)
-            invocation = combine_usage(invocation, current_value)
+            if value is not None:
+                aggregate = combine_usage(aggregate, value)
+            if current_value is not None:
+                invocation = combine_usage(invocation, current_value)
         on_usage(aggregate or unavailable_usage(), invocation or unavailable_usage())
 
     def report_progress(stage: str, completed: int, failed: int, total: int) -> None:
@@ -1396,10 +1398,11 @@ async def run_continuous(
         current_value = usage_by_stage.get(stage_name)
         value = (
             combine_usage(base, current_value)
-            if base is not None
-            else current_value
+            if base is not None and current_value is not None
+            else base if base is not None else current_value
         )
-        aggregate_usage = combine_usage(aggregate_usage, value)
+        if value is not None:
+            aggregate_usage = combine_usage(aggregate_usage, value)
     failure_counts: dict[str, int] = {}
     for summary in summaries.values():
         for key, value in (summary.get("failure_counts") or {}).items():

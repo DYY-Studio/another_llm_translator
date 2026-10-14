@@ -1203,6 +1203,9 @@ async def test_continuous_repetition_applies_or_stops_for_review(tmp_path, monke
     result = manager.get(task["task_id"])
     assert result["status"] == "completed", result.get("error")
     assert result["summary"]["waiting_review"] is bool(waiting)
+    if waiting != "budget":
+        assert result["summary"]["usage"]["available"] is True
+        assert result["summary"]["usage"]["total_tokens"] == 30
     assert events == (["translation", "repetition"] if waiting else ["translation", "repetition", "proofreading"])
     assert (current_draft(project) is not None) is bool(waiting)
     step = next(s for s in result["steps"] if s["stage"] == "repetition_consistency")
@@ -1272,3 +1275,77 @@ def test_continuous_repetition_defers_evidence_until_translation(tmp_path, monke
         apply_repetition_consistency=True, reuse_mixed_fingerprints=True)
     step = value["steps"][-1]
     assert step["stage"] == "repetition_consistency" and step["count_deferred"] is True
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [False, True])
+async def test_continuous_repetition_empty_or_apply_failure(tmp_path, monkeypatch, failure):
+    from app.web_tasks import WebTaskManager
+    from app.repetition_consistency import current_draft, run_repetition
+    project = repetition_project(tmp_path, monkeypatch, texts=None if failure else ["同译文"] * 8)
+    events = []
+    async def repetition(*args, **kwargs):
+        events.append("comparison")
+        async with httpx.AsyncClient(transport=transport()) as client:
+            return await run_repetition(*args, **kwargs, http_client=client)
+    async def apply(*args, **kwargs):
+        raise UsageError("application failure probe")
+    async def review(*args, **kwargs):
+        events.append("proofreading")
+        return {"selected": 8, "completed": 8, "failed": 0, "pending": 0}
+    monkeypatch.setattr("app.web_continuous.run_repetition", repetition)
+    monkeypatch.setattr("app.web_continuous.apply_draft_locked", apply)
+    monkeypatch.setattr("app.web_continuous.run_review", review)
+    manager = WebTaskManager()
+    task = await manager.start(project, "continuous", scope=Scope(), run_action=None, reuse_mixed_fingerprints=False,
+        continuous_stages=("proofreading",), include_repetition_consistency=True, apply_repetition_consistency=True)
+    await manager.tasks[task["task_id"]].asyncio_task
+    view = manager.get(task["task_id"])
+    assert view["status"] == ("failed" if failure else "completed")
+    assert events == (["comparison"] if failure else ["proofreading"])
+    assert (current_draft(project) is not None) is failure
+    if failure:
+        assert "application failure" in view["error"]["error"]
+    else:
+        assert view["steps"][0]["status"] == "skipped"
+
+
+def test_continuous_term_application_checks_only_downstream_segment_stages(tmp_path, monkeypatch):
+    from app import web_continuous
+    project = repetition_project(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_continuous, "load_terms", lambda _: character_library(project))
+    monkeypatch.setattr(web_continuous, "current_decision_draft", lambda _: {"proposals": [{"proposal_id": "1"}]})
+    web_continuous._ensure_downstream_fingerprints_after_decision(project,
+        ("repetition_consistency", "proofreading"), Scope(), reuse_mixed_fingerprints=False)
+
+@pytest.mark.asyncio
+async def test_continuous_repetition_checks_resume_evidence_after_translation(tmp_path, monkeypatch):
+    from app.web_tasks import WebTaskManager
+    from app.repetition_consistency import run_repetition, repetition_plan, repetition_resume
+    from app.web_continuous import stage_fingerprint_snapshot
+    project = repetition_project(tmp_path, monkeypatch)
+    segments = load_segments(project)
+    states = latest_stage_states(project, "translation", [s["segment_id"] for s in segments])
+    project_id = read_json(project, project / "project.json")["project_id"]
+    fingerprint = stage_fingerprint_snapshot(project, "translation")
+    append_stage_results(project, [record_header("stage_result", project_id, stage="translation",
+        segment_id=s["segment_id"], status="completed", text=states[s["segment_id"]]["completed"]["text"],
+        origin="web", stage_fingerprint=fingerprint) for s in segments])
+    async with httpx.AsyncClient(transport=transport(invalid=True)) as client:
+        with pytest.raises(ExternalError):
+            await run_repetition(project, Scope(), http_client=client)
+    old = repetition_resume(project, repetition_plan(project, Scope()))
+    async def translate(*args, **kwargs):
+        append_stage_results(project, [record_header("stage_result", project_id, stage="translation",
+            segment_id=segments[1]["segment_id"], status="completed", text="新的译文",
+            origin="web", stage_fingerprint=fingerprint)])
+        return {"selected": 8, "completed": 8, "failed": 0, "pending": 0}
+    monkeypatch.setattr("app.web_continuous.run_translation", translate)
+    manager = WebTaskManager()
+    task = await manager.start(project, "continuous", scope=Scope(), run_action=None, reuse_mixed_fingerprints=False,
+        continuous_stages=("translation",), continuous_run_actions={"repetition_consistency": "resume"},
+        include_repetition_consistency=True, apply_repetition_consistency=True)
+    await manager.tasks[task["task_id"]].asyncio_task
+    view = manager.get(task["task_id"])
+    assert view["status"] == "failed"
+    assert "证据已变化" in view["error"]["error"]
+    assert repetition_resume(project, repetition_plan(project, Scope()))["run_id"] == old["run_id"]

@@ -784,6 +784,10 @@ LLM Prompt 的 `/api/v1/prompts/{stage}/default?language=...` GET 直接读取�
 
 ### 重复译文上下文比较
 
+连续运行预检与启动增加 `include_repetition_consistency`、`apply_repetition_consistency`，均默认 `false`，并传递上述两个筛选布尔值。请求的 `stages` 保持原规范连续区间；启用后返回的执行步骤在翻译后或校对起点前包含 `repetition_consistency`，其动作通过 `run_actions` 指定。续作仅接受整项目 Run 并恢复原筛选开关。上游翻译尚需执行时，审查步骤 `count_deferred: true`，`selected: 0` 不表示没有候选；未完成 Run 可返回 `compatibility_deferred: true`，证据兼容性在到达该阶段时再次检查。
+
+上下文及超预算待审停止后，审查步骤状态为 `waiting_review`，保留 `run_id`，步骤 `summary.needs_review` 是待审出现数；连续任务摘要 `waiting_review: true`，后续步骤为 `not_executed`。该审查 Run 已成功生成草案，未应用，任务没有模型失败计数。连续任务累计实际调用用量，未执行步骤与零请求续作不新增未知用量。无待审时应用限定本次 Run 的草案，保留正常应用和撤销契约。
+
 重复审查预检与任务启动接收布尔值 `exclude_punctuation_only` 和 `screening_enabled`，分别默认 `true` 和 `false`；预检返回 `excluded_punctuation_groups`，Run 保存本次选择与排除数量。关闭初筛时 `decision_model` 为 `null`，不读取初筛 Prompt 或 Preset，也不保存其快照。
 
 预检与启动支持 `run_action`：`resume` 续用、`decline` 结束旧 Run 并新建。预检的 `running_run` 沿用共享未完成 Run 描述，并包含已保存步骤数和总步骤数；`completed` 表示已完成审查的出现数，预检估算在续用模式下只统计未完成步骤。预检返回实际采用的 `only_file` 和两个筛选开关；续用模式恢复原值，启动时再次检查证据兼容性、当前执行指纹与 Run 身份。`running_run.execution_changed` 表示当前设置与最近一次执行不同，兼容时仍可显式 `resume`；超预算统计及剩余预算只针对尚未完成的工作。
