@@ -47,9 +47,10 @@ def _choices(draft: dict[str, Any], values: Any) -> dict[str, Any]:
 def save_choices(project: Path, values: Any, *, run_id: str | None = None) -> dict[str, Any]:
     with project_write_lock(project):
         manifest, draft = _pending(project, run_id)
-        manifest["choices"] = _choices(draft, values)
+        values = _choices(draft, values)
+        manifest["choices"] = {**manifest.get("choices", {}), **values}
         warnings = write_repetition_state(project, records=[], manifests=[manifest])
-        return {"choices": manifest["choices"], "warnings": warnings}
+        return {"choices": values, "warnings": warnings}
 
 
 def discard_draft(project: Path, *, confirm: bool, run_id: str | None = None) -> dict[str, Any]:
@@ -97,12 +98,15 @@ def _verify_groups(draft: dict[str, Any], groups: list[dict[str, Any]],
                     raise UsageError("重复组上下文已变化，草案已过期")
 
 
-async def apply_draft(project: Path, *, confirm: bool, run_id: str | None = None) -> dict[str, Any]:
+async def apply_draft(project: Path, *, confirm: bool, run_id: str | None = None,
+                      expected_choices: dict[str, Any] | None = None) -> dict[str, Any]:
     if confirm is not True:
         raise UsageError("必须明确确认应用重复译文草案")
     with project_write_lock(project):
         manifest, draft = _pending(project, run_id)
         choices = _choices(draft, manifest.get("choices", {}))
+        if expected_choices is not None and expected_choices != choices:
+            raise UsageError("草案审核选择已变化，请重新打开审核")
         accepted = [(g, p, choices.get(p["id"], {"accepted": True, "target": p["target"]}))
                     for g in draft["groups"] for p in g["proposals"]
                     if choices.get(p["id"], {}).get("accepted", True)]
@@ -159,20 +163,23 @@ async def apply_draft(project: Path, *, confirm: bool, run_id: str | None = None
                     decision_validation=decision.records[decision_start:] if decision else [])
                 records.append(record)
                 changes.append({"group": group["id"], "member": member, "after_result_id": record["record_id"],
-                                "before_metadata": {key: base[key] for key in _BEFORE_FIELDS if key in base}})
+                                "before_metadata": {**{key: base[key] for key in _BEFORE_FIELDS if key in base},
+                                                    "restored_origin": base.get("restored_origin", base.get("origin"))}})
         manifest.update(draft_status="applied" if records else "rejected", applied_at=utc_now(), changes=changes)
         warnings.extend(write_repetition_state(project, records=records, manifests=[manifest]))
         return {"changed": len(records), "warnings": warnings,
                 "validation_warning_count": sum(r["validation_status"] == "warning" for r in records)}
 
 
-def rollback_draft(project: Path, *, confirm: bool) -> dict[str, Any]:
+def rollback_draft(project: Path, *, confirm: bool, run_id: str | None = None) -> dict[str, Any]:
     if confirm is not True:
         raise UsageError("必须明确确认撤销重复译文统一")
     with project_write_lock(project):
         manifest = read_repetition_run(project, ("applied", "rolled_back"))
         if manifest is None or manifest["draft_status"] != "applied":
             raise UsageError("没有可撤销的最近一次重复译文应用")
+        if run_id is not None and manifest["run_id"] != run_id:
+            raise UsageError("最近一次应用已变化，请重新打开审核")
         draft = read_draft(project, manifest)
         groups = {g["id"]: g for g in draft["groups"]}
         occurrences = {g["id"]: {o["id"]: o for o in g["occurrences"]} for g in draft["groups"]}
@@ -200,4 +207,5 @@ def rollback_draft(project: Path, *, confirm: bool) -> dict[str, Any]:
 
 def review_state(project: Path) -> dict[str, Any]:
     manifest = read_repetition_run(project, ("applied", "rolled_back"))
-    return {"draft": current_draft(project), "can_rollback": bool(manifest and manifest["draft_status"] == "applied")}
+    return {"draft": current_draft(project), "can_rollback": bool(manifest and manifest["draft_status"] == "applied"),
+            "rollback_run_id": manifest["run_id"] if manifest and manifest["draft_status"] == "applied" else None}

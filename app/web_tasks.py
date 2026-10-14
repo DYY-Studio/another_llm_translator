@@ -909,6 +909,7 @@ class WebTaskManager:
             "translation",
             "proofreading",
             "polishing",
+            "repetition_consistency",
             TERMINOLOGY_DECISION_STAGE,
             "content_summary",
             "run-all",
@@ -962,6 +963,13 @@ class WebTaskManager:
                 active = self.tasks[active_id]
                 if active.status in {"queued", "running", "cancelling"}:
                     raise UsageError(f"项目已有后台任务：{active.task_id}")
+        if stage == "repetition_consistency":
+            from .repetition_consistency import repetition_plan
+            if run_action is not None or reuse_mixed_fingerprints:
+                raise UsageError("重复译文审查不支持续用或复用结果")
+            plan = repetition_plan(project, scope)
+            return _StartDecision(selected_count=plan["selected"], running_run_id=None,
+                fingerprints=((stage, plan["fingerprint"]),), selection_snapshots=(), running_runs=(), plan=plan)
         selected_count = 0
         running_run_id: str | None = None
         decision_plan_snapshot: dict[str, Any] | None = None
@@ -1582,7 +1590,7 @@ class WebTaskManager:
                         shared_limiters[key] = limiter
                         limiter_releases.append(release)
                 else:
-                    config = load_project_config(state.project, stage=state.stage)
+                    config = load_project_config(state.project, stage="translation" if state.stage == "repetition_consistency" else state.stage)
                     limiter, release = self._acquire_limiter(config)
                     shared_limiters[
                         (
@@ -1592,7 +1600,7 @@ class WebTaskManager:
                     ] = limiter
                     limiter_releases.append(release)
                 resume_run_id = None
-                if state.stage not in {"run-all", CONTINUOUS_STAGE}:
+                if state.stage not in {"run-all", CONTINUOUS_STAGE, "repetition_consistency"}:
                     resume_run_id, _ = choose_running_run(
                         state.project,
                         state.stage,
@@ -1672,6 +1680,11 @@ class WebTaskManager:
                         include_draft_translation=include_draft_translation,
                         on_draft_progress=draft_progress,
                     )
+                elif state.stage == "repetition_consistency":
+                    from .repetition_consistency import run_repetition
+                    summary = await run_repetition(state.project, scope, replace_draft=replace_draft,
+                        on_progress=progress, on_usage=usage_changed,
+                        limiter=next(iter(shared_limiters.values())))
                 elif state.stage == "translation":
                     summary = await run_translation(
                         state.project,

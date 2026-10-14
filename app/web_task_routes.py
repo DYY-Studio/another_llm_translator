@@ -727,6 +727,8 @@ def register_task_routes(
         from .config import LLM_MODEL_STAGES
         from .web_chatgpt_routes import require_project_plan_session
         stages = (payload.stages or LLM_MODEL_STAGES) if stage == "continuous" else LLM_MODEL_STAGES if stage == "run-all" else (stage,)
+        if stage == "repetition_consistency":
+            stages = ("translation",)
         if stage == "continuous":
             stages = tuple(value for value in stages if not (value == "translation" and payload.include_draft_translation))
             if payload.aggregate_full_summaries:

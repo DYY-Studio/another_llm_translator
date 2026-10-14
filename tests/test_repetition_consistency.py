@@ -117,6 +117,24 @@ def test_missing_translation_fails_preflight(tmp_path, monkeypatch):
         repetition_plan(project, Scope())
 
 
+def test_over_budget_group_is_visible_without_sending_requests(tmp_path, monkeypatch):
+    from app.repetition_consistency import current_draft, run_repetition
+    project = repetition_project(tmp_path, monkeypatch)
+    path = config.APP_ROOT / "decision_presets" / "local.json"
+    value = json.loads(path.read_text())
+    value.update(context_window_tokens=2, context_safety_margin_tokens=1)
+    path.write_text(json.dumps(value))
+    def unexpected(request):
+        pytest.fail("over-budget group must not send a request")
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as client:
+            await run_repetition(project, Scope(), http_client=client)
+    asyncio.run(run())
+    group = current_draft(project)["groups"][0]
+    assert group["screening"] == "over_budget"
+    assert group["uncertain"] == ["1", "2", "3"]
+
+
 def generate(project):
     from app.repetition_consistency import run_repetition
     async def run():
@@ -136,7 +154,9 @@ def test_apply_undo_survives_history_maintenance(tmp_path, monkeypatch):
     assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == "我会来接你"
     maintain_project_database(project)
     rollback_draft(project, confirm=True)
-    assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == "我会去接你"
+    restored = latest_stage_states(project, "translation", [sid])[sid]["completed"]
+    assert restored["text"] == "我会去接你"
+    assert restored["restored_origin"] == "web"
     with pytest.raises(UsageError, match="撤销"):
         rollback_draft(project, confirm=True)
 
@@ -207,3 +227,45 @@ def test_saved_rejection_and_alternative_target(tmp_path, monkeypatch):
     assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 1
     sid = load_segments(project)[1]["segment_id"]
     assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == "我会去接你"
+
+
+def test_web_draft_flow_and_stale_review_identity(tmp_path, monkeypatch):
+    from app.web import create_app
+    from fastapi.testclient import TestClient
+    project = repetition_project(tmp_path, monkeypatch)
+    generate(project)
+    with TestClient(create_app(projects_root=project.parent)) as client:
+        base = "/api/v1/projects/repetition/repetition"
+        options = client.get(base + "/options").json()
+        assert options["candidate_groups"] == 1
+        state = client.get(base).json()
+        run_id = state["draft"]["run_id"]
+        assert client.post(base + "/apply", json={"run_id": "old", "confirm": True, "choices": {}}).status_code == 400
+        assert client.put(base + "/choices", json={"run_id": run_id, "choices": {
+            "1-1": {"accepted": True, "target": "2"}}}).status_code == 200
+        assert client.post(base + "/apply", json={"run_id": run_id, "confirm": True, "choices": {}}).status_code == 400
+        assert client.post(base + "/apply", json={"run_id": run_id, "confirm": True,
+            "choices": {"1-1": {"accepted": True, "target": "2"}}}).json()["changed"] == 1
+        assert client.get(base).json()["can_rollback"]
+        assert client.post(base + "/rollback", json={"run_id": run_id, "confirm": True}).json()["changed"] == 1
+
+
+def test_repetition_tasks_use_existing_manager_and_cancel(tmp_path, monkeypatch):
+    from app.web_tasks import WebTaskManager
+    from app import repetition_consistency
+    project = repetition_project(tmp_path, monkeypatch)
+    started = asyncio.Event()
+    async def held_run(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+    monkeypatch.setattr(repetition_consistency, "run_repetition", held_run)
+    async def run():
+        manager = WebTaskManager()
+        state = await manager.start(project, "repetition_consistency", scope=Scope(),
+                                    reuse_mixed_fingerprints=False, run_action=None)
+        await asyncio.wait_for(started.wait(), 2)
+        assert manager.is_project_running(project)
+        await manager.cancel(state["task_id"])
+        await manager.shutdown()
+        assert manager.get(state["task_id"])["status"] == "cancelled"
+    asyncio.run(run())

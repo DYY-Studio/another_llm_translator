@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
@@ -16,6 +16,7 @@ import {
 } from "../segmentReadState";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
+const RepetitionReview = lazy(() => import("./RepetitionReview").then(module => ({ default: module.RepetitionReview })));
 
 interface WorkspaceCacheEntry {
   orderedIds: string[];
@@ -144,6 +145,7 @@ export function SegmentWorkspace({
       .map((key) => [key, translate(`status.${key}`, language)]),
   );
   const selection = useClassicSelection();
+  const [repetitionOpen, setRepetitionOpen] = useState(false);
   const [boundary, setBoundary] = useState("all");
   const [status, setStatus] = useState("all");
   const [search, setSearch] = useState("");
@@ -593,6 +595,7 @@ export function SegmentWorkspace({
     <div className="workspace">
       <section className="segment-browser">
         <div className="filters">
+          {stage === "translation" && <button onClick={() => setRepetitionOpen(true)}>{translate("repetition.title", language)}</button>}
           <select value={boundary} onChange={(event) => {
             setBoundary(event.target.value);
             setBatchMessage("");
@@ -756,6 +759,8 @@ export function SegmentWorkspace({
           onConfirm={runBatch}
         />
       )}
+      {repetitionOpen && <Suspense fallback={<Modal ariaLabel={translate("repetition.title", language)}>{translate("common.loading", language)}</Modal>}><RepetitionReview key={projectId} project={project} files={overview.files} language={language}
+        onClose={() => setRepetitionOpen(false)} onChanged={async () => { await onRefresh(); await reloadIndex(); }} /></Suspense>}
     </div>
   );
 }
