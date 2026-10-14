@@ -772,15 +772,19 @@ Segment ID、证据摘要、耗时和用量；生成与校验用量合并汇总�
 
 插件可通过 `PluginDescriptor.decision_prompts` 声明 `DecisionPromptDeclaration(validator_id, choice_ids, default)`；未声明的插件不提供编辑入口。声明必须属于本插件的校验器且不重复，固定选项为 2 至 255 个唯一非空 ID。`default` 提供一份默认内容，只含非空 `instructions` 和按固定 ID 填写非空描述的 `criteria`。宿主不允许用户增删选项。逐段校验器从 `context.decision_prompts[validator_id]` 取得运行时冻结内容，动态问题定位由校验器附加。
 
-内置任务 `repetition_screening` 同样使用该编辑契约，固定选项为 `compare`、`skip`、`uncertain`；该标识由宿主保留，不属于翻译校验器，也不受校验器启用配置控制。Decision 的判断说明和选项描述为完整可编辑内容，不追加 Prefix 或 Suffix，无语言限制。
+内置任务 `repetition_screening` 同样使用该编辑契约，固定选项为 `compare`、`skip`；该标识由宿主保留，不属于翻译校验器，也不受校验器启用配置控制。Decision 的判断说明和选项描述为完整可编辑内容，不追加 Prefix 或 Suffix，无语言限制。
 
-Decision 提示词资源接口使用 `/api/v1/global/decision-prompts/{validator_id}` 与 `/api/v1/projects/{name}/decision-prompts/{validator_id}`：GET 读取有效内容，项目响应附 `global_sync`（available、same；全局无效时附 error），PUT 接收 `{content}`，项目 DELETE 删除覆盖。`/api/v1/decision-prompts` 列举已加载声明。命名模板由 `/api/v1/decision-prompt-library/{validator_id}` 列举，其 `/{prompt_id}` 提供 GET、PUT `{content}` 和 DELETE。
+Decision 提示词资源接口使用 `/api/v1/global/decision-prompts/{validator_id}` 与 `/api/v1/projects/{name}/decision-prompts/{validator_id}`：GET 读取有效内容，项目响应附 `global_sync`（available、same；全局无效时附 error），PUT 接收 `{content}`，项目 DELETE 接收 `{confirm: true}` 后验证全局内容并删除覆盖。`/api/v1/decision-prompts` 列举已加载声明。命名模板由 `/api/v1/decision-prompt-library/{validator_id}` 列举，其 `/{prompt_id}` 提供 GET、PUT `{content}` 和 DELETE。
 
 `/api/v1/decision-prompts/{validator_id}/default` GET 读取声明默认内容，供用户显式加载草稿，便于修正无效覆盖。Run 在 `decision_prompts/{validator_id}.json` 保存 `{choice_ids, content}` 快照，加载时检查与已安装声明一致。
+
+LLM 项目 Prompt 的 `/api/v1/projects/{name}/prompts/{stage}` GET 返回有效资源及 `inherited`。PUT 接收 `{language, content}` 并建立项目覆盖；DELETE 接收 `{language, confirm: true}`，验证全局资源后解除当前阶段、语言的覆盖。显式继承记录在项目元数据 `inherited_llm_prompts`，以 Prompt 文件名标识资源；普通文件缺失不视为继承。
 
 LLM Prompt 的 `/api/v1/prompts/{stage}/default?language=...` GET 直接读取程序分发的原始 Prompt，组合预览也只使用内置资源，不读取用户全局覆盖。资源缺失时明确失败。
 
 ### 重复译文上下文比较
+
+重复审查预检与任务启动接收布尔值 `exclude_punctuation_only`，默认 `true`；预检返回 `excluded_punctuation_groups`，Run 保存本次选择与排除数量。
 
 `repetition_consistency` 是独立 Prompt 资源，使用标准 Prefix、中段、Suffix 装配；模型连接沿用翻译 Preset。输入包含 `source`、`translations`、`target_language`、共享 `context` 与 `terms`，以及 `occurrences`。每次出现携带短 ID、File/part、位置、从零开始的译文索引、前后文引用和术语引用。术语正文仅发送一次，命中的别名保存在各次出现的术语引用 `aliases` 中；术语引用的 `source_relations` 按顺序对应 `entity_knowledge.items`，关系以该次出现的局部上下文为基准。
 
