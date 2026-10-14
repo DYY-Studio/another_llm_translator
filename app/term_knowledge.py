@@ -59,10 +59,17 @@ def source_range(
     return values
 
 
-def _overlap(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> bool:
-    return any(a["segment_id"] == b["segment_id"]
-               and (a["source_digest"] != b["source_digest"] or (a["start"] < b["end"] and b["start"] < a["end"]))
-               for a in left for b in right)
+def _range_index(ranges: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    by_segment: dict[str, list[dict[str, Any]]] = {}
+    for r in ranges:
+        by_segment.setdefault(r["segment_id"], []).append(r)
+    return by_segment
+
+
+def _overlap(left: list[dict[str, Any]], right: dict[str, list[dict[str, Any]]]) -> bool:
+    return any(a["source_digest"] != b["source_digest"]
+               or (a["start"] < b["end"] and b["start"] < a["end"])
+               for a in left for b in right.get(a["segment_id"], ()))
 
 
 def evidence(project: Path, library: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -114,8 +121,9 @@ def publish_evidence(
         if not record.get("source_range"):
             raise UsageError("旧扫描缺少完整来源范围，请结束旧扫描并重新扫描")
         if replace:
+            coverage = _range_index(record["source_range"])
             for key, fragment in old.items():
-                if fragment["source_range"] and _overlap(fragment["source_range"], record["source_range"]):
+                if fragment["source_range"] and _overlap(fragment["source_range"], coverage):
                     # Retries/slices in one scan are observations, not replacement scans.
                     old_record = fragment.get("candidate_id")
                     same_task = next((r.get("active_task_id") for r in candidates
@@ -498,7 +506,7 @@ def replacement_impacts(project: Path, segments: list[dict[str, Any]]) -> list[d
     library = load_terms(project)
     if library is None:
         return []
-    coverage = source_range(segments, {s["segment_id"]: s for s in segments}, {})
+    coverage = _range_index(source_range(segments, {s["segment_id"]: s for s in segments}, {}))
     return [{"fragment_id": f["id"], "owner": f["owner"], "text": f["text"], "source_range": f["source_range"]}
             for f in evidence(project, library).values()
             if f["state"] == "active" and f["source_range"] and _overlap(f["source_range"], coverage)]

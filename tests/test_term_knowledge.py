@@ -743,3 +743,42 @@ def test_scan_publication_failure_does_not_write_alias_cleanup(tmp_path: Path, m
         _merge_and_publish_terms(project, task_id='scan', project_id='test', published_run_id='run')
     assert read_json(project, overrides_path) == before
     assert read_json(project, terms_path)['terms_revision'] == 1
+
+
+@pytest.mark.parametrize(('start', 'end', 'changed_source', 'expected'), [
+    (5, 10, False, 'active'),
+    (4, 6, False, 'superseded'),
+    (5, 10, True, 'superseded'),
+])
+def test_replacement_indexes_each_request_and_preserves_slice_boundaries(
+    tmp_path: Path, monkeypatch, start, end, changed_source, expected,
+) -> None:
+    from copy import deepcopy
+    from app import term_knowledge
+    from app.term_library import term_normalization
+    from app.config import load_project_config
+
+    project = make_project(tmp_path)
+    data = library()
+    segments = read_segments(project)
+    first = record_header('terminology_candidates', 'test', active_task_id='scan',
+                          source_range=term_knowledge.source_range(segments, {s['segment_id']: s for s in segments}, {}),
+                          terms=[{'source': 'Alpha', 'description': '旧证据'}])
+    first['source_range'][0].update(start=0, end=5)
+    append_jsonl(project, project / 'terminology/candidates.jsonl', first)
+    spec = term_normalization(load_project_config(project))
+    term_knowledge.publish_evidence(project, data, [first], spec)
+    replacement = deepcopy(first)
+    replacement.update(record_id='replacement', active_task_id='rescan', terms=[])
+    replacement['source_range'][0].update(start=start, end=end)
+    if changed_source:
+        replacement['source_range'][0]['source_digest'] = 'changed'
+    calls = []
+    index = term_knowledge._range_index
+    def counted(ranges):
+        calls.append(ranges)
+        return index(ranges)
+    monkeypatch.setattr(term_knowledge, '_range_index', counted)
+    term_knowledge.publish_evidence(project, data, [replacement], spec)
+    assert len(calls) == 1
+    assert data['knowledge']['fragments'][f"{first['record_id']}:0"]['state'] == expected
