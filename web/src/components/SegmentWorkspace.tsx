@@ -620,6 +620,7 @@ export function SegmentWorkspace({
           <div className="batch-toolbar segment-batch-toolbar">
             <span>{translate("workspace.selectedCount", language, { selected: selectedVisibleIds.length, total })}</span>
             <div className="segment-batch-actions">
+              {stage === "translation" && <button className="quiet-button repetition-entry" onClick={() => setRepetitionOpen(true)}>{translate("repetition.title", language)}</button>}
               {stage !== "translation" && (
                 <>
                   <button className="quiet-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "apply", scope: "selected" })}>{translate("workspace.applySelected", language)}</button>
@@ -628,7 +629,6 @@ export function SegmentWorkspace({
               )}
               <button className="danger-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "reset", scope: "selected" })}>{translate("workspace.clearSelected", language)}</button>
               <button className="danger-button" disabled={!total} onClick={() => setBatchAction({ kind: "reset", scope: "filtered" })}>{translate("workspace.clearAll", language)}</button>
-              {stage === "translation" && <button className="quiet-button" onClick={() => setRepetitionOpen(true)}>{translate("repetition.title", language)}</button>}
             </div>
           </div>
           {batchMessage && <span className="success-text">{batchMessage}</span>}
