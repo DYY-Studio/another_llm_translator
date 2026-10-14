@@ -567,17 +567,17 @@ _FIELD_PREFIX.update({
         "en": "terms: Shared terminology, preferred translations, and entity knowledge indexed by short id. Each occurrence references entries matched in its source and local context; aliases lists the aliases matched there. source_relations aligns with entity_knowledge.items: before N, within, and after N locate knowledge sources relative to that occurrence's local context; N ranks positions within the entity. unsourced marks knowledge without source evidence.",
     },
     "repetition.occurrences": {
-        "zh-CN": "occurrences: 各次出现的短 id、文件、章节、位置、译文索引、上下文及术语引用。file 是项目文件顺序中从 1 开始的索引，files 将索引映射到文件名。part 是文件内的内容边界标识。position 是文件内从 0 开始的 Segment 序号，包含空片段，不是章节内序号或字符偏移。文件或章节相同本身不证明属于同一次话语。",
-        "en": "occurrences: Short id, file, part, position, translation index, context, and terminology references for each occurrence. file is the one-based index in project file order; files maps indices to filenames. part identifies a content boundary within the file. position is the zero-based Segment index within the file, counting empty segments, not an index within the part or a character offset. Sharing a file or part does not by itself establish the same speech event.",
+        "zh-CN": "occurrences: 各次出现的短 id、文件、章节、位置、译文索引、上下文及术语引用。file 是项目文件顺序中从 1 开始的索引，files 将索引映射到文件名。part 是文件内的内容边界标识。position 是文件内从 0 开始的 Segment 序号，包含空片段，不是章节内序号或字符偏移。",
+        "en": "occurrences: Short id, file, part, position, translation index, context, and terminology references for each occurrence. file is the one-based index in project file order; files maps indices to filenames. part identifies a content boundary within the file. position is the zero-based Segment index within the file, counting empty segments, not an index within the part or a character offset.",
     },
 })
 _TASK_PREFIX["repetition_consistency"] = {
-    "zh-CN": "审查相同原文的不同译法。先判断话语事件或固定措辞关联，再判断叙事意图是否要求保留差异。术语与角色说明是理解证据，不能替代局部语境。",
-    "en": "Review differing translations of an identical source. Assess shared speech events or fixed-wording relationships, then whether narrative intent requires differences. Terminology and character knowledge inform interpretation but do not replace local context.",
+    "zh-CN": "你负责重复译文一致性审查。",
+    "en": "You perform repeated translation consistency review.",
 }
 _RESULT_PROTOCOLS["repetition_consistency"] = {
-    "zh-CN": '只返回一个 JSON 对象，无 Markdown 或额外字段：{"groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"依据"}],"keep":["3"],"uncertain":[]}。成员及 target 必须使用 occurrences 中的短 id。每个成员恰好属于一个子组、keep 或 uncertain；子组至少两个成员且不可重叠。target 必须是该子组成员，选用其现有译文，不生成新译文。apply 是本次建议应用的成员短 id 数组，必须是 members 的无重复子集，可以为空；成员关联与应用选择独立，应保留需要不同译法的成员。reason 使用 target_language 简述依据。没有可统一子组时 groups 为空。',
-    "en": 'Return only one JSON object, without Markdown or extra fields: {"groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"evidence"}],"keep":["3"],"uncertain":[]}. Use occurrence short ids for members and target. Every occurrence must belong exactly once to a subgroup, keep, or uncertain; subgroups must have at least two members and cannot overlap. target must be a subgroup member selecting its existing translation; do not generate a new translation. apply lists occurrence short ids to update, a unique subset of members that may be empty. Group membership and application are separate; leave occurrences requiring different wording out of apply. Write a brief reason in target_language. Use an empty groups array if no subgroup can be unified.',
+    "zh-CN": '只返回一个 JSON 对象，无 Markdown 或额外字段：{"groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"依据"}],"keep":["3"],"uncertain":[]}。成员及 target 必须使用 occurrences 中的短 id。每个成员恰好属于一个子组、keep 或 uncertain；子组至少两个成员且不可重叠。target 必须是该子组成员，选用其现有译文，不生成新译文。apply 是本次建议应用的成员短 id 数组，必须是 members 的无重复子集，可以为空；成员关联与应用选择独立。reason 使用 target_language 简述依据。没有可统一子组时 groups 为空。',
+    "en": 'Return only one JSON object, without Markdown or extra fields: {"groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"evidence"}],"keep":["3"],"uncertain":[]}. Use occurrence short ids for members and target. Every occurrence must belong exactly once to a subgroup, keep, or uncertain; subgroups must have at least two members and cannot overlap. target must be a subgroup member selecting its existing translation; do not generate a new translation. apply lists occurrence short ids to update, a unique subset of members that may be empty. Group membership and application are separate. Write a brief reason in target_language. Use an empty groups array if no subgroup can be unified.',
 }
 
 # Each declaration selects input fields, a task, and output contracts.

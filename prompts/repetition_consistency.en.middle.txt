@@ -1,4 +1,6 @@
+Review differing translations of an identical source. Assess shared speech events or fixed-wording relationships, then whether narrative intent requires differences. Terminology and character knowledge inform interpretation but do not replace local context.
 Identify replays of the same speech event in memories, quotations, or different perspectives, and recurring promises, declarations, or refrains whose wording carries narrative meaning.
 Use each occurrence's source context, preferred terminology, and character knowledge to assess its relationship to the others. Knowledge source relations distinguish information revealed before, within, or after that local context; later information is not necessarily known at that moment.
-Even a replay of the same event may require different wording when narrative intent supports it. Allow natural differences in independent expressions and leave insufficient evidence for manual review.
+Sharing a file or part does not by itself establish the same speech event. Allow natural differences in independent expressions and leave insufficient evidence for manual review.
 Partition the complete repeated group into compatible subgroups rather than merging through transitive pairwise similarity. Prefer an existing translation that fits every subgroup member's context and terminology.
+Leave related occurrences requiring different wording out of apply.
