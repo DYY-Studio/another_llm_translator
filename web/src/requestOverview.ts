@@ -29,14 +29,16 @@ export function parseRepetitionOverview(snapshot: RequestOverviewSnapshot) {
   const files = object(input.files);
   const occurrences = records(input.occurrences);
   const members = new Map(occurrences.map(item => [item.id, item]));
-  const proposals = new Map(records(output.groups).flatMap(group => Array.isArray(group.members) ? group.members.map(id => [id, group] as const) : []));
+  const groups = records(output.groups);
+  const proposals = new Map(groups.flatMap(group => Array.isArray(group.members) ? group.members.map(id => [id, group] as const) : []));
+  const appliedMembers = new Set(groups.flatMap(group => Array.isArray(group.apply) ? group.apply : Array.isArray(group.members) ? group.members : []));
   const uncertain = new Set(Array.isArray(output.uncertain) ? output.uncertain : []);
   const kept = new Set(Array.isArray(output.keep) ? output.keep : []);
   return {source: text(input.source), invalid,
-    groups: records(output.groups).map(group => ({members: Array.isArray(group.members) ? group.members.map(text) : [], reason: text(group.reason)})),
+    groups: groups.map(group => ({members: Array.isArray(group.members) ? group.members.map(text) : [], reason: text(group.reason)})),
     occurrences: occurrences.map(item => {
     const proposal = proposals.get(item.id);
-    const applied = proposal && (Array.isArray(proposal.apply) ? proposal.apply : proposal.members as unknown[]).includes(item.id);
+    const applied = proposal && appliedMembers.has(item.id);
     const target = applied ? members.get(proposal.target) : undefined;
     const context = (refs: unknown) => Array.isArray(refs) ? refs.map(id => text(contexts[String(id)])) : [];
     return {id: text(item.id), file: String(item.file), filename: text(files[String(item.file)]),

@@ -784,8 +784,10 @@ LLM Prompt 的 `/api/v1/prompts/{stage}/default?language=...` GET 直接读取�
 
 ### 重复译文上下文比较
 
-重复审查预检与任务启动接收布尔值 `exclude_punctuation_only`，默认 `true`；预检返回 `excluded_punctuation_groups`，Run 保存本次选择与排除数量。
+重复审查预检与任务启动接收布尔值 `exclude_punctuation_only` 和 `screening_enabled`，均默认 `true`；预检返回 `excluded_punctuation_groups`，Run 保存本次选择与排除数量。关闭初筛时 `decision_model` 为 `null`，不读取初筛 Prompt 或 Preset，也不保存其快照。
 
 `repetition_consistency` 是独立 Prompt 资源，使用标准 Prefix、中段、Suffix 装配；模型连接沿用翻译 Preset。输入包含 `source`、`translations`、`target_language`、共享 `context` 与 `terms`、`files`，以及 `occurrences`。每次出现携带短 ID、File/part、位置、从零开始的译文索引、前后文引用和术语引用。`file` 是项目文件顺序中从 1 开始的索引，`files` 将本请求涉及的索引映射到文件名；`position` 是文件内从 0 开始的 Segment 序号，包含空片段。术语正文仅发送一次，命中的别名保存在各次出现的术语引用 `aliases` 中；术语引用的 `source_relations` 按顺序对应 `entity_knowledge.items`，关系以该次出现的局部上下文为基准。
 
-响应为单个 JSON 对象，包含 `groups`、`keep`、`uncertain`。每个统一子组含 `members`、`target`、`reason`；成员至少两个，`target` 必须是组内成员并选择其现有译文，`reason` 使用目标语言。各次出现的短 ID 必须完整、不重复地划入子组或保留、待审列表。该协议不输出 JSONL 或结束记录。
+响应为单个 JSON 对象，包含 `groups`、`keep`、`uncertain`。每个统一子组含 `members`、`target`、`apply`、`reason`；成员至少两个，`target` 必须是组内成员并选择其现有译文，`apply` 是 `members` 的无重复子集，可以为空，`reason` 使用目标语言。各次出现的短 ID 必须完整、不重复地划入子组或保留、待审列表。该协议不输出 JSONL 或结束记录。
+
+草案审核选择以建议 ID 索引，含 `accepted`、`target` 及可选 `apply`；应用成员遵守相同子集规则。未提供 `apply` 时使用建议默认值；已有建议缺少该字段时使用全部成员。初筛跳过组由读取接口提供默认关闭的人工建议，ID 为 `{group_id}-manual`，成员为该重复组全部出现，选择仍保存于 Run；不可变草案正文保持原样。
