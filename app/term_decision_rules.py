@@ -24,7 +24,6 @@ from .term_library import build_term_library_rows, normalize_term
 _GroupViolation = tuple[str, tuple[str, ...]]
 _STATE_FIELDS = (
     "category",
-    "description",
     "preferred_translation",
     "aliases",
     "group_primary",
@@ -224,6 +223,9 @@ def _payload_term(
             "group_primary",
         )
     } | {"evidence": deepcopy(evidence[state["normalized"]])}
+    if "description" in value["evidence"]:
+        value["applied_description"] = value["description"]
+        value["description"] = value["evidence"].pop("description")
     term_conflicts = (conflicts or {}).get(str(state["normalized"]))
     if term_conflicts is not None and _has_conflicts(term_conflicts):
         value["conflicts"] = deepcopy(term_conflicts)
@@ -423,6 +425,7 @@ def _analyze_decisions(
     spec: Any | None,
     phase: str,
     conflicts: dict[str, dict[str, list[Any]]] | None = None,
+    descriptions: dict[str, str | None] | None = None,
 ) -> tuple[
     dict[str, dict[str, Any]],
     list[str],
@@ -515,7 +518,7 @@ def _analyze_decisions(
         else:
             missing_keys = sorted(SIMPLE_ACTION_KEYS - set(value))
             extra_keys = set(value) - SIMPLE_ACTION_KEYS
-            unknown_extra_keys = sorted(extra_keys - PATCH_FIELDS)
+            unknown_extra_keys = sorted(extra_keys - (PATCH_FIELDS | {"description"}))
             details = []
             if missing_keys:
                 details.append(f"缺少字段 {', '.join(missing_keys)}")
@@ -523,8 +526,9 @@ def _analyze_decisions(
                 details.append(f"禁止字段 {', '.join(unknown_extra_keys)}")
             mismatched = sorted(
                 key
-                for key in extra_keys & PATCH_FIELDS
-                if value[key] != expected[normalized].get(key)
+                for key in extra_keys & (PATCH_FIELDS | {"description"})
+                if value[key] != (descriptions[normalized] if key == "description" and descriptions is not None
+                                  else expected[normalized].get(key))
             )
             if mismatched:
                 details.append(f"冗余字段与当前状态不一致 {', '.join(mismatched)}")

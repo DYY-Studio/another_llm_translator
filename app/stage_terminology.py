@@ -78,6 +78,7 @@ from .stage_runtime import (
     _split_source_once,
     prompt_middle_digests,
 )
+from .term_knowledge import source_range
 from .summary_provenance import write_fragment_summary
 from .term_library import (
     _candidate_source_order,
@@ -287,6 +288,11 @@ async def run_terminology(
     include_draft_translation: bool = False,
     on_draft_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    from .term_knowledge import replacement_impacts
+    from .sqlite_storage import read_segments
+    impacts = replacement_impacts(project, [s for s in read_segments(project) if not s["is_empty"]]) if scope.force else []
+    if impacts and not scope.dry_run and not scope.confirm_knowledge_replacement:
+        raise UsageError(f"强制重扫会替换 {len(impacts)} 个相交说明片段，请先查看影响并明确确认（--confirm-knowledge-replacement）")
     if resume_run_id is not None:
         manifest = read_json(
             project, project / "runs" / resume_run_id / "manifest.json"
@@ -313,7 +319,7 @@ async def run_terminology(
     if include_draft_translation:
         from .stage_translation import run_translation
 
-        return await run_translation(
+        result = await run_translation(
             project,
             scope,
             http_client=http_client,
@@ -327,6 +333,7 @@ async def run_terminology(
             _include_summaries=include_summaries,
             _on_draft_progress=on_draft_progress,
         )
+        return {**result, "knowledge_replacement_impacts": impacts}
     logger = get_logger("terminology")
     preparation_started_at = time.perf_counter()
     scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
@@ -1048,6 +1055,7 @@ async def run_terminology(
         return {
             "stage": "terminology",
             "dry_run": True,
+            "knowledge_replacement_impacts": impacts,
             "resume_run_id": resume_run_id,
             "active_task_id": task_id,
             "selected": len(selected),
@@ -1549,7 +1557,7 @@ async def run_terminology(
                 envelope_ok and parsed.summary_complete
             )
             async with write_lock:
-                if term_ok and parsed.terms:
+                if term_ok and failed_class is not TerminologyResponseMode.SUMMARY_ONLY:
                     append_jsonl(
                         project,
                         project / "terminology" / "candidates.jsonl",
@@ -1566,6 +1574,7 @@ async def run_terminology(
                             source_order=_candidate_source_order(
                                 unresolved, segment_order, part_original,
                             ),
+                            source_range=source_range(unresolved, selected_by_id, part_original),
                             terms=list(parsed.terms),
                         ),
                     )
@@ -1713,7 +1722,7 @@ async def run_terminology(
                     }
                 )
             async with write_lock:
-                if terms:
+                if response_complete:
                     append_jsonl(
                         project,
                         project / "terminology" / "candidates.jsonl",
@@ -1732,6 +1741,7 @@ async def run_terminology(
                             source_order=_candidate_source_order(
                                 unresolved, segment_order, part_original,
                             ),
+                            source_range=source_range(unresolved, selected_by_id, part_original),
                             terms=terms,
                         ),
                     )

@@ -459,7 +459,7 @@ async def test_old_top_level_json_retries_without_added_feedback(
 
 
 @pytest.mark.asyncio
-async def test_incomplete_terms_save_candidates_without_advancing_scan(
+async def test_incomplete_terms_do_not_publish_candidates_or_advance_scan(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "Alice")
@@ -478,10 +478,10 @@ async def test_incomplete_terms_save_candidates_without_advancing_scan(
                 }
             )
         else:
-            assert read_jsonl(project, project / "terminology" / "candidates.jsonl")
+            assert not read_jsonl(project, project / "terminology" / "candidates.jsonl")
             scans = read_jsonl(project, project / "terminology" / "scans.jsonl")
             assert not any(item["status"] == "completed" for item in scans)
-            content = '{"type":"end"}'
+            content = llm_jsonl([{"type": "term", "source": "Alice", "category": "人物", "description": "", "aliases": []}])
         return httpx.Response(
             200, json={"choices": [{"message": {"content": content}}]}
         )
@@ -499,7 +499,7 @@ async def test_incomplete_terms_save_candidates_without_advancing_scan(
 
 
 @pytest.mark.asyncio
-async def test_malformed_end_keeps_candidates_and_marks_scan_failed(
+async def test_malformed_end_does_not_publish_candidates_and_marks_scan_failed(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "Alice")
@@ -531,7 +531,7 @@ async def test_malformed_end_keeps_candidates_and_marks_scan_failed(
     assert summary["published"] is False
     assert summary["failed"] == 1
     assert summary["failure_counts"] == {"format_error": 1}
-    assert candidates and candidates[0]["terms"][0]["source"] == "Alice"
+    assert candidates == []
     assert scans[-1]["status"] == "failed"
     assert scans[-1]["error_class"] == "format_error"
     assert not (project / "terminology" / "terms.json").exists()

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.helpers import write_term_library, scan_source_range
 
 import asyncio
 import io
@@ -2708,11 +2709,12 @@ def test_web_rejects_unresolved_term_conflict_on_save(tmp_path: Path) -> None:
     unresolved = client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "old_normalized": "alpha",
             "source": "Alpha",
             "preferred_translation": "阿尔法",
             "category": "",
-            "description": "category conflict",
+            "description_items": [{"text": "category conflict", "fragment_ids": []}],
             "aliases": [],
             "disabled": False,
         },
@@ -2727,10 +2729,11 @@ def test_web_can_permanently_delete_disabled_term(tmp_path: Path) -> None:
     added = client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "source": "Alice",
             "preferred_translation": "爱丽丝",
             "category": "人物",
-            "description": "主角",
+            "description_items": [{"text": "主角", "fragment_ids": []}],
             "aliases": [],
             "disabled": True,
         },
@@ -2829,10 +2832,10 @@ def test_web_clears_all_terminology_state_and_interrupts_stale_run(
         json={"confirm": True},
     )
     assert cleared.status_code == 200
-    assert cleared.json()["terms_revision"] is None
+    assert cleared.json()["terms_revision"] == 3
     assert cleared.json()["terms"] == []
     assert cleared.json()["scan"]["status"] == "none"
-    assert not record_exists(project, project / "terminology" / "terms.json")
+    assert read_json(project, project / "terminology" / "terms.json")["terms"] == []
     assert not record_exists(project, project / "terminology" / "active_task.json")
     assert read_json(project, project / "terminology" / "overrides.json")["overrides"] == []
     assert read_jsonl(project, project / "terminology" / "scans.jsonl") == []
@@ -2865,10 +2868,11 @@ def test_web_materializes_alias_and_changes_group_primary(tmp_path: Path) -> Non
     added = client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "source": "Alice",
             "preferred_translation": "爱丽丝",
             "category": "人物",
-            "description": "主角",
+            "description_items": [{"text": "主角", "fragment_ids": []}],
             "aliases": ["Alicia"],
             "disabled": False,
         },
@@ -2908,10 +2912,11 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
     assert client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
             "category": "别名条目",
-            "description": "已有人物资料",
+            "description_items": [{"text": "已有人物资料", "fragment_ids": []}],
             "aliases": ["Alicia Jr"],
             "disabled": False,
         },
@@ -2924,10 +2929,11 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
     assert client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "source": "Alice",
             "preferred_translation": "爱丽丝",
             "category": "人物",
-            "description": "主角",
+            "description_items": [{"text": "主角", "fragment_ids": []}],
             "aliases": ["Alicia"],
             "disabled": False,
         },
@@ -2942,7 +2948,7 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
     assert rows["alicia"]["group_primary"] == "alice"
     assert rows["alicia"]["preferred_translation"] == "艾丽西亚"
     assert rows["alicia"]["category"] == "别名条目"
-    assert rows["alicia"]["description"] == "已有人物资料"
+    assert rows["alicia"]["description"] == "主角"
     assert rows["alicia"]["aliases"] == ["Alicia Jr"]
     assert rows["alice"]["aliases"] == []
 
@@ -3156,7 +3162,7 @@ def test_web_exports_and_publishes_scanned_candidates(tmp_path: Path) -> None:
             str(metadata["project_id"]),
             active_task_id=task_id,
             run_id="RUN-WEB-PARTIAL",
-            source_order={"segment_id": "F0001-S000001", "offset": 0},
+            source_order={"segment_id": "F0001-S000001", "offset": 0}, source_range=scan_source_range(project),
             terms=[
                 {
                     "source": "Alice",
@@ -3188,7 +3194,7 @@ def test_web_exports_and_publishes_scanned_candidates(tmp_path: Path) -> None:
 
 def _seed_terms(project: Path, terms: list[dict]) -> None:
     project_id = str(read_json(project, project / "project.json")["project_id"])
-    write_json(
+    write_term_library(
         project,
         project / "terminology" / "terms.json",
         record_header(

@@ -54,20 +54,39 @@ def _build_draft(
     prompt_fingerprint: str,
     spec: Any,
     reviewed_components: list[set[str]] | None = None,
+    knowledge_updates: dict[str, Any] | None = None,
+    knowledge_errors: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    knowledge_updates = knowledge_updates or {}
+    knowledge_errors = knowledge_errors or {}
+    final = deepcopy(final)
+    decisions = deepcopy(decisions)
+    graph = _decision_dependency_graph(original, final, spec)
+    from .term_knowledge import entity_members, persistent_library
+    groups = entity_members({"terms": [s for s in final.values() if not s.get("disabled")]})
+    failed = {key for root in knowledge_errors for key in groups.get(root, [root])}
+    blocked = set().union(*_dependency_components(graph, failed)) if failed else set()
+    for key in blocked:
+        final[key] = deepcopy(original[key])
+        if key not in protected:
+            decisions[key] = {"action": "needs_review", "reason": "实体说明聚合失败，相关建议暂缓"}
+    knowledge_updates = {root: update for root, update in knowledge_updates.items()
+                         if not set(update["members"]) & blocked}
     changed = {
         key
         for key in final
         if key not in protected
         and any(original[key][field] != final[key][field] for field in _STATE_FIELDS)
     }
-    graph = _decision_dependency_graph(original, final, spec)
+    for update in knowledge_updates.values():
+        members = update["members"]
+        changed.update(members)
     for reviewed in reviewed_components or []:
         keys = sorted(reviewed & changed)
         for left, right in zip(keys, keys[1:]):
             graph[left].add(right)
             graph[right].add(left)
-    components = _dependency_components(graph, changed, allowed=changed)
+    components = _dependency_components(graph, changed)
     proposals: list[dict[str, Any]] = []
     for component in sorted(components, key=lambda value: sorted(value)):
         keys = sorted(component)
@@ -81,18 +100,32 @@ def _build_draft(
                 if original[key][field] != final[key][field]
             }
         )
+        updates = {root: update["aggregate"] for root, update in knowledge_updates.items()
+                   if set(update["members"]) & component}
+        before_knowledge = {root: deepcopy(source_library["knowledge"]["entities"].get(root)) for root in updates}
+        if updates:
+            fields.append("description_items")
+            for state in after:
+                root = str(state.get("group_primary") or state["normalized"])
+                if root in updates:
+                    state["description"] = "；".join(item["text"] for item in updates[root]["items"])
+                    state["description_items"] = deepcopy(updates[root]["items"])
         relationship = len(keys) > 1 or "group_primary" in fields
         proposals.append(
             {
-                "proposal_id": _proposal_id([{"before": before, "after": after}]),
-                "kind": "relationship" if relationship else "term_update",
+                "proposal_id": _proposal_id([{"before": before, "after": after, "knowledge_before": before_knowledge, "knowledge_after": updates}]),
+                "kind": "entity_knowledge" if fields == ["description_items"] else "relationship" if relationship else "term_update",
                 "normalized": keys,
                 "before": before,
                 "after": after,
                 "changes": fields,
                 "reason": "；".join(
-                    dict.fromkeys(decisions[key]["reason"] for key in keys)
+                    dict.fromkeys([*(decisions[key]["reason"] for key in keys if key in decisions),
+                                   *(update["reason"] for root, update in knowledge_updates.items() if root in updates)])
                 ),
+                "knowledge_before": before_knowledge,
+                "knowledge_after": deepcopy(updates),
+                "knowledge_owner_moves": {old:new for root, update in knowledge_updates.items() if root in updates for old,new in update.get("owner_moves", {}).items()},
                 "evidence": {key: deepcopy(evidence[key]) for key in keys},
                 "conflicts": {key: deepcopy(conflicts[key]) for key in keys},
             }
@@ -108,6 +141,11 @@ def _build_draft(
         for key, decision in sorted(decisions.items())
         if decision["action"] == "needs_review"
     ]
+    present = {item["normalized"] for item in needs_review}
+    for root, error in knowledge_errors.items():
+        if root not in present:
+            needs_review.append({"normalized": root, "source": original[root]["source"], "reason": error,
+                                 "evidence": deepcopy(evidence[root]), "conflicts": deepcopy(conflicts[root])})
     return record_header(
         "terminology_decision_draft",
         project_id,
@@ -122,14 +160,14 @@ def _build_draft(
         proposals=proposals,
         needs_review=needs_review,
         rejected_proposal_ids=[],
-        source_library=source_library,
+        source_library=persistent_library(source_library),
         source_overrides=source_overrides,
     )
 
 def _draft_path(project: Path, run_id: str) -> Path:
     return project / "runs" / run_id / DRAFT_FILE
 
-def current_decision_draft(project: Path) -> dict[str, Any] | None:
+def _read_pending_draft(project: Path) -> dict[str, Any] | None:
     for manifest in sorted(
         list_runs(project, stage=STAGE),
         key=lambda item: str(item.get("started_at", "")),
@@ -146,6 +184,25 @@ def current_decision_draft(project: Path) -> dict[str, Any] | None:
             draft["final_review_error"] = deepcopy(manifest["final_review_error"])
         return draft
     return None
+
+def current_decision_draft(project: Path) -> dict[str, Any] | None:
+    draft = _read_pending_draft(project)
+    if draft is None:
+        return None
+    refs = {key for proposal in draft["proposals"]
+            for aggregate in [*proposal.get("knowledge_before", {}).values(), *proposal.get("knowledge_after", {}).values()]
+            if aggregate for item in aggregate["items"] for key in item["fragment_ids"]}
+    from .term_knowledge import evidence as knowledge_evidence, navigation_fragment
+    fragments = knowledge_evidence(project, draft["source_library"]) if refs else {}
+    for proposal in draft["proposals"]:
+        proposal_refs = {key for aggregate in [*proposal.get("knowledge_before", {}).values(), *proposal.get("knowledge_after", {}).values()]
+                         if aggregate for item in aggregate["items"] for key in item["fragment_ids"]}
+        proposal["knowledge_evidence"] = {}
+        for key in proposal_refs:
+            if key not in fragments:
+                continue
+            proposal["knowledge_evidence"][key] = navigation_fragment(fragments[key])
+    return draft
 
 def _decision_needs_review(
     project: Path, manifest: dict[str, Any]
@@ -273,7 +330,7 @@ def _pending_manifest(project: Path, run_id: str) -> dict[str, Any]:
     return manifest
 
 def save_decision_rejections(project: Path, proposal_ids: list[str]) -> dict[str, Any]:
-    draft = current_decision_draft(project)
+    draft = _read_pending_draft(project)
     if draft is None:
         raise UsageError("没有待处理术语决策草案")
     library = load_terms(project)
@@ -301,7 +358,7 @@ def save_decision_rejections(project: Path, proposal_ids: list[str]) -> dict[str
 def discard_decision_draft(project: Path, *, confirm: bool) -> dict[str, Any]:
     if confirm is not True:
         raise UsageError("必须明确确认丢弃术语决策草案")
-    draft = current_decision_draft(project)
+    draft = _read_pending_draft(project)
     if draft is None:
         raise UsageError("没有待处理术语决策草案")
     run_id = str(draft["run_id"])
@@ -321,7 +378,7 @@ def apply_decision_draft(
 ) -> dict[str, Any]:
     if confirm_all is not True:
         raise UsageError("必须使用 --all 或界面确认应用术语决策")
-    draft = current_decision_draft(project)
+    draft = _read_pending_draft(project)
     if draft is None:
         raise UsageError("没有待处理术语决策草案")
     library = load_terms(project)
@@ -339,6 +396,10 @@ def apply_decision_draft(
         raise UsageError(f"未知术语决策建议：{', '.join(unknown[:10])}")
     rejected = manifest_rejected | requested_rejected
     after_states, accepted = _proposal_after_states(draft, rejected)
+    _validate_accepted_scalar_conflicts(draft, after_states)
+    before_states = {term["normalized"]: _term_state(term) for term in library["terms"]}
+    after_states = {key: state for key, state in after_states.items()
+                    if key not in before_states or any(state[field] != before_states[key][field] for field in _STATE_FIELDS)}
     _validate_accepted_scalar_conflicts(draft, after_states)
     run_id = str(draft["run_id"])
     manifest_path = project / "runs" / run_id / "manifest.json"
@@ -379,7 +440,6 @@ def apply_decision_draft(
             "normalized": normalized,
             "source": state["source"],
             "category": state.get("category"),
-            "description": state.get("description"),
             "preferred_translation": state.get("preferred_translation"),
             "aliases": list(state.get("aliases", [])),
             "disabled": bool(state.get("disabled")),
@@ -421,7 +481,20 @@ def apply_decision_draft(
         decision_run_id=run_id,
         origin="terminology_decision",
         terms=terms,
+        knowledge=deepcopy(library["knowledge"]),
     )
+    from .term_knowledge import entity_view, save_items, project_descriptions, transfer_alias_evidence, evidence
+    transfer_alias_evidence(term_record, term_normalization(load_project_config(project)))
+    known = evidence(project, term_record)
+    for proposal in draft["proposals"]:
+        if proposal["proposal_id"] in rejected:
+            continue
+        for root, aggregate in proposal.get("knowledge_after", {}).items():
+            view = entity_view(project, term_record, root, all_evidence=known)
+            if view["input_version"] != aggregate["input_version"] or any(f["state"] == "active" and not f["valid"] for f in view["fragments"]):
+                raise UsageError("实体说明证据已变化，请重新生成草案")
+            save_items(project, term_record, root, aggregate["items"], all_evidence=known)
+    project_descriptions(project, term_record, all_evidence=known)
     override_record = record_header(
         "terminology_overrides",
         str(draft["project_id"]),
@@ -480,6 +553,8 @@ def rollback_decision(project: Path, *, confirm: bool) -> dict[str, Any]:
     ):
         raise UsageError("术语库在应用后已有变化，不能撤销自动决策")
     source_library = deepcopy(draft["source_library"])
+    from .term_knowledge import require_knowledge
+    require_knowledge(source_library)
     source_overrides = deepcopy(draft["source_overrides"])
     revision = int(library["terms_revision"]) + 1
     source_library.update(

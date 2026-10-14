@@ -11,6 +11,15 @@ from app.stage_terminology import run_terminology
 from tests.test_terminology_translation import create_project, llm_jsonl
 
 
+def published_descriptions(project: Path) -> list[str]:
+    from app.term_library import load_terms
+    from app.term_knowledge import entity_view
+    library = load_terms(project)
+    assert library["terms"][0]["description"] == ""
+    view = entity_view(project, library, library["terms"][0]["normalized"])
+    return [f["text"] for f in view["fragments"] if f["state"] == "active"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("include_draft", [False, True])
 @pytest.mark.parametrize("include_summaries", [False, True])
@@ -45,7 +54,12 @@ async def test_completed_legacy_scan_allows_other_outputs(
         await run_terminology(project, Scope(), http_client=client)
         # Represent a completed scan created before candidate ordering existed.
         with sqlite3.connect(database_path(project)) as connection:
-            connection.execute("UPDATE terminology_candidates SET payload_json = json_remove(payload_json, '$.source_order')")
+            import zlib
+            for row_id, payload in connection.execute("SELECT rowid, payload_json FROM terminology_candidates").fetchall():
+                value = json.loads(zlib.decompress(payload))
+                value.pop("source_order", None)
+                connection.execute("UPDATE terminology_candidates SET payload_json = ? WHERE rowid = ?",
+                                   (zlib.compress(json.dumps(value).encode()), row_id))
         library = load_terms(project)
         candidates = read_jsonl(project, project / "terminology" / "candidates.jsonl")
         if include_summaries:
@@ -92,7 +106,7 @@ async def test_scan_publication_uses_current_file_order(tmp_path: Path, include_
         result = await run_terminology(project, Scope(), http_client=client,
                                        include_draft_translation=include_draft)
     assert result["failed"] == 0
-    assert load_terms(project)["terms"][0]["description"] == "a-later；z-first"
+    assert published_descriptions(project) == ["a-later", "z-first"]
 
 
 @pytest.mark.asyncio
@@ -149,16 +163,16 @@ async def test_scan_descriptions_follow_source_order_despite_completion_order(
         assert result["failed"] == 0
         candidates = read_jsonl(project, project / "terminology" / "candidates.jsonl")
         assert [row["terms"][0]["description"] for row in candidates] == ["a-later", "z-first"]
-        assert load_terms(project)["terms"][0]["description"] == "z-first；a-later"
+        assert published_descriptions(project) == ["z-first", "a-later"]
         assert [row["source_order"] for row in candidates] == [
             {"segment_id": "F0001-S000002", "offset": 0},
             {"segment_id": "F0001-S000001", "offset": 0},
         ]
         await run_terminology(
-            project, Scope(force=True), http_client=client,
+            project, Scope(force=True, confirm_knowledge_replacement=True), http_client=client,
             include_draft_translation=include_draft, include_summaries=include_summaries,
         )
-    assert load_terms(project)["terms"][0]["description"] == "z-first；a-later"
+    assert published_descriptions(project) == ["z-first", "a-later"]
 
 
 @pytest.mark.asyncio
@@ -189,7 +203,7 @@ async def test_scan_runtime_slices_persist_source_offsets(tmp_path: Path, includ
         {"segment_id": "F0001-S000001", "offset": 0},
         {"segment_id": "F0001-S000001", "offset": 4},
     ]
-    assert load_terms(project)["terms"][0]["description"] == "z-first；a-later"
+    assert published_descriptions(project) == ["z-first", "a-later"]
 
 
 @pytest.mark.asyncio
@@ -322,7 +336,7 @@ async def test_triple_scan_preserves_independent_results_and_force(
         seen.clear()
         result = await run_terminology(
             project,
-            Scope(force=True),
+            Scope(force=True, confirm_knowledge_replacement=True),
             http_client=client,
             include_summaries=True,
             include_draft_translation=True,
@@ -418,7 +432,7 @@ async def test_supplement_adapter_requirements_follow_active_tasks(
         ):
             await run_terminology(
                 project,
-                Scope(force=True),
+                Scope(force=True, confirm_knowledge_replacement=True),
                 http_client=client,
                 include_summaries=True,
                 include_draft_translation=True,

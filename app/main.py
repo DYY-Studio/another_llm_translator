@@ -155,6 +155,8 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--dry-run", action="store_true")
         result_choice = command.add_mutually_exclusive_group()
         result_choice.add_argument("--force", action="store_true")
+        if name in {"terminology", "run-all"}:
+            command.add_argument("--confirm-knowledge-replacement", action="store_true", help="确认强制扫描替换相交的旧说明片段；先用 --dry-run 查看影响")
         result_choice.add_argument(
             "--reuse-mixed-fingerprints",
             action="store_true",
@@ -551,6 +553,7 @@ def run(argv: list[str] | None = None) -> int:
             only_file=args.only_file,
             only_segment=args.only_segment,
             force=args.force,
+            confirm_knowledge_replacement=getattr(args, "confirm_knowledge_replacement", False),
             dry_run=args.dry_run,
         )
         resume_run_id = None

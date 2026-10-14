@@ -1195,7 +1195,7 @@ def test_file_reorder_upgrades_unopened_v6_project(tmp_path: Path) -> None:
     with sqlite3.connect(project / "project.sqlite") as database:
         assert database.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "7"
+        ).fetchone()[0] == str(sqlite_storage.SCHEMA_VERSION)
     assert len(list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))) == 1
 
 

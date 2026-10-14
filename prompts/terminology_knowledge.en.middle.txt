@@ -1,0 +1,5 @@
+Organize the complete evidence for each entity independently. Merge duplicate or semantically equivalent information while preserving each fragment's unique information. Present stable identity and attributes first.
+
+When identity, allegiance or relationships change, preserve the sequence supported by evidence without inferring event time from fragment order. Preserve uncertainty where evidence conflicts or is insufficient; do not infer unverified facts.
+
+Write concise, coherent target-language explanations rather than piling up raw fragments. Facts must be supported by the supplied valid fragments; applied explanations are only review comparisons.

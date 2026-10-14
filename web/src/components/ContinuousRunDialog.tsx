@@ -53,6 +53,7 @@ export function ContinuousRunDialog({
   }>({ project, steps: {} });
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<unknown>(null);
+  const [knowledgeConfirmed, setKnowledgeConfirmed] = useState(false);
   const [submitError, setSubmitError] = useState<unknown>(null);
   const [finalReview, setFinalReview] = useState(false);
   const [applyTerminologyDecision, setApplyTerminologyDecision] = useState(false);
@@ -165,6 +166,8 @@ export function ContinuousRunDialog({
       || (resultPolicy !== "reuse" && resultPolicy !== "force"))
     && !isContinuousBlockingResolved(item.code, item.stage, runActions, resultPolicy)
   ));
+  const replacementImpacts = options?.terminology_options?.knowledge_replacement_impacts ?? [];
+  const replacementNeeded = stages.includes("terminology") && resultPolicy === "force" && replacementImpacts.length > 0;
   const localBlocking: Array<{ code: string; message: string; stage?: string }> = [
     ...missingActions.map((step) => ({
       code: "run_action_required",
@@ -181,7 +184,7 @@ export function ContinuousRunDialog({
       message: translate("continuousRun.resumePolicyConflict", language),
     }] : []),
   ];
-  const allBlocking = [...blocking, ...localBlocking];
+  const allBlocking = [...blocking, ...localBlocking, ...(replacementNeeded && !knowledgeConfirmed ? [{code: "knowledge_replacement_confirmation", message: translate("knowledge.confirmReplacement", language)}] : [])];
   const globalBlocking = allBlocking.filter((item) => !item.stage);
   const canStart = Boolean(
     options
@@ -198,7 +201,7 @@ export function ContinuousRunDialog({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await onStart(continuousPayload(stages, {
+      await onStart({ ...continuousPayload(stages, {
         finalReview,
         applyTerminologyDecision,
         force: resultPolicy === "force",
@@ -207,7 +210,7 @@ export function ContinuousRunDialog({
         includeDraftTranslation,
         includeSummaries,
         aggregateFullSummaries,
-      }));
+      }), confirm_knowledge_replacement: replacementNeeded && knowledgeConfirmed });
     } catch (reason) {
       setSubmitError(reason);
     } finally {
@@ -393,6 +396,11 @@ export function ContinuousRunDialog({
             {loading && <p className="muted">{translate("common.loading", language)}</p>}
             {loadError != null && <p className="error-text" role="alert">{errorMessage(loadError, language)}</p>}
             {loadError != null && Object.keys(displaySteps).length > 0 && <p className="muted">{translate("continuousRun.previousPreflight", language)}</p>}
+            {replacementNeeded && <div className="warning-banner run-warning">
+              <strong>{translate("knowledge.replacement", language, { count: replacementImpacts.length })}</strong>
+              <details><summary>{translate("knowledge.fragments", language)}</summary>{replacementImpacts.map((fragment) => <p key={fragment.fragment_id}>{fragment.owner}: {fragment.text}</p>)}</details>
+              <label className="checkbox-label"><input type="checkbox" checked={knowledgeConfirmed} onChange={(event) => setKnowledgeConfirmed(event.target.checked)} />{translate("knowledge.confirmReplacement", language)}</label>
+            </div>}
             {submitError != null && <p className="error-text" role="alert">{errorMessage(submitError, language)}</p>}
           </div>
         </div>

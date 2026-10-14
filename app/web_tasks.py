@@ -371,6 +371,9 @@ def task_options(
         "running_run": _running_run(project, stage, config),
         "document_adapter_run_options": _document_adapter_run_option_summary(project),
     }
+    if stage == "terminology":
+        from .term_knowledge import replacement_impacts
+        result["knowledge_replacement_impacts"] = replacement_impacts(project, nonempty)
     result["include_summaries"] = include_summaries
     if stage == "terminology" and include_summaries:
         participation = read_summary_participation(project)

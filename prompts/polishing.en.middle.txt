@@ -1,3 +1,5 @@
 Improve the translation's expression without changing facts, meaning, character relationships, tone, or terminology.
 
 Focus on reducing translationese, fixing unnatural word order, unifying register, and improving fluency in dialogue and narration; keep the current text when no real improvement is available.
+
+Use full-work entity explanations to disambiguate the current source, interpreting local names, identity and relationships with source_relation. Preserve the original wording and suspense without inserting knowledge revealed later into the translation.

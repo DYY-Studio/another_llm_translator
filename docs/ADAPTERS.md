@@ -296,14 +296,45 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 ### 自动术语决策关系校验
 
+名称与关系决策各阶段的 `description` 为按术语当前归属拼接的全部有效、未停用说明片段，每段以方括号标明原术语归属；`applied_description` 单独提供已应用实体说明作对照。两者均只读。片段可能重复、存在分歧或描述不同位置，排列顺序不表示事实发生时间。拼接文本计入现有分批预算，不截断。
+
 `changes` 按完整最终状态检查 [术语组规则](MINIMAL.md#51-术语)，覆盖新增 Alias、
 组关系变更和成员重新启用。新增非法关系返回 `invalid_relationship`；普通决策无法完整
 解决时使用 `needs_review`，自动终审仍必须给出合法最终状态，否则执行失败。
-受保护条目只作为只读证据。草案应用时对实际接受的组合重新检查，未解决的受影响关系拒绝写入。
+受保护条目的名称等字段只作为只读证据，实体说明允许提出更新。草案应用时对实际接受的组合重新检查，未解决的受影响关系拒绝写入。
 在此前阶段的最终状态上，额外以 `containment` 请求复核原文长短包含而译名疑似不一致的组合。
 子串关系只筛选候选，不构成硬冲突；可明确保留独立译法，无法可靠判断则将关联组件恢复到原状态并进入 `needs_review`。
 同一复核组合中发生的修改作为整体建议接受或拒绝；复核不能修改受保护条目，不能通过修改制造新的未确认包含冲突。
-此复核位于可选自动终审之后，仍可产生待审项。当前决策规则版本为 9；旧规则草案须重新生成，不作转换。
+此复核位于可选自动终审之后，仍可产生待审项。当前决策规则版本为 11；旧规则草案须重新生成，不作转换。
+
+固定 Prefix 按阶段声明输入字段、只读参考与任务，固定 Suffix 按阶段声明输出协议并统一追加一次 JSONL 结束约束。可编辑中段位于两者之间，负责信息取舍、详略与表达策略；来源边界、引用及输出覆盖要求由固定协议定义。联合模式声明参与阶段和附加输出协议；设置预览与实际请求共用组装入口，固定规则版本纳入 fingerprint。名称与关系阶段的 `description` 和 `applied_description` 均为只读。
+
+### 实体说明决策与接口
+
+名称与关系确定后，`phase: "knowledge"` 发送 `target_language` 和 `entities` 数组；各实体包含 `entity`、`members`、`current_items` 和全部有效 `fragments`。片段包含整次请求内唯一的短 ID（如 `K1`）、原归属、当前归属、说明及来源范围。实体证据完整且不可拆分，按现有软目标、硬限制和安全系数装箱，批次共用现有并发调度与 KeyPool。超限实体单独失败。Prompt 使用独立资源 `terminology_knowledge` 的中段，不携带名称与关系决策中段；该资源不是独立执行阶段或模型设置。
+
+请求中的 `source_range` 将连续源文表示为区间，每项包含 `file_id`、`part_id`、`first: {position, start}` 和 `last: {position, end}`。`position` 是从 0 开始的 Segment 位置，偏移是首尾 Segment 内的字符位置，`end` 为不包含端点。跨文件、分部、位置间断或切片空缺分别保留。无来源片段为 `null`。持久化来源和引用校验仍使用完整 Segment 范围。
+
+每个请求实体恰好返回一条实体记录，允许乱序，最后返回终止记录：
+
+```jsonl
+{"type":"entity_knowledge","entity":"alice","items":[{"text":"船长","refs":["K1"]}],"reason":"源文明确身份"}
+{"type":"end"}
+```
+
+字段严格校验，条目文字非空且引用非空。完整文档中的缺失或重复实体、非法条目、未知或跨实体引用仅使对应实体失败；成功实体立即保存检查点，只重试未完成实体，格式反馈纳入预算并重新分批。未知实体、损坏 JSONL 或缺少终止记录使整次响应无效。停用或失效证据不发送。宿主将短引用转换为持久化 `fragment_ids`；扫描片段以候选记录 ID 和条目序号标识，并关联原 Segment、实际输入切片范围及原文/模型输入摘要。
+
+术语查询附加 `entity_key`、`knowledge_status`（`current`、`pending`、`stale`）、`description_items`，保留只读 `description` 投影。条目只返回 `text` 和 `fragment_ids`。`GET /api/v1/projects/{name}/terms/knowledge?normalized=...` 返回条目、片段和导航所需的引用范围，不暴露来源摘要。
+
+翻译、校对、润色和联合粗翻的 `entity_knowledge.items` 提供 `text`、`source_relation` 和布尔 `unsourced`，每个命中实体只提供一次全部已应用条目。`source_relation` 最多包含三个指示，例如 `["before 1", "within", "after 2"]`；无来源说明使用空数组及 `unsourced: true`，混合引用同时保留相对关系和无来源标记。位置以本次待处理源文的首尾范围为准，使用原 Segment 位置和实际切片偏移，结束偏移不包含端点；范围内空缺归为 `within`，参考上下文不扩大范围。`before`、`after` 分别按同一实体各条目的最早相关证据位置升序编号，同位置同号，`within` 不编号。位置和编号表示证据先后，不表示事实生效范围或事件时间。生成请求不发送具体来源区间或当前位置数组；持久来源、实体详情和导航保留完整范围。
+
+`PUT` 同一路径使用现有写锁和事务，必须提供 `normalized`、`expected_revision`、`action`，操作字段分别为：
+
+- `save_items`：`items: [{text, fragment_ids}]`，空引用明确创建无来源人工片段。
+- `set_fragment_enabled`：`fragment_id` 和布尔 `enabled`。
+- `confirm_keep`：仅接受有效的当前已应用说明。
+
+术语编辑可携带 `description_items`，同时必须提供 `expected_revision`（新库为 0），旧 `description` 写入被拒绝。强制术语扫描有相交片段时必须提供 `confirm_knowledge_replacement: true`，CLI 对应 `--confirm-knowledge-replacement`。
 
 ## 2. Document Adapter（Beta）
 
