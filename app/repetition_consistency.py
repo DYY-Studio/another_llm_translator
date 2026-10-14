@@ -24,6 +24,8 @@ from .project import load_segments, load_source_files
 from .sqlite_storage import (atomic_write_json, atomic_write_text, latest_stage_states, read_json,
                              read_repetition_run, utc_now)
 from .sqlite_storage import write_repetition_state
+from .term_library import load_terms, term_normalization
+from .term_matching import _TermMatchCache
 from .user_config import effective_path
 
 STAGE = "repetition_consistency"
@@ -100,6 +102,13 @@ def repetition_plan(project: Path, scope: Scope) -> dict[str, Any]:
             by_part[(s["file_id"], s["part_id"])].append(s)
     positions = {str(s["segment_id"]): (items, i)
                  for items in by_part.values() for i, s in enumerate(items)}
+    library = load_terms(project)
+    terms_revision = library["terms_revision"] if library else None
+    warnings: list[str] = []
+    term_cache = _TermMatchCache(library, term_normalization(config),
+        int(config["terminology"]["max_terms_per_segment"]), segments=segments, warnings=warnings)
+    terms: dict[str, dict[str, Any]] = {}
+    term_ids: dict[str, str] = {}
     evidence: dict[str, dict[str, Any]] = {}
     sources: dict[str, str] = {}
     groups = []
@@ -124,7 +133,20 @@ def repetition_plan(project: Path, scope: Scope) -> dict[str, Any]:
                     source_key = digest(neighbor["source"])
                     sources.setdefault(source_key, str(neighbor["source"]))
                     evidence[nid] = {"source_key": source_key, "signature": segment_signature(neighbor)}
-            occurrences.append({"id": str(i), "segment_id": sid,
+            matched_ids = []
+            local_items = [*neighbors[max(0, position - 3):position], s, *neighbors[position + 1:position + 4]]
+            for term in term_cache.for_items(local_items):
+                relations = []
+                if "entity_knowledge" in term:
+                    relations = [item.pop("source_relation") for item in term["entity_knowledge"]["items"]]
+                key = digest(term)
+                tid = term_ids.get(key)
+                if tid is None:
+                    tid = str(len(terms) + 1)
+                    term_ids[key] = tid
+                    terms[tid] = term
+                matched_ids.append({"id": tid, "source_relations": relations})
+            occurrences.append({"id": str(i), "terms": matched_ids, "segment_id": sid,
                 "file_id": s["file_id"], "part_id": s["part_id"], "line_index": s["line_index"],
                 "signature": segment_signature(s), "base_result_id": bases[sid]["record_id"],
                 "origin": bases[sid].get("restored_origin", bases[sid].get("origin")), "variant": variant_indices[bases[sid]["text"]],
@@ -132,7 +154,7 @@ def repetition_plan(project: Path, scope: Scope) -> dict[str, Any]:
         group = {"id": str(number), "source": str(items[0]["source"]),
                  "translations": variants, "occurrences": occurrences}
         _, screening_tokens = decision.request_plan(screening_payload(group), [SCREEN])
-        messages = render_messages(PROMPT, comparison_payload(group, evidence, sources, config["project"]["target_language"]))
+        messages = render_messages(PROMPT, comparison_payload(group, evidence, sources, config["project"]["target_language"], terms))
         comparison_tokens = estimate_messages(messages, config["execution"]["token_safety_factor"])
         itpm = config["execution"]["input_tokens_per_minute"]
         group["over_budget"] = screening_tokens > decision_limit or comparison_tokens >= llm_limit or (itpm > 0 and comparison_tokens > itpm)
@@ -141,11 +163,11 @@ def repetition_plan(project: Path, scope: Scope) -> dict[str, Any]:
             estimated_requests += 2
         groups.append(group)
     selected_count = sum(len(g["occurrences"]) for g in groups)
-    fingerprint = digest({"groups": groups, "evidence": evidence, "llm": config["_llm_preset_hash"],
+    fingerprint = digest({"groups": groups, "evidence": evidence, "terms": terms, "terms_revision": terms_revision, "llm": config["_llm_preset_hash"],
                           "temperature": config["llm"]["temperature_translation"], "retry": config["retry"],
                           "decision": preset, "target_language": config["project"]["target_language"], "prompt": PROMPT,
                           "screen": {"instructions": SCREEN.instructions, "choices": SCREEN.choices}})
-    return {"config": config, "decision_preset": preset, "groups": groups, "evidence": evidence, "sources": sources,
+    return {"config": config, "terms": terms, "terms_revision": terms_revision, "warnings": warnings, "decision_preset": preset, "groups": groups, "evidence": evidence, "sources": sources,
             "selected": selected_count, "fingerprint": fingerprint, "estimated_requests": estimated_requests,
             "estimated_input_tokens": input_tokens}
 
@@ -162,15 +184,18 @@ def screening_payload(group: dict[str, Any]) -> dict[str, Any]:
     return {"source": group["source"], "translations": group["translations"], "counts": counts}
 
 
-def comparison_payload(group: dict[str, Any], evidence: dict[str, Any], sources: dict[str, str], language: str) -> dict[str, Any]:
+def comparison_payload(group: dict[str, Any], evidence: dict[str, Any], sources: dict[str, str], language: str, terms: dict[str, Any]) -> dict[str, Any]:
     context_ids = dict.fromkeys(n for o in group["occurrences"] for n in (*o["previous"], *o["next"]))
     source_keys = dict.fromkeys(evidence[sid]["source_key"] for sid in context_ids)
     source_ids = {key: str(i) for i, key in enumerate(source_keys, 1)}
     short = {sid: source_ids[evidence[sid]["source_key"]] for sid in context_ids}
+    used_terms = dict.fromkeys(ref["id"] for o in group["occurrences"] for ref in o["terms"])
+    short_terms = {tid: str(i) for i, tid in enumerate(used_terms, 1)}
     return {"source": group["source"], "translations": group["translations"], "target_language": language,
+            "terms": {short_terms[tid]: terms[tid] for tid in used_terms},
             "context": {source_ids[key]: sources[key] for key in source_keys},
             "occurrences": [{"id": o["id"], "file": o["file_id"], "part": o["part_id"],
-                             "position": o["line_index"], "variant": o["variant"],
+                             "position": o["line_index"], "variant": o["variant"], "terms": [{"id": short_terms[ref["id"]], "source_relations": ref["source_relations"]} for ref in o["terms"]],
                              "previous": [short[sid] for sid in o["previous"]],
                              "next": [short[sid] for sid in o["next"]]} for o in group["occurrences"]]}
 
@@ -216,6 +241,10 @@ async def run_repetition(project: Path, scope: Scope, *, replace_draft: bool = F
     run_id, run_dir = create_run(project, config=config, stage=STAGE, fingerprint=plan["fingerprint"],
         prompt=PROMPT, selected_count=total, requested_count=total, reused_count=0,
         details={"draft_status": "generating", "scope": {"only_file": scope.only_file}, "choices": {}})
+    atomic_write_text(run_dir / "repetition_terms.json", json.dumps({
+        "terms_revision": plan["terms_revision"], "terms": plan["terms"],
+        "groups": {g["id"]: {o["id"]: o["terms"] for o in g["occurrences"]} for g in plan["groups"]},
+    }, ensure_ascii=False, separators=(",", ":")) + "\n")
     atomic_write_json(run_dir / "decision_preset.json", plan["decision_preset"])
     atomic_write_json(run_dir / "decision_prompt.json", {"instructions": SCREEN.instructions, "choices": SCREEN.choices})
     llm_usage: dict[str, Any] | None = None
@@ -245,7 +274,7 @@ async def run_repetition(project: Path, scope: Scope, *, replace_draft: bool = F
                         if answer.choice == "skip":
                             group.update(proposals=[], keep=[o["id"] for o in group["occurrences"]], uncertain=[])
                         else:
-                            messages = render_messages(PROMPT, comparison_payload(group, plan["evidence"], plan["sources"], config["project"]["target_language"]))
+                            messages = render_messages(PROMPT, comparison_payload(group, plan["evidence"], plan["sources"], config["project"]["target_language"], plan["terms"]))
                             response, _ = await llm.chat(messages=messages, temperature=config["llm"]["temperature_translation"],
                                 estimated_input_tokens=estimate_messages(messages, config["execution"]["token_safety_factor"]))
                             group.update(parse_comparison(response.content, group))
@@ -255,6 +284,9 @@ async def run_repetition(project: Path, scope: Scope, *, replace_draft: bool = F
                     return group
                 groups = await run_bounded(plan["groups"], compare,
                     max_parallel=config["execution"]["max_parallel"])
+        for group in groups:
+            for occurrence in group["occurrences"]:
+                occurrence.pop("terms")
         draft = {"run_id": run_id, "groups": groups, "evidence": plan["evidence"], "sources": plan["sources"], "scope": {"only_file": scope.only_file}, "created_at": utc_now()}
         atomic_write_text(draft_path(project, run_id), json.dumps(draft, ensure_ascii=False, separators=(",", ":")) + "\n")
         usage = combine_usage(llm_usage, decision.usage_summary()) if decision.records or llm_usage else unavailable_usage()
@@ -265,7 +297,7 @@ async def run_repetition(project: Path, scope: Scope, *, replace_draft: bool = F
         if old:
             old["draft_status"] = "replaced"
             manifests.append(old)
-        warnings = write_repetition_state(project, records=[], manifests=manifests)
+        warnings = [*plan["warnings"], *write_repetition_state(project, records=[], manifests=manifests)]
         return {"stage": STAGE, "run_id": run_id, "selected": total, "completed": total,
                 "failed": 0, "pending": 0, "usage": usage, "warnings": warnings,
                 "proposal_count": sum(len(g["proposals"]) for g in groups)}

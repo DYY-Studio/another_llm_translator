@@ -290,3 +290,64 @@ def test_managed_generation_publishes_draft_and_does_not_retain_queued_evidence(
         assert current_draft(project)["groups"][0]["proposals"]
         await manager.shutdown()
     asyncio.run(run())
+
+
+def character_library(project, *, status="current", detail="角色设定"):
+    from app.term_knowledge import source_range
+    segments = load_segments(project)
+    refs = source_range([segments[5]], {s["segment_id"]: s for s in segments}, {})
+    return {"terms_revision": 7, "terms": [{"source": "前文", "normalized": "前文",
+        "aliases": [], "preferred_translation": "前文译文", "entity_key": "前文",
+        "knowledge_status": status, "description_items": [{"text": detail, "sources": [refs]}]}]}
+
+
+def test_comparison_injects_context_terms_with_local_relations_and_shared_snapshot(tmp_path, monkeypatch):
+    from app import repetition_consistency as repetition
+    project = repetition_project(tmp_path, monkeypatch)
+    library = character_library(project)
+    monkeypatch.setattr(repetition, "load_terms", lambda _: library)
+    requests = []
+    async def run():
+        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+            return await repetition.run_repetition(project, Scope(), http_client=client)
+    result = asyncio.run(run())
+    payload = json.loads(requests[1]["messages"][-1]["content"])
+    first, second = payload["occurrences"][:2]
+    first_term = payload["terms"][first["terms"][0]["id"]]
+    second_term = payload["terms"][second["terms"][0]["id"]]
+    assert first_term["preferred_translation"] == "前文译文"
+    assert first["terms"][0]["source_relations"][0] == ["after 1"]
+    assert second["terms"][0]["source_relations"][0] == ["within"]
+    assert first_term == second_term
+    assert len(payload["terms"]) == 1
+    snapshot = json.loads((project / "runs" / result["run_id"] / "repetition_terms.json").read_text())
+    assert snapshot["terms_revision"] == 7
+    assert len(snapshot["terms"]) == 1
+    draft = repetition.current_draft(project)
+    assert all("terms" not in o for g in draft["groups"] for o in g["occurrences"])
+
+
+@pytest.mark.parametrize("status", ["pending", "stale"])
+def test_comparison_obeys_character_knowledge_state(tmp_path, monkeypatch, status):
+    from app import repetition_consistency as repetition
+    project = repetition_project(tmp_path, monkeypatch)
+    monkeypatch.setattr(repetition, "load_terms", lambda _: character_library(project, status=status))
+    if status == "stale":
+        with pytest.raises(UsageError, match="过期"):
+            repetition.repetition_plan(project, Scope())
+    else:
+        async def run():
+            async with httpx.AsyncClient(transport=transport()) as client:
+                return await repetition.run_repetition(project, Scope(), http_client=client)
+        assert any("待聚合" in warning for warning in asyncio.run(run())["warnings"])
+
+
+def test_term_injection_is_counted_in_preflight_budget(tmp_path, monkeypatch):
+    from app import repetition_consistency as repetition
+    project = repetition_project(tmp_path, monkeypatch)
+    before = repetition.repetition_plan(project, Scope())
+    monkeypatch.setattr(repetition, "load_terms", lambda _: character_library(project, detail="角色信息" * 20000))
+    after = repetition.repetition_plan(project, Scope())
+    assert not before["groups"][0]["over_budget"]
+    assert after["groups"][0]["over_budget"]
+    assert after["fingerprint"] != before["fingerprint"]
