@@ -549,8 +549,43 @@ _COMMON_SUFFIX: dict[str, str] = {
     ),
 }
 
+_FIELD_PREFIX.update({
+    "repetition.source": {
+        "zh-CN": "source: 本组各次出现完全相同的原文。",
+        "en": "source: The exact source shared by all occurrences in this group.",
+    },
+    "repetition.translations": {
+        "zh-CN": "translations: 现有译文数组，occurrences.variant 是从 0 开始的索引。",
+        "en": "translations: Existing translation variants; occurrences.variant is a zero-based index.",
+    },
+    "repetition.context": {
+        "zh-CN": "context: 以短 id 索引的共享原文上下文，由各次出现的 previous、next 按顺序引用。",
+        "en": "context: Shared source context indexed by short id, referenced in order by each occurrence's previous and next.",
+    },
+    "repetition.terms": {
+        "zh-CN": "terms: 短 id 索引的共享术语、别名、推荐译法及实体说明。每次出现的 terms 引用适用于其原文与局部上下文的条目。source_relations 与 entity_knowledge.items 按顺序对应，before N、within、after N 表示说明来源相对该次局部上下文的位置，N 为该实体内部的位置顺序；unsourced 表示无原文依据的说明。",
+        "en": "terms: Shared terminology, aliases, preferred translations, and entity knowledge indexed by short id. Each occurrence references entries matched in its source and local context. source_relations aligns with entity_knowledge.items: before N, within, and after N locate knowledge sources relative to that occurrence's local context; N ranks positions within the entity. unsourced marks knowledge without source evidence.",
+    },
+    "repetition.occurrences": {
+        "zh-CN": "occurrences: 各次出现的短 id、文件、章节、位置、译文索引、上下文及术语引用。文件或章节相同本身不证明属于同一次话语。",
+        "en": "occurrences: Short id, file, part, position, translation index, context, and terminology references for each occurrence. Sharing a file or part does not by itself establish the same speech event.",
+    },
+})
+_TASK_PREFIX["repetition_consistency"] = {
+    "zh-CN": "审查相同原文的不同译法。先判断话语事件或固定措辞关联，再判断叙事意图是否要求保留差异。术语与角色说明是理解证据，不能替代局部语境。",
+    "en": "Review differing translations of an identical source. Assess shared speech events or fixed-wording relationships, then whether narrative intent requires differences. Terminology and character knowledge inform interpretation but do not replace local context.",
+}
+_RESULT_PROTOCOLS["repetition_consistency"] = {
+    "zh-CN": '只返回一个 JSON 对象，无 Markdown 或额外字段：{"groups":[{"members":["1","2"],"target":"1","reason":"依据"}],"keep":["3"],"uncertain":[]}。成员及 target 必须使用 occurrences 中的短 id。每个成员恰好属于一个子组、keep 或 uncertain；子组至少两个成员且不可重叠。target 必须是该子组成员，选用其现有译文，不生成新译文。reason 使用 target_language 简述依据。没有可统一子组时 groups 为空。',
+    "en": 'Return only one JSON object, without Markdown or extra fields: {"groups":[{"members":["1","2"],"target":"1","reason":"evidence"}],"keep":["3"],"uncertain":[]}. Use occurrence short ids for members and target. Every occurrence must belong exactly once to a subgroup, keep, or uncertain; subgroups must have at least two members and cannot overlap. target must be a subgroup member selecting its existing translation; do not generate a new translation. Write a brief reason in target_language. Use an empty groups array if no subgroup can be unified.',
+}
+
 # Each declaration selects input fields, a task, and output contracts.
 _PROMPT_DECLARATIONS = {
+    ("repetition_consistency", None): {
+        "fields": ("target_language", "repetition.source", "repetition.translations", "repetition.context", "repetition.terms", "repetition.occurrences"),
+        "task": "repetition_consistency", "protocols": ("repetition_consistency",),
+    },
     ("terminology", None): {
         "fields": ("target_language", "source_segments", "reference_context"),
         "task": "terminology", "protocols": ("terminology",),
@@ -716,7 +751,9 @@ def full_prompt(
         *mode_protocols,
     ))
     stage_suffix = " ".join(_RESULT_PROTOCOLS[key][language] for key in protocol_ids)
-    suffix_parts.extend((stage_suffix, _COMMON_SUFFIX[language]))
+    suffix_parts.append(stage_suffix)
+    if stage != "repetition_consistency":
+        suffix_parts.append(_COMMON_SUFFIX[language])
     return "\n\n".join((prefix, effective_middle.strip(), " ".join(suffix_parts)))
 
 

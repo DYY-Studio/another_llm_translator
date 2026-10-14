@@ -967,7 +967,7 @@ class WebTaskManager:
             from .repetition_consistency import repetition_plan
             if run_action is not None or reuse_mixed_fingerprints:
                 raise UsageError("重复译文审查不支持续用或复用结果")
-            plan = repetition_plan(project, scope)
+            plan = repetition_plan(project, scope, prompt_language=prompt_language)
             return _StartDecision(selected_count=plan["selected"], running_run_id=None,
                 fingerprints=((stage, plan["fingerprint"]),), selection_snapshots=(), running_runs=(),
                 plan=None if ensure_unique else plan)

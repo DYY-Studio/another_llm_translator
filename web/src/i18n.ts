@@ -5,6 +5,8 @@ export type Language = "zh-CN" | "en";
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
     "repetition.title": "实验：重复译文一致性审查",
+    "repetition.comparisonPrompt": "重复译文上下文比较",
+    "repetition.screeningPrompt": "重复译文初筛",
     "repetition.back": "返回翻译",
     "repetition.groupCount": "重复组 {count}",
     "repetition.acceptedCount": "接受 {count}",
@@ -1463,6 +1465,8 @@ const messages: Record<Language, Record<string, string>> = {
   },
   en: {
     "repetition.title": "Experiment: repeated translation consistency",
+    "repetition.comparisonPrompt": "Repeated translation context comparison",
+    "repetition.screeningPrompt": "Repeated translation screening",
     "repetition.back": "Back to translation",
     "repetition.groupCount": "Repeated groups {count}",
     "repetition.acceptedCount": "Accepted {count}",

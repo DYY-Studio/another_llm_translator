@@ -44,7 +44,7 @@ def register_decision_prompt_routes(app: FastAPI, project: Callable[[str], Path]
     @app.get("/api/v1/decision-prompts")
     async def list_prompts() -> dict:
         summaries = {value["validator_id"]: value for _, value in resolve_translation_validators()}
-        return {"prompts": [{"validator_id": key, "label": summaries[key]["label"], "choice_ids": list(value.choice_ids)} for key, value in prompt_declarations().items()]}
+        return {"prompts": [{"validator_id": key, "label": "重复译文初筛" if key == "repetition_screening" else summaries[key]["label"], "choice_ids": list(value.choice_ids)} for key, value in prompt_declarations().items()]}
 
     @app.get("/api/v1/decision-prompts/{validator_id}/default")
     async def get_default(validator_id: str) -> dict:

@@ -282,12 +282,14 @@ def test_managed_generation_publishes_draft_and_does_not_retain_queued_evidence(
     async def run():
         manager = WebTaskManager()
         state = await manager.start(project, "repetition_consistency", scope=Scope(),
-                                    reuse_mixed_fingerprints=False, run_action=None)
+                                    reuse_mixed_fingerprints=False, run_action=None, prompt_language="en")
         retained = manager.tasks[state["task_id"]]
         assert retained._start_decision.plan is None
         await retained.asyncio_task
         assert manager.get(state["task_id"])["status"] == "completed"
-        assert current_draft(project)["groups"][0]["proposals"]
+        draft = current_draft(project)
+        assert draft["groups"][0]["proposals"]
+        assert read_json(project, project / "runs" / draft["run_id"] / "manifest.json")["prompt_language"] == "en"
         await manager.shutdown()
     asyncio.run(run())
 
@@ -351,3 +353,59 @@ def test_term_injection_is_counted_in_preflight_budget(tmp_path, monkeypatch):
     assert not before["groups"][0]["over_budget"]
     assert after["groups"][0]["over_budget"]
     assert after["fingerprint"] != before["fingerprint"]
+
+
+def test_repetition_prompts_are_editable_and_frozen_in_actual_requests(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.repetition_consistency import repetition_plan, run_repetition
+    from app.web import create_app
+    project = repetition_project(tmp_path, monkeypatch)
+    app = create_app(projects_root=project.parent, app_root=config.APP_ROOT)
+    with TestClient(app) as client:
+        base = f"/api/v1/projects/{project.name}"
+        prompts = client.get("/api/v1/decision-prompts").json()["prompts"]
+        assert any(p["validator_id"] == "repetition_screening" for p in prompts)
+        decision = client.get(f"{base}/decision-prompts/repetition_screening").json()
+        assert decision["content"]["instructions"].startswith("Assess")
+        custom = {**decision["content"], "instructions": "这部作品中的承诺值得比较"}
+        assert client.put(f"{base}/decision-prompts/repetition_screening", json={"content": custom}).status_code == 200
+        assert client.put("/api/v1/decision-prompt-library/repetition_screening/story", json={"content": custom}).status_code == 200
+        assert client.get("/api/v1/decision-prompt-library/repetition_screening/story").json()["content"] == custom
+        initial = repetition_plan(project, Scope(), prompt_language="en")["fingerprint"]
+        path = f"{base}/prompts/repetition_consistency"
+        assert client.put(path, json={"language": "en", "content": "Prefer recurring promises."}).status_code == 200
+        preview = client.get(path, params={"language": "en"}).json()["assembled"]
+    plan = repetition_plan(project, Scope(), prompt_language="en")
+    assert plan["fingerprint"] != initial
+    requests = []
+    async def run():
+        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+            return await run_repetition(project, Scope(), prompt_language="en", http_client=client)
+    result = asyncio.run(run())
+    assert requests[0]["questions"]["value"]["instructions"] == custom["instructions"]
+    assert requests[1]["messages"][0]["content"] == preview
+    run_dir = project / "runs" / result["run_id"]
+    assert (run_dir / "prompt.txt").read_text() == preview
+    assert json.loads((run_dir / "decision_prompts" / "repetition_screening.json").read_text())["content"]["instructions"] == custom["instructions"]
+
+
+def test_repetition_prompt_missing_language_fails_without_fallback(tmp_path, monkeypatch):
+    from app.repetition_consistency import repetition_plan
+    project = repetition_project(tmp_path, monkeypatch)
+    (project / "prompts" / "repetition_consistency.en.middle.txt").unlink()
+    with pytest.raises(UsageError, match="Prompt"):
+        repetition_plan(project, Scope(), prompt_language="en")
+
+
+def test_updated_terminology_does_not_invalidate_existing_repetition_draft(tmp_path, monkeypatch):
+    from app import repetition_consistency as repetition, repetition_drafts
+    project = repetition_project(tmp_path, monkeypatch)
+    library = character_library(project)
+    monkeypatch.setattr(repetition, "load_terms", lambda _: library)
+    generate(project)
+    updated = {**library, "terms_revision": 8}
+    monkeypatch.setattr(repetition_drafts, "load_terms", lambda _: updated)
+    result = asyncio.run(repetition_drafts.apply_draft(project, confirm=True))
+    assert result["changed"] == 1
+    sid = load_segments(project)[3]["segment_id"]
+    assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["terms_revision"] == 8

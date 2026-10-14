@@ -193,7 +193,7 @@ def test_optional_plugin_custom_choices_uninstall_and_reinstall(tmp_path, monkey
     custom = {**content, "instructions": "Saved custom policy"}
     atomic_write_json(path, custom)
     monkeypatch.setattr(plugins, "_PLUGIN_CACHE", ())
-    assert prompt_declarations() == {}
+    assert set(prompt_declarations()) == {"repetition_screening"}
     assert path.is_file()
     with pytest.raises(ConfigError, match="未安装"):
         plugins.resolve_translation_validators(["custom_validator"])

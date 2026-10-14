@@ -88,7 +88,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   async function inspect() {
     setBusy(true); setError(""); setMessage("");
     try {
-      setOptions(await api<RepetitionRunOptions>(`${base}/options${onlyFile ? `?only_file=${encodeURIComponent(onlyFile)}` : ""}`));
+      setOptions(await api<RepetitionRunOptions>(`${base}/options?language=${language}${onlyFile ? `&only_file=${encodeURIComponent(onlyFile)}` : ""}`));
       setConfirm("generate");
     } catch (value) { setError(errorMessage(value, language)); }
     finally { setBusy(false); }
@@ -114,7 +114,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
     try {
       if (confirm === "generate") {
         setTask(await api<TaskState>(`/api/v1/projects/${encodeURIComponent(project)}/tasks`, {
-          method: "POST", body: JSON.stringify({ stage: "repetition_consistency", only_file: onlyFile || null,
+          method: "POST", body: JSON.stringify({ stage: "repetition_consistency", language, only_file: onlyFile || null,
             replace_draft: !!draft }),
         }));
       } else {
