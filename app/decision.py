@@ -127,6 +127,19 @@ class DecisionClient:
         self.pool = KeyPool(preset["requests_per_minute"], 0,
                             preset["max_parallel"], preset["max_parallel"])
 
+    def request_plan(self, state: Any, questions: list[DecisionQuestion]) -> tuple[dict[str, Any], int]:
+        """Build the actual wire payload and its input-token estimate."""
+        from .execution import estimate_tokens
+        if self.preset["protocol"] == "typesafe":
+            body = dict(model=self.preset["model"], state=state,
+                        questions={q.name: dict(type="choice", instructions=q.instructions, criteria=q.choices) for q in questions})
+        else:
+            body = dict(model=self.preset["model"], input=json.dumps(state, ensure_ascii=False),
+                        questions=[dict(type="choice", name=q.name, instructions=q.instructions,
+                                        choices=[dict(value=k, description=v) for k, v in q.choices.items()]) for q in questions])
+        return body, math.ceil(estimate_tokens(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
+                               * self.preset["token_safety_factor"])
+
     async def choose(self, state: Any, questions: list[DecisionQuestion], *, segment_id: str | None = None,
                      reference_context: list[str] | None = None) -> dict[str, DecisionAnswer]:
         if not questions:
@@ -135,7 +148,6 @@ class DecisionClient:
             raise ConfigError("Decision 问题名称重复")
         if any(not q.name or not q.instructions or not 2 <= len(q.choices) <= 255 for q in questions):
             raise ConfigError("Decision Choice 问题无效")
-        from .execution import estimate_tokens
         diagnostics = current_diagnostics()
         context = list(reference_context or [])
         if reference_context is not None and not isinstance(state, dict):
@@ -144,15 +156,7 @@ class DecisionClient:
         available = self.preset["context_window_tokens"] - self.preset["context_safety_margin_tokens"]
         while True:
             evidence = {**state, "reference_context": context} if reference_context is not None else state
-            if self.preset["protocol"] == "typesafe":
-                body = dict(model=self.preset["model"], state=evidence,
-                            questions={q.name: dict(type="choice", instructions=q.instructions, criteria=q.choices) for q in questions})
-            else:
-                body = dict(model=self.preset["model"], input=json.dumps(evidence, ensure_ascii=False),
-                            questions=[dict(type="choice", name=q.name, instructions=q.instructions,
-                                            choices=[dict(value=k, description=v) for k, v in q.choices.items()]) for q in questions])
-            estimated = math.ceil(estimate_tokens(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
-                                  * self.preset["token_safety_factor"])
+            body, estimated = self.request_plan(evidence, questions)
             if estimated <= available or not context:
                 break
             context = context[1:]

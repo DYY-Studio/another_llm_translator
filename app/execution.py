@@ -72,6 +72,7 @@ STAGE_FILES = {
 }
 
 STAGE_CODES = {
+    "repetition_consistency": "REP",
     "terminology": "TERM",
     "terminology_decision": "TERMD",
     "content_summary": "SUM",
