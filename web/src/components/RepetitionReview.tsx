@@ -4,12 +4,16 @@ import { errorMessage, translate, type Language } from "../i18n";
 import type { ProjectOverview, TaskState } from "../types";
 import { RunDialog, type RepetitionRunOptions } from "./RunDialog";
 
-interface Choice { accepted: boolean; target: string }
+interface Choice { accepted: boolean; target: string; apply?: string[] }
 interface Occurrence {
   id: string; segment_id: string; file_id: string; part_id: string;
   variant: number; origin?: string; previous: string[]; next: string[];
 }
-interface Proposal { id: string; members: string[]; target: string; reason: string }
+interface Proposal { id: string; members: string[]; target: string; apply?: string[]; default_accepted?: boolean; manual?: boolean; reason: string }
+function proposalChoice(draft: Draft, proposal: Proposal) {
+  const choice = draft.choices[proposal.id] ?? {accepted: proposal.default_accepted ?? true, target: proposal.target};
+  return {...choice, apply: choice.apply ?? proposal.apply ?? proposal.members};
+}
 interface Group {
   id: string; source: string; translations: string[]; occurrences: Occurrence[];
   proposals: Proposal[]; screening: string; keep: string[]; uncertain: string[];
@@ -34,6 +38,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   const [task, setTask] = useState<TaskState | null>(null);
   const [onlyFile, setOnlyFile] = useState("");
   const [excludePunctuationOnly, setExcludePunctuationOnly] = useState(true);
+  const [screeningEnabled, setScreeningEnabled] = useState(true);
   const [options, setOptions] = useState<RepetitionRunOptions | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -46,11 +51,11 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   const active = isRunning(task);
   const draft = state?.draft;
   const groups = useMemo(() => (draft?.groups ?? []).filter(g => (
-    (filter === "all" || (filter === "suggested" && g.proposals.length > 0)
+    (filter === "all" || (filter === "suggested" && g.proposals.some(p => !p.manual || draft?.choices[p.id]?.accepted))
       || (filter === "uncertain" && g.uncertain.length > 0) || (filter === "skip" && g.screening === "skip"))
     && (!search || g.source.includes(search) || g.translations.some(text => text.includes(search)))
   )), [draft, filter, search]);
-  const acceptedCount = draft?.groups.reduce((n, g) => n + g.proposals.filter(p => draft.choices[p.id]?.accepted !== false).length, 0) ?? 0;
+  const acceptedCount = draft?.groups.reduce((n, g) => n + g.proposals.filter(p => { const choice = proposalChoice(draft, p); return choice.accepted && choice.apply.length > 0; }).length, 0) ?? 0;
 
   useEffect(() => {
     let alive = true;
@@ -86,11 +91,11 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   function changePage(value: number) { setGroupPage(value); contentRef.current?.scrollTo({ top: 0 }); }
   function resetPages() { changePage(0); }
 
-  async function inspect(exclude = true) {
-    setExcludePunctuationOnly(exclude); setOptions(null); setConfirm("generate");
+  async function inspect(exclude = true, screening = true) {
+    setExcludePunctuationOnly(exclude); setScreeningEnabled(screening); setOptions(null); setConfirm("generate");
     setBusy(true); setError(""); setMessage("");
     try {
-      setOptions(await api<RepetitionRunOptions>(`${base}/options?language=${language}&exclude_punctuation_only=${exclude}${onlyFile ? `&only_file=${encodeURIComponent(onlyFile)}` : ""}`));
+      setOptions(await api<RepetitionRunOptions>(`${base}/options?language=${language}&exclude_punctuation_only=${exclude}&screening_enabled=${screening}${onlyFile ? `&only_file=${encodeURIComponent(onlyFile)}` : ""}`));
       setConfirm("generate");
     } catch (value) { setError(errorMessage(value, language)); }
     finally { setBusy(false); }
@@ -117,7 +122,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
       if (confirm === "generate") {
         setTask(await api<TaskState>(`/api/v1/projects/${encodeURIComponent(project)}/tasks`, {
           method: "POST", body: JSON.stringify({ stage: "repetition_consistency", language, only_file: onlyFile || null,
-            replace_draft: !!draft, exclude_punctuation_only: excludePunctuationOnly }),
+            replace_draft: !!draft, exclude_punctuation_only: excludePunctuationOnly, screening_enabled: screeningEnabled }),
         }));
       } else {
         const result = await api<{ changed?: number; warnings: string[]; validation_warning_count?: number }>(`${base}/${confirm}`, {
@@ -198,7 +203,8 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
       </div>
     </div>}
     {confirm === "generate" && <RunDialog repetitionOptions={options} replaceDraft={!!draft} busy={busy} error={error}
-      language={language} excludePunctuationOnly={excludePunctuationOnly} onExcludePunctuationOnly={value => void inspect(value)}
+      language={language} excludePunctuationOnly={excludePunctuationOnly} onExcludePunctuationOnly={value => void inspect(value, screeningEnabled)}
+      screeningEnabled={screeningEnabled} onScreeningEnabled={value => void inspect(excludePunctuationOnly, value)}
       onClose={() => setConfirm(null)} onStart={() => void execute()} />}
   </section>;
 }
@@ -217,18 +223,19 @@ function GroupCard({ group, draft, files, language, disabled, onChoose }: {
         <h3>{t("source")}</h3><pre className="repetition-text">{group.source}</pre>
         <p>{t(`screening.${group.screening}`)}</p>
         {group.proposals.map(proposal => {
-          const choice = draft.choices[proposal.id] ?? { accepted: true, target: proposal.target };
+          const choice = proposalChoice(draft, proposal);
           const members = proposal.members.map(id => occurrenceById.get(id)!);
           const variants = [...new Map(members.map(o => [o.variant, o])).values()];
           return <article className={`term-decision-proposal ${choice.accepted ? "" : "rejected"}`} key={proposal.id}>
-            <div className="repetition-actions repetition-heading"><strong>{t("unify", { count: members.length })}</strong>
+            <div className="repetition-actions repetition-heading"><div><strong>{proposal.manual ? t("manualUnify") : t("unify", { count: members.length })}</strong>
+              <small> {t("enabledCount", {count: choice.accepted ? choice.apply.length : 0, total: members.length})}</small></div>
               <button className="quiet-button" disabled={disabled} onClick={() => void onChoose(proposal, { ...choice, accepted: !choice.accepted })}>
                 {t(choice.accepted ? "reject" : "restore")}</button></div>
             <label>{t("target")}<select value={members.find(o => o.id === choice.target)?.variant} disabled={disabled}
               onChange={e => { const member = variants.find(o => o.variant === Number(e.target.value)); if (member) void onChoose(proposal, { ...choice, target: member.id }); }}>
               {variants.map(o => <option key={o.variant} value={o.variant}>{group.translations[o.variant]}</option>)}
             </select></label>
-            <p>{proposal.reason}</p>
+            {proposal.reason && <p>{proposal.reason}</p>}
           </article>;
         })}
         <div className="repetition-actions repetition-heading"><strong>{t("occurrences")}</strong>
@@ -241,11 +248,17 @@ function GroupCard({ group, draft, files, language, disabled, onChoose }: {
         <div className="repetition-occurrences" key={page}>
         {group.occurrences.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map(o => {
           const proposal = proposalByMember.get(o.id);
-          const choice = proposal ? draft.choices[proposal.id] ?? { accepted: true, target: proposal.target } : null;
-          const target = choice?.accepted ? occurrenceById.get(choice.target) : null;
+          const choice = proposal ? proposalChoice(draft, proposal) : null;
+          const enabled = !!choice?.accepted && choice.apply.includes(o.id);
+          const target = enabled && choice ? occurrenceById.get(choice.target) : null;
           return <article className="term-decision-proposal" key={o.id}>
-            <small>{files.find(f => f.file_id === o.file_id)?.name ?? o.file_id} / {o.part_id} / {o.segment_id}
-              {o.origin === "web" && ` (${t("manual")})`}</small>
+            <div className="repetition-actions repetition-heading">
+              <small>{files.find(f => f.file_id === o.file_id)?.name ?? o.file_id} / {o.part_id} / {o.segment_id}
+                {o.origin === "web" && ` (${t("manual")})`}</small>
+              {proposal && choice && <label className="repetition-apply-toggle"><input type="checkbox" checked={enabled} disabled={disabled}
+                onChange={event => { const selected = new Set(choice.accepted ? choice.apply : []); if (event.target.checked) selected.add(o.id); else selected.delete(o.id);
+                  void onChoose(proposal, {...choice, accepted: true, apply: [...selected]}); }} />{t("applyOccurrence")}</label>}
+            </div>
             <div className="decision-state-pair"><div><strong>{t("before")}</strong><pre className="repetition-text">{group.translations[o.variant]}</pre></div>
               <div><strong>{target ? t("after") : uncertain.has(o.id) ? t("needsReview") : t("keep")}</strong>
                 <pre className="repetition-text">{group.translations[target?.variant ?? o.variant]}</pre></div></div>

@@ -66,24 +66,26 @@ def current_draft(project: Path) -> dict[str, Any] | None:
     return {**read_draft(project, manifest), "choices": manifest.get("choices", {})}
 
 
-def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True) -> dict[str, Any]:
+def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = True) -> dict[str, Any]:
     scope.validate()
     if scope.from_file or scope.only_segment or scope.segment_ids is not None or scope.force or scope.dry_run:
         raise UsageError("重复译文审查只支持整个项目或单个 File")
     config = load_project_config(project, stage="translation")
     language = _prompt_language(project, STAGE, prompt_language)
     prompt = _prompt(project, STAGE, language)
-    screen_content, _ = resolve_prompt(get_declaration("repetition_screening"), project)
-    screen = DecisionQuestion("value", screen_content["instructions"], screen_content["criteria"])
-    config["_decision_prompt_definitions"]["repetition_screening"] = {
-        "choice_ids": list(screen.choices), "content": screen_content}
-    preset_id = config["decision"]["preset"]
-    if not preset_id:
-        raise UsageError("重复译文审查需要配置 Decision Preset")
-    preset = load_decision_preset(effective_path(
-        str(decision_preset_path(Path(), preset_id)), builtin_root=config_module.APP_ROOT))
-    if preset["preset_id"] != preset_id:
-        raise UsageError("Decision Preset ID 与配置不一致")
+    screen_content = screen = preset = None
+    if screening_enabled:
+        screen_content, _ = resolve_prompt(get_declaration("repetition_screening"), project)
+        screen = DecisionQuestion("value", screen_content["instructions"], screen_content["criteria"])
+        config["_decision_prompt_definitions"]["repetition_screening"] = {
+            "choice_ids": list(screen.choices), "content": screen_content}
+        preset_id = config["decision"]["preset"]
+        if not preset_id:
+            raise UsageError("重复译文审查需要配置 Decision Preset")
+        preset = load_decision_preset(effective_path(
+            str(decision_preset_path(Path(), preset_id)), builtin_root=config_module.APP_ROOT))
+        if preset["preset_id"] != preset_id:
+            raise UsageError("Decision Preset ID 与配置不一致")
     segments = load_segments(project)
     files = load_source_files(project)
     file_indices = {f["file_id"]: i for i, f in enumerate(files, 1)}
@@ -129,9 +131,9 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
     groups = []
     input_tokens = 0
     estimated_requests = 0
-    decision = DecisionClient(preset)
+    decision = DecisionClient(preset) if preset else None
     llm_limit = config["llm"]["context_window_tokens"] - config["llm"]["context_safety_margin_tokens"]
-    decision_limit = preset["context_window_tokens"] - preset["context_safety_margin_tokens"]
+    decision_limit = preset["context_window_tokens"] - preset["context_safety_margin_tokens"] if preset else 0
     for number, items in enumerate(candidates, 1):
         variants = list(dict.fromkeys(bases[str(s["segment_id"])]["text"] for s in items))
         variant_indices = {text: i for i, text in enumerate(variants)}
@@ -171,21 +173,21 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
         group = {"id": str(number), "source": str(items[0]["source"]),
                  "files": {str(file_indices[s["file_id"]]): file_names[s["file_id"]] for s in items},
                  "translations": variants, "occurrences": occurrences}
-        _, screening_tokens = decision.request_plan(screening_payload(group), [screen])
+        screening_tokens = decision.request_plan(screening_payload(group), [screen])[1] if decision else 0
         messages = render_messages(prompt, comparison_payload(group, evidence, sources, config["project"]["target_language"], terms))
         comparison_tokens = estimate_messages(messages, config["execution"]["token_safety_factor"])
         itpm = config["execution"]["input_tokens_per_minute"]
-        group["over_budget"] = screening_tokens > decision_limit or comparison_tokens >= llm_limit or (itpm > 0 and comparison_tokens > itpm)
+        group["over_budget"] = (screening_enabled and screening_tokens > decision_limit) or comparison_tokens >= llm_limit or (itpm > 0 and comparison_tokens > itpm)
         if not group["over_budget"]:
             input_tokens += screening_tokens + comparison_tokens
-            estimated_requests += 2
+            estimated_requests += 2 if screening_enabled else 1
         groups.append(group)
     selected_count = sum(len(g["occurrences"]) for g in groups)
-    fingerprint = digest({"exclude_punctuation_only": exclude_punctuation_only, "groups": groups, "evidence": evidence, "terms": terms, "terms_revision": terms_revision, "llm": config["_llm_preset_hash"],
+    fingerprint = digest({"screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only, "groups": groups, "evidence": evidence, "terms": terms, "terms_revision": terms_revision, "llm": config["_llm_preset_hash"],
                           "temperature": config["llm"]["temperature_translation"], "retry": config["retry"],
                           "decision": preset, "target_language": config["project"]["target_language"], "prompt": prompt,
                           "screen": screen_content})
-    return {"exclude_punctuation_only": exclude_punctuation_only, "excluded_punctuation_groups": excluded_punctuation_groups, "config": config, "prompt": prompt, "language": language, "screen": screen, "terms": terms, "terms_revision": terms_revision, "warnings": warnings, "decision_preset": preset, "groups": groups, "evidence": evidence, "sources": sources,
+    return {"screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only, "excluded_punctuation_groups": excluded_punctuation_groups, "config": config, "prompt": prompt, "language": language, "screen": screen, "terms": terms, "terms_revision": terms_revision, "warnings": warnings, "decision_preset": preset, "groups": groups, "evidence": evidence, "sources": sources,
             "selected": selected_count, "fingerprint": fingerprint, "estimated_requests": estimated_requests,
             "estimated_input_tokens": input_tokens}
 
@@ -247,7 +249,7 @@ def parse_comparison(content: str, group: dict[str, Any]) -> dict[str, Any]:
         raise ExternalError(f"重复译文审查响应无效：{exc}") from exc
 
 
-async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, replace_draft: bool = False,
+async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = True, replace_draft: bool = False,
                          http_client: httpx.AsyncClient | None = None,
                          limiter: SlidingWindowLimiter | KeyPool | None = None,
                          on_progress: Callable[[int, int, int], None] | None = None,
@@ -256,19 +258,20 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
     old = read_repetition_run(project, ("pending",))
     if old and not replace_draft:
         raise UsageError("已有待审核草案，必须明确选择替换")
-    plan = prepared_plan if prepared_plan is not None else repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only)
+    plan = prepared_plan if prepared_plan is not None else repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled)
     config = plan["config"]
     prompt, screen = plan["prompt"], plan["screen"]
     total = plan["selected"]
     metadata = read_json(project, project / "project.json")
     run_id, run_dir = create_run(project, config=config, stage=STAGE, fingerprint=plan["fingerprint"],
         prompt=prompt, selected_count=total, requested_count=total, reused_count=0,
-        details={"exclude_punctuation_only": plan["exclude_punctuation_only"], "excluded_punctuation_groups": plan["excluded_punctuation_groups"], "prompt_language": plan["language"], "terms_revision": plan["terms_revision"], "draft_status": "generating", "scope": {"only_file": scope.only_file}, "choices": {}})
+        details={"screening_enabled": plan["screening_enabled"], "exclude_punctuation_only": plan["exclude_punctuation_only"], "excluded_punctuation_groups": plan["excluded_punctuation_groups"], "prompt_language": plan["language"], "terms_revision": plan["terms_revision"], "draft_status": "generating", "scope": {"only_file": scope.only_file}, "choices": {}})
     atomic_write_text(run_dir / "repetition_terms.json", json.dumps({
         "terms_revision": plan["terms_revision"], "terms": plan["terms"],
         "groups": {g["id"]: {o["id"]: o["terms"] for o in g["occurrences"]} for g in plan["groups"]},
     }, ensure_ascii=False, separators=(",", ":")) + "\n")
-    atomic_write_json(run_dir / "decision_preset.json", plan["decision_preset"])
+    if plan["decision_preset"]:
+        atomic_write_json(run_dir / "decision_preset.json", plan["decision_preset"])
     llm_usage: dict[str, Any] | None = None
     completed = 0
     def record_usage(value):
@@ -277,11 +280,12 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
         if on_usage:
             on_usage(llm_usage)
     decision = DecisionClient(plan["decision_preset"], retry=config["retry"], project_id=metadata["project_id"],
-                              run_id=run_id, stage=STAGE, debug_directory=run_dir / "debug")
+                              run_id=run_id, stage=STAGE, debug_directory=run_dir / "debug") if plan["screening_enabled"] else None
     limiter = limiter or SlidingWindowLimiter(config["execution"]["requests_per_minute"], config["execution"]["input_tokens_per_minute"])
     try:
-        async with httpx.AsyncClient(proxy=plan["decision_preset"]["proxy_url"] or None) if http_client is None else _borrow_client(http_client) as decision_http:
-            decision.http_client = decision_http
+        async with httpx.AsyncClient(proxy=plan["decision_preset"]["proxy_url"] or None) if decision and http_client is None else _borrow_client(http_client) as decision_http:
+            if decision:
+                decision.http_client = decision_http
             async with LLMClient(config, limiter, run_dir=run_dir, project_id=metadata["project_id"],
                                  run_id=run_id, stage=STAGE, client=http_client, on_usage=record_usage) as llm:
                 async def compare(group):
@@ -290,10 +294,10 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                     if group["over_budget"]:
                         group.update(screening="over_budget", proposals=[], keep=[], uncertain=[o["id"] for o in group["occurrences"]])
                     else:
-                        answer = (await decision.choose(screening_payload(group), [screen]))["value"]
-                        group["screening"] = "refusal" if answer.refused else answer.choice
-                        group["confidence"] = answer.confidence
-                        if answer.choice == "skip":
+                        answer = (await decision.choose(screening_payload(group), [screen]))["value"] if decision else None
+                        group["screening"] = ("refusal" if answer.refused else answer.choice) if answer else "disabled"
+                        group["confidence"] = answer.confidence if answer else None
+                        if answer and answer.choice == "skip":
                             group.update(proposals=[], keep=[o["id"] for o in group["occurrences"]], uncertain=[])
                         else:
                             messages = render_messages(prompt, comparison_payload(group, plan["evidence"], plan["sources"], config["project"]["target_language"], plan["terms"]))
@@ -311,7 +315,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                 occurrence.pop("terms")
         draft = {"run_id": run_id, "groups": groups, "evidence": plan["evidence"], "sources": plan["sources"], "scope": {"only_file": scope.only_file}, "created_at": utc_now()}
         atomic_write_text(draft_path(project, run_id), json.dumps(draft, ensure_ascii=False, separators=(",", ":")) + "\n")
-        usage = combine_usage(llm_usage, decision.usage_summary()) if decision.records or llm_usage else unavailable_usage()
+        usage = combine_usage(llm_usage, (decision.usage_summary() if decision else None)) if (decision and decision.records) or llm_usage else unavailable_usage()
         finalize_run(project, run_dir, status="completed", completed=total, failed=0, usage=usage)
         manifest = read_json(project, run_dir / "manifest.json")
         manifest["draft_status"] = "pending"
@@ -325,7 +329,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                 "proposal_count": sum(len(g["proposals"]) for g in groups)}
     except BaseException as exc:
         finalize_run(project, run_dir, status="interrupted" if isinstance(exc, asyncio.CancelledError) else "failed",
-                     completed=completed, failed=total - completed, usage=combine_usage(llm_usage, decision.usage_summary()))
+                     completed=completed, failed=total - completed, usage=combine_usage(llm_usage, (decision.usage_summary() if decision else None)))
         raise
 
 

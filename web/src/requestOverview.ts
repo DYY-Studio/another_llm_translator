@@ -36,12 +36,13 @@ export function parseRepetitionOverview(snapshot: RequestOverviewSnapshot) {
     groups: records(output.groups).map(group => ({members: Array.isArray(group.members) ? group.members.map(text) : [], reason: text(group.reason)})),
     occurrences: occurrences.map(item => {
     const proposal = proposals.get(item.id);
-    const target = proposal ? members.get(proposal.target) : undefined;
+    const applied = proposal && (Array.isArray(proposal.apply) ? proposal.apply : proposal.members as unknown[]).includes(item.id);
+    const target = applied ? members.get(proposal.target) : undefined;
     const context = (refs: unknown) => Array.isArray(refs) ? refs.map(id => text(contexts[String(id)])) : [];
     return {id: text(item.id), file: String(item.file), filename: text(files[String(item.file)]),
       part: text(item.part), position: String(item.position), current: translations[Number(item.variant)] ?? "",
       result: target ? translations[Number(target.variant)] : null,
-      uncertain: uncertain.has(item.id), kept: kept.has(item.id),
+      uncertain: uncertain.has(item.id), kept: kept.has(item.id) || !!proposal && !applied,
       previous: context(item.previous), next: context(item.next)};
   })};
 }

@@ -74,6 +74,7 @@ class TaskStartPayload(_WebPayload):
     force: StrictBool = False
     confirm_knowledge_replacement: StrictBool = False
     exclude_punctuation_only: StrictBool = True
+    screening_enabled: StrictBool = True
     replace_draft: StrictBool = False
     acknowledge_manual_review: StrictBool = False
     include_summaries: StrictBool = False

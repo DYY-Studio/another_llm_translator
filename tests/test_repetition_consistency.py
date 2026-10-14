@@ -39,7 +39,7 @@ def repetition_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return project
 
 
-def transport(*, choice: str = "compare", invalid: bool = False, requests: list | None = None):
+def transport(*, choice: str = "compare", invalid: bool = False, requests: list | None = None, apply_members: list[str] | None = None):
     def respond(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         if requests is not None:
@@ -52,6 +52,8 @@ def transport(*, choice: str = "compare", invalid: bool = False, requests: list 
             return httpx.Response(200, json={"model": "test-model", "answers": {"value": answer}})
         result = {"groups": [{"members": ["1", "2"], "target": "1", "apply": ["1", "2"], "reason": "同一承诺重现"}],
                   "keep": ["3"], "uncertain": []}
+        if apply_members is not None:
+            result["groups"][0]["apply"] = apply_members
         if invalid:
             result["groups"][0]["members"] = ["1", "unknown"]
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}, "finish_reason": "stop"}],
@@ -277,7 +279,8 @@ def test_repetition_tasks_use_existing_manager_and_cancel(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("exclude_punctuation_only", [True, False])
-def test_managed_generation_publishes_draft_and_does_not_retain_queued_evidence(tmp_path, monkeypatch, exclude_punctuation_only):
+@pytest.mark.parametrize("screening_enabled", [True, False])
+def test_managed_generation_publishes_draft_and_does_not_retain_queued_evidence(tmp_path, monkeypatch, exclude_punctuation_only, screening_enabled):
     from app.web_tasks import WebTaskManager
     from app.repetition_consistency import current_draft
     project = repetition_project(tmp_path, monkeypatch)
@@ -288,7 +291,7 @@ def test_managed_generation_publishes_draft_and_does_not_retain_queued_evidence(
     async def run():
         manager = WebTaskManager()
         state = await manager.start(project, "repetition_consistency", scope=Scope(),
-                                    reuse_mixed_fingerprints=False, run_action=None, prompt_language="en", exclude_punctuation_only=exclude_punctuation_only)
+                                    reuse_mixed_fingerprints=False, run_action=None, prompt_language="en", exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled)
         retained = manager.tasks[state["task_id"]]
         assert retained._start_decision.plan is None
         await retained.asyncio_task
@@ -298,6 +301,7 @@ def test_managed_generation_publishes_draft_and_does_not_retain_queued_evidence(
         manifest = read_json(project, project / "runs" / draft["run_id"] / "manifest.json")
         assert manifest["prompt_language"] == "en"
         assert manifest["exclude_punctuation_only"] is exclude_punctuation_only
+        assert manifest["screening_enabled"] is screening_enabled
         await manager.shutdown()
     asyncio.run(run())
 
@@ -525,3 +529,29 @@ def test_invalid_partial_application_fails(tmp_path, monkeypatch, members):
     generate(project)
     with pytest.raises(UsageError, match="应用成员"):
         save_choices(project, {"1-1": {"accepted": True, "target": "1", "apply": members}})
+
+
+def test_disabled_screening_needs_no_decision_resources_and_preserves_model_subset(tmp_path, monkeypatch):
+    from app.repetition_consistency import repetition_plan, run_repetition, current_draft
+    from app.repetition_drafts import apply_draft, save_choices
+    project = repetition_project(tmp_path, monkeypatch)
+    path = project / "config.toml"
+    path.write_text(path.read_text().replace('[decision]\npreset = "local"', '[decision]\npreset = ""'))
+    prompt = project / "decision_prompts" / "repetition_screening.json"
+    prompt.parent.mkdir(exist_ok=True)
+    prompt.write_text("invalid")
+    plan = repetition_plan(project, Scope(), screening_enabled=False)
+    assert plan["screen"] is None and plan["decision_preset"] is None
+    assert plan["estimated_requests"] == 1
+    requests = []
+    async def run():
+        async with httpx.AsyncClient(transport=transport(requests=requests, apply_members=[])) as client:
+            return await run_repetition(project, Scope(), screening_enabled=False, http_client=client)
+    result = asyncio.run(run())
+    assert len(requests) == 1 and "messages" in requests[0]
+    assert not (project / "runs" / result["run_id"] / "decision_preset.json").exists()
+    draft = current_draft(project)
+    assert draft["groups"][0]["screening"] == "disabled"
+    assert draft["groups"][0]["proposals"][0]["apply"] == []
+    save_choices(project, {"1-1": {"accepted": True, "target": "1", "apply": ["2"]}})
+    assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 1

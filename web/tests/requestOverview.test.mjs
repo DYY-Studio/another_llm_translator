@@ -6,10 +6,12 @@ test("repetition overview resolves shared translations and context by occurrence
   const input = {source: "promise", files: {"2": "chapter.txt"}, translations: ["come", "go"], context: {"1": "before", "2": "after"},
     occurrences: [{id: "1", file: 2, part: "document", position: 4, variant: 0, previous: ["1"], next: ["2"]},
       {id: "2", file: 2, part: "document", position: 9, variant: 1}, {id: "3", variant: 1}]};
-  const value = parseRepetitionOverview({input, response_content: JSON.stringify({groups: [{members: ["2", "1"], target: "1", reason: "same event"}], keep: [], uncertain: ["3"]})});
+  const value = parseRepetitionOverview({input, response_content: JSON.stringify({groups: [{members: ["2", "1"], target: "1", apply: ["2"], reason: "same event"}], keep: [], uncertain: ["3"]})});
   assert.equal(value.invalid, false);
   assert.deepEqual(value.groups, [{members: ["2", "1"], reason: "same event"}]);
   assert.equal(value.occurrences[1].result, "come");
+  assert.equal(value.occurrences[0].result, null);
+  assert.equal(value.occurrences[0].kept, true);
   assert.equal(value.occurrences[0].filename, "chapter.txt");
   assert.deepEqual(value.occurrences[0].previous, ["before"]);
   assert.deepEqual(value.occurrences[0].next, ["after"]);

@@ -134,6 +134,7 @@
 .repetition-filters .term-decision-pages { padding: 0; }
 .repetition-scope, .repetition-summary { grid-column: 1 / -1; }
 .repetition-heading { justify-content: space-between; }
+.repetition-group .repetition-apply-toggle { display: flex; align-items: center; gap: 6px; }
 .repetition-occurrences { display: grid; gap: 12px; max-height: min(640px, 65vh); overflow: auto; }
 .repetition-workspace .term-decision-content { overscroll-behavior: auto; }
 .replacement-modal { width: min(560px, calc(100vw - 32px)); }
