@@ -28,6 +28,7 @@ from .sqlite_storage import (
     read_jsonl,
     read_summary_participation,
     record_exists,
+    read_repetition_run,
 )
 from .stage_review import run_apply, run_review
 from .stage_runtime import prompt_middle_digests, prompt_preflight
@@ -48,6 +49,8 @@ from .term_decision_drafts import (
     manual_review_state,
 )
 from .term_library import load_terms
+from .repetition_consistency import repetition_plan, repetition_resume, repetition_resources, repetition_execution_fingerprint, PROTOCOL_VERSION, run_repetition, read_draft
+from .repetition_drafts import apply_draft_locked
 
 CONTINUOUS_STAGE = "continuous"
 CONTINUOUS_STAGES = (
@@ -85,6 +88,19 @@ def normalize_stages(stages: Iterable[object]) -> tuple[str, ...]:
     return values
 
 
+def repetition_stages(stages: Iterable[object], enabled: bool) -> tuple[str, ...]:
+    values = normalize_stages(stages)
+    if not enabled:
+        return values
+    if "translation" in values:
+        index = values.index("translation") + 1
+    elif values[0] == "proofreading":
+        index = 0
+    else:
+        raise UsageError("一致性审查要求包含翻译或校对阶段")
+    return (*values[:index], "repetition_consistency", *values[index:])
+
+
 def _stable_digest(value: Any) -> str:
     encoded = json.dumps(
         value,
@@ -96,7 +112,7 @@ def _stable_digest(value: Any) -> str:
 
 
 def stage_fingerprint_snapshot(project: Path, stage: str) -> str:
-    config = load_project_config(project, stage=stage)
+    config = load_project_config(project, stage="translation" if stage == "repetition_consistency" else stage)
     library = load_terms(project)
     terms_revision = (
         int(library["terms_revision"])
@@ -325,13 +341,17 @@ def inspect_continuous(
     reuse_mixed_fingerprints: bool = False,
     run_actions: Mapping[str, str] | None = None,
     apply_terminology_decision: bool = False,
+    include_repetition_consistency: bool = False,
+    apply_repetition_consistency: bool = False,
+    exclude_punctuation_only: bool = True,
+    screening_enabled: bool = False,
     final_review: bool = False,
     include_draft_translation: bool = False,
     include_summaries: bool = False,
     aggregate_full_summaries: bool = False,
     terminology_options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    normalized = normalize_stages(stages)
+    normalized = repetition_stages(stages, include_repetition_consistency)
     if (include_draft_translation or include_summaries) and "terminology" not in normalized:
         raise UsageError("联合输出要求连续运行包含术语阶段")
     if aggregate_full_summaries and not include_summaries:
@@ -374,7 +394,7 @@ def inspect_continuous(
         terms if terms is not None and bool(terms.get("terms")) else None
     )
     configs = {
-        stage: load_project_config(project, stage=stage) for stage in execution_stages
+        stage: load_project_config(project, stage="translation" if stage == "repetition_consistency" else stage) for stage in execution_stages
     }
     limiter_identities: dict[tuple[str, str], tuple[int, int, int, int]] = {}
     for stage, config in configs.items():
@@ -384,6 +404,18 @@ def inspect_continuous(
         if previous is not None and previous != limits:
             raise ConfigError("相同 Preset 身份的共享限流配置不一致")
         limiter_identities[identity] = limits
+
+    repetition_current = None
+    if apply_repetition_consistency and not include_repetition_consistency:
+        raise UsageError("自动应用一致性审查要求启用审查阶段")
+    if include_repetition_consistency:
+        repetition_runs = find_running_runs(project, "repetition_consistency")
+        if "translation" not in normalized and "terminology" not in normalized and "terminology_decision" not in normalized:
+            repetition_current = repetition_plan(project, Scope(), prompt_language=prompt_language,
+                exclude_punctuation_only=repetition_runs[0]["exclude_punctuation_only"] if repetition_runs else exclude_punctuation_only,
+                screening_enabled=repetition_runs[0]["screening_enabled"] if repetition_runs else screening_enabled)
+        else:
+            repetition_config, repetition_prompt, repetition_screen, _, repetition_preset, _ = repetition_resources(project, prompt_language, screening_enabled)
 
     decision_final_review = (
         final_review
@@ -415,6 +447,20 @@ def inspect_continuous(
                 )
                 run["resume_compatible"] = run.get("resume_compatible", True) and compatible
                 run["resume_incompatibility_reason"] = run.get("resume_incompatibility_reason") or (None if compatible else "续用 Run 必须保持原有粗翻和概括选项")
+        if stage == "repetition_consistency":
+            if repetition_current is not None:
+                running = repetition_resume(project, repetition_current)
+                runs = [running] if running else []
+                if running and running["scope"] != {"only_file": None}:
+                    running.update(resume_compatible=False, resume_incompatibility_reason="连续运行只能续用整项目审查 Run")
+            else:
+                for run in runs:
+                    manifest = read_json(project, project / "runs" / run["run_id"] / "manifest.json")
+                    run.update(exclude_punctuation_only=manifest.get("exclude_punctuation_only"),
+                        screening_enabled=manifest.get("screening_enabled"), scope=manifest.get("scope"),
+                        resume_compatible=manifest.get("repetition_checkpoint") == 2 and manifest.get("repetition_protocol") == PROTOCOL_VERSION and manifest.get("scope") == {"only_file": None},
+                        compatibility_deferred=True,
+                        resume_incompatibility_reason="检查点、协议或范围不兼容，请新建 Run" if manifest.get("repetition_checkpoint") != 2 or manifest.get("repetition_protocol") != PROTOCOL_VERSION or manifest.get("scope") != {"only_file": None} else None)
         running_runs[stage] = runs
         action = actions.get(stage)
         if runs and action is None:
@@ -483,7 +529,9 @@ def inspect_continuous(
 
     fingerprints: dict[str, str] = {}
     for stage in execution_stages:
-        if stage == "terminology_decision":
+        if stage == "repetition_consistency":
+            fingerprints[stage] = repetition_current["fingerprint"] if repetition_current is not None else repetition_execution_fingerprint(repetition_config, repetition_prompt, repetition_screen, repetition_preset)
+        elif stage == "terminology_decision":
             fingerprints[stage] = _stable_digest(
                 {
                     "stage": stage,
@@ -528,7 +576,7 @@ def inspect_continuous(
 
     stage_summaries: dict[str, dict[str, Any]] = {}
     for stage in execution_stages:
-        if stage in {"terminology_decision", "content_summary"}:
+        if stage in {"terminology_decision", "content_summary", "repetition_consistency"}:
             continue
         if stage == "terminology" and terminology_options is not None:
             stage_summaries[stage] = {
@@ -704,7 +752,7 @@ def inspect_continuous(
             and decision_inputs["status"] == "ready"
         ):
             block_future_terms_revision("terminology_decision")
-    if normalized[0] == "proofreading" and not _translation_complete(project, segments):
+    if "translation" not in normalized and "proofreading" in normalized and not _translation_complete(project, segments):
         blocking.append(
             _blocking(
                 "translation_incomplete",
@@ -712,6 +760,12 @@ def inspect_continuous(
                 stage="proofreading",
             )
         )
+
+    if include_repetition_consistency:
+        if not apply_repetition_consistency:
+            blocking.append(_blocking("apply_repetition_consistency_required", "必须明确授权自动应用一致性审查建议", stage="repetition_consistency"))
+        if read_repetition_run(project, ("pending",)) is not None:
+            blocking.append(_blocking("pending_repetition_draft", "存在待处理一致性审查草案，请先人工处理", stage="repetition_consistency"))
 
     participation = (terminology_options or {}).get("summary_participation", [])
     if include_summaries and actions.get("terminology") == "decline":
@@ -739,6 +793,10 @@ def inspect_continuous(
         "reuse_mixed_fingerprints": bool(reuse_mixed_fingerprints),
         "run_actions": {stage: actions[stage] for stage in sorted(actions)},
         "apply_terminology_decision": bool(apply_terminology_decision),
+        "include_repetition_consistency": include_repetition_consistency,
+        "apply_repetition_consistency": apply_repetition_consistency,
+        "exclude_punctuation_only": exclude_punctuation_only,
+        "screening_enabled": screening_enabled,
         "final_review": bool(decision_final_review),
         "prompt_language": prompt_language,
         "whole_project": True,
@@ -761,7 +819,11 @@ def inspect_continuous(
     steps: list[dict[str, Any]] = []
     for stage in normalized:
         stage_running = running_runs.get(stage, [])
-        if stage == "translation" and include_draft_translation:
+        if stage == "repetition_consistency":
+            step = {"stage": stage, "status": "ready", "selected": repetition_current["selected"] if repetition_current else 0,
+                "count_deferred": repetition_current is None, "preset": _preset_summary(configs[stage]),
+                "running_run": stage_running[0] if stage_running else None}
+        elif stage == "translation" and include_draft_translation:
             step = {"stage": stage, "status": "skipped", "selected": 0, "reason": "joint_draft_translation", "running_run": None}
         elif stage == "terminology_decision" and decision_inputs is not None:
             status = str(decision_inputs["status"])
@@ -927,7 +989,7 @@ def _ensure_downstream_fingerprints_after_decision(
     for stage in stages:
         if stage in {"terminology", "terminology_decision"}:
             continue
-        config = load_project_config(project, stage=stage)
+        config = load_project_config(project, stage="translation" if stage == "repetition_consistency" else stage)
         summary = stage_summary(
             project,
             stage,
@@ -959,6 +1021,10 @@ async def run_continuous(
     reuse_mixed_fingerprints: bool = False,
     run_actions: Mapping[str, str] | None = None,
     apply_terminology_decision: bool = False,
+    include_repetition_consistency: bool = False,
+    apply_repetition_consistency: bool = False,
+    exclude_punctuation_only: bool = True,
+    screening_enabled: bool = False,
     final_review: bool = False,
     include_draft_translation: bool = False,
     include_summaries: bool = False,
@@ -971,7 +1037,7 @@ async def run_continuous(
     on_usage: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
     on_draft_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    normalized = normalize_stages(stages)
+    normalized = repetition_stages(stages, include_repetition_consistency)
     if aggregate_full_summaries:
         normalized = (normalized[0], "content_summary", *normalized[1:])
     actions = dict(run_actions or {})
@@ -983,6 +1049,9 @@ async def run_continuous(
     )
     if has_decision and normalized[-1] != "terminology_decision" and not apply_terminology_decision:
         raise UsageError("连续运行包含自动术语决策，必须明确授权应用决策")
+
+    if include_repetition_consistency and not apply_repetition_consistency:
+        raise UsageError("必须明确授权自动应用一致性审查建议")
 
     planned = {
         str(step["stage"]): int(step.get("selected", 0))
@@ -996,7 +1065,7 @@ async def run_continuous(
     for stage in normalized:
         if stage == "translation" and include_draft_translation:
             continue
-        config = load_project_config(project, stage=stage)
+        config = load_project_config(project, stage="translation" if stage == "repetition_consistency" else stage)
         identity = _limiter_identity(config)
         try:
             stage_limiters[stage] = limiters[identity]
@@ -1055,7 +1124,7 @@ async def run_continuous(
         steps.append(step)
         emit(stage, "running", step)
         try:
-            resume_run_id, _ = choose_running_run(
+            resume_run_id, _ = (None, []) if stage == "repetition_consistency" else choose_running_run(
                 project,
                 stage,
                 action=actions.get(stage),
@@ -1071,7 +1140,40 @@ async def run_continuous(
                     raw_usage = read_json(project, manifest_path).get("usage")
                     if isinstance(raw_usage, dict):
                         usage_base_by_stage[stage] = raw_usage
-            if stage == "terminology_decision":
+            if stage == "repetition_consistency":
+                prior = find_running_runs(project, stage)
+                if prior and actions.get(stage) == "resume":
+                    exclude_punctuation_only = prior[0]["exclude_punctuation_only"]
+                    screening_enabled = prior[0]["screening_enabled"]
+                plan = repetition_plan(project, Scope(), prompt_language=prompt_language,
+                    exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled)
+                running = repetition_resume(project, plan)
+                if running and actions.get(stage) == "resume":
+                    if running["scope"] != {"only_file": None}:
+                        raise UsageError("连续运行只能续用整项目一致性审查 Run")
+                    raw = read_json(project, project / "runs" / running["run_id"] / "manifest.json").get("usage")
+                    if isinstance(raw, dict):
+                        usage_base_by_stage[stage] = raw
+                if not plan["groups"] and not running:
+                    summary = {"stage": stage, "selected": 0, "completed": 0, "failed": 0, "pending": 0, "reason": "no_work"}
+                    step.update(_continuous_step_summary(stage, summary, status="skipped"))
+                else:
+                    summary = await run_repetition(project, Scope(), prepared_plan=plan, run_action=actions.get(stage),
+                        limiter=stage_limiters[stage], on_progress=lambda completed, failed, total: report_progress(stage, completed, failed, total),
+                        on_usage=lambda current: report_usage(stage, current))
+                    draft = read_draft(project, {"run_id": summary["run_id"]})
+                    needs_review = sum(len(group["uncertain"]) for group in draft["groups"])
+                    summary = {**summary, "needs_review": needs_review}
+                    step.update(_continuous_step_summary(stage, summary, run_id=summary["run_id"]))
+                    if needs_review:
+                        step["status"] = "waiting_review"
+                        summaries[stage] = dict(summary)
+                        emit(stage, "waiting_review", step)
+                        break
+                    applied = await apply_draft_locked(project, confirm=True, run_id=summary["run_id"])
+                    summary = {**summary, "applied": applied}
+                    step["summary"] = dict(summary)
+            elif stage == "terminology_decision":
                 plan, skip_reason = _decision_plan_or_skip(
                     project,
                     prompt_language,
@@ -1295,6 +1397,7 @@ async def run_continuous(
             failure_counts[str(key)] = failure_counts.get(str(key), 0) + int(value)
     return {
         "stage": CONTINUOUS_STAGE,
+        "waiting_review": any(step["status"] == "waiting_review" for step in steps),
         "steps": steps,
         "summaries": summaries,
         "completed": sum(int(step["completed"]) for step in steps),

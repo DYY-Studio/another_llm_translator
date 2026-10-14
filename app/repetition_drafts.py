@@ -105,84 +105,89 @@ def _verify_groups(draft: dict[str, Any], groups: list[dict[str, Any]],
 
 async def apply_draft(project: Path, *, confirm: bool, run_id: str | None = None,
                       expected_choices: dict[str, Any] | None = None) -> dict[str, Any]:
+    with project_write_lock(project):
+        return await apply_draft_locked(project, confirm=confirm, run_id=run_id, expected_choices=expected_choices)
+
+
+async def apply_draft_locked(project: Path, *, confirm: bool, run_id: str | None = None,
+                      expected_choices: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Apply inside the caller's project write lock, including continuous tasks."""
     if confirm is not True:
         raise UsageError("必须明确确认应用重复译文草案")
-    with project_write_lock(project):
-        manifest, draft = _pending(project, run_id)
-        choices = _choices(draft, manifest.get("choices", {}))
-        if expected_choices is not None and expected_choices != choices:
-            raise UsageError("草案审核选择已变化，请重新打开审核")
-        accepted = [(g, p, choices.get(p["id"], {"accepted": True, "target": p["target"]}))
-                    for g in draft["groups"] for p in g["proposals"]
-                    if choices.get(p["id"], {}).get("accepted", p.get("default_accepted", True))]
-        groups = list({g["id"]: g for g, _, _ in accepted}.values())
-        segments = load_segments(project)
-        indices = _indices(segments)
-        by_id = {str(s["segment_id"]): s for s in segments}
-        ids = [o["segment_id"] for g in groups for o in g["occurrences"]]
-        bases = {sid: state["completed"] for sid, state in latest_stage_states(project, "translation", ids).items()
-                 if state["completed"] is not None} if ids else {}
-        _verify_groups(draft, groups, segments, bases, indices)
-        config = load_project_config(project, stage="translation")
-        metadata = read_json(project, project / "project.json")
-        files = load_source_files(project)
-        file_by_id = {str(f["file_id"]): f for f in files}
-        adapter_contexts = {}
-        library = load_terms(project)
-        warnings: list[str] = []
-        cache = _TermMatchCache(library, term_normalization(config), config["terminology"]["max_terms_per_segment"],
-                               segments=segments, warnings=warnings)
-        options = config["validation"]["translation"]
-        binding = config.get("_decision_validator_presets", {}).get("preferred_term_usage")
-        decision = DecisionClient(config["_decision_preset_definitions"][binding], retry=config["retry"]) if binding else None
-        terms_revision = library["terms_revision"] if library else None
-        fingerprint = stage_fingerprint(config, "translation", prompt_middle_digests(project, "translation"),
-                                        terms_revision=terms_revision)
-        records = []
-        changes = []
-        for group, proposal, choice in accepted:
-            occurrences = {o["id"]: o for o in group["occurrences"]}
-            target = group["translations"][occurrences[choice["target"]]["variant"]]
-            for member in choice.get("apply", proposal.get("apply", proposal["members"])):
-                occurrence = occurrences[member]
-                sid = occurrence["segment_id"]
-                base = bases[sid]
-                if base["text"] == target:
-                    continue
-                item = by_id[sid]
-                file_id = str(item["file_id"])
-                if file_id not in adapter_contexts:
-                    _, state, run_options = document_prompt_context(project, file_by_id[file_id])
-                    adapter_contexts[file_id] = (state, run_options)
-                state, run_options = adapter_contexts[file_id]
-                model_item = {**item, "_adapter_state": state, "_adapter_run_options": run_options}
-                text = normalize_model_text(files, model_item, target, "translation")
-                if text != target:
-                    raise UsageError("目标译文需要文档格式转换，不能直接统一，请人工编辑")
-                neighbors, position = indices[sid]
-                count = options["decision_previous_segments"] if options["decision_context_enabled"] else 0
-                context = TranslationValidationContext(source=item["source"], translation=text,
-                    terms=cache.validation_matches_for_item(item), decision=decision,
-                    decision_prompts={key: value["content"] for key, value in config.get("_decision_prompt_definitions", {}).items()},
-                    decision_confidence_threshold=options["decision_confidence_threshold"],
-                    decision_warning_threshold=options["decision_warning_threshold"], segment_id=sid,
-                    previous_source=tuple(s["source"] for s in neighbors[max(0, position - count):position]))
-                decision_start = len(decision.records) if decision else 0
-                findings = await validate_translation_text(context, config["_translation_validator_instances"])
-                record = record_header("stage_result", metadata["project_id"], stage="translation", segment_id=sid,
-                    status="completed", text=text, origin="repetition_consistency", run_id=manifest["run_id"],
-                    request_id=None, stage_fingerprint=fingerprint, terms_revision=terms_revision,
-                    validation_status="warning" if findings else "passed", validation_findings=findings,
-                    decision_validation=decision.records[decision_start:] if decision else [])
-                records.append(record)
-                changes.append({"group": group["id"], "member": member, "after_result_id": record["record_id"],
-                                "before_metadata": {**{key: base[key] for key in _BEFORE_FIELDS if key in base},
-                                                    "restored_origin": base.get("restored_origin", base.get("origin"))}})
-        manifest.update(draft_status="applied" if records else "rejected", applied_at=utc_now(), changes=changes)
-        warnings.extend(write_repetition_state(project, records=records, manifests=[manifest]))
-        return {"changed": len(records), "warnings": warnings,
-                "validation_warning_count": sum(r["validation_status"] == "warning" for r in records)}
-
+    manifest, draft = _pending(project, run_id)
+    choices = _choices(draft, manifest.get("choices", {}))
+    if expected_choices is not None and expected_choices != choices:
+        raise UsageError("草案审核选择已变化，请重新打开审核")
+    accepted = [(g, p, choices.get(p["id"], {"accepted": True, "target": p["target"]}))
+                for g in draft["groups"] for p in g["proposals"]
+                if choices.get(p["id"], {}).get("accepted", p.get("default_accepted", True))]
+    groups = list({g["id"]: g for g, _, _ in accepted}.values())
+    segments = load_segments(project)
+    indices = _indices(segments)
+    by_id = {str(s["segment_id"]): s for s in segments}
+    ids = [o["segment_id"] for g in groups for o in g["occurrences"]]
+    bases = {sid: state["completed"] for sid, state in latest_stage_states(project, "translation", ids).items()
+             if state["completed"] is not None} if ids else {}
+    _verify_groups(draft, groups, segments, bases, indices)
+    config = load_project_config(project, stage="translation")
+    metadata = read_json(project, project / "project.json")
+    files = load_source_files(project)
+    file_by_id = {str(f["file_id"]): f for f in files}
+    adapter_contexts = {}
+    library = load_terms(project)
+    warnings: list[str] = []
+    cache = _TermMatchCache(library, term_normalization(config), config["terminology"]["max_terms_per_segment"],
+                           segments=segments, warnings=warnings)
+    options = config["validation"]["translation"]
+    binding = config.get("_decision_validator_presets", {}).get("preferred_term_usage")
+    decision = DecisionClient(config["_decision_preset_definitions"][binding], retry=config["retry"]) if binding else None
+    terms_revision = library["terms_revision"] if library else None
+    fingerprint = stage_fingerprint(config, "translation", prompt_middle_digests(project, "translation"),
+                                    terms_revision=terms_revision)
+    records = []
+    changes = []
+    for group, proposal, choice in accepted:
+        occurrences = {o["id"]: o for o in group["occurrences"]}
+        target = group["translations"][occurrences[choice["target"]]["variant"]]
+        for member in choice.get("apply", proposal.get("apply", proposal["members"])):
+            occurrence = occurrences[member]
+            sid = occurrence["segment_id"]
+            base = bases[sid]
+            if base["text"] == target:
+                continue
+            item = by_id[sid]
+            file_id = str(item["file_id"])
+            if file_id not in adapter_contexts:
+                _, state, run_options = document_prompt_context(project, file_by_id[file_id])
+                adapter_contexts[file_id] = (state, run_options)
+            state, run_options = adapter_contexts[file_id]
+            model_item = {**item, "_adapter_state": state, "_adapter_run_options": run_options}
+            text = normalize_model_text(files, model_item, target, "translation")
+            if text != target:
+                raise UsageError("目标译文需要文档格式转换，不能直接统一，请人工编辑")
+            neighbors, position = indices[sid]
+            count = options["decision_previous_segments"] if options["decision_context_enabled"] else 0
+            context = TranslationValidationContext(source=item["source"], translation=text,
+                terms=cache.validation_matches_for_item(item), decision=decision,
+                decision_prompts={key: value["content"] for key, value in config.get("_decision_prompt_definitions", {}).items()},
+                decision_confidence_threshold=options["decision_confidence_threshold"],
+                decision_warning_threshold=options["decision_warning_threshold"], segment_id=sid,
+                previous_source=tuple(s["source"] for s in neighbors[max(0, position - count):position]))
+            decision_start = len(decision.records) if decision else 0
+            findings = await validate_translation_text(context, config["_translation_validator_instances"])
+            record = record_header("stage_result", metadata["project_id"], stage="translation", segment_id=sid,
+                status="completed", text=text, origin="repetition_consistency", run_id=manifest["run_id"],
+                request_id=None, stage_fingerprint=fingerprint, terms_revision=terms_revision,
+                validation_status="warning" if findings else "passed", validation_findings=findings,
+                decision_validation=decision.records[decision_start:] if decision else [])
+            records.append(record)
+            changes.append({"group": group["id"], "member": member, "after_result_id": record["record_id"],
+                            "before_metadata": {**{key: base[key] for key in _BEFORE_FIELDS if key in base},
+                                                "restored_origin": base.get("restored_origin", base.get("origin"))}})
+    manifest.update(draft_status="applied" if records else "rejected", applied_at=utc_now(), changes=changes)
+    warnings.extend(write_repetition_state(project, records=records, manifests=[manifest]))
+    return {"changed": len(records), "warnings": warnings,
+            "validation_warning_count": sum(r["validation_status"] == "warning" for r in records)}
 
 def rollback_draft(project: Path, *, confirm: bool, run_id: str | None = None) -> dict[str, Any]:
     if confirm is not True:

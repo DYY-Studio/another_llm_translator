@@ -172,6 +172,8 @@ def task_options(
     project: Path,
     stage: str,
     *,
+    exclude_punctuation_only: bool = True,
+    screening_enabled: bool = False,
     include_summaries: bool = False,
     include_draft_translation: bool = False,
     aggregate_full_summaries: bool = False,
@@ -179,6 +181,8 @@ def task_options(
     final_review: bool = False,
     continuous_stages: Iterable[object] = (),
     apply_terminology_decision: bool = False,
+    include_repetition_consistency: bool = False,
+    apply_repetition_consistency: bool = False,
 ) -> dict[str, Any]:
     if include_draft_translation and stage not in {"terminology", CONTINUOUS_STAGE}:
         raise UsageError("粗翻开关仅支持术语扫描")
@@ -204,6 +208,10 @@ def task_options(
             terminology_options=terminology_options,
             prompt_language=prompt_language,
             apply_terminology_decision=apply_terminology_decision,
+            include_repetition_consistency=include_repetition_consistency,
+            apply_repetition_consistency=apply_repetition_consistency,
+            exclude_punctuation_only=exclude_punctuation_only,
+            screening_enabled=screening_enabled,
             final_review=final_review,
         )
     if stage == TERMINOLOGY_DECISION_STAGE:
@@ -631,6 +639,8 @@ class WebTask:
     _summary_selection: tuple[tuple[str, str], ...] = field(default_factory=tuple, repr=False)
     _continuous_stages: tuple[str, ...] = field(default_factory=tuple, repr=False)
     _continuous_run_actions: dict[str, str] = field(default_factory=dict, repr=False)
+    _include_repetition_consistency: bool = field(default=False, repr=False)
+    _apply_repetition_consistency: bool = field(default=False, repr=False)
     _apply_terminology_decision: bool = field(default=False, repr=False)
     _start_decision: _StartDecision | None = field(default=None, repr=False)
 
@@ -907,6 +917,8 @@ class WebTaskManager:
         continuous_stages: Iterable[object] = (),
         continuous_run_actions: Mapping[str, str] | None = None,
         apply_terminology_decision: bool = False,
+        include_repetition_consistency: bool = False,
+        apply_repetition_consistency: bool = False,
     ) -> _StartDecision:
         if stage not in {
             "terminology",
@@ -956,6 +968,8 @@ class WebTaskManager:
         if stage != CONTINUOUS_STAGE and (
             tuple(continuous_stages)
             or continuous_run_actions
+            or include_repetition_consistency
+            or apply_repetition_consistency
             or apply_terminology_decision
         ):
             raise UsageError("连续运行选项只允许 stage=continuous")
@@ -1020,6 +1034,10 @@ class WebTaskManager:
                 reuse_mixed_fingerprints=reuse_mixed_fingerprints,
                 run_actions=continuous_run_actions,
                 apply_terminology_decision=apply_terminology_decision,
+                include_repetition_consistency=include_repetition_consistency,
+                apply_repetition_consistency=apply_repetition_consistency,
+                exclude_punctuation_only=exclude_punctuation_only,
+                screening_enabled=screening_enabled,
                 final_review=final_review,
             )
             require_continuous_ready(inspection)
@@ -1327,6 +1345,8 @@ class WebTaskManager:
                     continuous_stages=state._continuous_stages,
                     continuous_run_actions=state._continuous_run_actions,
                     apply_terminology_decision=state._apply_terminology_decision,
+                    include_repetition_consistency=state._include_repetition_consistency,
+                    apply_repetition_consistency=state._apply_repetition_consistency,
                     prompt_language=state._prompt_language,
                     replace_draft=state._replace_draft,
                     exclude_punctuation_only=state._exclude_punctuation_only,
@@ -1379,6 +1399,8 @@ class WebTaskManager:
         continuous_stages: Iterable[object] = (),
         continuous_run_actions: Mapping[str, str] | None = None,
         apply_terminology_decision: bool = False,
+        include_repetition_consistency: bool = False,
+        apply_repetition_consistency: bool = False,
     ) -> dict[str, Any]:
         async with self.guard:
             if self._shutting_down:
@@ -1416,6 +1438,8 @@ class WebTaskManager:
                 continuous_stages=continuous_stages,
                 continuous_run_actions=continuous_run_actions,
                 apply_terminology_decision=apply_terminology_decision,
+                include_repetition_consistency=include_repetition_consistency,
+                apply_repetition_consistency=apply_repetition_consistency,
             )
             task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
             state = WebTask(
@@ -1446,6 +1470,8 @@ class WebTaskManager:
             )
             state._continuous_run_actions = dict(continuous_run_actions)
             state._apply_terminology_decision = apply_terminology_decision
+            state._include_repetition_consistency = include_repetition_consistency
+            state._apply_repetition_consistency = apply_repetition_consistency
             state._start_decision = decision
             self.tasks[task_id] = state
             self.active_by_project[project] = task_id
@@ -1473,6 +1499,8 @@ class WebTaskManager:
         continuous_stages: tuple[str, ...] = (),
         continuous_run_actions: Mapping[str, str] | None = None,
         apply_terminology_decision: bool = False,
+        include_repetition_consistency: bool = False,
+        apply_repetition_consistency: bool = False,
     ) -> None:
         state.started_at = utc_now()
         usage_base: dict[str, Any] | None = None
@@ -1580,6 +1608,8 @@ class WebTaskManager:
                     continuous_stages=continuous_stages,
                     continuous_run_actions=continuous_run_actions,
                     apply_terminology_decision=apply_terminology_decision,
+                    include_repetition_consistency=include_repetition_consistency,
+                    apply_repetition_consistency=apply_repetition_consistency,
                 )
                 if (
                     state._start_decision is not None
@@ -1600,7 +1630,7 @@ class WebTaskManager:
                     limiter_stages = (state.stage,)
                 if state.stage in {CONTINUOUS_STAGE, "run-all"}:
                     for stage in limiter_stages:
-                        config = load_project_config(state.project, stage=stage)
+                        config = load_project_config(state.project, stage="translation" if stage == "repetition_consistency" else stage)
                         key = (
                             str(config["_llm_preset_id"]),
                             str(config["_llm_preset_hash"]),
@@ -1652,6 +1682,10 @@ class WebTaskManager:
                         reuse_mixed_fingerprints=reuse_mixed_fingerprints,
                         run_actions=continuous_run_actions,
                         apply_terminology_decision=apply_terminology_decision,
+                        include_repetition_consistency=include_repetition_consistency,
+                        apply_repetition_consistency=apply_repetition_consistency,
+                        exclude_punctuation_only=exclude_punctuation_only,
+                        screening_enabled=screening_enabled,
                         final_review=final_review,
                         prompt_language=prompt_language,
                         include_draft_translation=include_draft_translation,

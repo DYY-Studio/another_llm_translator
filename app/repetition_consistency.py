@@ -156,10 +156,15 @@ def current_draft(project: Path) -> dict[str, Any] | None:
     return {**read_draft(project, manifest), "choices": manifest.get("choices", {})}
 
 
-def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False) -> dict[str, Any]:
-    scope.validate()
-    if scope.from_file or scope.only_segment or scope.segment_ids is not None or scope.force or scope.dry_run:
-        raise UsageError("重复译文审查只支持整个项目或单个 File")
+def repetition_execution_fingerprint(config: dict[str, Any], prompt: str, screen_content: dict[str, Any] | None,
+                                     preset: dict[str, Any] | None, input_fingerprint: str | None = None) -> str:
+    return digest({"input": input_fingerprint, "protocol": PROTOCOL_VERSION,
+        "llm": config["_llm_preset_hash"], "adapter": config["_llm_adapter_hash"],
+        "temperature": config["llm"]["temperature_translation"], "retry": config["retry"],
+        "execution": config["execution"], "decision": preset, "prompt": prompt, "screen": screen_content})
+
+
+def repetition_resources(project: Path, prompt_language: str | None, screening_enabled: bool) -> tuple[dict[str, Any], str, dict[str, Any] | None, DecisionQuestion | None, dict[str, Any] | None, str]:
     config = load_project_config(project, stage="translation")
     language = _prompt_language(project, STAGE, prompt_language)
     prompt = _prompt(project, STAGE, language)
@@ -177,6 +182,14 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
         if preset["preset_id"] != preset_id:
             raise UsageError("Decision Preset ID 与配置不一致")
         config["_decision_preset_definitions"][preset_id] = preset
+    return config, prompt, screen_content, screen, preset, language
+
+
+def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False) -> dict[str, Any]:
+    scope.validate()
+    if scope.from_file or scope.only_segment or scope.segment_ids is not None or scope.force or scope.dry_run:
+        raise UsageError("重复译文审查只支持整个项目或单个 File")
+    config, prompt, screen_content, screen, preset, language = repetition_resources(project, prompt_language, screening_enabled)
     segments = load_segments(project)
     files = load_source_files(project)
     file_indices = {f["file_id"]: i for i, f in enumerate(files, 1)}
@@ -275,10 +288,7 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
         "exclude_punctuation_only": exclude_punctuation_only, "target_language": config["project"]["target_language"],
         "groups": [{key: value for key, value in group.items() if key not in {"screening_input_tokens", "comparison_input_tokens", "over_budget"}} for group in groups],
         "evidence": evidence, "terms": terms, "terms_revision": terms_revision})
-    fingerprint = digest({"input": input_fingerprint, "protocol": PROTOCOL_VERSION,
-        "llm": config["_llm_preset_hash"], "adapter": config["_llm_adapter_hash"],
-        "temperature": config["llm"]["temperature_translation"], "retry": config["retry"],
-        "execution": config["execution"], "decision": preset, "prompt": prompt, "screen": screen_content})
+    fingerprint = repetition_execution_fingerprint(config, prompt, screen_content, preset, input_fingerprint)
     plan = {"screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only, "excluded_punctuation_groups": excluded_punctuation_groups, "config": config, "prompt": prompt, "language": language, "screen": screen, "terms": terms, "terms_revision": terms_revision, "warnings": warnings, "decision_preset": preset, "groups": groups, "evidence": evidence, "sources": sources,
             "selected": selected_count, "fingerprint": fingerprint, "input_fingerprint": input_fingerprint}
     eligible = [g for g in groups if not g["over_budget"]]

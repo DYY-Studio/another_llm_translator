@@ -772,6 +772,8 @@ def register_task_routes(
             continuous_stages=payload.stages,
             continuous_run_actions=payload.run_actions,
             apply_terminology_decision=payload.apply_terminology_decision,
+            include_repetition_consistency=payload.include_repetition_consistency,
+            apply_repetition_consistency=payload.apply_repetition_consistency,
         )
 
     @app.get("/api/v1/projects/{name}/task-options/{stage}")
@@ -786,6 +788,10 @@ def register_task_routes(
         final_review: bool = False,
         stages: list[str] = Query(default=[]),  # noqa: B008
         apply_terminology_decision: bool = False,
+        include_repetition_consistency: bool = False,
+        apply_repetition_consistency: bool = False,
+        exclude_punctuation_only: bool = True,
+        screening_enabled: bool = False,
     ) -> dict[str, Any]:
         from .config import LLM_MODEL_STAGES
         from .web_chatgpt_routes import require_project_plan_session
@@ -807,6 +813,10 @@ def register_task_routes(
             final_review=final_review,
             continuous_stages=stages,
             apply_terminology_decision=apply_terminology_decision,
+            include_repetition_consistency=include_repetition_consistency,
+            apply_repetition_consistency=apply_repetition_consistency,
+            exclude_punctuation_only=exclude_punctuation_only,
+            screening_enabled=screening_enabled,
         )
 
     @app.get("/api/v1/tasks/active")

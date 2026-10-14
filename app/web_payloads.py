@@ -85,6 +85,8 @@ class TaskStartPayload(_WebPayload):
     run_action: str | None = None
     stages: list[StrictStr] = Field(default_factory=list)
     run_actions: dict[StrictStr, StrictStr] = Field(default_factory=dict)
+    include_repetition_consistency: StrictBool = False
+    apply_repetition_consistency: StrictBool = False
     apply_terminology_decision: StrictBool = False
     summary_selection: list[BoundaryPayload] = Field(default_factory=list)
 

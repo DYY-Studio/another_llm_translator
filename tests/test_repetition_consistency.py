@@ -1157,3 +1157,112 @@ def test_failed_publication_transition_does_not_double_count_usage(tmp_path, mon
     monkeypatch.setattr(repetition, "write_repetition_state", original_write)
     result = asyncio.run(run("resume"))
     assert result["usage"] == manifest["usage"]
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiting", [False, True])
+async def test_continuous_repetition_applies_or_stops_for_review(tmp_path, monkeypatch, waiting):
+    from app.web_tasks import WebTaskManager
+    from app.repetition_consistency import run_repetition, current_draft
+    project = repetition_project(tmp_path, monkeypatch)
+    events = []
+
+    async def translate(*args, **kwargs):
+        events.append("translation")
+        return {"selected": 8, "completed": 8, "failed": 0, "pending": 0}
+
+    async def review(*args, **kwargs):
+        events.append("proofreading")
+        return {"selected": 8, "completed": 8, "failed": 0, "pending": 0}
+
+    def respond(request):
+        response = transport().handler(request)
+        if waiting:
+            body = response.json()
+            data = json.loads(body["choices"][0]["message"]["content"])
+            data["repetitions"][0].update(keep=[], uncertain=["3"])
+            body["choices"][0]["message"]["content"] = json.dumps(data)
+            return httpx.Response(200, json=body)
+        return response
+
+    async def repetition(*args, **kwargs):
+        events.append("repetition")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await run_repetition(*args, **kwargs, http_client=client)
+
+    monkeypatch.setattr("app.web_continuous.run_translation", translate)
+    monkeypatch.setattr("app.web_continuous.run_review", review)
+    monkeypatch.setattr("app.web_continuous.run_repetition", repetition)
+    manager = WebTaskManager()
+    task = await manager.start(project, "continuous", scope=Scope(), run_action=None,
+        reuse_mixed_fingerprints=True, continuous_stages=("translation", "proofreading"),
+        include_repetition_consistency=True, apply_repetition_consistency=True)
+    await manager.tasks[task["task_id"]].asyncio_task
+    result = manager.get(task["task_id"])
+    assert result["status"] == "completed", result.get("error")
+    assert result["summary"]["waiting_review"] is waiting
+    assert events == (["translation", "repetition"] if waiting else ["translation", "repetition", "proofreading"])
+    assert (current_draft(project) is not None) is waiting
+    step = next(s for s in result["steps"] if s["stage"] == "repetition_consistency")
+    assert step["failed"] == 0
+    assert step["status"] == ("waiting_review" if waiting else "completed")
+    states = latest_stage_states(project, "translation", [s["segment_id"] for s in load_segments(project)])
+    translations = [s["completed"]["text"] for s in states.values()]
+    assert translations.count("我会去接你") == (2 if waiting else 1)
+
+
+def test_continuous_repetition_preflight_permissions_and_deferred_count(tmp_path, monkeypatch):
+    from app.web_continuous import inspect_continuous
+    project = repetition_project(tmp_path, monkeypatch)
+    options = inspect_continuous(project, ("translation", "proofreading"), include_repetition_consistency=True,
+        reuse_mixed_fingerprints=True)
+    assert options["stages"] == ["translation", "repetition_consistency", "proofreading"]
+    assert any(b["code"] == "apply_repetition_consistency_required" for b in options["blocking"])
+    from app.repetition_consistency import run_repetition
+    async def generate():
+        async with httpx.AsyncClient(transport=transport()) as client:
+            await run_repetition(project, Scope(), http_client=client)
+    asyncio.run(generate())
+    options = inspect_continuous(project, ("proofreading",), include_repetition_consistency=True,
+        apply_repetition_consistency=True, reuse_mixed_fingerprints=True)
+    assert any(b["code"] == "pending_repetition_draft" for b in options["blocking"])
+
+@pytest.mark.asyncio
+async def test_continuous_repetition_resume_restores_filters_and_screening(tmp_path, monkeypatch):
+    from app.web_tasks import WebTaskManager
+    from app.repetition_consistency import run_repetition, repetition_plan, repetition_resume
+    from tests.helpers import use_llm_preset
+    project = repetition_project(tmp_path, monkeypatch)
+    async with httpx.AsyncClient(transport=transport(invalid=True)) as client:
+        with pytest.raises(ExternalError):
+            await run_repetition(project, Scope(), screening_enabled=True, exclude_punctuation_only=False, http_client=client)
+    use_llm_preset(tmp_path, model="changed")
+    requests = []
+    async def resume(*args, **kwargs):
+        assert kwargs["prepared_plan"]["screening_enabled"] is True
+        assert kwargs["prepared_plan"]["exclude_punctuation_only"] is False
+        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+            return await run_repetition(*args, **kwargs, http_client=client)
+    async def review(*args, **kwargs):
+        return {"selected": 8, "completed": 8, "failed": 0, "pending": 0}
+    monkeypatch.setattr("app.web_continuous.run_repetition", resume)
+    monkeypatch.setattr("app.web_continuous.run_review", review)
+    manager = WebTaskManager()
+    task = await manager.start(project, "continuous", scope=Scope(), run_action=None, reuse_mixed_fingerprints=False,
+        continuous_stages=("proofreading",), continuous_run_actions={"repetition_consistency": "resume"},
+        include_repetition_consistency=True, apply_repetition_consistency=True)
+    await manager.tasks[task["task_id"]].asyncio_task
+    view = manager.get(task["task_id"])
+    assert view["status"] == "completed", view.get("error")
+    assert len(requests) == 1 and "messages" in requests[0]
+
+
+def test_continuous_repetition_defers_evidence_until_translation(tmp_path, monkeypatch):
+    from app.web_continuous import inspect_continuous
+    project = repetition_project(tmp_path, monkeypatch)
+    def forbidden(*args, **kwargs):
+        pytest.fail("translation preflight must not assemble repetition evidence")
+    monkeypatch.setattr("app.web_continuous.repetition_plan", forbidden)
+    value = inspect_continuous(project, ("translation",), include_repetition_consistency=True,
+        apply_repetition_consistency=True, reuse_mixed_fingerprints=True)
+    step = value["steps"][-1]
+    assert step["stage"] == "repetition_consistency" and step["count_deferred"] is True
