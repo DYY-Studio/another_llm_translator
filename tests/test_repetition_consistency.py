@@ -1159,12 +1159,15 @@ def test_failed_publication_transition_does_not_double_count_usage(tmp_path, mon
     assert result["usage"] == manifest["usage"]
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("waiting", [False, True])
+@pytest.mark.parametrize("waiting", [False, True, "budget"])
 async def test_continuous_repetition_applies_or_stops_for_review(tmp_path, monkeypatch, waiting):
     from app.web_tasks import WebTaskManager
     from app.repetition_consistency import run_repetition, current_draft
     project = repetition_project(tmp_path, monkeypatch)
     events = []
+    if waiting == "budget":
+        from tests.helpers import use_llm_preset
+        use_llm_preset(tmp_path, context_window_tokens=100, context_safety_margin_tokens=10)
 
     async def translate(*args, **kwargs):
         events.append("translation")
@@ -1199,12 +1202,15 @@ async def test_continuous_repetition_applies_or_stops_for_review(tmp_path, monke
     await manager.tasks[task["task_id"]].asyncio_task
     result = manager.get(task["task_id"])
     assert result["status"] == "completed", result.get("error")
-    assert result["summary"]["waiting_review"] is waiting
+    assert result["summary"]["waiting_review"] is bool(waiting)
     assert events == (["translation", "repetition"] if waiting else ["translation", "repetition", "proofreading"])
-    assert (current_draft(project) is not None) is waiting
+    assert (current_draft(project) is not None) is bool(waiting)
     step = next(s for s in result["steps"] if s["stage"] == "repetition_consistency")
     assert step["failed"] == 0
     assert step["status"] == ("waiting_review" if waiting else "completed")
+    if waiting:
+        assert result["current_stage"] == "repetition_consistency"
+        assert result["steps"][-1]["status"] == "not_executed"
     states = latest_stage_states(project, "translation", [s["segment_id"] for s in load_segments(project)])
     translations = [s["completed"]["text"] for s in states.values()]
     assert translations.count("我会去接你") == (2 if waiting else 1)

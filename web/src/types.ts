@@ -724,7 +724,10 @@ export interface ContinuousTaskOptions {
 }
 
 export interface RunningRun {
+  exclude_punctuation_only?: boolean;
+  screening_enabled?: boolean;
   execution_changed?: boolean;
+  compatibility_deferred?: boolean;
   include_summaries?: boolean;
   include_draft_translation?: boolean;
   run_id: string;
@@ -749,6 +752,7 @@ export interface RunningRun {
 }
 
 export interface ContinuousOptionStep {
+  count_deferred?: boolean;
   stage: string;
   status: string;
   selected: number;
@@ -770,6 +774,10 @@ export interface ContinuousRunDecision {
   force: boolean;
   reuse_mixed_fingerprints: boolean;
   final_review: boolean;
+  include_repetition_consistency: boolean;
+  apply_repetition_consistency: boolean;
+  exclude_punctuation_only: boolean;
+  screening_enabled: boolean;
   apply_terminology_decision: boolean;
   include_draft_translation: boolean;
   include_summaries: boolean;

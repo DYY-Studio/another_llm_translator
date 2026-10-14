@@ -1781,7 +1781,7 @@ class WebTaskManager:
                 state.steps = [dict(step) for step in summary.get("steps", [])]
                 state.current_stage = (
                     next((str(step["stage"]) for step in reversed(state.steps)
-                          if step["status"] != "skipped"), None)
+                          if step["status"] not in {"skipped", "not_executed"}), None)
                 )
                 state.completed_segments = sum(
                     int(step.get("completed", 0)) for step in state.steps

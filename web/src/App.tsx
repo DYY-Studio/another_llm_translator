@@ -145,6 +145,7 @@ export default function App() {
   });
   const overview = overviewQuery.data ?? null;
   const queryError = projectsQuery.error ?? overviewQuery.error;
+  const [openRepetition, setOpenRepetition] = useState(false);
   const consumeSettingsFocus = useCallback(() => setSettingsField(null), []);
   const task = selectedProject ? tasks[selectedProject.project_id] ?? null : null;
   const runningProjectIds = new Set(
@@ -632,7 +633,7 @@ export default function App() {
   else if (project && overview) {
     if (stage === "terminology") content = <TermsView key={`terms:${selectedProjectId}`} project={project} projectId={selectedProjectId} overview={overview} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} pendingTermSource={pendingTermSource} onTermJumpConsumed={() => setPendingTermSource(null)} task={task} onTask={updateTask} onSubpageChange={setTermsSubpage} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
-      content = <SegmentWorkspace key={`${stage}:${selectedProjectId}`} project={project} projectId={selectedProjectId} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} pendingJump={pendingJump} onJumpConsumed={() => setPendingJump(null)} onFindTerm={jumpToTerm} />;
+      content = <SegmentWorkspace key={`${stage}:${selectedProjectId}`} project={project} projectId={selectedProjectId} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} pendingJump={pendingJump} onJumpConsumed={() => setPendingJump(null)} onFindTerm={jumpToTerm} openRepetition={openRepetition} onRepetitionOpened={() => setOpenRepetition(false)} />;
     } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} onNavigateStage={navigateStage} onOpenSettings={openSettingsField} />;
   }
 
@@ -664,6 +665,7 @@ export default function App() {
         onDismissTask={dismissTask}
         onStage={navigateStage}
         onShowFailures={showFailures}
+        onOpenRepetition={() => { setStage("translation"); setOpenRepetition(true); }}
         onRun={openRunDialog}
         onCancel={cancelRun}
         canRun={Boolean(runnable[stage] && overview?.nonempty_segment_count && !(stage === "terminology" && termsSubpage !== "library"))}

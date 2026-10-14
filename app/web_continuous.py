@@ -410,7 +410,7 @@ def inspect_continuous(
         raise UsageError("自动应用一致性审查要求启用审查阶段")
     if include_repetition_consistency:
         repetition_runs = find_running_runs(project, "repetition_consistency")
-        if "translation" not in normalized and "terminology" not in normalized and "terminology_decision" not in normalized:
+        if _translation_complete(project, segments) and "translation" not in normalized and "terminology" not in normalized and "terminology_decision" not in normalized:
             repetition_current = repetition_plan(project, Scope(), prompt_language=prompt_language,
                 exclude_punctuation_only=repetition_runs[0]["exclude_punctuation_only"] if repetition_runs else exclude_punctuation_only,
                 screening_enabled=repetition_runs[0]["screening_enabled"] if repetition_runs else screening_enabled)
@@ -424,6 +424,7 @@ def inspect_continuous(
     )
     requires_decision_apply = has_decision and normalized[-1] != "terminology_decision"
 
+    repetition_running_executions: dict[str, str] = {}
     running_runs: dict[str, list[dict[str, Any]]] = {}
     blocking: list[dict[str, str]] = []
     for stage in execution_stages:
@@ -456,11 +457,15 @@ def inspect_continuous(
             else:
                 for run in runs:
                     manifest = read_json(project, project / "runs" / run["run_id"] / "manifest.json")
+                    resources = repetition_resources(project, prompt_language, manifest["screening_enabled"]) if manifest["screening_enabled"] != screening_enabled else (repetition_config, repetition_prompt, repetition_screen, None, repetition_preset, None)
+                    execution = repetition_execution_fingerprint(resources[0], resources[1], resources[2], resources[4], manifest.get("repetition_input_fingerprint"))
+                    repetition_running_executions[run["run_id"]] = execution
+                    run["execution_changed"] = execution != (manifest.get("continuations") or [manifest])[-1]["stage_fingerprint"]
                     run.update(exclude_punctuation_only=manifest.get("exclude_punctuation_only"),
                         screening_enabled=manifest.get("screening_enabled"), scope=manifest.get("scope"),
-                        resume_compatible=manifest.get("repetition_checkpoint") == 2 and manifest.get("repetition_protocol") == PROTOCOL_VERSION and manifest.get("scope") == {"only_file": None},
+                        resume_compatible=run.get("resume_compatible", True) and manifest.get("repetition_checkpoint") == 2 and manifest.get("repetition_protocol") == PROTOCOL_VERSION and manifest.get("scope") == {"only_file": None},
                         compatibility_deferred=True,
-                        resume_incompatibility_reason="检查点、协议或范围不兼容，请新建 Run" if manifest.get("repetition_checkpoint") != 2 or manifest.get("repetition_protocol") != PROTOCOL_VERSION or manifest.get("scope") != {"only_file": None} else None)
+                        resume_incompatibility_reason=run.get("resume_incompatibility_reason") or ("检查点、协议或范围不兼容，请新建 Run" if manifest.get("repetition_checkpoint") != 2 or manifest.get("repetition_protocol") != PROTOCOL_VERSION or manifest.get("scope") != {"only_file": None} else None))
         running_runs[stage] = runs
         action = actions.get(stage)
         if runs and action is None:
@@ -530,7 +535,7 @@ def inspect_continuous(
     fingerprints: dict[str, str] = {}
     for stage in execution_stages:
         if stage == "repetition_consistency":
-            fingerprints[stage] = repetition_current["fingerprint"] if repetition_current is not None else repetition_execution_fingerprint(repetition_config, repetition_prompt, repetition_screen, repetition_preset)
+            fingerprints[stage] = repetition_current["fingerprint"] if repetition_current is not None else _stable_digest({"execution": repetition_execution_fingerprint(repetition_config, repetition_prompt, repetition_screen, repetition_preset), "running_executions": repetition_running_executions})
         elif stage == "terminology_decision":
             fingerprints[stage] = _stable_digest(
                 {
@@ -1380,6 +1385,10 @@ async def run_continuous(
             step["status"] = "failed"
             emit(stage, "failed", step)
             raise
+
+    if steps and steps[-1]["status"] == "waiting_review":
+        for stage_name in normalized[len(steps):]:
+            steps.append({"stage": stage_name, "status": "not_executed", "selected": 0, "completed": 0, "failed": 0, "pending": 0})
 
     aggregate_usage: dict[str, Any] | None = None
     for stage_name in normalized:
