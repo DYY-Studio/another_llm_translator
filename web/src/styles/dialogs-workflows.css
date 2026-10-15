@@ -137,6 +137,12 @@
 .repetition-group .repetition-occurrence-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
 .repetition-occurrence-heading > small { overflow-wrap: anywhere; }
 .repetition-group .repetition-apply-toggle { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.repetition-occurrence-choice { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
+.repetition-group .repetition-occurrence-choice select { width: auto; max-width: 260px; }
+@media (max-width: 600px) {
+  .repetition-group .repetition-occurrence-heading { grid-template-columns: minmax(0, 1fr); }
+  .repetition-occurrence-choice { justify-content: flex-start; }
+}
 .repetition-result { min-width: 0; padding: 4px 10px; border-left: 3px solid var(--row-border); }
 .repetition-result.is-applied { border-left-color: var(--accent); background: var(--accent-soft); }
 .repetition-result.is-applied > strong, .repetition-result.is-applied > h4 { color: var(--accent-text); }

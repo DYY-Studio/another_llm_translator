@@ -220,8 +220,12 @@ function GroupCard({ group, draft, files, language, disabled, onChoose }: {
   const t = (key: string, params: Record<string, string | number> = {}) => translate(`repetition.${key}`, language, params);
   const [page, setPage] = useState(0);
   const [openContexts, setOpenContexts] = useState<Record<string, boolean>>({});
+  const [manualTargets, setManualTargets] = useState<Record<string, string>>({});
   const occurrenceById = useMemo(() => new Map(group.occurrences.map(o => [o.id, o])), [group]);
-  const proposalByMember = useMemo(() => new Map(group.proposals.flatMap(p => p.members.map(id => [id, p] as const))), [group]);
+  const proposalByMember = useMemo(() => new Map(group.proposals.flatMap(p => {
+    const choice = proposalChoice(draft, p);
+    return [...new Set([...p.members, ...(choice.accepted ? choice.apply : [])])].map(id => [id, p] as const);
+  })), [group, draft]);
   const uncertain = useMemo(() => new Set(group.uncertain), [group]);
   return <section className="term-decision-proposal repetition-group" key={group.id}>
         <h3>{t("source")}</h3><pre className="repetition-text">{group.source}</pre>
@@ -232,7 +236,7 @@ function GroupCard({ group, draft, files, language, disabled, onChoose }: {
           const variants = [...new Map(members.map(o => [o.variant, o])).values()];
           return <article className={`term-decision-proposal ${choice.accepted ? "" : "rejected"}`} key={proposal.id}>
             <div className="repetition-actions repetition-heading"><div><strong>{proposal.manual ? t("manualUnify") : t("unify", { count: members.length })}</strong>
-              <small> {t("enabledCount", {count: choice.accepted ? choice.apply.length : 0, total: members.length})}</small></div>
+              <small> {t("enabledCount", {count: choice.accepted ? choice.apply.length : 0, total: new Set([...proposal.members, ...choice.apply]).size})}</small></div>
               <button className="quiet-button" disabled={disabled} onClick={() => void onChoose(proposal, { ...choice, accepted: !choice.accepted,
                 apply: !choice.accepted && !choice.apply.length ? proposal.members : choice.apply })}>
                 {t(choice.accepted ? "reject" : "restore")}</button></div>
@@ -252,7 +256,9 @@ function GroupCard({ group, draft, files, language, disabled, onChoose }: {
         </div>
         <div className="repetition-occurrences" key={page}>
         {group.occurrences.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map(o => {
-          const proposal = proposalByMember.get(o.id);
+          const proposal = proposalByMember.get(o.id) ?? (uncertain.has(o.id)
+            ? group.proposals.find(p => p.id === manualTargets[o.id]) ?? (group.proposals.length === 1 ? group.proposals[0] : undefined)
+            : undefined);
           const choice = proposal ? proposalChoice(draft, proposal) : null;
           const enabled = !!choice?.accepted && choice.apply.includes(o.id);
           const target = enabled && choice ? occurrenceById.get(choice.target) : null;
@@ -260,9 +266,16 @@ function GroupCard({ group, draft, files, language, disabled, onChoose }: {
             <div className="repetition-actions repetition-occurrence-heading">
               <small>{files.find(f => f.file_id === o.file_id)?.name ?? o.file_id} / {o.part_id} / {o.segment_id}
                 {o.origin === "web" && ` (${t("manual")})`}</small>
-              {proposal && choice && <label className="repetition-apply-toggle"><input type="checkbox" checked={enabled} disabled={disabled}
-                onChange={event => { const selected = new Set(choice.accepted ? choice.apply : []); if (event.target.checked) selected.add(o.id); else selected.delete(o.id);
-                  void onChoose(proposal, {...choice, accepted: selected.size > 0, apply: [...selected]}); }} />{t("applyOccurrence")}</label>}
+              {(proposal || (uncertain.has(o.id) && group.proposals.length > 0)) && <div className="repetition-occurrence-choice">
+              {uncertain.has(o.id) && group.proposals.length > 1 && <select aria-label={t("joinProposal")} value={proposal?.id ?? ""} disabled={disabled || enabled}
+                onChange={event => setManualTargets(current => ({...current, [o.id]: event.target.value}))}>
+                <option value="">{t("joinProposal")}</option>
+                {group.proposals.map((p, index) => <option key={p.id} value={p.id}>{t("proposalTarget", {count: index + 1, text: group.translations[occurrenceById.get(proposalChoice(draft, p).target)!.variant]})}</option>)}
+              </select>}
+              <label className="repetition-apply-toggle"><input type="checkbox" checked={enabled} disabled={disabled || !proposal}
+                onChange={event => { if (!proposal || !choice) return; const selected = new Set(choice.accepted ? choice.apply : []); if (event.target.checked) selected.add(o.id); else selected.delete(o.id);
+                  void onChoose(proposal, {...choice, accepted: selected.size > 0, apply: [...selected]}); }} />{t("applyOccurrence")}</label>
+              </div>}
             </div>
             <div className="decision-state-pair"><div><strong>{t("before")}</strong><pre className="repetition-text">{group.translations[o.variant]}</pre></div>
               <div className={`repetition-result ${enabled ? "is-applied" : ""}`}><strong>{target ? t("after") : uncertain.has(o.id) ? t("needsReview") : t("keep")}</strong>
