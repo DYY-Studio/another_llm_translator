@@ -1,3 +1,4 @@
+import { useDialogs, Feedback } from "./InteractionProvider";
 import { useEffect, useMemo, useState } from "react";
 import { errorMessage, translate, type Language } from "../i18n";
 import { applyDataRootRelocation, nativeBridgeAvailable, pickNativeFolder } from "../native";
@@ -103,6 +104,7 @@ function EmptyStorage({ language, text }: { language: Language; text?: string })
 }
 
 export function StorageView({ language }: { language: Language }) {
+  const dialogs = useDialogs();
   const [summary, setSummary] = useState<StorageSummary | null>(null);
   const [dataRoot, setDataRoot] = useState<DataRootStatus | null>(null);
   const [directoryPicker, setDirectoryPicker] = useState(false);
@@ -245,7 +247,7 @@ export function StorageView({ language }: { language: Language }) {
     setError("");
     try {
       const warning = await applyDataRootRelocation();
-      if (warning) window.alert(warning);
+      if (warning) await dialogs.alert(warning);
       window.location.reload();
     } catch (reason) {
       setError(errorMessage(reason, language));
@@ -264,7 +266,7 @@ export function StorageView({ language }: { language: Language }) {
     const confirmationKey = nativeBridgeAvailable()
       ? "storage.dataRootConfirmNative"
       : "storage.dataRootConfirmWeb";
-    if (!window.confirm(translate(confirmationKey, language, {
+    if (!await dialogs.confirm(translate(confirmationKey, language, {
       source: dataRoot.active_root,
       target: targetRoot,
     }))) return;
@@ -276,7 +278,7 @@ export function StorageView({ language }: { language: Language }) {
       if (nativeBridgeAvailable()) {
         setDataRoot(await fetchDataRoot());
         const warning = await applyDataRootRelocation();
-        if (warning) window.alert(warning);
+        if (warning) await dialogs.alert(warning);
         window.location.reload();
       } else {
         setDataRoot(await fetchDataRoot());
@@ -329,7 +331,7 @@ export function StorageView({ language }: { language: Language }) {
     confirmation: string,
     operation: () => Promise<StorageCleanupResult>,
   ) {
-    if (!window.confirm(confirmation)) return;
+    if (!await dialogs.confirm(confirmation)) return;
     setBusyAction(key);
     setError("");
     setMessage("");
@@ -424,8 +426,8 @@ export function StorageView({ language }: { language: Language }) {
           {refreshing ? translate("storage.refreshing", language) : translate("storage.refresh", language)}
         </button>
       </header>
-      {!selectedProject && error && <div className="error-banner" role="alert">{error}</div>}
-      {!selectedProject && message && <p className="success-text storage-message">{message}</p>}
+      {!selectedProject && error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
+      {!selectedProject && message && <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
       {dataRoot && (
         <section className="storage-panel storage-root-panel">
           <div className="storage-panel-heading">
@@ -549,8 +551,8 @@ export function StorageView({ language }: { language: Language }) {
               </div>
             </header>
             <div className="storage-detail-body">
-              {error && <div className="error-banner" role="alert">{error}</div>}
-              {message && <p className="success-text storage-message">{message}</p>}
+              {error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
+              {message && <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
               {detailLoading && <p className="muted">{translate("storage.detailLoading", language)}</p>}
               {detailError && <div className="error-banner" role="alert">{detailError}<button className="quiet-button" type="button" onClick={() => setDetailRevision((current) => current + 1)}>{translate("common.retry", language)}</button></div>}
               {detail && (

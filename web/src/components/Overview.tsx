@@ -1,3 +1,4 @@
+import { useDialogs, Feedback } from "./InteractionProvider";
 import { useEffect, useRef, useState, useId, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import { api, apiErrorFromResponse, errorPayloadFrom } from "../api";
 import { nativeBridgeAvailable, pickNativeFile, pickNativeFolder, saveExport } from "../native";
@@ -56,6 +57,7 @@ export function Overview({
   repairing: boolean;
   language: Language;
 }) {
+  const dialogs = useDialogs();
   const selection = useClassicSelection();
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
   const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
@@ -344,7 +346,7 @@ export function Overview({
   }
 
   async function compactStorage() {
-    if (!window.confirm(translate("overview.compactConfirm", language))) return;
+    if (!await dialogs.confirm(translate("overview.compactConfirm", language))) return;
     setCompacting(true);
     setError("");
     setStorageMessage("");
@@ -443,8 +445,8 @@ export function Overview({
           </button>
         </div>
         </div>
-        {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
-        {storageMessage && <button className="success-banner" onClick={() => setStorageMessage("")}>{storageMessage}</button>}
+        {error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
+        {storageMessage && <Feedback message={storageMessage} type="success" />}
         {buttonReorderMode && (
           <div className="mobile-reorder-toolbar" role="toolbar" aria-label={translate("overview.reorderToolbar", language)}>
             <span aria-live="polite">

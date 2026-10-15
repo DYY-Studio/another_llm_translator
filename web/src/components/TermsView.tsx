@@ -1,3 +1,4 @@
+import { Feedback } from "./InteractionProvider";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -119,7 +120,10 @@ export function TermsView({
   const [search, setSearch] = useState("");
   const [onlyConflicts, setOnlyConflicts] = useState(false);
   const [showDisabled, setShowDisabled] = useState(false);
-  const [message, setMessage] = useState("");
+  const [message, setMessageText] = useState("");
+  const [messageType, setMessageType] = useState<"success" | "error">("success");
+  function setMessage(text: string) { setMessageType("success"); setMessageText(text); }
+  function setFailure(text: string) { setMessageType("error"); setMessageText(text); }
   const [saving, setSaving] = useState(false);
   const [removeOpen, setRemoveOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -245,7 +249,7 @@ export function TermsView({
     setEditorTab("edit");
     selection.reset(term?.normalized ?? "");
     setForm(term ? formFor(term) : emptyForm);
-    setMessage(term ? "" : translate("terms.jumpMissing", language, { source: pendingTermSource }));
+    setFailure(term ? "" : translate("terms.jumpMissing", language, { source: pendingTermSource }));
     onTermJumpConsumed?.();
   }, [data, pendingTermSource, onTermJumpConsumed, language]);
 
@@ -452,7 +456,7 @@ export function TermsView({
     } else {
       selection.reset();
       setForm(emptyForm);
-      setMessage(translate("terms.decisionManualTermMissing", language));
+      setFailure(translate("terms.decisionManualTermMissing", language));
     }
   }
 
@@ -464,7 +468,7 @@ export function TermsView({
       );
       setManualReview(result.manual_review);
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      setFailure(errorMessage(error, language));
     }
   }
 
@@ -477,7 +481,7 @@ export function TermsView({
 
   async function save(disabled: boolean) {
     if (!form.source.trim()) {
-      setMessage(translate("terms.sourceRequired", language));
+      setFailure(translate("terms.sourceRequired", language));
       return;
     }
     setSaving(true);
@@ -507,7 +511,7 @@ export function TermsView({
       setForm(saved ? formFor(saved) : emptyForm);
       setMessage(disabled ? translate("terms.termRemoved", language) : selected?.disabled ? translate("terms.termRestored", language) : translate("terms.termSaved", language));
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      setFailure(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -531,7 +535,7 @@ export function TermsView({
       setMessage(translate("terms.removedCount", language, { count: value.removed }));
       setRemoveOpen(false);
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      setFailure(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -555,7 +559,7 @@ export function TermsView({
       setMessage(translate("terms.deletedCount", language, { count: value.deleted }));
       setDeleteOpen(false);
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      setFailure(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -584,7 +588,7 @@ export function TermsView({
       setClearOpen(false);
       setMessage(translate("terms.stageCleared", language));
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      setFailure(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -611,7 +615,7 @@ export function TermsView({
       } : emptyForm);
       setMessage(translate(restored ? "terms.materializedRestored" : "terms.materializedUnsaved", language));
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      setFailure(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -632,7 +636,7 @@ export function TermsView({
       setPendingPrimary(null);
       setMessage(translate("terms.primaryChanged", language));
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      setFailure(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -643,7 +647,7 @@ export function TermsView({
       await navigator.clipboard.writeText(candidate.source);
       setMessage(translate("terms.relatedCopied", language));
     } catch (error) {
-      setMessage(`${translate("terms.relatedCopyFailed", language)}: ${errorMessage(error, language)}`);
+      setFailure(`${translate("terms.relatedCopyFailed", language)}: ${errorMessage(error, language)}`);
     }
   }
 
@@ -697,7 +701,7 @@ export function TermsView({
       setPendingRelatedGroup(null);
       setMessage(translate("terms.relatedGrouped", language));
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      setFailure(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -728,7 +732,7 @@ export function TermsView({
       setPendingRelatedAlias(null);
       setMessage(translate("terms.relatedConverted", language, { count: value.aliases_added.length }));
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      setFailure(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -758,7 +762,7 @@ export function TermsView({
       setPendingGroupMemberAlias(null);
       setMessage(translate("terms.groupMemberConverted", language, { count: value.aliases_added.length }));
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      setFailure(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -785,7 +789,7 @@ export function TermsView({
       setPendingGroupMemberLeave(null);
       setMessage(translate("terms.groupMemberLeft", language));
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      setFailure(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -807,7 +811,7 @@ export function TermsView({
       setPendingRelatedRemoval(null);
       setMessage(translate("terms.relatedRemoved", language));
     } catch (error) {
-      setMessage(errorMessage(error, language));
+      setFailure(errorMessage(error, language));
     } finally {
       setSaving(false);
     }
@@ -845,6 +849,7 @@ export function TermsView({
 
   return (
     <div className="terms-workspace">
+      <Feedback message={message} type={messageType} onDismiss={() => setMessage("")} />
       <section className="terms-browser">
         <div className="term-toolbar">
           <div className="term-primary">
@@ -1195,7 +1200,6 @@ export function TermsView({
                 language={language} onChanged={setCurrentData}
                 onFindSegment={onFindSegment} />
             ) : !selected ? <small>{translate("knowledge.saveTermFirst", language)}</small> : null}
-            {message && <p className={message.startsWith("Error") ? "error-text" : "success-text"}>{message}</p>}
           </div>
         )}
         {(!selected || editorTab === "edit") && (

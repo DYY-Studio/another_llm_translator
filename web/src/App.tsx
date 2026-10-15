@@ -1,3 +1,4 @@
+import { Feedback } from "./components/InteractionProvider";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorPayloadFrom, onAuthRequired } from "./api";
@@ -698,7 +699,7 @@ export default function App() {
           </div>
         )}
         {error != null && (
-          <button className="error-banner" type="button" onClick={() => setError(null)}>{errorMessage(error, language)}</button>
+          <Feedback message={errorMessage(error, language)} onDismiss={() => setError((current: unknown) => current === error ? null : current)} />
         )}
         {serverStatusError != null && (
           <div className="error-banner error-banner-global" role="alert">

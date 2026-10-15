@@ -1,3 +1,4 @@
+import { Feedback } from "./InteractionProvider";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
@@ -157,8 +158,8 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
         {state?.can_rollback && <button className="quiet-button" disabled={busy || active || !!confirm} onClick={() => setConfirm("rollback")}>{t("rollback")}</button>}
       </div>
     </header>
-    {error && !confirm && <div className="error-banner" role="alert">{error}</div>}
-    {message && <div className="warning-banner" role="status">{message}</div>}
+    {error && !confirm && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
+    {message && <Feedback message={message} type="warning" />}
     {task && <div className="repetition-actions" role="status">
       <span>{t(`status.${task.status}`)} {task.completed_segments}/{task.total_segments}</span>
       <span>{t("usage", { input: task.usage.input_tokens, output: task.usage.output_tokens })}{!task.usage.available && ` (${t("partialUsage")})`}</span>
@@ -197,7 +198,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
     {confirm && confirm !== "generate" && <div className="modal-backdrop" onMouseDown={() => { if (!busy) setConfirm(null); }}>
       <div className="modal" role="dialog" aria-modal="true" aria-labelledby="repetition-confirm-title" onMouseDown={event => event.stopPropagation()}>
         <h2 id="repetition-confirm-title">{t(`confirm.${confirm}`)}</h2>
-        {error && <div className="error-banner" role="alert">{error}</div>}
+        {error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
         <div className="modal-actions">
           <button className="quiet-button" disabled={busy} onClick={() => setConfirm(null)}>{translate("common.cancel", language)}</button>
           <button className="primary-button" disabled={busy} onClick={() => void execute()}>{t("confirm")}</button>

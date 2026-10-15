@@ -1,3 +1,4 @@
+import { useDialogs, Feedback } from "./InteractionProvider";
 import { useEffect, useRef, useState, useId, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import { api, apiErrorFromResponse, errorPayloadFrom } from "../api";
 import { nativeBridgeAvailable, pickNativeFile, pickNativeFolder, saveExport } from "../native";
@@ -42,6 +43,7 @@ export function ExportView({
   onNavigateStage: (stage: Stage) => void;
   onOpenSettings: (field: SettingsField) => void;
 }) {
+  const dialogs = useDialogs();
   const [stage, setStage] = useState("translated");
   const [format, setFormat] = useState("original");
   const [bilingual, setBilingual] = useState(false);
@@ -174,7 +176,7 @@ export function ExportView({
   }
 
   async function removeFile(path: string) {
-    if (!window.confirm(translate("export.deleteConfirm", language, { path }))) {
+    if (!await dialogs.confirm(translate("export.deleteConfirm", language, { path }))) {
       return;
     }
     setError(null); setMessage("");
@@ -206,7 +208,7 @@ export function ExportView({
         <button className={tab === "export" ? "active" : ""} onClick={() => setTab("export")}>{translate("export.tabExport", language)}</button>
         <button className={tab === "browse" ? "active" : ""} onClick={openBrowse}>{translate("export.tabBrowse", language)}</button>
       </div>
-      {error != null ? <button className="error-banner" onClick={() => setError(null)}>{errorMessage(error, language)}</button> : null}
+      {error != null ? <Feedback message={errorMessage(error, language)} onDismiss={() => setError((current: unknown) => current === error ? null : current)} /> : null}
       {tab === "export" ? <>
         <div className="export-workspace">
           <div className="export-form-col">
@@ -216,6 +218,7 @@ export function ExportView({
             <button className="primary-button" disabled={generating} onClick={() => void run()}>{translate(generating ? "export.generating" : "export.generate", language)}</button>
             {exportError && (
               <div className="export-error-card" role="alert">
+                <Feedback message={errorMessage(exportError, language)} />
                 <div className="export-error-heading">
                   <strong>{translate("export.errorTitle", language)}</strong>
                   <button
@@ -243,7 +246,7 @@ export function ExportView({
               </div>
             )}
             {message && (
-              <div className="notice-box"><span>{message}</span><button className="quiet-button" onClick={openBrowse}>{translate("export.viewOutputs", language)}</button></div>
+              <div className="notice-box"><Feedback message={message} type="success" /><span>{message}</span><button className="quiet-button" onClick={openBrowse}>{translate("export.viewOutputs", language)}</button></div>
             )}
           </div>
           <div className="export-select-col">

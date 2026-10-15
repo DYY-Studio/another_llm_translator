@@ -1,3 +1,4 @@
+import { Feedback } from "./InteractionProvider";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
@@ -13,7 +14,7 @@ export function PlanUsageLink({ language }: { language: Language }) {
   return <><button type="button" className="quiet-button" onClick={() => {
     setError("");
     void openExternalUrl("https://chatgpt.com/#settings/Usage").catch((reason) => setError(errorMessage(reason, language)));
-  }}>{translate("chatgpt.manageUsage", language)}</button>{error && <small role="alert">{error}</small>}</>;
+  }}>{translate("chatgpt.manageUsage", language)}</button>{error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}</>;
 }
 
 export function ChatGPTSettings({ language }: { language: Language }) {

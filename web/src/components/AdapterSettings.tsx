@@ -1,3 +1,4 @@
+import { useDialogs, Feedback } from "./InteractionProvider";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
@@ -10,10 +11,12 @@ interface AdapterRow {
 }
 
 export function AdapterSettings({ language }: { language: Language }) {
+  const dialogs = useDialogs();
   const [adapters, setAdapters] = useState<AdapterRow[]>([]);
   const [selected, setSelected] = useState("");
   const [content, setContent] = useState("");
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
+  const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -31,36 +34,38 @@ export function AdapterSettings({ language }: { language: Language }) {
     setError("");
     setPreview(null);
     void api<Record<string, unknown>>(`/api/v1/global/adapters/${selected}`)
-      .then((value) => setContent(JSON.stringify(value, null, 2)));
+      .then((value) => setContent(JSON.stringify(value, null, 2)))
+      .catch((reason) => setError(errorMessage(reason, language)));
     void api<Record<string, unknown>>(`/api/v1/global/adapters/${selected}/preview`)
       .then(setPreview)
       .catch((reason) => setError(errorMessage(reason, language)));
   }, [selected, language]);
 
   async function save() {
-    const value = JSON.parse(content) as Record<string, unknown>;
-    const result = await api<{ digest: string }>(`/api/v1/global/adapters/${selected}`, {
-      method: "PUT",
-      body: JSON.stringify(value),
-    });
-    setMessage(translate("adapter.saved", language));
-    setPreview(await api<Record<string, unknown>>(`/api/v1/global/adapters/${selected}/preview`));
-    await loadAdapters();
-    void result;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const value = JSON.parse(content) as Record<string, unknown>;
+      await api(`/api/v1/global/adapters/${selected}`, { method: "PUT", body: JSON.stringify(value) });
+      setPreview(await api<Record<string, unknown>>(`/api/v1/global/adapters/${selected}/preview`));
+      await loadAdapters();
+      setMessage(translate("adapter.saved", language));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+    finally { setBusy(false); }
   }
 
   async function copyAdapter() {
-    const adapterId = window.prompt(translate("adapter.newId", language));
+    const adapterId = await dialogs.prompt(translate("adapter.newId", language));
     if (!adapterId) return;
-    const value = JSON.parse(content) as Record<string, unknown>;
-    value.adapter_id = adapterId;
-    await api(`/api/v1/global/adapters/${adapterId}`, {
-      method: "PUT",
-      body: JSON.stringify(value),
-    });
-    await loadAdapters();
-    setSelected(adapterId);
-    setMessage(translate("adapter.copied", language, { id: adapterId }));
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const value = JSON.parse(content) as Record<string, unknown>;
+      value.adapter_id = adapterId;
+      await api(`/api/v1/global/adapters/${encodeURIComponent(adapterId)}`, { method: "PUT", body: JSON.stringify(value) });
+      await loadAdapters();
+      setSelected(adapterId);
+      setMessage(translate("adapter.copied", language, { id: adapterId }));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+    finally { setBusy(false); }
   }
 
   return (
@@ -69,22 +74,22 @@ export function AdapterSettings({ language }: { language: Language }) {
         <div className="page-heading settings-action-heading settings-sticky-heading">
           <div><h1>{translate("adapter.title", language)}</h1><p>{translate("adapter.description", language)}</p></div>
           <div className="button-group">
-            <button className="quiet-button" onClick={copyAdapter}>{translate("adapter.duplicate", language)}</button>
-            <button className="primary-button" onClick={save}>{translate("common.validateSave", language)}</button>
+            <button className="quiet-button" disabled={busy || !selected} onClick={copyAdapter}>{translate("adapter.duplicate", language)}</button>
+            <button className="primary-button" disabled={busy || !selected} onClick={save}>{translate("common.validateSave", language)}</button>
           </div>
         </div>
-        {error && <div className="error-banner">{error}</div>}
+        {error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
         <div className="settings-row">
           <label>{translate("adapter.edit", language)}
-            <select value={selected} onChange={(event) => setSelected(event.target.value)}>
+            <select disabled={busy} value={selected} onChange={(event) => setSelected(event.target.value)}>
               {adapters.map((item) => <option key={item.adapter_id}>{item.adapter_id}</option>)}
             </select>
           </label>
-          <span className="success-text">{message}</span>
+          <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />
         </div>
         <label className="code-field">
           <span>Adapter JSON</span>
-          <textarea spellCheck={false} value={content} onChange={(event) => setContent(event.target.value)} />
+          <textarea disabled={busy} spellCheck={false} value={content} onChange={(event) => setContent(event.target.value)} />
         </label>
       </section>
       <aside className="reference-rail">

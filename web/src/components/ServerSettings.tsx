@@ -1,3 +1,4 @@
+import { useDialogs, Feedback } from "./InteractionProvider";
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
@@ -38,6 +39,7 @@ export function LoginView({ language, onLoggedIn }: { language: Language; onLogg
 }
 
 export function ServerSettings({ language, onChanged }: { language: Language; onChanged: () => void }) {
+  const dialogs = useDialogs();
   const [status, setStatus] = useState<ServerStatus | null>(null);
   const [interfaces, setInterfaces] = useState<InterfaceEntry[]>([]);
   const [enabled, setEnabled] = useState(false);
@@ -73,7 +75,7 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
     const enablingWithoutAuth = enabled && !required;
     if (
       enablingWithoutAuth &&
-      !window.confirm(translate("server.warningConfirm", language))
+      !await dialogs.confirm(translate("server.warningConfirm", language))
     ) {
       return;
     }
@@ -109,8 +111,8 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
         <div><h1>{translate("server.title", language)}</h1><p>{translate("server.subtitle", language)}</p></div>
         <div className="button-group"><button className="primary-button" disabled={saving || (enabled && !bindAddress) || !Number.isInteger(maxActiveProjects) || maxActiveProjects < 1} onClick={() => void save()}>{saving ? translate("common.saving", language) : translate("common.validateSave", language)}</button></div>
       </div>
-      {error && <div className="error-banner">{error}</div>}
-      {message && <p className="success-text">{message}</p>}
+      {error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
+      {message && <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
       {status && !status.loopback && <div className="warning-banner">{translate("server.lanViewHint", language)}</div>}
       <div className="config-form">
         <section className="config-section">

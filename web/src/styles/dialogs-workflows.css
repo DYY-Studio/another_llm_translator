@@ -256,3 +256,14 @@
 .run-details code { color: var(--text); white-space: normal; }
 .run-warning { margin: 0 0 2px; }
 .button-group { display: flex; align-items: center; gap: 8px; }
+
+.interaction-layer { position: fixed; inset: 0; z-index: 30; }
+.interaction-question { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.interaction-layer input { width: 100%; margin-top: 16px; }
+.feedback-stack { position: fixed; top: 16px; right: 16px; z-index: 40; display: grid; gap: 8px; width: min(440px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; pointer-events: none; }
+.feedback-notice { display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); box-shadow: 0 4px 16px var(--modal-shadow); pointer-events: auto; }
+.feedback-notice > span { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.feedback-notice > button { flex: none; min-height: 24px; padding: 0 6px; }
+.feedback-error { border-color: var(--danger); }
+.feedback-success { border-color: var(--success); }
+.feedback-warning { border-color: var(--warning-border); color: var(--warning-text); }
