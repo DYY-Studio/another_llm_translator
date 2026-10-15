@@ -1079,6 +1079,7 @@ export interface ProjectConfig {
 }
 
 export interface AdapterCapabilities {
+  json_schema: boolean;
   temperature: boolean;
   max_output_tokens_minimum: number;
   reasoning_effort: { body_pointer: string; values: string[]; aliases: string[] } | null;
@@ -1143,6 +1144,7 @@ export interface LLMPreset {
   target_chunk_input_tokens: number;
   max_output_tokens: number;
   send_temperature: boolean;
+  json_schema_enabled?: boolean;
   reasoning_effort: string | null;
   context_safety_margin_tokens: number;
   token_safety_factor: number;
