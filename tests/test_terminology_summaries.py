@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from app.errors import ConfigError, UsageError
+from app.diagnostics import Diagnostics
 from app.execution import Scope
 from app.llm_response import response_record_types
 from app.main import run
@@ -1817,21 +1818,27 @@ async def test_summary_format_retry_adds_no_guidance(
 
     os.environ["LLM_API_KEY"] = "test"
     client = httpx.AsyncClient(transport=httpx.MockTransport(summary_handler))
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
     try:
-        result = await run_terminology(
-            project,
-            Scope(),
-            http_client=client,
-            prompt_language="zh-CN",
-            reuse_mixed_fingerprints=True,
-            include_summaries=True,
-        )
+        with diagnostics.activate("sample", "terminology"):
+            result = await run_terminology(
+                project,
+                Scope(),
+                http_client=client,
+                prompt_language="zh-CN",
+                reuse_mixed_fingerprints=True,
+                include_summaries=True,
+            )
     finally:
         await client.aclose()
         os.environ.pop("LLM_API_KEY", None)
 
     assert result["failed"] == 0
     assert calls == 2
+    parent, child = diagnostics.snapshot()["requests"]["items"]
+    assert parent["status"] == "failed"
+    assert parent["error"] == "format_error"
+    assert child["parent_request_id"] == parent["request_id"]
     summary_run = next(
         item for item in read_summary_runs(project) if item["run_id"] == result["run_id"]
     )

@@ -931,6 +931,7 @@ class LLMClient:
         if diagnostics is not None:
             diagnostics.begin_request(
                 request_id=request_id,
+                parent_request_id=parent_request_id,
                 model=str(self.config["llm"]["model"]),
                 messages=messages,
                 max_attempts=attempts,

@@ -19,6 +19,43 @@ from app.web import create_app
 from tests.test_execution import config
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["translation", "terminology"])
+async def test_format_retry_reports_parent_result_and_direct_source(tmp_path: Path, stage: str) -> None:
+    from tests.helpers import llm_jsonl
+    from tests.test_terminology_translation import create_project
+    from app.execution import Scope
+    from app.stage_translation import run_translation
+    from app.stage_terminology import run_terminology
+
+    project = await create_project(tmp_path, "Hello")
+    diagnostics = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        content = "invalid" if calls == 1 else llm_jsonl(
+            [{"type": "segment", "id": "1", "translation": "你好"}]
+            if stage == "translation" else []
+        )
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    with diagnostics.activate("sample", stage, task_id="retry-check"):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            run_stage = run_translation if stage == "translation" else run_terminology
+            result = await run_stage(project, Scope(), http_client=client)
+        assert result["failed"] == 0
+        requests = diagnostics.snapshot()["requests"]["items"]
+        assert len(requests) == 2
+        parent, child = sorted(requests, key=lambda item: item["timestamp"])
+        assert parent["status"] == "failed"
+        assert parent["error"] == "format_error"
+        assert parent["parent_request_id"] is None
+        assert child["parent_request_id"] == parent["request_id"]
+        assert diagnostics.request_detail(child["request_id"])["parent_request_id"] == parent["request_id"]
+
+
 @pytest.mark.parametrize("diagnostics_type", [Diagnostics, DiagnosticsHub])
 def test_throughput_uses_current_invocation_usage(
     tmp_path: Path, diagnostics_type: type[Diagnostics]
@@ -548,6 +585,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
             "project": "sample",
             "stage": "translation",
             "request_id": "REQ-1",
+            "parent_request_id": None,
             "model": "test-model",
             "request_kind": "llm",
             "segment_id": None,

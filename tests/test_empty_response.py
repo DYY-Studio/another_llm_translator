@@ -6,6 +6,7 @@ import pytest
 
 from app.config import load_config, load_global_config
 from app.errors import ExternalError
+from app.diagnostics import Diagnostics
 from app.execution import Scope
 from app.llm_client import LLMClient, SlidingWindowLimiter
 from app.stage_translation import run_translation
@@ -87,6 +88,7 @@ async def test_empty_original_retry_preserves_request_and_usage(
             },
         )
 
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         async with LLMClient(
             config,
@@ -97,14 +99,19 @@ async def test_empty_original_retry_preserves_request_and_usage(
             stage="translation",
             client=client,
         ) as llm:
-            response, _ = await llm.chat(
-                messages=[{"role": "user", "content": "source"}],
-                temperature=0,
-                estimated_input_tokens=10,
-            )
+            with diagnostics.activate("sample", "translation"):
+                response, _ = await llm.chat(
+                    messages=[{"role": "user", "content": "source"}],
+                    temperature=0,
+                    estimated_input_tokens=10,
+                )
             assert response.content == "answer"
             assert llm.usage_summary()["total_tokens"] == 60
     assert len(bodies) == 2 and bodies[0] == bodies[1]
+    parent, child = diagnostics.snapshot()["requests"]["items"]
+    assert parent["status"] == "failed"
+    assert parent["error"] == ("empty_response_truncated" if reason == "length" else "empty_response_unknown")
+    assert child["parent_request_id"] == parent["request_id"]
 
 
 @pytest.mark.asyncio
