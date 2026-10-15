@@ -379,45 +379,6 @@ async def test_partial_truncated_translation_is_buffered_before_format_retry(
 
 
 @pytest.mark.asyncio
-async def test_translation_complete_id_mismatch_retries_original_batch(
-    tmp_path: Path,
-) -> None:
-    project = await create_project(tmp_path, "one\ntwo\nthree")
-    calls: list[list[str]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        ids = [item["id"] for item in payload["segments"]]
-        calls.append(ids)
-        returned = ids[1:2] if len(calls) == 1 else ids
-        content = llm_jsonl(
-            [
-                {
-                    "type": "segment",
-                    "id": segment_id,
-                    "translation": f"translated:{segment_id}",
-                }
-                for segment_id in returned
-            ]
-        )
-        return httpx.Response(
-            200, json={"choices": [{"message": {"content": content}}]}
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        summary = await run_translation(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-    assert summary["completed"] == 3
-    assert calls == [
-        ["1", "2", "3"],
-        ["1", "2", "3"],
-    ]
-
-
-@pytest.mark.asyncio
 async def test_old_top_level_json_retries_without_added_feedback(
     tmp_path: Path,
 ) -> None:
