@@ -63,7 +63,7 @@ def request_plan(preset: dict[str, Any], config: dict[str, Any], state: Any,
                  questions: list[DecisionQuestion]) -> tuple[dict[str, Any], int]:
     from .execution import estimate_tokens
 
-    evidence = dict(model=preset["model"], state=state, questions={
+    evidence = dict(state=state, questions={
         q.name: dict(type="choice", instructions=q.instructions, criteria=q.choices) for q in questions})
     messages = [dict(role="system", content=preset["_resources"]["prompt"]),
                 dict(role="user", content=json.dumps(evidence, ensure_ascii=False))]
@@ -102,7 +102,7 @@ async def request_decision(client: DecisionClient, body: dict[str, Any], estimat
                 response, current_id = await llm.chat(messages=body["messages"], temperature=0,
                     estimated_input_tokens=estimated, request_id=current_id)
                 try:
-                    data = json.loads(response.content)
+                    data = {**json.loads(response.content), "model": client.preset["model"]}
                     answers = client._parse(data, questions)
                 except (ValueError, TypeError, KeyError) as exc:
                     record["error"] = "response_parse_error"

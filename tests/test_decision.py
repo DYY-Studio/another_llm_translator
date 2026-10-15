@@ -344,7 +344,8 @@ def test_decision_hub_publishes_answers_in_incremental_summary(tmp_path, task_id
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path, monkeypatch, stream):
+@pytest.mark.parametrize("returned_model", [None, "untrusted-model"])
+def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path, monkeypatch, stream, returned_model):
     from app.config import load_config
     from app.decision import load_decision_preset
     from app.decision_llm import resolve_llm_resources
@@ -370,11 +371,14 @@ def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path
         attempts.append(payload)
         assert "Changed prompt" not in json.dumps(payload)
         evidence = json.loads(payload["messages"][-1]["content"])
+        assert set(evidence) == {"state", "questions"}
         assert evidence["state"] == {"text": "Evidence"}
         assert evidence["questions"]["term"]["criteria"] == {"a": "A", "b": "B"}
         probabilities = {"a": 0.9, "b": 0.1} if len(attempts) > 1 else {"a": 0.9}
-        answer = {"model": "judge-model", "answers": {"term": {
+        answer = {"answers": {"term": {
             "type": "choice", "choice": "a", "probabilities": probabilities, "confidence": 0.9}}}
+        if returned_model is not None:
+            answer["model"] = returned_model
         if stream:
             from tests.test_llm_streaming import stream_response
             return stream_response({"choices": [{"delta": {"content": json.dumps(answer)}, "finish_reason": None}]},
@@ -393,6 +397,7 @@ def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path
                 assert result["term"].choice == "a"
                 assert client.usage_summary()["total_tokens"] == 30
                 assert len(client.records) == 2
+                assert client.records[-1]["model"] == "example-model"
                 assert diagnostics.snapshot()["decision"]["metrics"]["total_requests"] == 2
                 assert diagnostics.snapshot()["metrics"]["total_requests"] == 0
                 activity = diagnostics.snapshot()["decision"]["activities"][0]
