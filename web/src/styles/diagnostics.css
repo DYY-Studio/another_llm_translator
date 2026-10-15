@@ -38,8 +38,12 @@
 .request-group-finished { flex: 1 1 55%; }
 .request-groups.single .request-group { max-height: none; flex: 1; }
 .request-group-heading { min-height: 38px; display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--row-border); background: var(--surface-raised); }
-.request-group-heading h3 { margin: 0; font-size: 12px; }
+.request-group-heading h3 { width: 100%; margin: 0; font-size: 12px; }
 .request-group-heading span { color: var(--muted); font-size: 11px; }
+.request-group-toggle { width: 100%; display: flex; align-items: center; gap: 8px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; }
+.request-group-count { margin-left: auto; font-weight: normal; }
+.request-groups .request-group.collapsed { min-height: 0; max-height: none; flex: none; }
+.request-groups:has(> .collapsed) > .request-group:not(.collapsed) { max-height: none; flex: 1; }
 .request-list { min-height: 0; flex: 1; overflow: auto; }
 .request-list-content { position: relative; width: 100%; }
 .request-list article { position: absolute; top: 0; left: 0; width: 100%; display: flex; align-items: center; gap: 12px; padding: 13px 14px; border-bottom: 1px solid var(--row-border); }

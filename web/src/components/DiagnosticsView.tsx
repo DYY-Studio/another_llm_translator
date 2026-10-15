@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { RequestOverview } from "./RequestOverview";
 import { HistoricalDiagnosticsView } from "./HistoricalDiagnosticsView";
@@ -92,9 +92,12 @@ const RequestGroup = memo(function RequestGroup({
   statusLabels: Record<DiagnosticsRequestStatus, string>;
   title: string;
 }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const listId = useId();
   const listRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
     count: items.length,
+    enabled: !collapsed,
     getScrollElement: () => listRef.current,
     getItemKey: (index) => items[index]?.request_id ?? index,
     estimateSize: () => 82,
@@ -102,12 +105,15 @@ const RequestGroup = memo(function RequestGroup({
   });
 
   return (
-    <section className={`request-group ${className}`}>
+    <section className={`request-group ${className}${collapsed ? " collapsed" : ""}`}>
       <header className="request-group-heading">
-        <h3>{title}</h3>
-        <span>{translate("diagnostics.requestsLabel", language, { count: items.length })}</span>
+        <h3><button type="button" className="request-group-toggle" aria-expanded={!collapsed} aria-controls={listId} onClick={() => setCollapsed((current) => !current)}>
+          <span aria-hidden="true">{collapsed ? "▸" : "▾"}</span>
+          {title}
+          <span className="request-group-count">{translate("diagnostics.requestsLabel", language, { count: items.length })}</span>
+        </button></h3>
       </header>
-      <div className="request-list" ref={listRef}>
+      <div className="request-list" id={listId} ref={listRef} hidden={collapsed}>
         <div className="request-list-content" style={{ height: virtualizer.getTotalSize() }}>
           {virtualizer.getVirtualItems().map((virtualRow) => {
             const item = items[virtualRow.index];
