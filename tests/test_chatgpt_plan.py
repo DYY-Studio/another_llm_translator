@@ -189,7 +189,7 @@ async def test_plan_missing_content_type_warns_but_explicit_wrong_type_fails(tmp
 def test_adapter_capabilities_follow_template_and_fixed_connection(tmp_path):
     plan = load_json_adapter(ROOT / "llm_adapters/chatgpt-plan.json")
     assert plan.capabilities == {
-        "temperature": False, "max_output_tokens": False, "streaming": "required",
+        "temperature": False, "max_output_tokens": False, "streaming": "required", "json_schema": True,
         "max_output_tokens_minimum": 0, "reasoning_effort": plan.definition["reasoning_effort"],
         "connection": {"base_url": "https://api.openai.com/v1", "credential": {"kind": "chatgpt", "name": "default"}, "proxy_source": "connection"},
     }

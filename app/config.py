@@ -705,6 +705,7 @@ def _resolve_llm_config(
             )
         }
     )
+    config["llm"]["json_schema_enabled"] = definition.get("json_schema_enabled", False)
     config["llm"]["endpoint"] = adapter.endpoint
     config["llm"]["stream_endpoint"] = (
         adapter.streaming_spec["endpoint"]

@@ -3605,6 +3605,8 @@ def test_web_adapter_validation_preview_and_secret_redaction(
         "/api/v1/global/adapters/openai-compatible"
     ).json()
     adapter["body"]["response_format"] = {"type": "json_object"}
+    assert client.put("/api/v1/global/adapters/openai-compatible", json=adapter).status_code == 400
+    adapter.pop("structured_output")
     saved = client.put(
         "/api/v1/global/adapters/openai-compatible",
         json=adapter,

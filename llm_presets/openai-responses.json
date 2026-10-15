@@ -24,5 +24,6 @@
   },
   "send_temperature": true,
   "reasoning_effort": null,
-  "extra_headers": {}
+  "extra_headers": {},
+  "json_schema_enabled": false
 }

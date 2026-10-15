@@ -786,6 +786,7 @@ class LLMClient:
         request_id: str | None = None,
         parent_request_id: str | None = None,
         segment_id_map: dict[str, str] | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> tuple[LLMResponse, str]:
         retried = {"truncated": 0, "unknown": 0}
         while True:
@@ -796,6 +797,7 @@ class LLMClient:
                 request_id=request_id,
                 parent_request_id=parent_request_id,
                 segment_id_map=segment_id_map,
+                json_schema=json_schema,
             )
             diagnostics = current_diagnostics()
             if response.finish_reason in self.adapter.blocked_finish_reasons:
@@ -856,9 +858,11 @@ class LLMClient:
         request_id: str | None = None,
         parent_request_id: str | None = None,
         segment_id_map: dict[str, str] | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> tuple[LLMResponse, str]:
         if self.client is None:
             raise RuntimeError("LLMClient must be used as an async context manager")
+        json_schema = json_schema if self.config["llm"].get("json_schema_enabled", False) else None
         self._prepare_keys()
         api_keys = self._api_keys
         request_id = request_id or f"REQ-{uuid.uuid4().hex[:12].upper()}"
@@ -993,7 +997,10 @@ class LLMClient:
                     extra_headers=self.config.get("_llm_extra_headers"),
                     session_id=self.run_id,
                     request_id=request_id,
+                    json_schema=json_schema,
                 )
+                if diagnostics is not None and json_schema is not None:
+                    diagnostics.set_request_body(request_id, json.dumps(payload, ensure_ascii=False, indent=2))
             except ExternalError as exc:
                 if lease is not None:
                     await lease.release()

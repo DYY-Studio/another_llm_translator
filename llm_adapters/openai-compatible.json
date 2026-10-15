@@ -42,5 +42,15 @@
       "/reasoning/effort"
     ]
   },
-  "response_format": "chat-completions"
+  "response_format": "chat-completions",
+  "structured_output": {
+    "/response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "structured_response",
+        "strict": true,
+        "schema": "${json_schema}"
+      }
+    }
+  }
 }

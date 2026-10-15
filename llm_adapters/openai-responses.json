@@ -36,5 +36,13 @@
     ],
     "aliases": []
   },
-  "response_format": "responses"
+  "response_format": "responses",
+  "structured_output": {
+    "/text/format": {
+      "type": "json_schema",
+      "name": "structured_response",
+      "strict": true,
+      "schema": "${json_schema}"
+    }
+  }
 }

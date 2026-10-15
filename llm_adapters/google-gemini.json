@@ -42,5 +42,9 @@
     ],
     "aliases": []
   },
-  "response_format": "gemini"
+  "response_format": "gemini",
+  "structured_output": {
+    "/generationConfig/responseMimeType": "application/json",
+    "/generationConfig/responseJsonSchema": "${json_schema}"
+  }
 }

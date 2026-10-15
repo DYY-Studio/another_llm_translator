@@ -43,6 +43,7 @@ _OPTIONAL_ADAPTER_KEYS = frozenset(
         "connection",
         "max_output_tokens_minimum",
         "reasoning_effort",
+        "structured_output",
     }
 )
 _MESSAGES_FORMATS = frozenset({"openai", "anthropic", "gemini", "responses"})
@@ -132,6 +133,7 @@ class JSONLLMAdapter:
         extra_headers: dict[str, str] | None = None,
         session_id: str | None = None,
         request_id: str | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> tuple[dict[str, str], dict[str, Any]]:
         minimum = self.definition.get("max_output_tokens_minimum", 0)
         if max_output_tokens < minimum:
@@ -207,6 +209,14 @@ class JSONLLMAdapter:
             body.update(deepcopy(extra_body))
         if reasoning_effort is not None:
             _insert_body_value(body, effort["body_pointer"], reasoning_effort)
+        if json_schema is not None:
+            declaration = self.definition.get("structured_output")
+            if declaration is None:
+                raise ConfigError("该 Adapter 未声明 JSON Schema 能力")
+            if not isinstance(json_schema, dict) or not json_schema:
+                raise ConfigError("JSON Schema 必须是非空对象")
+            for pointer, template in declaration.items():
+                _insert_body_value(body, pointer, _render_body(template, {"json_schema": json_schema}), label="JSON Schema")
         if self.adapter_id == "chatgpt-plan":
             from .chatgpt_oauth import validate_plan_body
             validate_plan_body(body)
@@ -266,10 +276,13 @@ class JSONLLMAdapter:
             "connection": deepcopy(self.definition.get("connection")),
             "max_output_tokens_minimum": self.definition.get("max_output_tokens_minimum", 0),
             "reasoning_effort": deepcopy(self.definition.get("reasoning_effort")),
+            "json_schema": self.definition.get("structured_output") is not None,
         }
 
     def validate_preset(self, definition: dict[str, Any]) -> None:
         capabilities = self.capabilities
+        if definition.get("json_schema_enabled", False) and not capabilities["json_schema"]:
+            raise ConfigError("该 Adapter 未声明 JSON Schema 能力")
         if definition["send_temperature"] and not capabilities["temperature"]:
             raise ConfigError("该 Adapter 不支持发送温度")
         if definition["max_output_tokens"] < capabilities["max_output_tokens_minimum"]:
@@ -683,6 +696,19 @@ def parse_json_adapter(value: Any, *, raw: bytes | None = None) -> JSONLLMAdapte
                 except ExternalError:
                     continue
                 raise ConfigError("Adapter 请求体不得重复配置声明的 Reasoning Effort 字段")
+    structured = value.get("structured_output")
+    if structured is not None:
+        if not isinstance(structured, dict) or not structured:
+            raise ConfigError("structured_output 必须是 JSON Pointer 到模板的非空映射")
+        for schema_pointer, template in structured.items():
+            _validate_stream_pointer(schema_pointer, "structured_output")
+            _validate_body(template, allowed=frozenset({"json_schema"}))
+        if not any("json_schema" in _PLACEHOLDER_RE.findall(json.dumps(template)) for template in structured.values()):
+            raise ConfigError("structured_output 必须引用 ${json_schema}")
+        for request_body in (body, (streaming_spec or {}).get("request_body", {})):
+            probe = deepcopy(request_body)
+            for schema_pointer, template in structured.items():
+                _insert_body_value(probe, schema_pointer, deepcopy(template), label="JSON Schema")
     encoded = raw if raw is not None else json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
     digest = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
     return JSONLLMAdapter(
@@ -998,20 +1024,20 @@ def _validate_placeholders(
         )
 
 
-def _validate_body(value: Any) -> None:
+def _validate_body(value: Any, *, allowed: frozenset[str] = _BODY_PLACEHOLDERS) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
             if not isinstance(key, str):
                 raise ConfigError("LLM Adapter body 的对象键必须是字符串")
-            _validate_body(child)
+            _validate_body(child, allowed=allowed)
         return
     if isinstance(value, list):
         for child in value:
-            _validate_body(child)
+            _validate_body(child, allowed=allowed)
         return
     if isinstance(value, str):
         _validate_placeholders(
-            value, allowed=_BODY_PLACEHOLDERS, location="body"
+            value, allowed=allowed, location="body"
         )
         if _PLACEHOLDER_RE.search(value) and not _PLACEHOLDER_RE.fullmatch(value):
             raise ConfigError("LLM Adapter body 占位符必须独占字符串值")
@@ -1135,7 +1161,7 @@ def _contains_key(value: Any, key: str) -> bool:
     return False
 
 
-def _insert_body_value(body: dict[str, Any], pointer: str, value: Any) -> None:
+def _insert_body_value(body: dict[str, Any], pointer: str, value: Any, *, label: str = "Reasoning Effort") -> None:
     tokens = _parse_json_pointer(pointer)
     parent = body
     for key in tokens[:-1]:
@@ -1143,8 +1169,8 @@ def _insert_body_value(body: dict[str, Any], pointer: str, value: Any) -> None:
             parent[key] = {}
         child = parent[key]
         if not isinstance(child, dict):
-            raise ConfigError("Reasoning Effort 请求路径必须经过 JSON 对象")
+            raise ConfigError(f"{label} 请求路径必须经过 JSON 对象")
         parent = child
     if tokens[-1] in parent:
-        raise ConfigError("Reasoning Effort 请求字段与 Adapter body 冲突")
+        raise ConfigError(f"{label} 请求字段与 Adapter body 冲突")
     parent[tokens[-1]] = value

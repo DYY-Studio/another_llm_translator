@@ -59,6 +59,25 @@ def llm_config(preset: dict[str, Any], *, retry: dict[str, Any] | None, debug: b
     return _resolve_llm_config(config, preset=selected, adapter=parse_json_adapter(resources["adapter"]))
 
 
+def decision_json_schema(questions: list[DecisionQuestion]) -> dict[str, Any]:
+    def object_schema(properties: dict[str, Any]) -> dict[str, Any]:
+        return {"type": "object", "properties": properties,
+                "required": list(properties), "additionalProperties": False}
+
+    answers = {}
+    for question in questions:
+        answers[question.name] = {"anyOf": [
+            object_schema({
+                "type": {"type": "string", "enum": ["choice"]},
+                "choice": {"type": "string", "enum": list(question.choices)},
+                "probabilities": object_schema({choice: {"type": "number"} for choice in question.choices}),
+                "confidence": {"type": "number"},
+            }),
+            object_schema({"type": {"type": "string", "enum": ["refusal"]}}),
+        ]}
+    return object_schema({"answers": object_schema(answers)})
+
+
 def request_plan(preset: dict[str, Any], config: dict[str, Any], state: Any,
                  questions: list[DecisionQuestion]) -> tuple[dict[str, Any], int]:
     from .execution import estimate_tokens
@@ -67,14 +86,15 @@ def request_plan(preset: dict[str, Any], config: dict[str, Any], state: Any,
         q.name: dict(type="choice", instructions=q.instructions, criteria=q.choices) for q in questions})
     messages = [dict(role="system", content=preset["_resources"]["prompt"]),
                 dict(role="user", content=json.dumps(evidence, ensure_ascii=False))]
+    schema = decision_json_schema(questions) if config["llm"]["json_schema_enabled"] else None
     _, payload = config["_llm_adapter"].build_request(
         api_key="***", model=preset["model"], messages=messages, temperature=0,
         max_output_tokens=config["llm"]["max_output_tokens"], stream=config["llm"]["stream"],
         send_temperature=config["llm"]["send_temperature"], reasoning_effort=config["llm"]["reasoning_effort"],
         extra_body=config["_llm_extra_body"], extra_headers=config["_llm_extra_headers"],
-        session_id="RUN-DECISION", request_id="REQ-DECISION")
+        session_id="RUN-DECISION", request_id="REQ-DECISION", json_schema=schema)
     estimate = math.ceil(estimate_tokens(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))) * preset["token_safety_factor"])
-    return {"messages": messages}, estimate
+    return {"messages": messages, "json_schema": schema}, estimate
 
 
 async def request_decision(client: DecisionClient, body: dict[str, Any], estimated: int,
@@ -100,7 +120,7 @@ async def request_decision(client: DecisionClient, body: dict[str, Any], estimat
             llm.config["retry"] = {**client.retry, "http_max_attempts": client.retry["http_max_attempts"] - llm.send_count}
             try:
                 response, current_id = await llm.chat(messages=body["messages"], temperature=0,
-                    estimated_input_tokens=estimated, request_id=current_id)
+                    estimated_input_tokens=estimated, request_id=current_id, json_schema=body["json_schema"])
                 try:
                     data = {**json.loads(response.content), "model": client.preset["model"]}
                     answers = client._parse(data, questions)

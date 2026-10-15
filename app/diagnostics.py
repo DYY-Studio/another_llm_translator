@@ -299,6 +299,12 @@ class Diagnostics:
             request["provider_error_status"] = None
             self._touch_request(request)
 
+    def set_request_body(self, request_id: str, body: str) -> None:
+        request = self._request(request_id)
+        if request is not None:
+            request["request_body"], request["request_body_truncated"] = _bounded(body, _MESSAGE_LIMIT)
+            self._touch_request(request)
+
     def stream_progress(
         self,
         request_id: str,
@@ -754,6 +760,13 @@ class DiagnosticsHub(Diagnostics):
             target.request_started(request_id)
             return
         super().request_started(request_id)
+
+    def set_request_body(self, request_id: str, body: str) -> None:
+        target = self._active_session()
+        if target is not None:
+            target.set_request_body(request_id, body)
+            return
+        super().set_request_body(request_id, body)
 
     def stream_progress(self, request_id: str, **kwargs: Any) -> None:
         target = self._active_session()

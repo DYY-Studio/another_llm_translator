@@ -76,6 +76,41 @@ Adapter 摘要通过 `capabilities` 返回这些能力，Preset 编辑器据此�
 当前授权连接代理由 `chatgpt` 凭据提供。
 连接描述不替代凭据模块对令牌目标和授权的安全校验。
 
+### JSON Schema 结构化输出
+
+Adapter 可选 `structured_output` 是 JSON Pointer 到请求值模板的非空映射。模板仅支持独占字符串值的
+`${json_schema}`，用于插入任务声明的完整 Schema。例如 Chat Completions：
+
+```json
+{
+  "structured_output": {
+    "/response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "structured_response",
+        "strict": true,
+        "schema": "${json_schema}"
+      }
+    }
+  }
+}
+```
+
+宿主复用请求字段写入逻辑按 Pointer 插入，保留同一父对象内的其他字段；与 Adapter body、流式 body
+或 Extra Body 的目标字段冲突时失败。`capabilities.json_schema` 表示 Adapter 是否声明此能力。
+内置 OpenAI Chat Completions 使用 `response_format`，Responses 使用 `text.format`，见
+[OpenAI 结构化输出](https://developers.openai.com/api/docs/guides/structured-outputs)；Anthropic 使用
+`output_config.format`，见 [Claude 结构化输出](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)；
+Gemini Generate Content 使用 `generationConfig.responseMimeType` 与 `responseJsonSchema`，见
+[GenerationConfig](https://ai.google.dev/api/generate-content#v1beta.GenerationConfig)。具体模型或端点不支持时明确失败，不改用其他模式。
+
+LLM Preset 的可选布尔值 `json_schema_enabled` 默认 false，缺字段的已有 Preset 视为关闭，
+可在编辑器手动开启并保存，资源版本不变。开启后要求 Adapter 声明能力。
+`LLMClient.chat` 和 Adapter `build_request` 接收可选 `json_schema`；客户端仅在 Preset 开启且任务
+提供 Schema 时发送约束。任务未声明 Schema 时沿用自身输出契约，JSONL 阶段不作格式转换。
+调用方按同一 Adapter 渲染包含 Schema 的完整请求进行 Token 估算；请求正文与 Schema 一同进入诊断及已启用的 Debug 保存。
+Preset 开关和 Adapter 声明随现有资源快照保存并参与指纹。Schema 约束不替代任务自己的结果校验。
+
 ### ChatGPT Plan 连接
 
 `credential: {"kind": "chatgpt", "name": "default"}` 必须配对 `chatgpt-plan` Adapter。
@@ -745,6 +780,8 @@ LLM 模式的 `protocol` 为 `llm`，Preset 仅保存 `preset_id`、`protocol`�
 安全系数、限流及输出上限由所选 LLM Preset 管理，请求温度为 0（仅在 Preset 允许时发送）。
 用户消息包含 `state` 和 `questions`，正文仅返回含 `answers` 的 JSON 对象。宿主使用所选
 LLM Preset 的模型标识填入 `model`，再复用 TypeSafe 响应校验，包括完整问题及选项覆盖、有限概率、概率和及显式拒答。
+Decision 在 Preset 开启 JSON Schema 时按本次问题生成约束，固定问题名称、选项及概率字段，并包含拒答分支；
+完整请求预算包含 Schema，概率取值、概率和及置信度仍由现有校验器检查。
 请求与格式错误共享 `retry.http_max_attempts` 发送预算；空响应沿用 LLM 的专用重试规则。
 
 `decision_llm` 使用普通 LLM 提示词资源机制：Prefix 按字段声明拼接输入结构及指令边界，

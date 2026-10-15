@@ -154,7 +154,7 @@ Run 索引、术语说明的事务性升级、重复译文应用与撤销事务�
 
 ### `app/llm_adapter.py`
 
-声明式 JSON LLM Adapter 的加载、严格校验、模板渲染、能力摘要、固定连接约束、响应指针和 SSE 规则。协议字段以
+声明式 JSON LLM Adapter 的加载、严格校验、模板渲染、JSON Schema 请求映射、能力摘要、固定连接约束、响应指针和 SSE 规则。协议字段以
 [Adapter 契约](ADAPTERS.md)为准。
 
 ### `app/llm_native.py`
@@ -213,7 +213,7 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 通过公共 DecisionService 提供结构化决策调用，不拥有业务规则或结果提交。
 
 `decision_llm.py` 解析并冻结 LLM Decision 使用的 Preset、Adapter 与系统提示词，复用
-`LLMClient` 执行请求，将 TypeSafe 格式响应交回统一 Decision 校验器。提示词资源、项目覆盖及模板库仍由共享提示词模块管理。
+`LLMClient` 执行请求，按问题生成可选 JSON Schema，将 TypeSafe 格式响应交回统一 Decision 校验器。提示词资源、项目覆盖及模板库仍由共享提示词模块管理。
 
 ## 8. 术语
 

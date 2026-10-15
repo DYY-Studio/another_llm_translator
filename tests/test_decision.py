@@ -344,8 +344,9 @@ def test_decision_hub_publishes_answers_in_incremental_summary(tmp_path, task_id
 
 
 @pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("schema_enabled", [False, True])
 @pytest.mark.parametrize("returned_model", [None, "untrusted-model"])
-def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path, monkeypatch, stream, returned_model):
+def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path, monkeypatch, stream, returned_model, schema_enabled):
     from app.config import load_config
     from app.decision import load_decision_preset
     from app.decision_llm import resolve_llm_resources
@@ -356,7 +357,7 @@ def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path
     monkeypatch.setenv("LLM_API_KEY", "secret")
     selected_path = root / "llm_presets" / "default.json"
     selected = json.loads(selected_path.read_text())
-    selected.update(stream=stream, requests_per_minute=0, input_tokens_per_minute=0)
+    selected.update(stream=stream, requests_per_minute=0, input_tokens_per_minute=0, json_schema_enabled=schema_enabled)
     selected_path.write_text(json.dumps(selected))
     value = dict(preset_id="judge", protocol="llm", llm_preset="default", prompt_language="en")
     validate_decision_preset(value)
@@ -369,6 +370,17 @@ def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path
     def respond(request):
         payload = json.loads(request.content)
         attempts.append(payload)
+        if schema_enabled:
+            schema = payload["response_format"]["json_schema"]["schema"]
+            assert schema["required"] == ["answers"]
+            answers_schema = schema["properties"]["answers"]
+            assert answers_schema["required"] == ["term"]
+            choice, refusal = answers_schema["properties"]["term"]["anyOf"]
+            assert choice["properties"]["choice"]["enum"] == ["a", "b"]
+            assert choice["properties"]["probabilities"]["required"] == ["a", "b"]
+            assert refusal["properties"]["type"]["enum"] == ["refusal"]
+        else:
+            assert "response_format" not in payload
         assert "Changed prompt" not in json.dumps(payload)
         evidence = json.loads(payload["messages"][-1]["content"])
         assert set(evidence) == {"state", "questions"}
@@ -430,3 +442,25 @@ def test_llm_decision_http_and_parse_errors_share_send_budget(tmp_path, monkeypa
                 await client.choose("Evidence", [DecisionQuestion("term", "Choose", {"a": "A", "b": "B"})])
     asyncio.run(run())
     assert len(attempts) == 2
+
+
+def test_llm_decision_schema_is_included_in_context_preflight(tmp_path):
+    from app.decision_llm import resolve_llm_resources
+    from tests.test_foundation import make_app_root
+
+    root = make_app_root(tmp_path)
+    value = resolve_llm_resources(dict(preset_id='judge', protocol='llm', llm_preset='default', prompt_language='en'), root)
+    questions = [DecisionQuestion(f'q_{i}', 'Choose', {'a':'A', 'b':'B'}) for i in range(10)]
+    plain = DecisionClient(value)
+    _, plain_estimate = plain.request_plan('Evidence', questions)
+    value['_resources']['preset']['json_schema_enabled'] = True
+    client = DecisionClient(value)
+    _, schema_estimate = client.request_plan('Evidence', questions)
+    assert schema_estimate > plain_estimate
+    client.preset['context_window_tokens'] = plain_estimate + client.preset['context_safety_margin_tokens']
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: pytest.fail('Must fail before HTTP'))) as http:
+            client.http_client = http
+            with pytest.raises(ExternalError, match='超过可用上下文'):
+                await client.choose('Evidence', questions)
+    asyncio.run(run())
