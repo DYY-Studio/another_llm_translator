@@ -173,7 +173,17 @@ def entity_view(
         raise UsageError("实体术语不存在")
     members = groups[root]
     known = all_evidence if all_evidence is not None else evidence(project, library)
-    fragments = [f for f in known.values() if f["owner"] in members]
+    member_names = set(members)
+    fragments = [f for f in known.values() if f["owner"] in member_names]
+    return _entity_view(library, root, members, known, fragments, require_current=require_current)
+
+
+def _entity_view(
+    library: dict[str, Any], root: str, members: list[str],
+    known: dict[str, dict[str, Any]], fragments: list[dict[str, Any]], *,
+    require_current: bool = False,
+) -> dict[str, Any]:
+    member_names = set(members)
     order = _source_order(fragments)
     rank = {tuple(r): index for index, r in enumerate(order)}
     fragments.sort(key=lambda f: (min((rank[tuple((r["segment_id"], r["start"], r["end"]))]
@@ -187,7 +197,7 @@ def entity_view(
     current_ranges = {tuple(r) for r in active_order}
     stale = bool(saved) and (
         saved["members"] != members or len(referenced) != len(refs)
-        or any(f["owner"] not in members or f["state"] != "active" or not f["valid"] for f in referenced)
+        or any(f["owner"] not in member_names or f["state"] != "active" or not f["valid"] for f in referenced)
         or [r for r in saved["source_order"] if tuple(r) in current_ranges]
         != [r for r in active_order if tuple(r) in previous_ranges]
     )
@@ -259,8 +269,15 @@ def project_descriptions(project: Path, library: dict[str, Any], *,
                          all_evidence: dict[str, dict[str, Any]] | None = None) -> None:
     known = all_evidence if all_evidence is not None else evidence(project, library)
     terms = {term["normalized"]: term for term in library["terms"]}
-    for root, members in entity_members(library).items():
-        view = entity_view(project, library, root, all_evidence=known)
+    groups = entity_members(library)
+    roots = {member: root for root, members in groups.items() for member in members}
+    fragments = {root: [] for root in groups}
+    for fragment in known.values():
+        root = roots.get(fragment["owner"])
+        if root is not None:
+            fragments[root].append(fragment)
+    for root, members in groups.items():
+        view = _entity_view(library, root, members, known, fragments[root])
         for member in members:
             term = terms[member]
             term["description"] = "；".join(item["text"] for item in view["items"])
