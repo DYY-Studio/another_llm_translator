@@ -39,7 +39,7 @@ def repetition_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, sourc
     return project
 
 
-def transport(*, choice: str = "compare", invalid: bool = False, requests: list | None = None, apply_members: list[str] | None = None):
+def transport(*, choice: str = "compare", invalid: bool = False, requests: list | None = None, apply_members: list[str] | None = None, uncertain: bool = False):
     def respond(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         if requests is not None:
@@ -54,6 +54,8 @@ def transport(*, choice: str = "compare", invalid: bool = False, requests: list 
                   "keep": ["3"], "uncertain": []}
         if apply_members is not None:
             result["groups"][0]["apply"] = apply_members
+        if uncertain:
+            result["uncertain"], result["keep"] = result["keep"], []
         if invalid:
             result["groups"][0]["members"] = ["1", "unknown"]
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"repetitions": [{"id": group["id"], **result} for group in json.loads(body["messages"][-1]["content"])["repetitions"]]})}, "finish_reason": "stop"}],
@@ -599,13 +601,45 @@ def test_old_draft_remains_applicable_without_member_choices(tmp_path, monkeypat
     assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 1
 
 
-@pytest.mark.parametrize("members", [["unknown"], ["2", "2"]])
+@pytest.mark.parametrize("members", [["unknown"], ["2", "2"], ["3"]])
 def test_invalid_partial_application_fails(tmp_path, monkeypatch, members):
     from app.repetition_drafts import save_choices
     project = repetition_project(tmp_path, monkeypatch)
     generate(project)
     with pytest.raises(UsageError, match="应用成员"):
         save_choices(project, {"1-1": {"accepted": True, "target": "1", "apply": members}})
+
+
+def test_manual_uncertain_occurrence_joins_existing_proposal(tmp_path, monkeypatch):
+    from app.repetition_consistency import run_repetition, current_draft
+    from app.repetition_drafts import apply_draft, save_choices, rollback_draft
+    project = repetition_project(tmp_path, monkeypatch)
+
+    async def run():
+        async with httpx.AsyncClient(transport=transport(uncertain=True)) as client:
+            await run_repetition(project, Scope(), http_client=client)
+    asyncio.run(run())
+    save_choices(project, {"1-1": {"accepted": True, "target": "1", "apply": ["3"]}})
+    assert current_draft(project)["choices"]["1-1"]["apply"] == ["3"]
+    assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 1
+    segments = load_segments(project)
+    states = latest_stage_states(project, "translation", [s["segment_id"] for s in segments])
+    assert states[segments[3]["segment_id"]]["completed"]["text"] == "我会去接你"
+    assert states[segments[5]["segment_id"]]["completed"]["text"] == "我会来接你"
+    assert rollback_draft(project, confirm=True)["changed"] == 1
+
+
+def test_uncertain_occurrence_cannot_join_two_accepted_proposals():
+    from app.repetition_drafts import _choices
+    draft = {"groups": [{"occurrences": [], "uncertain": ["5"], "proposals": [
+        {"id": "a", "members": ["1", "2"], "target": "1"},
+        {"id": "b", "members": ["3", "4"], "target": "3"},
+    ]}]}
+    with pytest.raises(UsageError, match="多个统一建议"):
+        _choices(draft, {
+            "a": {"accepted": True, "target": "1", "apply": ["5"]},
+            "b": {"accepted": True, "target": "3", "apply": ["5"]},
+        })
 
 
 def test_disabled_screening_needs_no_decision_resources_and_preserves_model_subset(tmp_path, monkeypatch):
