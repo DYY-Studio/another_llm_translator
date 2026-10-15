@@ -1468,6 +1468,30 @@ def write_content_summary(project: Path, value: dict[str, Any]) -> None:
         connection.close()
 
 
+def clear_content_summaries(project: Path) -> None:
+    """Clear summary artifacts while preserving participation and Run history."""
+    connection = _with_db(project)
+    try:
+        with connection:
+            connection.execute("DELETE FROM content_summaries")
+            connection.execute("DELETE FROM summary_source_texts")
+            connection.execute(
+                "UPDATE runs SET status = 'interrupted', payload_json = "
+                "json_set(payload_json, '$.status', 'interrupted', "
+                "'$.interrupted_reason', 'content_summary_cleared', '$.completed_at', ?) "
+                "WHERE stage = 'content_summary' AND status = 'running'",
+                (utc_now(),),
+            )
+            connection.execute(
+                "UPDATE summary_runs SET status = 'interrupted', updated_at = ? "
+                "WHERE status = 'running'", (utc_now(),),
+            )
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法清空内容概括：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def mark_content_summary_fragments_stale(
     project: Path,
     boundaries: Iterable[tuple[str, str]],
