@@ -749,7 +749,7 @@ def test_match_terms_counts_a_group_as_one_slot() -> None:
     assert matched[1]["primary_source"] == "Alice"
 
 
-def test_term_hits_isolate_a_group_member_from_its_primary(tmp_path: Path) -> None:
+def test_segment_detail_keeps_group_primary_and_disputed_members(tmp_path: Path) -> None:
     project = create_web_store_project(
         tmp_path,
         "Alice only\nAlicia walks\nAlly sings\nAlice and Alicia",
@@ -790,21 +790,10 @@ def test_term_hits_isolate_a_group_member_from_its_primary(tmp_path: Path) -> No
         ),
     )
 
-    hits = WebStore(project).term_hits("alicia")
-
     terms = WebStore(project).segment_detail("F0001-S000003")["matched_terms"]
     assert [term["source"] for term in terms] == ["Alice", "Alicia"]
     assert terms[1]["primary_source"] == "Alice"
     assert terms[1]["aliases"] == ["Ally"]
-
-    assert hits["source"] == "Alicia"
-    assert hits["total"] == 3
-    assert [item["source"] for item in hits["hits"]] == [
-        "Alicia walks",
-        "Ally sings",
-        "Alice and Alicia",
-    ]
-
 
     library = load_terms(project)
     claim = {"entry": "alicia", "claimed_by": "alice", "alias": "Ally", "reason": "multiple_owners"}

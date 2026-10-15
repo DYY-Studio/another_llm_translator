@@ -1292,35 +1292,15 @@ RUBY_XHTML = (
 )
 
 
-@pytest.mark.parametrize(
-    ("mode", "expected"),
-    [
-        (
-            "aozora",
-            ["彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"],
-        ),
-        (
-            "short_xml",
-            ["彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"],
-        ),
-        (
-            "compact",
-            ["彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"],
-        ),
-        ("base_only", ["彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。"]),
-    ],
-)
-def test_epub_ruby_modes_form_semantic_segments(
-    tmp_path: Path, mode: str, expected: list[str]
-) -> None:
-    source = tmp_path / f"ruby-{mode}.epub"
+def test_epub_import_keeps_canonical_ruby_segments(tmp_path: Path) -> None:
+    source = tmp_path / "ruby.epub"
     make_epub(source, xhtml=RUBY_XHTML)
-
     imported = get_document_adapter("epub").import_sources(
-            [str(source)], recursive=False, config={}, options={}
+        [str(source)], recursive=False, config={}, options={}
     )
-
-    assert list(imported.files[0].segments) == expected
+    assert imported.files[0].segments == (
+        "彼は｜漢字《かんじ》を読む。", "｜特別《スペシャル／とくべつ》だ。",
+    )
     assert imported.files[0].opaque_state is not None
     assert "ruby_mode" not in imported.files[0].opaque_state
 
@@ -1359,14 +1339,14 @@ def test_epub_model_only_ruby_modes_keep_aozora_source(
 
 
 @pytest.mark.parametrize(
-    ("mode", "model_text"),
+    ("mode", "model_text", "expected"),
     [
-        ("short_xml", "<r><b>汉字 &amp; 词</b><y>hànzì</y></r>"),
-        ("compact", "⟦R:汉\\|字|Y:hànzì⟧"),
+        ("short_xml", "<r><b>汉字 &amp; 词</b><y>hànzì</y></r>", "｜汉字 & 词《hànzì》"),
+        ("compact", "⟦R:汉\\|字|Y:hànzì⟧", "｜汉|字《hànzì》"),
     ],
 )
 def test_epub_model_ruby_output_normalizes_to_aozora(
-    mode: str, model_text: str
+    mode: str, model_text: str, expected: str
 ) -> None:
     adapter = get_document_adapter("epub")
 
@@ -1380,7 +1360,7 @@ def test_epub_model_ruby_output_normalizes_to_aozora(
             "inline_format_mode": "plain",
             "inline_format_policy": "tiered",
         },
-    ) in {"｜汉字 & 词《hànzì》", "｜汉|字《hànzì》"}
+    ) == expected
 
 
 def test_epub_model_output_rejects_incomplete_run_options() -> None:
@@ -1521,18 +1501,8 @@ def test_emphasis_aozora_does_not_cross_non_emphasis_boundaries(
     assert compact_emphasis_aozora(source) == source
 
 
-@pytest.mark.parametrize(
-    ("mode", "expected_model"),
-    [
-        ("aozora", None),
-        ("short_xml", "<r><b>强调</b><y>・</y></r>"),
-        ("compact", "⟦R:强调|Y:・⟧"),
-    ],
-)
-def test_epub_import_compacts_consecutive_emphasis_ruby(
-    tmp_path: Path, mode: str, expected_model: str | None
-) -> None:
-    source = tmp_path / f"emphasis-{mode}.epub"
+def test_epub_import_compacts_consecutive_emphasis_ruby(tmp_path: Path) -> None:
+    source = tmp_path / "emphasis.epub"
     make_epub(
         source,
         xhtml=(
@@ -1543,7 +1513,7 @@ def test_epub_import_compacts_consecutive_emphasis_ruby(
     )
 
     imported = get_document_adapter("epub").import_sources(
-        [str(source)], recursive=False, config={}, options={"ruby_mode": mode}
+        [str(source)], recursive=False, config={}, options={}
     )
 
     assert imported.files[0].segments == ("｜强调《・》",)
