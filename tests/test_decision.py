@@ -404,7 +404,7 @@ def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path
             async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
                 retry = load_config(root / "config" / "config.toml")["retry"]
                 retry["http_max_attempts"] = 2
-                client = DecisionClient(frozen, http_client=http, retry=retry)
+                client = DecisionClient(frozen, http_client=http, retry=retry, debug_directory=tmp_path / "debug")
                 result = await client.choose({"text": "Evidence"}, [DecisionQuestion("term", "Choose", {"a": "A", "b": "B"})])
                 assert result["term"].choice == "a"
                 assert client.usage_summary()["total_tokens"] == 30
@@ -417,6 +417,17 @@ def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path
                 assert activity["failed"] == 1
     asyncio.run(run())
     assert len(attempts) == 2
+    debug = tmp_path / "debug"
+    records = [json.loads(line) for line in (debug / "attempts.jsonl").read_text().splitlines()]
+    assert [r["status"] for r in records] == ["failed", "completed"]
+    assert [r["outcome"] for r in records] == ["response_parse_error", "succeeded"]
+    failed, completed = [json.loads((debug / "payloads" / f"{r['record_id']}.overview.json").read_text()) for r in records]
+    assert failed["answers"] == {}
+    assert failed["error"] == "response_parse_error"
+    assert completed["answers"]["term"]["choice"] == "a"
+    assert completed["error"] is None
+    error = json.loads((debug / "payloads" / f"{records[0]['record_id']}.error.json").read_text())
+    assert error["outcome"] == "response_parse_error"
 
 
 def test_llm_decision_http_and_parse_errors_share_send_budget(tmp_path, monkeypatch):
@@ -442,6 +453,49 @@ def test_llm_decision_http_and_parse_errors_share_send_budget(tmp_path, monkeypa
                 await client.choose("Evidence", [DecisionQuestion("term", "Choose", {"a": "A", "b": "B"})])
     asyncio.run(run())
     assert len(attempts) == 2
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("content", ['{"answers":{"q":{"type":"refusal"}}}', '{}', ''])
+def test_llm_decision_debug_records_final_outcome(tmp_path, monkeypatch, stream, content):
+    from app.decision_llm import resolve_llm_resources
+    from tests.test_foundation import make_app_root
+
+    root = make_app_root(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "secret")
+    preset = resolve_llm_resources(dict(preset_id="judge", protocol="llm", llm_preset="default", prompt_language="en"), root)
+    preset["_resources"]["preset"]["stream"] = stream
+
+    def respond(request):
+        if stream:
+            from tests.test_llm_streaming import stream_response
+            return stream_response({"choices": [{"delta": {"content": content}, "finish_reason": "stop"}]}, "[DONE]")
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            client = DecisionClient(preset, http_client=http, debug_directory=tmp_path / "debug")
+            question = DecisionQuestion("q", "Choose", {"a": "A", "b": "B"})
+            if "refusal" in content:
+                assert (await client.choose("Evidence", [question]))["q"].refused
+            else:
+                with pytest.raises(ExternalError):
+                    await client.choose("Evidence", [question])
+
+    asyncio.run(run())
+    debug = tmp_path / "debug"
+    records = [json.loads(line) for line in (debug / "attempts.jsonl").read_text().splitlines()]
+    assert len(records) == 1
+    record = records[0]
+    overview = json.loads((debug / "payloads" / f"{record['record_id']}.overview.json").read_text())
+    if "refusal" in content:
+        assert record["status"] == "completed"
+        assert record["outcome"] == "succeeded"
+        assert overview["answers"]["q"]["refused"] is True
+    else:
+        error = "response_parse_error" if content else "empty_response_unknown"
+        assert record["status"] == "failed"
+        assert record["outcome"] == overview["error"] == error
 
 
 def test_llm_decision_schema_is_included_in_context_preflight(tmp_path):

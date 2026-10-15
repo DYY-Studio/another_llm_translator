@@ -126,6 +126,7 @@ async def request_decision(client: DecisionClient, body: dict[str, Any], estimat
                     answers = client._parse(data, questions)
                 except (ValueError, TypeError, KeyError) as exc:
                     record["error"] = "response_parse_error"
+                    await llm.finish_decision_debug("response_parse_error")
                     if diagnostics is not None:
                         diagnostics.fail_request(current_id, "response_parse_error")
                     if llm.send_count >= client.retry["http_max_attempts"]:
@@ -135,11 +136,13 @@ async def request_decision(client: DecisionClient, body: dict[str, Any], estimat
                 else:
                     overview["answers"] = {k: asdict(v) for k, v in answers.items()}
                     record.update(model=data["model"], answers=overview["answers"])
+                    await llm.finish_decision_debug()
                     if diagnostics is not None:
                         diagnostics.complete_request(current_id, content=response.content,
                             reasoning_content=response.reasoning_content, overview_answers=overview["answers"])
                     return answers
             except BaseException as exc:
+                await llm.finish_decision_debug(str(exc) or type(exc).__name__)
                 record["error"] = str(exc) or type(exc).__name__
                 if diagnostics is not None:
                     diagnostics.fail_request(current_id, str(exc), interrupted=isinstance(exc, asyncio.CancelledError))

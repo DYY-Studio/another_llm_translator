@@ -276,6 +276,7 @@ class LLMClient:
     ) -> None:
         self.config = config
         self.decision_overview = decision_overview
+        self._decision_debug_attempt: tuple[tuple[Any, ...], dict[str, Any]] | None = None
         self.limiter = limiter
         self.key_pool = limiter if isinstance(limiter, KeyPool) else None
         self._api_keys: tuple[str, ...] | None = None
@@ -777,6 +778,17 @@ class LLMClient:
                 ),
             )
 
+    async def finish_decision_debug(self, error: str | None = None) -> None:
+        pending = self._decision_debug_attempt
+        if pending is None:
+            return
+        self._decision_debug_attempt = None
+        args, kwargs = pending
+        await self._debug_attempt(*args, **{
+            **kwargs, "error": error, "outcome": error or "succeeded",
+            "overview": {**self.decision_overview, "error": error},
+        })
+
     async def chat(
         self,
         *,
@@ -801,6 +813,7 @@ class LLMClient:
             )
             diagnostics = current_diagnostics()
             if response.finish_reason in self.adapter.blocked_finish_reasons:
+                await self.finish_decision_debug("response_blocked")
                 message = f"模型拒绝生成正文（{response.finish_reason}）"
                 if diagnostics is not None:
                     diagnostics.fail_request(actual_id, "response_blocked")
@@ -824,6 +837,7 @@ class LLMClient:
                 if kind == "truncated"
                 else "正文为空：原因未知"
             )
+            await self.finish_decision_debug(f"empty_response_{kind}")
             if diagnostics is not None:
                 diagnostics.fail_request(actual_id, f"empty_response_{kind}")
             mode = self.config["retry"][f"empty_{kind}_mode"]
@@ -896,6 +910,10 @@ class LLMClient:
         )
         async def debug_attempt(*args: Any, overview_content: str | None = None, **kwargs: Any) -> None:
             if not self.config["debug"]["enabled"]:
+                return
+            if self.decision_overview is not None and kwargs.get("error") is None:
+                # Decision owns the final outcome after validating the response body.
+                self._decision_debug_attempt = (args, kwargs)
                 return
             response_data = kwargs.get("response")
             overview_error = None
