@@ -272,8 +272,10 @@ class LLMClient:
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
         on_usage: Callable[[dict[str, Any] | None], None] | None = None,
         preparation_started_at: float | None = None,
+        decision_overview: dict[str, Any] | None = None,
     ) -> None:
         self.config = config
+        self.decision_overview = decision_overview
         self.limiter = limiter
         self.key_pool = limiter if isinstance(limiter, KeyPool) else None
         self._api_keys: tuple[str, ...] | None = None
@@ -802,7 +804,7 @@ class LLMClient:
                     diagnostics.fail_request(actual_id, "response_blocked")
                 raise ExternalError(message)
             if response.content.strip() and response.finish_reason not in self.adapter.truncated_finish_reasons:
-                if diagnostics is not None:
+                if diagnostics is not None and self.decision_overview is None:
                     diagnostics.complete_request(
                         actual_id,
                         content=response.content,
@@ -898,7 +900,7 @@ class LLMClient:
                     overview_content = normalize_llm_response(self.adapter.parse_response(response_data)).content
                 except ExternalError as exc:
                     overview_error = str(exc)
-            overview = llm_overview(messages, segment_id_map, overview_content)
+            overview = dict(self.decision_overview) if self.decision_overview is not None else llm_overview(messages, segment_id_map, overview_content)
             overview["error"] = overview_error
             await self._debug_attempt(*args, overview=overview, **kwargs)
 
@@ -912,6 +914,10 @@ class LLMClient:
                 max_attempts=attempts,
                 segment_id_map=segment_id_map,
                 transport="sse" if stream_enabled else "non_streaming",
+                request_kind="decision" if self.decision_overview is not None else "llm",
+                segment_id=self.decision_overview.get("segment_id") if self.decision_overview is not None else None,
+                question_count=len(self.decision_overview["questions"]) if self.decision_overview is not None else 0,
+                overview=self.decision_overview,
             )
         attempt = 1
         send_attempt = 0

@@ -59,7 +59,7 @@ from .user_config import APP_ROOT, effective_path, user_root
 
 PROJECTS_ROOT = user_root() / "projects"
 PROMPT_LANGUAGES = ("zh-CN", "en")
-PROMPT_RESOURCE_STAGES = (*LLM_MODEL_STAGES, "fragment_summary", "terminology_knowledge", "repetition_consistency")
+PROMPT_RESOURCE_STAGES = (*LLM_MODEL_STAGES, "fragment_summary", "terminology_knowledge", "repetition_consistency", "decision_llm")
 
 
 def prompt_file(stage: str, language: str) -> str:

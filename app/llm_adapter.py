@@ -551,8 +551,12 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
         raise ConfigError(f"无法读取 LLM Adapter：{path}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ConfigError(f"LLM Adapter 不是合法 JSON：{path}: {exc}") from exc
+    return parse_json_adapter(value, raw=raw)
+
+
+def parse_json_adapter(value: Any, *, raw: bytes | None = None) -> JSONLLMAdapter:
     if not isinstance(value, dict):
-        raise ConfigError(f"LLM Adapter 顶层必须是 JSON 对象：{path}")
+        raise ConfigError("LLM Adapter 顶层必须是 JSON 对象")
     schema_version = value.get("schema_version")
     if schema_version != ADAPTER_SCHEMA_VERSION:
         raise ConfigError(f"LLM Adapter schema_version 必须是 {ADAPTER_SCHEMA_VERSION}")
@@ -679,7 +683,8 @@ def load_json_adapter(path: Path) -> JSONLLMAdapter:
                 except ExternalError:
                     continue
                 raise ConfigError("Adapter 请求体不得重复配置声明的 Reasoning Effort 字段")
-    digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
+    encoded = raw if raw is not None else json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    digest = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
     return JSONLLMAdapter(
         adapter_id=adapter_id,
         endpoint=endpoint,

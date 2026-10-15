@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigError, ConfigFieldError
-from .llm_adapter import load_json_adapter
+from .llm_adapter import JSONLLMAdapter, load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
 from .user_config import APP_ROOT, effective_path
 
@@ -576,7 +576,7 @@ def _resolve_config(
     config["_translation_validator_instances"] = tuple(
         validator for validator, _ in validator_bindings
     )
-    _resolve_decision_config(config, root)
+    _resolve_decision_config(config, root, project=project)
     from .decision_prompt import resolve_run_prompts
     resolve_run_prompts(config, project=project)
     configured_preset_id = _preset_id_for_stage(config, stage)
@@ -590,9 +590,9 @@ def _resolve_config(
         raise ConfigError(f"LLM Preset 文件中的 preset_id 与{error_kind}不一致")
     return _resolve_llm_config(
         config,
-        adapter_file=effective_path(
+        adapter=load_json_adapter(effective_path(
             f"llm_adapters/{preset.adapter_id}.json", builtin_root=root
-        ),
+        )),
         preset=preset,
     )
 
@@ -642,7 +642,7 @@ def decision_validator_overrides(config: dict[str, Any]) -> dict[str, str]:
     return result
 
 
-def _resolve_decision_config(config: dict[str, Any], root: Path, *, snapshot: bool = False) -> None:
+def _resolve_decision_config(config: dict[str, Any], root: Path, *, snapshot: bool = False, project: Path | None = None) -> None:
     from .decision import decision_preset_path, load_decision_preset
     definitions = {}
     bindings = {}
@@ -653,7 +653,10 @@ def _resolve_decision_config(config: dict[str, Any], root: Path, *, snapshot: bo
             continue
         path = decision_preset_path(root, preset_id) if snapshot else effective_path(
             str(decision_preset_path(Path(), preset_id)), builtin_root=root)
-        definition = load_decision_preset(path)
+        definition = load_decision_preset(path, snapshot=snapshot)
+        if definition["protocol"] == "llm" and not snapshot:
+            from .decision_llm import resolve_llm_resources
+            definition = resolve_llm_resources(definition, root, project=project)
         if definition["preset_id"] != preset_id:
             raise ConfigError("Decision Preset ID 与配置不一致")
         definitions[preset_id] = definition
@@ -669,7 +672,7 @@ def load_run_config(run_dir: Path) -> dict[str, Any]:
     preset = load_llm_preset(run_dir / "llm_preset.json")
     return _resolve_llm_config(
         config,
-        adapter_file=run_dir / "llm_adapter.json",
+        adapter=load_json_adapter(run_dir / "llm_adapter.json"),
         preset=preset,
     )
 
@@ -677,11 +680,10 @@ def load_run_config(run_dir: Path) -> dict[str, Any]:
 def _resolve_llm_config(
     config: dict[str, Any],
     *,
-    adapter_file: Path,
+    adapter: JSONLLMAdapter,
     preset: LLMPreset,
 ) -> dict[str, Any]:
     definition = preset.definition
-    adapter = load_json_adapter(adapter_file)
     if adapter.adapter_id != preset.adapter_id:
         raise ConfigError("LLM Adapter 文件中的 adapter_id 与配置不一致")
     adapter.validate_preset(definition)

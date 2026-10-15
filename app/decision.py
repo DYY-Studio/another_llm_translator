@@ -51,6 +51,18 @@ def decision_preset_path(root: Path, preset_id: str) -> Path:
 
 
 def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
+    if value.get("protocol") == "llm":
+        from .llm_preset import preset_path
+        from .project import PROMPT_LANGUAGES
+        if set(value) != {"preset_id", "protocol", "llm_preset", "prompt_language"}:
+            raise ConfigError("LLM Decision Preset 字段不完整或包含未知字段")
+        decision_preset_path(Path(), value["preset_id"])
+        if not isinstance(value["llm_preset"], str):
+            raise ConfigError("LLM Preset ID 格式无效")
+        preset_path(Path(), value["llm_preset"])
+        if value["prompt_language"] not in PROMPT_LANGUAGES:
+            raise ConfigError("Prompt 语言必须是 zh-CN 或 en")
+        return value
     required = {"preset_id", "protocol", "url", "model", "credential", "proxy_url",
                 "request_timeout_seconds", "requests_per_minute", "max_parallel",
                 "context_window_tokens", "context_safety_margin_tokens", "token_safety_factor"}
@@ -104,13 +116,18 @@ def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-def load_decision_preset(path: Path) -> dict[str, Any]:
+def load_decision_preset(path: Path, *, snapshot: bool = False) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ConfigError(f"无法读取 Decision Preset：{path.name}") from exc
     if not isinstance(value, dict):
         raise ConfigError("Decision Preset 必须是对象")
+    if snapshot and value.get("protocol") == "llm":
+        validate_decision_preset({k: v for k, v in value.items() if k != "_resources"})
+        from .decision_llm import llm_config
+        llm_config(value, retry={"http_max_attempts": 1}, debug=False)
+        return value
     return validate_decision_preset(value)
 
 
@@ -120,16 +137,29 @@ class DecisionClient:
                  project_id: str = "", run_id: str = "", stage: str = "") -> None:
         self.debug_directory = debug_directory
         self.project_id, self.run_id, self.stage = project_id, run_id, stage
-        self.preset = preset
+        self.retry = {"http_max_attempts": 1, "base_delay_seconds": 0, "max_delay_seconds": 60,
+                               "jitter_seconds": 0, "empty_unknown_mode": "retry", "empty_unknown_max_attempts": 0,
+                               "empty_truncated_mode": "retry", "empty_truncated_max_attempts": 0, **(retry or {})}
+        self.preset = dict(preset) if preset["protocol"] == "llm" else preset
+        self.llm_config = None
+        if preset["protocol"] == "llm":
+            from .decision_llm import llm_config
+            self.llm_config = llm_config(preset, retry=self.retry, debug=debug_directory is not None)
+            definition = self.llm_config["_llm_preset_definition"]
+            self.preset.update({key: definition[key] for key in (
+                "model", "context_window_tokens", "context_safety_margin_tokens", "token_safety_factor")})
         self.http_client = http_client
-        self.retry = retry or {"http_max_attempts": 1, "base_delay_seconds": 0}
         self.records: list[dict[str, Any]] = []
-        self.pool = KeyPool(preset["requests_per_minute"], 0,
-                            preset["max_parallel"], preset["max_parallel"])
+        limits = self.llm_config["execution"] if self.llm_config is not None else preset
+        self.pool = KeyPool(limits["requests_per_minute"], limits.get("input_tokens_per_minute", 0),
+                            limits["max_parallel"], limits.get("max_parallel_per_key", limits["max_parallel"]))
 
     def request_plan(self, state: Any, questions: list[DecisionQuestion]) -> tuple[dict[str, Any], int]:
         """Build the actual wire payload and its input-token estimate."""
         from .execution import estimate_tokens
+        if self.llm_config is not None:
+            from .decision_llm import request_plan
+            return request_plan(self.preset, self.llm_config, state, questions)
         if self.preset["protocol"] == "typesafe":
             body = dict(model=self.preset["model"], state=state,
                         questions={q.name: dict(type="choice", instructions=q.instructions, criteria=q.choices) for q in questions})
@@ -168,7 +198,7 @@ class DecisionClient:
         overview = {"request_kind": "decision", "input": evidence, "segment_id": segment_id,
                     "questions": [asdict(q) for q in questions], "answers": {}}
         request_id = f"decision-{uuid.uuid4().hex}"
-        if diagnostics is not None:
+        if diagnostics is not None and (self.llm_config is None or estimated > available):
             diagnostics.begin_request(
                 request_id=request_id, model=self.preset["model"], messages=[],
                 max_attempts=self.retry["http_max_attempts"], request_kind="decision",
@@ -179,6 +209,10 @@ class DecisionClient:
             if estimated > available:
                 segment = f"（Segment {segment_id}）" if segment_id else ""
                 raise FatalExternalError(f"Decision 请求{segment}估算 {estimated} Token，超过可用上下文 {available} Token")
+            if self.llm_config is not None:
+                from .decision_llm import request_decision
+                return await request_decision(self, body, estimated, questions, segment_id,
+                                              request_id, requested, len(context), overview)
             if self.http_client is not None:
                 return await self._request(self.http_client, body, questions, segment_id, request_id, requested, len(context), overview)
             async with httpx.AsyncClient(proxy=self.preset["proxy_url"] or None) as http:
@@ -291,6 +325,9 @@ class DecisionClient:
         summary = None
         for record in self.records:
             usage = record.get("usage")
+            if self.llm_config is not None:
+                summary = combine_usage(summary, usage)
+                continue
             if isinstance(usage, dict) and all(type(usage.get(k)) is int and usage[k] >= 0 for k in ("input_tokens", "output_tokens")):
                 value = dict(input_tokens=usage["input_tokens"], output_tokens=usage["output_tokens"],
                              total_tokens=usage["input_tokens"] + usage["output_tokens"], available=True, partial=False)

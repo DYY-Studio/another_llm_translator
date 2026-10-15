@@ -1,0 +1,1 @@
+Judge each question independently using the supplied evidence and choice descriptions. Assign probabilities according to the strength of the evidence. Refuse when the evidence does not support a reliable decision.

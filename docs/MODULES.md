@@ -212,6 +212,9 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 按上下文预算缩减调用方提供的上文，向实时诊断报告请求生命周期。
 通过公共 DecisionService 提供结构化决策调用，不拥有业务规则或结果提交。
 
+`decision_llm.py` 解析并冻结 LLM Decision 使用的 Preset、Adapter 与系统提示词，复用
+`LLMClient` 执行请求，将 TypeSafe 格式响应交回统一 Decision 校验器。提示词资源、项目覆盖及模板库仍由共享提示词模块管理。
+
 ## 8. 术语
 
 - `term_library.py`：术语规范化、候选合并、发布库、override 和组关系；统一检测组主 Alias 重叠，并记录归组移除的 Alias 供发布边界同步。

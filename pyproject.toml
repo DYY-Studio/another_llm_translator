@@ -40,6 +40,8 @@ app = ["web_dist/**", "decision_prompts/*.json"]
 [tool.setuptools.data-files]
 config = ["config/config.toml"]
 prompts = [
+  "prompts/decision_llm.en.middle.txt",
+  "prompts/decision_llm.zh-CN.middle.txt",
   "prompts/content_summary.en.middle.txt",
   "prompts/content_summary.zh-CN.middle.txt",
   "prompts/fragment_summary.en.middle.txt",

@@ -780,7 +780,8 @@ def register_resource_routes(
                 value = load_decision_preset(path)
                 if value["preset_id"] != preset_id:
                     raise ConfigError("Decision Preset ID 与文件名不一致")
-                values.append({"preset_id": preset_id, "protocol": value["protocol"], "model": value["model"], "valid": True})
+                model = value["llm_preset"] if value["protocol"] == "llm" else value["model"]
+                values.append({"preset_id": preset_id, "protocol": value["protocol"], "model": model, "valid": True})
             except AppError as exc:
                 values.append({"preset_id": preset_id, "valid": False, "error": str(exc)})
         return {"presets": values}
@@ -796,6 +797,9 @@ def register_resource_routes(
         definition = validate_decision_preset(payload)
         if definition["preset_id"] != preset_id:
             raise ConfigError("Decision Preset ID 与请求不一致")
+        if definition["protocol"] == "llm":
+            from .decision_llm import resolve_llm_resources
+            resolve_llm_resources(definition, app_root)
         atomic_write_json(write_user(relative), definition)
         return {"saved": True}
 
@@ -885,6 +889,13 @@ def register_resource_routes(
             project_config = load_config(item / "config.toml")
             if project_config["llm"].get("preset") == preset_id:
                 raise UsageError(f"不能删除项目 {item.name} 正在使用的 LLM Preset")
+        decisions = await list_decision_presets()
+        for item in decisions["presets"]:
+            if item.get("protocol") != "llm":
+                continue
+            definition = await get_decision_preset(item["preset_id"])
+            if definition["protocol"] == "llm" and definition["llm_preset"] == preset_id:
+                raise UsageError(f"不能删除 Decision Preset {item['preset_id']} 正在使用的 LLM Preset")
         user_file = user_root() / "llm_presets" / f"{preset_id}.json"
         builtin_file = app_root / "llm_presets" / f"{preset_id}.json"
         if user_file.is_file():

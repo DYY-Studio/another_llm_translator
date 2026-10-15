@@ -725,7 +725,7 @@ Preset 仍只记录一个 credential 引用；其环境变量或钥匙串值按�
 
 ## 5. Decision Preset 与服务（实验）
 
-全局 `decision_presets/<preset_id>.json` 保存 `preset_id`、`protocol`、`url`、`model`、
+HTTP 模式的全局 `decision_presets/<preset_id>.json` 保存 `preset_id`、`protocol`、`url`、`model`、
 `credential`、`proxy_url`、`context_window_tokens`、`context_safety_margin_tokens`、`token_safety_factor`、
 `request_timeout_seconds`、`requests_per_minute`、`max_parallel`。
 `protocol` 为 `typesafe` 或 `openai-decisions`；`url` 是含最终 Path 的完整 HTTP(S) URL，
@@ -739,6 +739,18 @@ Preset 仍只记录一个 credential 引用；其环境变量或钥匙串值按�
 仓库附带 TypeSafe 和 OpenAI Decisions Example Preset，分别使用
 [TypeSafe 官方接口](https://api.typesafe.ai/redoc)和
 [OpenAI 官方接口](https://developers.openai.com/api/docs/guides/decisions)。
+
+LLM 模式的 `protocol` 为 `llm`，Preset 仅保存 `preset_id`、`protocol`、`llm_preset`、
+`prompt_language`（`zh-CN` 或 `en`）。连接、凭据、Adapter、流式响应、上下文窗口、Token
+安全系数、限流及输出上限由所选 LLM Preset 管理，请求温度为 0（仅在 Preset 允许时发送）。
+用户消息使用 TypeSafe 的 `model`、`state`、`questions` 请求结构，正文必须是含 `model` 和
+`answers` 的 JSON 对象，复用 TypeSafe 响应校验，包括完整问题及选项覆盖、有限概率、概率和及显式拒答。
+请求与格式错误共享 `retry.http_max_attempts` 发送预算；空响应沿用 LLM 的专用重试规则。
+
+`decision_llm` 使用普通 LLM 提示词资源机制：固定前后段约束协议，中段按语言提供全局资源、
+项目覆盖、恢复继承、内置草稿及命名模板。运行冻结完整系统提示词、所选 LLM Preset 和 Adapter，
+保存在 Decision Preset 快照的 `_resources` 中，参与指纹及续作资源解析；不写入密钥。
+缺失资源或无效输出明确失败，不降级到其他协议。
 
 TypeSafe 将共享证据写入 `state`，问题写入 `questions` 映射，读取 `answers` 映射。
 OpenAI Decisions 将共享证据编码为 JSON 字符串写入 `input`，问题写入带唯一 `name` 的
