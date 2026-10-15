@@ -1087,7 +1087,7 @@ export interface AdapterCapabilities {
   connection: { base_url: string; credential: LLMPreset["credential"]; proxy_source: "preset" | "connection" } | null;
 }
 
-export interface DecisionPreset {
+export interface HTTPDecisionPreset {
   preset_id: string;
   protocol: "typesafe" | "openai-decisions";
   url: string;
@@ -1101,6 +1101,15 @@ export interface DecisionPreset {
   requests_per_minute: number;
   max_parallel: number;
 }
+
+export interface LLMDecisionPreset {
+  preset_id: string;
+  protocol: "llm";
+  llm_preset: string;
+  prompt_language: "zh-CN" | "en";
+}
+
+export type DecisionPreset = HTTPDecisionPreset | LLMDecisionPreset;
 
 export interface DecisionPresetSummary {
   preset_id: string;
