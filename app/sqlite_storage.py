@@ -17,10 +17,11 @@ from typing import Any, Iterable
 from .errors import ProjectError, StorageError, UsageError
 from .stage_result_retention import prune_stage_results
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 STAGES = frozenset(
     {
+        "repetition_consistency",
         "terminology",
         "terminology_decision",
         "content_summary",
@@ -351,6 +352,9 @@ def _project_id(connection: sqlite3.Connection) -> str | None:
 
 
 def _residual(value: dict[str, Any], keys: Iterable[str]) -> str:
+    if value.get("record_type") == "terminology_library":
+        from .term_knowledge import persistent_library
+        value = persistent_library(value)
     residual = dict(value)
     for key in keys:
         residual.pop(key, None)
@@ -738,7 +742,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             (str(version),),
         )
         return None
-    elif version not in {3, 4, 5, 6, SCHEMA_VERSION}:
+    elif version not in {3, 4, 5, 6, 7, SCHEMA_VERSION}:
         raise ProjectError(
             f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
         )
@@ -754,8 +758,9 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         # version check and sqlite's online backup.
         connection.execute("BEGIN IMMEDIATE")
         backup_path = _backup_before_schema_upgrade(project, version)
-        for kind in ("base", "suggestion"):
-            connection.execute(f"DROP INDEX IF EXISTS stage_results_{kind}_reference")
+        if version < 7:
+            for kind in ("base", "suggestion"):
+                connection.execute(f"DROP INDEX IF EXISTS stage_results_{kind}_reference")
         _create_tables(connection)
         if version < 5:
             _migrate_to_v5(connection, project)
@@ -763,32 +768,42 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             _migrate_summary_storage_to_v6(connection, project)
         elif version < 7:
             _migrate_summary_hashes_to_v7(connection, project)
-        for row in connection.execute(
-            "SELECT file_id, payload_json FROM adapter_states WHERE typeof(payload_json) = 'text'"
-        ).fetchall():
-            raw = row["payload_json"]
-            _load(raw)
-            connection.execute(
-                "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
-                (zlib.compress(raw.encode("utf-8")), row["file_id"]),
+        if version < 7:
+            for row in connection.execute(
+                "SELECT file_id, payload_json FROM adapter_states WHERE typeof(payload_json) = 'text'"
+            ).fetchall():
+                raw = row["payload_json"]
+                _load(raw)
+                connection.execute(
+                    "UPDATE adapter_states SET payload_json = ? WHERE file_id = ?",
+                    (zlib.compress(raw.encode("utf-8")), row["file_id"]),
+                )
+            metadata_cache: dict[str, int] = {}
+            for table in ("stage_results", "terminology_scans"):
+                updates = []
+                for row in connection.execute(f"SELECT sequence, payload_json FROM {table}"):
+                    value = _load(row["payload_json"])
+                    if any(key in value for key in _REQUEST_METADATA_FIELDS):
+                        updates.append((_request_residual(connection, value, (), metadata_cache), row["sequence"]))
+                        if len(updates) == 500:
+                            connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
+                            updates.clear()
+                connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
+            for row in connection.execute("SELECT run_id, payload_json FROM runs"):
+                payload = _load(row["payload_json"])
+                if "terminology_modes" in payload:
+                    connection.execute("UPDATE runs SET payload_json = ? WHERE run_id = ?",
+                                       (_run_residual(payload), row["run_id"]))
+            _refresh_segment_format_counts(connection)
+        cursor = connection.execute(
+            "SELECT sequence, payload_json FROM terminology_candidates WHERE typeof(payload_json) = 'text'"
+        )
+        while rows := cursor.fetchmany(500):
+            connection.executemany(
+                "UPDATE terminology_candidates SET payload_json = ? WHERE sequence = ?",
+                [(zlib.compress(row["payload_json"].encode("utf-8")), row["sequence"]) for row in rows],
             )
-        metadata_cache: dict[str, int] = {}
-        for table in ("stage_results", "terminology_scans"):
-            updates = []
-            for row in connection.execute(f"SELECT sequence, payload_json FROM {table}"):
-                value = _load(row["payload_json"])
-                if any(key in value for key in _REQUEST_METADATA_FIELDS):
-                    updates.append((_request_residual(connection, value, (), metadata_cache), row["sequence"]))
-                    if len(updates) == 500:
-                        connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
-                        updates.clear()
-            connection.executemany(f"UPDATE {table} SET payload_json = ? WHERE sequence = ?", updates)
-        for row in connection.execute("SELECT run_id, payload_json FROM runs"):
-            payload = _load(row["payload_json"])
-            if "terminology_modes" in payload:
-                connection.execute("UPDATE runs SET payload_json = ? WHERE run_id = ?",
-                                   (_run_residual(payload), row["run_id"]))
-        _refresh_segment_format_counts(connection)
+        migrated_term_runs = _migrate_term_knowledge_to_v8(connection, project)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -799,6 +814,11 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         connection.rollback()
         raise
     try:
+        for run_id in migrated_term_runs:
+            manifest = project / "runs" / run_id / "manifest.json"
+            if manifest.is_file():
+                row = connection.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+                atomic_write_json(manifest, _hydrate_run(row, _project_id(connection)))
         if version < 6:
             project_id = _project_id(connection)
             for row in connection.execute(
@@ -807,9 +827,10 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
                 manifest = project / "runs" / str(row["run_id"]) / "manifest.json"
                 if manifest.is_file():
                     atomic_write_json(manifest, _hydrate_run(row, project_id))
-        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        connection.execute("VACUUM")
-        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if version < 7:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            connection.execute("VACUUM")
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     except (OSError, sqlite3.Error) as exc:
         raise StorageError(
             f"SQLite 已迁移，但快照整理或压缩失败：{project}；升级前备份位于 {backup_path}: {exc}"
@@ -979,8 +1000,12 @@ def _hydrate_scan(
 
 
 def _hydrate_candidate(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
+    try:
+        payload = _load(zlib.decompress(row["payload_json"]).decode("utf-8"))
+    except (zlib.error, TypeError, UnicodeDecodeError) as exc:
+        raise StorageError(f"术语候选压缩数据无效：{row['record_id']}") from exc
     return _with_common_header(
-        _load(str(row["payload_json"])),
+        payload,
         project_id=project_id,
         record_type="terminology_candidates",
         record_id=str(row["record_id"]),
@@ -1032,12 +1057,24 @@ def _hydrate_chunk(row: sqlite3.Row, project_id: str | None) -> dict[str, Any]:
     )
 
 
+def _terms_payload(value: dict[str, Any]) -> str | bytes:
+    payload = _residual(value, _TERMS_RESIDUAL_FIELDS)
+    return zlib.compress(payload.encode("utf-8")) if value.get("record_type") == "terminology_library" else payload
+
+
 def _hydrate_terms(
     row: sqlite3.Row, project_id: str | None
 ) -> dict[str, Any]:
     key = str(row["key"])
+    if key == "terms":
+        try:
+            payload = zlib.decompress(row["payload_json"]).decode("utf-8")
+        except (zlib.error, TypeError, UnicodeDecodeError) as exc:
+            raise StorageError("术语库压缩数据无效") from exc
+    else:
+        payload = str(row["payload_json"])
     return _with_common_header(
-        _load(str(row["payload_json"])),
+        _load(payload),
         project_id=project_id,
         record_type=_terms_record_type(key),
     )
@@ -1206,6 +1243,77 @@ def _summary_source_texts(
     return result
 
 
+def _migrate_term_knowledge_to_v8(connection: sqlite3.Connection, project: Path) -> list[str]:
+    """Convert scalar explanations in the schema upgrade transaction."""
+    from .term_knowledge import (
+        add_unsourced, empty_knowledge, entity_members, project_descriptions,
+        require_knowledge, save_items,
+    )
+
+    project_id = _project_id(connection)
+    records = {str(row["key"]): _with_common_header(
+                   _load(row["payload_json"] if isinstance(row["payload_json"], str) else zlib.decompress(row["payload_json"]).decode("utf-8")),
+                   project_id=project_id, record_type=_terms_record_type(str(row["key"])))
+               for row in connection.execute("SELECT key, payload_json FROM terms_state")}
+    library = records.get("terms")
+    if library is not None and "knowledge" in library:
+        require_knowledge(library)
+        connection.execute("UPDATE terms_state SET payload_json = ? WHERE key = 'terms'",
+                           (_terms_payload(library),))
+        return []
+    changed_runs = []
+    reason = "实体说明结构已升级，旧术语任务已结束，旧草案已作废，请新建 Run"
+    for row in connection.execute(
+        "SELECT * FROM runs WHERE stage IN ('terminology', 'terminology_decision') "
+        "AND (status = 'running' OR json_extract(payload_json, '$.decision_status') IN ('pending', 'generating'))"
+    ).fetchall():
+        run = _hydrate_run(row, project_id)
+        if run["status"] == "running":
+            run.update(status="interrupted", completed_at=utc_now())
+        if run.get("decision_status") in {"pending", "generating"}:
+            run.update(decision_status="discarded", discarded_at=utc_now())
+        run["error_message"] = reason
+        connection.execute("UPDATE runs SET status = ?, payload_json = ? WHERE run_id = ?",
+                           (run["status"], _run_residual(run), row["run_id"]))
+        changed_runs.append(str(row["run_id"]))
+    active_task = records.get("active_task")
+    if active_task and active_task.get("status") in {"active", "partial_published"}:
+        active_task.update(status="reset", updated_at=utc_now(), error_message=reason)
+        connection.execute("UPDATE terms_state SET payload_json = ? WHERE key = 'active_task'",
+                           (_terms_payload(active_task),))
+    if library is None:
+        return changed_runs
+    overrides = records.get("overrides", {"overrides": []})
+    knowledge = empty_knowledge()
+    library["knowledge"] = knowledge
+    texts = {term["normalized"]: term.get("description", "") for term in library["terms"]}
+    for override in overrides["overrides"]:
+        if "description" in override:
+            texts[override["normalized"]] = override.pop("description")
+    refs = {owner: add_unsourced(knowledge, owner, text, "legacy")
+            for owner, text in texts.items() if text}
+    known = {key: {**fragment, "id": key, "source_range": None, "valid": True, "_positions": {}}
+             for key, fragment in knowledge["fragments"].items()}
+    for root, members in entity_members(library).items():
+        save_items(project, library, root, [
+            {"text": texts[key], "fragment_ids": [refs[key]]} for key in members if key in refs
+        ], all_evidence=known)
+    active = {term["normalized"] for term in library["terms"]}
+    for owner in refs.keys() - active:
+        archived = {**library, "terms": [*library["terms"], {"normalized": owner, "group_primary": None}]}
+        save_items(project, archived, owner, [{"text": texts[owner], "fragment_ids": [refs[owner]]}],
+                   all_evidence=known)
+    project_descriptions(project, library, all_evidence=known)
+    library["terms_revision"] += 1
+    connection.executemany(
+        "INSERT INTO terms_state(key, payload_json) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET payload_json = excluded.payload_json",
+        [(key, _terms_payload(value))
+         for key, value in (("terms", library), ("overrides", overrides))],
+    )
+    return changed_runs
+
+
 def _migrate_summary_hashes_to_v7(connection: sqlite3.Connection, project: Path) -> None:
     texts = _summary_source_texts(connection)
     try:
@@ -1360,26 +1468,58 @@ def write_content_summary(project: Path, value: dict[str, Any]) -> None:
         connection.close()
 
 
+def clear_content_summaries(project: Path) -> None:
+    """Clear summary artifacts while preserving participation and Run history."""
+    connection = _with_db(project)
+    try:
+        with connection:
+            connection.execute("DELETE FROM content_summaries")
+            connection.execute("DELETE FROM summary_source_texts")
+            connection.execute(
+                "UPDATE runs SET status = 'interrupted', payload_json = "
+                "json_set(payload_json, '$.status', 'interrupted', "
+                "'$.interrupted_reason', 'content_summary_cleared', '$.completed_at', ?) "
+                "WHERE stage = 'content_summary' AND status = 'running'",
+                (utc_now(),),
+            )
+            connection.execute(
+                "UPDATE summary_runs SET status = 'interrupted', updated_at = ? "
+                "WHERE status = 'running'", (utc_now(),),
+            )
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法清空内容概括：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def mark_content_summary_fragments_stale(
     project: Path,
     boundaries: Iterable[tuple[str, str]],
+    *,
+    exclude_ids: Iterable[str] = (),
 ) -> int:
     boundary_values = {(str(file_id), str(part_id)) for file_id, part_id in boundaries}
     if not boundary_values:
         return 0
+    excluded = set(exclude_ids)
     connection = _with_db(project)
     deleted = 0
     try:
         with connection:
             for file_id, part_id in boundary_values:
-                cursor = connection.execute(
+                rows = connection.execute(
                     """
-                    UPDATE content_summaries
-                       SET status = 'stale', updated_at = ?
+                    SELECT summary_id FROM content_summaries
                      WHERE kind = 'fragment' AND status = 'completed'
                        AND file_id = ? AND part_id = ?
                     """,
-                    (utc_now(), file_id, part_id),
+                    (file_id, part_id),
+                ).fetchall()
+                now = utc_now()
+                cursor = connection.executemany(
+                    "UPDATE content_summaries SET status = 'stale', updated_at = ? "
+                    "WHERE summary_id = ?",
+                    [(now, row["summary_id"]) for row in rows if row["summary_id"] not in excluded],
                 )
                 deleted += max(0, int(cursor.rowcount))
     except sqlite3.Error as exc:
@@ -2398,7 +2538,7 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
                     "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
                     (
                         kind,
-                        _residual(value, _TERMS_RESIDUAL_FIELDS),
+                        _terms_payload(value),
                     ),
                 )
             elif kind == "run_manifest":
@@ -2440,17 +2580,33 @@ def clear_terminology_state(project: Path, overrides: dict[str, Any]) -> None:
     connection = _with_db(project)
     try:
         with connection:
-            connection.execute(
-                "DELETE FROM terms_state WHERE key IN ('terms', 'active_task')"
-            )
+            from .term_knowledge import empty_knowledge
+            previous = connection.execute("SELECT payload_json FROM terms_state WHERE key = 'terms'").fetchone()
+            revision = int(_load(zlib.decompress(previous["payload_json"]).decode("utf-8")).get("terms_revision", 0)) if previous else 0
+            library = record_header("terminology_library", _project_id(connection),
+                                    terms_revision=revision + 1, terms=[], knowledge=empty_knowledge())
+            connection.execute("INSERT INTO terms_state(key, payload_json) VALUES ('terms', ?) "
+                               "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
+                               (_terms_payload(library),))
+            connection.execute("DELETE FROM terms_state WHERE key = 'active_task'")
             connection.execute("DELETE FROM terminology_scans")
-            connection.execute("DELETE FROM terminology_candidates")
+            pinned: set[str] = set()
+            for row in connection.execute("SELECT run_id FROM runs WHERE stage = 'terminology_decision'"):
+                draft_path = project / "runs" / row["run_id"] / "terminology_decision_draft.json"
+                if draft_path.is_file():
+                    draft = json.loads(draft_path.read_text(encoding="utf-8"))
+                    pinned.update(fragment["candidate_id"] for fragment in
+                                  draft["source_library"].get("knowledge", {}).get("fragments", {}).values()
+                                  if fragment.get("candidate_id"))
+            deletable = [(row["record_id"],) for row in connection.execute("SELECT record_id FROM terminology_candidates")
+                         if row["record_id"] not in pinned]
+            connection.executemany("DELETE FROM terminology_candidates WHERE record_id = ?", deletable)
             connection.execute(
                 "INSERT INTO terms_state(key, payload_json) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
                 (
                     "overrides",
-                    _residual(overrides, _TERMS_RESIDUAL_FIELDS),
+                    _terms_payload(overrides),
                 ),
             )
     except sqlite3.Error as exc:
@@ -2475,8 +2631,8 @@ def write_terminology_decision_state(
                 "INSERT INTO terms_state(key, payload_json) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
                 [
-                    ("terms", _residual(terms, _TERMS_RESIDUAL_FIELDS)),
-                    ("overrides", _residual(overrides, _TERMS_RESIDUAL_FIELDS)),
+                    ("terms", _terms_payload(terms)),
+                    ("overrides", _terms_payload(overrides)),
                 ],
             )
             connection.execute(
@@ -2619,7 +2775,7 @@ def _insert_candidates(connection: sqlite3.Connection, records: Iterable[dict[st
             (
                 str(item["record_id"]),
                 str(item["active_task_id"]),
-                _residual(item, _CANDIDATE_RESIDUAL_FIELDS),
+                zlib.compress(_residual(item, _CANDIDATE_RESIDUAL_FIELDS).encode("utf-8")),
             )
             for item in records
         ],
@@ -2727,6 +2883,51 @@ def list_runs(project: Path, stage: str | None = None, status: str | None = None
         ]
     finally:
         connection.close()
+
+
+def read_repetition_run(project: Path, states: tuple[str, ...]) -> dict[str, Any] | None:
+    """Read one consistency draft/application without hydrating Run history."""
+    connection = _with_db(project)
+    try:
+        row = connection.execute(
+            "SELECT run_id, stage, status, started_at, payload_json FROM runs "
+            "WHERE stage = 'repetition_consistency' "
+            f"AND json_extract(payload_json, '$.draft_status') IN ({','.join('?' for _ in states)}) "
+            "ORDER BY rowid DESC LIMIT 1", states,
+        ).fetchone()
+        return _hydrate_run(row, _project_id(connection)) if row is not None else None
+    finally:
+        connection.close()
+
+
+def write_repetition_state(
+    project: Path, *, records: list[dict[str, Any]], manifests: list[dict[str, Any]]
+) -> list[str]:
+    """Commit changed translations and consistency Run transitions together."""
+    connection = _with_db(project)
+    try:
+        with connection:
+            if records:
+                _insert_stage(connection, records)
+            connection.executemany(
+                "INSERT INTO runs(run_id, stage, status, started_at, payload_json) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(run_id) DO UPDATE SET stage=excluded.stage, status=excluded.status, "
+                "started_at=excluded.started_at, payload_json=excluded.payload_json",
+                [(m["run_id"], m["stage"], m["status"], m.get("started_at"), _run_residual(m)) for m in manifests],
+            )
+            if records:
+                prune_stage_results(connection, [(str(r["stage"]), r.get("segment_id")) for r in records])
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法原子更新重复译文审查：{project}: {exc}") from exc
+    finally:
+        connection.close()
+    warnings = []
+    for manifest in manifests:
+        try:
+            atomic_write_json(project / "runs" / manifest["run_id"] / "manifest.json", manifest)
+        except OSError as exc:
+            warnings.append(f"数据库已保存，但 Run 文件镜像写入失败：{exc}")
+    return warnings
 
 
 def _read_only_connection(project: Path) -> sqlite3.Connection:
@@ -3601,3 +3802,43 @@ def maintain_project_database(project: Path) -> dict[str, int]:
         error.params = {"deleted_records": deleted, "deduplicated_applied_records": len(deduplicated),
                         "pruning_completed": True}
         raise error from exc
+
+
+def read_terminology_candidates(project: Path, record_ids: set[str]) -> list[dict[str, Any]]:
+    """Load only immutable candidate records referenced by entity explanations."""
+    if not record_ids:
+        return []
+    connection = _with_db(project)
+    try:
+        values = []
+        ids = sorted(record_ids)
+        for offset in range(0, len(ids), 500):
+            batch = ids[offset:offset + 500]
+            rows = connection.execute(
+                f"SELECT record_id, active_task_id, payload_json FROM terminology_candidates WHERE record_id IN ({','.join('?' for _ in batch)})",
+                batch,
+            ).fetchall()
+            values.extend(_hydrate_candidate(row, _project_id(connection)) for row in rows)
+        return values
+    finally:
+        connection.close()
+
+
+def write_terminology_publication(
+    project: Path, *, terms: dict[str, Any], overrides: dict[str, Any],
+    active_task: dict[str, Any] | None = None,
+) -> None:
+    """Publish library, evidence index and associated decisions atomically."""
+    connection = _with_db(project)
+    try:
+        with connection:
+            documents = [("terms", terms), ("overrides", overrides)]
+            if active_task is not None:
+                documents.append(("active_task", active_task))
+            connection.executemany(
+                "INSERT INTO terms_state(key,payload_json) VALUES (?,?) "
+                "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
+                [(key, _terms_payload(value)) for key, value in documents],
+            )
+    finally:
+        connection.close()

@@ -687,6 +687,7 @@ export interface TaskOptions {
   has_pending_draft?: boolean;
   estimated_requests?: number;
   estimated_input_tokens?: number;
+  knowledge_replacement_impacts?: Array<{fragment_id: string; owner: string; text: string; source_range: KnowledgeSourceRange[]}>;
   summary_selected_boundaries?: number;
   summary_only_work?: boolean;
   summary_prompt_preflight?: {
@@ -723,6 +724,10 @@ export interface ContinuousTaskOptions {
 }
 
 export interface RunningRun {
+  exclude_punctuation_only?: boolean;
+  screening_enabled?: boolean;
+  execution_changed?: boolean;
+  compatibility_deferred?: boolean;
   include_summaries?: boolean;
   include_draft_translation?: boolean;
   run_id: string;
@@ -747,6 +752,7 @@ export interface RunningRun {
 }
 
 export interface ContinuousOptionStep {
+  count_deferred?: boolean;
   stage: string;
   status: string;
   selected: number;
@@ -761,12 +767,17 @@ export interface ContinuousOptionStep {
 }
 
 export interface ContinuousRunDecision {
+  confirm_knowledge_replacement?: boolean;
   stage: "continuous";
   stages: LLMStage[];
   run_actions: Record<string, "resume" | "decline">;
   force: boolean;
   reuse_mixed_fingerprints: boolean;
   final_review: boolean;
+  include_repetition_consistency: boolean;
+  apply_repetition_consistency: boolean;
+  exclude_punctuation_only: boolean;
+  screening_enabled: boolean;
   apply_terminology_decision: boolean;
   include_draft_translation: boolean;
   include_summaries: boolean;
@@ -774,6 +785,7 @@ export interface ContinuousRunDecision {
 }
 
 export interface RunDecision {
+  confirm_knowledge_replacement?: boolean;
   include_summaries?: boolean;
   include_draft_translation?: boolean;
   force: boolean;
@@ -798,7 +810,27 @@ export interface TermDecisionConflicts {
   }>;
 }
 
+export interface KnowledgeSourceRange {
+  segment_id: string; file_id: string; part_id: string; start: number; end: number;
+}
+export interface KnowledgeItem {
+  text: string; fragment_ids: string[];
+}
+export interface KnowledgeFragment {
+  id: string; owner: string; original_owner: string; source?: string; origin: "scan" | "manual" | "import" | "legacy";
+  text: string; state: "active" | "disabled" | "superseded"; valid: boolean;
+  source_range: KnowledgeSourceRange[] | null;
+  _positions: Record<string, number>;
+}
+export interface EntityKnowledge {
+  entity_key: string; members: string[]; status: "current" | "pending" | "stale";
+  items: KnowledgeItem[]; fragments: KnowledgeFragment[]; terms_revision: number;
+}
+
 export interface Term {
+  entity_key: string;
+  knowledge_status: "current" | "pending" | "stale";
+  description_items: KnowledgeItem[];
   normalized: string;
   source: string;
   category: string | null;
@@ -837,8 +869,11 @@ export interface TermDecisionEvidence {
 }
 
 export interface TermDecisionProposal {
+  knowledge_evidence: Record<string, KnowledgeFragment>;
+  knowledge_before: Record<string, {items: KnowledgeItem[]} | null>;
+  knowledge_after: Record<string, {items: KnowledgeItem[]}>;
   proposal_id: string;
-  kind: "term_update" | "relationship";
+  kind: "term_update" | "relationship" | "entity_knowledge";
   normalized: string[];
   before: TermDecisionState[];
   after: TermDecisionState[];
@@ -849,6 +884,7 @@ export interface TermDecisionProposal {
 }
 
 export interface TermDecisionDraft {
+  final_review_error?: { error: string; code: string; params: Record<string, unknown> };
   run_id: string;
   source_terms_revision: number;
   proposals: TermDecisionProposal[];
@@ -1043,13 +1079,16 @@ export interface ProjectConfig {
 }
 
 export interface AdapterCapabilities {
+  json_schema: boolean;
   temperature: boolean;
+  max_output_tokens_minimum: number;
+  reasoning_effort: { body_pointer: string; values: string[]; aliases: string[] } | null;
   max_output_tokens: boolean;
   streaming: "required" | "optional" | "unsupported";
   connection: { base_url: string; credential: LLMPreset["credential"]; proxy_source: "preset" | "connection" } | null;
 }
 
-export interface DecisionPreset {
+export interface HTTPDecisionPreset {
   preset_id: string;
   protocol: "typesafe" | "openai-decisions";
   url: string;
@@ -1063,6 +1102,15 @@ export interface DecisionPreset {
   requests_per_minute: number;
   max_parallel: number;
 }
+
+export interface LLMDecisionPreset {
+  preset_id: string;
+  protocol: "llm";
+  llm_preset: string;
+  prompt_language: "zh-CN" | "en";
+}
+
+export type DecisionPreset = HTTPDecisionPreset | LLMDecisionPreset;
 
 export interface DecisionPresetSummary {
   preset_id: string;
@@ -1085,7 +1133,7 @@ export interface LLMPresetSummary {
 }
 
 export interface LLMPreset {
-  schema_version: 7;
+  schema_version: 8;
   preset_id: string;
   adapter_id: string;
   base_url: string;
@@ -1095,6 +1143,9 @@ export interface LLMPreset {
   context_window_tokens: number;
   target_chunk_input_tokens: number;
   max_output_tokens: number;
+  send_temperature: boolean;
+  json_schema_enabled?: boolean;
+  reasoning_effort: string | null;
   context_safety_margin_tokens: number;
   token_safety_factor: number;
   requests_per_minute: number;

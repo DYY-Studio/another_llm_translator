@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.helpers import write_term_library, scan_source_range
 
 import json
 import os
@@ -165,7 +166,7 @@ def test_scanned_terms_can_be_exported_and_published_without_complete_task(
             str(metadata["project_id"]),
             active_task_id=task_id,
             run_id="RUN-PARTIAL",
-            source_order={"segment_id": "F0001-S000001", "offset": 0},
+            source_order={"segment_id": "F0001-S000001", "offset": 0}, source_range=scan_source_range(project),
             terms=[
                 {
                     "source": "recover",
@@ -202,7 +203,7 @@ def test_publication_orders_slices_and_preserves_published_descriptions(tmp_path
     project = make_project(tmp_path)
     metadata = read_json(project, project / "project.json")
     project_id = str(metadata["project_id"])
-    write_json(project, project / "terminology" / "terms.json", record_header(
+    write_term_library(project, project / "terminology" / "terms.json", record_header(
         "terminology_library", project_id, terms_revision=1,
         terms=[{**term("Alpha"), "description": "z-old；a-old"}],
     ))
@@ -212,14 +213,17 @@ def test_publication_orders_slices_and_preserves_published_descriptions(tmp_path
     for offset, description in [(20, "a-later"), (0, "z-first"), (10, "z-first")]:
         append_jsonl(project, project / "terminology" / "candidates.jsonl", record_header(
             "terminology_candidates", project_id, active_task_id="TASK",
-            source_order={"segment_id": "F0001-S000001", "offset": offset},
+            source_order={"segment_id": "F0001-S000001", "offset": offset}, source_range=scan_source_range(project),
             terms=[{**term("Alpha"), "description": description}],
         ))
     library = _merge_and_publish_terms(project, task_id="TASK", project_id=project_id, published_run_id="RUN")
-    assert library["terms"][0]["description"] == "z-old；a-old；z-first；a-later"
+    assert library["terms"][0]["description"] == "z-old；a-old"
+    from app.term_knowledge import save_items
+    save_items(project, library, "alpha", [{"text": "已确认说明", "fragment_ids": []}])
+    write_term_library(project, project / "terminology" / "terms.json", library)
     write_json(project, project / "terminology" / "overrides.json", record_header(
         "terminology_overrides", project_id,
-        overrides=[{"normalized": "alpha", "description": "已确认说明"}],
+        overrides=[{"normalized": "alpha"}],
     ))
     library = _merge_and_publish_terms(project, task_id="TASK", project_id=project_id, published_run_id="RUN")
     assert library["terms"][0]["description"] == "已确认说明"
@@ -502,7 +506,7 @@ async def test_forced_rescan_merges_with_published_library(tmp_path: Path) -> No
         await run_terminology(project, Scope(), http_client=client)
         await run_terminology(
             project,
-            Scope(force=True),
+            Scope(force=True, confirm_knowledge_replacement=True),
             http_client=client,
         )
     library = read_json(project, project / "terminology" / "terms.json")
@@ -548,7 +552,7 @@ def test_manual_term_edit_and_grouping_reject_overlapping_aliases_atomically(tmp
     library = load_terms(project)
     overrides = read_json(project, project / "terminology" / "overrides.json")
     with pytest.raises(UsageError, match="组.*Alias"):
-        WebStore(project).save_term({**term("Alpha", aliases=["Beta"]), "old_normalized": "alpha"})
+        WebStore(project).save_term({**{k:v for k,v in term("Alpha", aliases=["Beta"]).items() if k != "description"}, "old_normalized": "alpha"})
     assert load_terms(project) == library
     assert read_json(project, project / "terminology" / "overrides.json") == overrides
 
@@ -573,9 +577,9 @@ def test_automatic_group_alias_removal_survives_later_manual_edits(tmp_path, cre
     from app.web_store import WebStore
     project = make_project(tmp_path)
     store = WebStore(project)
-    store.save_term(term("Alpha", aliases=["Beta"]))
+    store.save_term({k:v for k,v in term("Alpha", aliases=["Beta"]).items() if k != "description"})
     if creation == "manual":
-        store.save_term(term("Beta"))
+        store.save_term({k:v for k,v in term("Beta").items() if k != "description"})
     elif creation == "import":
         source = tmp_path / "beta.json"
         write_exchange(source, [term("Beta")])
@@ -588,10 +592,10 @@ def test_automatic_group_alias_removal_survives_later_manual_edits(tmp_path, cre
             status="active", initial_stage_fingerprint="test"))
         append_jsonl(project, project / "terminology" / "candidates.jsonl", record_header(
             "terminology_candidates", metadata["project_id"], active_task_id=task_id,
-            run_id="RUN-BETA", source_order={"segment_id": "F0001-S000001", "offset": 0},
+            run_id="RUN-BETA", source_order={"segment_id": "F0001-S000001", "offset": 0}, source_range=scan_source_range(project),
             terms=[term("Beta")]))
         publish_partial_terms(project)
-    store.save_term(term("Gamma"))
+    store.save_term({key: value for key, value in term("Gamma").items() if key != "description"})
     rows = {item["source"]: item for item in load_terms(project)["terms"]}
     assert rows["Alpha"]["aliases"] == []
     assert rows["Beta"]["group_primary"] == "alpha"

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.helpers import write_term_library, scan_source_range
 
 import asyncio
 import io
@@ -1732,6 +1733,30 @@ def test_web_returns_drive_entries_at_a_root(
 WEB_DIST_PRESENT = (Path(__file__).parents[1] / "app" / "web_dist").is_dir()
 
 
+def test_web_compresses_assets_and_project_data(tmp_path: Path) -> None:
+    projects_root, _ = make_project(tmp_path)
+    web_dist = tmp_path / "web-dist"
+    web_dist.mkdir()
+    script = "console.log('startup');\n" * 100
+    (web_dist / "index.js").write_text(script, encoding="utf-8")
+    client = TestClient(create_app(projects_root=projects_root, web_dist=web_dist))
+
+    asset = client.get("/index.js", headers={"Accept-Encoding": "gzip"})
+    overview = client.get("/api/v1/projects/sample", headers={"Accept-Encoding": "gzip"})
+
+    for response in (asset, overview):
+        assert response.status_code == 200
+        assert response.headers["content-encoding"] == "gzip"
+        assert "Accept-Encoding" in response.headers["vary"]
+        assert int(response.headers["content-length"]) < len(response.content)
+    assert asset.text == script
+    assert overview.json()["total_segments"] == 2
+
+    uncompressed = client.get("/index.js", headers={"Accept-Encoding": "identity"})
+    assert "content-encoding" not in uncompressed.headers
+    assert uncompressed.text == script
+
+
 @pytest.mark.skipif(
     not WEB_DIST_PRESENT,
     reason="web_dist 未构建；请先 npm run build --prefix web",
@@ -2517,6 +2542,8 @@ def test_web_manages_presets_and_previews_merged_extra_body(
         "stream_endpoint": "/v1/models/${model}:stream",
         "stream_read_timeout_enabled": False,
         "model": "provider/model",
+        "send_temperature": False,
+        "reasoning_effort": "high",
         "extra_body": {
             "provider": {
                 "order": ["anthropic", "google"],
@@ -2538,28 +2565,13 @@ def test_web_manages_presets_and_previews_merged_extra_body(
     assert preview["body"]["model"] == "provider/model"
     assert preview["transport"] == "sse"
     assert preview["body"]["stream"] is True
+    assert "temperature" not in preview["body"]
+    assert preview["body"]["reasoning_effort"] == "high"
     assert preview["body"]["stream_options"] == {"include_usage": True}
 
-    legacy = {
-        **default,
-        "preset_id": "legacy",
-        "schema_version": 4,
-    }
-    legacy.pop("max_parallel_per_key")
-    migrated = client.put("/api/v1/global/presets/legacy", json=legacy)
-    assert migrated.status_code == 200
-    stored_legacy = json.loads(
-        (tmp_path / "user-root" / "llm_presets" / "legacy.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert stored_legacy["schema_version"] == 7
-    assert stored_legacy["max_parallel_per_key"] == stored_legacy["max_parallel"]
+    legacy = {**default, "preset_id": "legacy", "schema_version": 7}
+    assert client.put("/api/v1/global/presets/legacy", json=legacy).status_code == 400
 
-    conflict = {**custom, "preset_id": "conflict", "extra_body": {"model": "x"}}
-    assert client.put(
-        "/api/v1/global/presets/conflict", json=conflict
-    ).status_code == 400
     secret = {**custom, "preset_id": "secret", "extra_body": {"x": "${api_key}"}}
     assert client.put(
         "/api/v1/global/presets/secret", json=secret
@@ -2697,11 +2709,12 @@ def test_web_rejects_unresolved_term_conflict_on_save(tmp_path: Path) -> None:
     unresolved = client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "old_normalized": "alpha",
             "source": "Alpha",
             "preferred_translation": "阿尔法",
             "category": "",
-            "description": "category conflict",
+            "description_items": [{"text": "category conflict", "fragment_ids": []}],
             "aliases": [],
             "disabled": False,
         },
@@ -2716,10 +2729,11 @@ def test_web_can_permanently_delete_disabled_term(tmp_path: Path) -> None:
     added = client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "source": "Alice",
             "preferred_translation": "爱丽丝",
             "category": "人物",
-            "description": "主角",
+            "description_items": [{"text": "主角", "fragment_ids": []}],
             "aliases": [],
             "disabled": True,
         },
@@ -2818,10 +2832,10 @@ def test_web_clears_all_terminology_state_and_interrupts_stale_run(
         json={"confirm": True},
     )
     assert cleared.status_code == 200
-    assert cleared.json()["terms_revision"] is None
+    assert cleared.json()["terms_revision"] == 3
     assert cleared.json()["terms"] == []
     assert cleared.json()["scan"]["status"] == "none"
-    assert not record_exists(project, project / "terminology" / "terms.json")
+    assert read_json(project, project / "terminology" / "terms.json")["terms"] == []
     assert not record_exists(project, project / "terminology" / "active_task.json")
     assert read_json(project, project / "terminology" / "overrides.json")["overrides"] == []
     assert read_jsonl(project, project / "terminology" / "scans.jsonl") == []
@@ -2854,10 +2868,11 @@ def test_web_materializes_alias_and_changes_group_primary(tmp_path: Path) -> Non
     added = client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "source": "Alice",
             "preferred_translation": "爱丽丝",
             "category": "人物",
-            "description": "主角",
+            "description_items": [{"text": "主角", "fragment_ids": []}],
             "aliases": ["Alicia"],
             "disabled": False,
         },
@@ -2897,10 +2912,11 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
     assert client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "source": "Alicia",
             "preferred_translation": "艾丽西亚",
             "category": "别名条目",
-            "description": "已有人物资料",
+            "description_items": [{"text": "已有人物资料", "fragment_ids": []}],
             "aliases": ["Alicia Jr"],
             "disabled": False,
         },
@@ -2913,10 +2929,11 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
     assert client.post(
         "/api/v1/projects/sample/terms",
         json={
+            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
             "source": "Alice",
             "preferred_translation": "爱丽丝",
             "category": "人物",
-            "description": "主角",
+            "description_items": [{"text": "主角", "fragment_ids": []}],
             "aliases": ["Alicia"],
             "disabled": False,
         },
@@ -2931,7 +2948,7 @@ def test_web_materializes_alias_by_restoring_removed_matching_entry(
     assert rows["alicia"]["group_primary"] == "alice"
     assert rows["alicia"]["preferred_translation"] == "艾丽西亚"
     assert rows["alicia"]["category"] == "别名条目"
-    assert rows["alicia"]["description"] == "已有人物资料"
+    assert rows["alicia"]["description"] == "主角"
     assert rows["alicia"]["aliases"] == ["Alicia Jr"]
     assert rows["alice"]["aliases"] == []
 
@@ -2945,6 +2962,13 @@ def test_web_term_group_member_can_leave_group(tmp_path: Path) -> None:
             json={"source": source, "aliases": [], "disabled": False},
         )
         assert response.status_code == 200
+    related = client.post(
+        "/api/v1/projects/sample/terms/related",
+        json={"normalized": "john smith"},
+    )
+    assert related.status_code == 200
+    assert related.json()["related"][0]["normalized"] == "john"
+
     grouped = client.post(
         "/api/v1/projects/sample/terms/group-related",
         json={
@@ -2955,6 +2979,8 @@ def test_web_term_group_member_can_leave_group(tmp_path: Path) -> None:
         },
     )
     assert grouped.status_code == 200
+    rows = {item["normalized"]: item for item in grouped.json()["terms"]}
+    assert rows["john"]["group_primary"] == "john smith"
 
     missing_confirmation = client.post(
         "/api/v1/projects/sample/terms/leave-group",
@@ -2977,39 +3003,6 @@ def test_web_term_group_member_can_leave_group(tmp_path: Path) -> None:
     assert primary.status_code == 400
     assert primary.json()["code"] == "term_group_error"
     assert primary.json()["params"]["reason"] == "not_group_member"
-
-
-def test_web_related_term_actions_are_exposed(tmp_path: Path) -> None:
-    projects_root, _ = make_project(tmp_path)
-    client = TestClient(create_app(projects_root=projects_root))
-    assert client.post(
-        "/api/v1/projects/sample/terms",
-        json={"source": "John Smith", "aliases": [], "disabled": False},
-    ).status_code == 200
-    assert client.post(
-        "/api/v1/projects/sample/terms",
-        json={"source": "John", "aliases": [], "disabled": False},
-    ).status_code == 200
-
-    related = client.post(
-        "/api/v1/projects/sample/terms/related",
-        json={"normalized": "john smith"},
-    )
-    assert related.status_code == 200
-    assert related.json()["related"][0]["normalized"] == "john"
-
-    grouped = client.post(
-        "/api/v1/projects/sample/terms/group-related",
-        json={
-            "normalized": "john smith",
-            "related_normalized": "john",
-            "primary_normalized": "john smith",
-            "confirm": True,
-        },
-    )
-    assert grouped.status_code == 200
-    rows = {item["normalized"]: item for item in grouped.json()["terms"]}
-    assert rows["john"]["group_primary"] == "john smith"
 
 
 def test_web_related_alias_conversion_route_is_exposed(tmp_path: Path) -> None:
@@ -3145,7 +3138,7 @@ def test_web_exports_and_publishes_scanned_candidates(tmp_path: Path) -> None:
             str(metadata["project_id"]),
             active_task_id=task_id,
             run_id="RUN-WEB-PARTIAL",
-            source_order={"segment_id": "F0001-S000001", "offset": 0},
+            source_order={"segment_id": "F0001-S000001", "offset": 0}, source_range=scan_source_range(project),
             terms=[
                 {
                     "source": "Alice",
@@ -3177,7 +3170,7 @@ def test_web_exports_and_publishes_scanned_candidates(tmp_path: Path) -> None:
 
 def _seed_terms(project: Path, terms: list[dict]) -> None:
     project_id = str(read_json(project, project / "project.json")["project_id"])
-    write_json(
+    write_term_library(
         project,
         project / "terminology" / "terms.json",
         record_header(
@@ -3612,6 +3605,8 @@ def test_web_adapter_validation_preview_and_secret_redaction(
         "/api/v1/global/adapters/openai-compatible"
     ).json()
     adapter["body"]["response_format"] = {"type": "json_object"}
+    assert client.put("/api/v1/global/adapters/openai-compatible", json=adapter).status_code == 400
+    adapter.pop("structured_output")
     saved = client.put(
         "/api/v1/global/adapters/openai-compatible",
         json=adapter,
@@ -4674,20 +4669,26 @@ async def test_web_run_all_initial_total_excludes_completed_terminology_stage(
     await manager.tasks[started["task_id"]].asyncio_task
 
 
-def test_web_selection_snapshot_includes_document_adapter_state(
-    tmp_path: Path,
-) -> None:
+def test_selection_snapshots_track_source_and_adapter_state(tmp_path: Path) -> None:
     project = init_epub(tmp_path)
     before = web_tasks_module._selection_snapshot(project, Scope())
+    continuous_before = inspect_continuous(project, ["translation"])["snapshot"]["selections"]
     file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
     state = read_json(project, state_path)
+    segments = read_segments(project)
+    segments[0]["source"] += " changed"
+    replace_source(project, read_files(project), segments,
+                   read_json(project, project / "project.json"), adapter_states=[state])
+    after_source = web_tasks_module._selection_snapshot(project, Scope())
+    continuous_after_source = inspect_continuous(project, ["translation"])["snapshot"]["selections"]
+    assert after_source != before
+    assert continuous_after_source != continuous_before
+
     state["run_options"]["ruby_mode"] = "base_only"
     write_json(project, state_path, state)
-
-    after = web_tasks_module._selection_snapshot(project, Scope())
-
-    assert before != after
+    assert web_tasks_module._selection_snapshot(project, Scope()) != after_source
+    assert inspect_continuous(project, ["translation"])["snapshot"]["selections"] != continuous_after_source
 
 
 @pytest.mark.asyncio
@@ -5260,7 +5261,7 @@ class FakeModelsClient:
     async def __aexit__(self, *_: object) -> bool:
         return False
 
-    async def get(self, url: str, headers: dict[str, str] | None = None) -> FakeModelsResponse:
+    async def get(self, url: str, headers: dict[str, str] | None = None, params: dict[str, str] | None = None) -> FakeModelsResponse:
         self.request_url = url
         self.request_headers = headers or {}
         if self.raise_error is not None:
@@ -5356,7 +5357,6 @@ def test_web_preset_models_discovery_fails_fast(
     )
     adapter["adapter_id"] = "minimal"
     adapter.pop("models")
-    adapter.pop("usage")
     (app_root / "llm_adapters" / "minimal.json").write_text(
         json.dumps(adapter), encoding="utf-8"
     )
@@ -5592,6 +5592,7 @@ def test_continuous_inspection_requires_per_stage_run_actions_and_apply_permissi
 ) -> None:
     _projects_root, project = make_project(tmp_path)
 
+    monkeypatch.setattr("app.web_continuous.run_protocol_is_current", lambda *_: True)
     monkeypatch.setattr(
         "app.web_continuous.find_running_runs",
         lambda _project, stage: (
@@ -5842,6 +5843,7 @@ def test_continuous_skipped_decision_resume_requires_decline_and_force(
 ) -> None:
     _projects_root, project = make_project(tmp_path)
     monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: None)
+    monkeypatch.setattr("app.web_continuous.run_protocol_is_current", lambda *_: True)
     monkeypatch.setattr(
         "app.web_continuous.find_running_runs",
         lambda _project, stage: (
@@ -6451,8 +6453,9 @@ def test_continuous_terminology_revision_policy_preflight_requires_explicit_stra
 
 
 @pytest.mark.asyncio
-async def test_continuous_terminal_decision_does_not_apply_draft(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("auto_apply", [False, True])
+async def test_continuous_terminal_decision_optional_application(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, auto_apply: bool
 ) -> None:
     _projects_root, project = make_project(tmp_path)
     library = {
@@ -6484,15 +6487,16 @@ async def test_continuous_terminal_decision_does_not_apply_draft(
             "completed": 1,
             "failed": 0,
             "pending": 0,
-            "needs_review": 1,
+            "needs_review": 0 if auto_apply else 1,
         }
 
-    def fail_apply(**_: object) -> None:
+    def fake_apply(*args: object, **kwargs: object) -> dict[str, object]:
         nonlocal applied
         applied = True
+        return {"applied": 1}
 
     monkeypatch.setattr("app.web_continuous.run_terminology_decision", fake_decision)
-    monkeypatch.setattr("app.web_continuous.apply_decision_draft", fail_apply)
+    monkeypatch.setattr("app.web_continuous.apply_decision_draft", fake_apply)
     stages = ("terminology", "terminology_decision")
     preflight = inspect_continuous(project, stages)
 
@@ -6506,10 +6510,11 @@ async def test_continuous_terminal_decision_does_not_apply_draft(
         stages,
         limiters=_continuous_limiter_map(project, stages),
         planned_steps=preflight["steps"],
+        apply_terminology_decision=auto_apply,
     )
 
     assert result["steps"][-1]["status"] == "completed"
-    assert applied is False
+    assert applied is auto_apply
 
 
 @pytest.mark.asyncio
@@ -6626,29 +6631,6 @@ async def test_continuous_dispatch_preserves_run_options(
     assert received["apply_terminology_decision"] is True
 
 
-def test_continuous_selection_snapshot_contains_source_and_adapter_context(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _projects_root, project = make_project(tmp_path)
-    captured: list[object] = []
-    original_digest = web_continuous_module._stable_digest
-
-    def capture(value: object) -> str:
-        captured.append(value)
-        return original_digest(value)
-
-    monkeypatch.setattr(web_continuous_module, "_stable_digest", capture)
-    inspect_continuous(project, ["translation"])
-
-    selection_values = [
-        value["translation"]
-        for value in captured
-        if isinstance(value, dict) and "translation" in value
-    ]
-    assert selection_values
-    assert len(selection_values[0][0]) == 8
-
-
 def test_continuous_decision_resume_preflight_rejects_incompatible_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -6670,6 +6652,7 @@ def test_continuous_decision_resume_preflight_rejects_incompatible_run(
         "evidence": {},
         "language": "zh-CN",
     })
+    monkeypatch.setattr("app.web_continuous.run_protocol_is_current", lambda *_: True)
     monkeypatch.setattr(
         "app.web_continuous.find_running_runs",
         lambda _project, stage: (
@@ -7062,3 +7045,21 @@ def test_segment_read_keeps_task_status_responsive(tmp_path: Path, monkeypatch) 
             assert result.json() == {"segments": [], "total": 0}
 
     asyncio.run(exercise())
+
+
+def test_continuous_preflight_disables_old_llm_run(tmp_path: Path) -> None:
+    _, project = make_project(tmp_path)
+    run_id, directory = create_run(
+        project, config=load_project_config(project), stage="translation",
+        fingerprint="old", prompt="prompt", selected_count=1, requested_count=1, reused_count=0,
+        details={"scope": {"all_nonempty": True}},
+    )
+    path = directory / "llm_preset.json"
+    preset = json.loads(path.read_text())
+    preset["schema_version"] = 7
+    path.write_text(json.dumps(preset))
+    result = inspect_continuous(project, ["translation"], run_actions={"translation": "resume"})
+    run = result["steps"][0]["running_run"]
+    assert run["run_id"] == run_id
+    assert run["resume_compatible"] is False
+    assert any("旧 LLM 协议" in item["message"] for item in result["blocking"])

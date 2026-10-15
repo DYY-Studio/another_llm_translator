@@ -107,6 +107,10 @@ export function isContinuousBlockingResolved(
 }
 
 export interface ContinuousPayloadOptions {
+  includeRepetitionConsistency?: boolean;
+  applyRepetitionConsistency?: boolean;
+  excludePunctuationOnly?: boolean;
+  screeningEnabled?: boolean;
   finalReview: boolean;
   applyTerminologyDecision: boolean;
   force: boolean;
@@ -125,11 +129,13 @@ export function continuousPayload(
   const terminalDecision = stages.at(-1) === "terminology_decision";
   return {
     stage: "continuous" as const,
+    include_repetition_consistency: Boolean(options.includeRepetitionConsistency),
+    apply_repetition_consistency: Boolean(options.includeRepetitionConsistency && options.applyRepetitionConsistency),
+    exclude_punctuation_only: options.excludePunctuationOnly ?? true,
+    screening_enabled: options.screeningEnabled ?? false,
     stages,
     final_review: hasDecision && (terminalDecision ? options.finalReview : true),
-    apply_terminology_decision: hasDecision && !terminalDecision
-      ? options.applyTerminologyDecision
-      : false,
+    apply_terminology_decision: hasDecision && options.applyTerminologyDecision,
     force: options.force,
     reuse_mixed_fingerprints: options.reuseMixedFingerprints,
     run_actions: options.runActions,

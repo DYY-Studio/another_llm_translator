@@ -10,6 +10,7 @@ import pytest
 
 from app.errors import ConfigError, UsageError
 from app.execution import Scope
+from app.llm_response import response_record_types
 from app.main import run
 from app.project import (
     add_project_files,
@@ -29,7 +30,7 @@ from app.sqlite_storage import (
     write_summary_participation,
 )
 from app.stage_terminology import _digest, run_terminology
-from app.summary_aggregation import export_summary_markdown
+from app.summary_aggregation import aggregation_preflight, export_summary_markdown
 from app.term_library import load_terms, publish_partial_terms
 from app.web_tasks import task_options
 from tests.helpers import llm_jsonl
@@ -443,6 +444,74 @@ async def test_forced_full_cover_summary_replaces_auto_adopted_full(
         ("stale", "人物依次出现并行动。"),
         ("completed", "强制重做后的概括。"),
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change_all", [True, False])
+@pytest.mark.parametrize("include_draft", [False, True])
+async def test_summary_rerun_replaces_obsolete_fragments_and_keeps_reusable_ones(
+    tmp_path: Path, change_all: bool, include_draft: bool
+) -> None:
+    project = _project(tmp_path)
+    selection = [{"file_id": "F0001", "part_id": "document"}]
+    write_summary_participation(project, [{**selection[0], "selected": True}])
+    requests: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        payload = json.loads(body["messages"][1]["content"])
+        segments = payload["source_segments"]
+        requests.append([item["text"] for item in segments])
+        records = [
+            {"type": "summary", "text": item["text"], "refs": [str(index)]}
+            for index, item in enumerate(segments, 1)
+        ]
+        if 'type="term"' in body["messages"][0]["content"]:
+            records.append({"type": "no_terms"})
+        if include_draft and "segment" in response_record_types(payload["response_mode"]):
+            records.extend(
+                {"type": "segment", "id": item["id"], "translation": "人物行动"}
+                for item in payload["segments"]
+            )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        first = await run_terminology(
+            project, Scope(), http_client=client, include_summaries=True,
+            include_draft_translation=include_draft,
+        )
+        assert first["failed"] == 0
+        old = read_content_summaries(project, kind="fragment", status="completed")
+        assert len(old) == 2
+        if change_all:
+            prompt = project / "prompts" / "fragment_summary.zh-CN.middle.txt"
+            prompt.write_text(prompt.read_text(encoding="utf-8") + "\n请简洁概括\n", encoding="utf-8")
+        else:
+            write_content_summary(project, {
+                **old[0],
+                "prompt_digest": "sha256:obsolete",
+                "fragment_prompt_digest": "sha256:obsolete",
+            })
+        second = await run_terminology(
+            project, Scope(), http_client=client, include_summaries=True,
+            include_draft_translation=include_draft,
+            reuse_mixed_fingerprints=True,
+        )
+        assert second["failed"] == 0
+        assert len(requests[-1]) == (2 if change_all else 1)
+        assert aggregation_preflight(project, selection)["boundaries"][0]["fragment_count"] == 2
+        summaries = {item["record_id"]: item for item in read_content_summaries(project)}
+        assert summaries[old[0]["record_id"]]["status"] == "stale"
+        assert summaries[old[1]["record_id"]]["status"] == ("stale" if change_all else "completed")
+        calls = len(requests)
+        await run_terminology(
+            project, Scope(), http_client=client, include_summaries=True,
+            include_draft_translation=include_draft,
+            reuse_mixed_fingerprints=True,
+        )
+        assert len(requests) == calls
 
 
 @pytest.mark.asyncio

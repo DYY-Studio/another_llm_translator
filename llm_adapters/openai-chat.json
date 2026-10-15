@@ -1,0 +1,56 @@
+{
+  "schema_version": 4,
+  "adapter_id": "openai-chat",
+  "endpoint": "/chat/completions",
+  "headers": {
+    "Authorization": "Bearer ${api_key}"
+  },
+  "body": {
+    "model": "${model}",
+    "messages": "${messages}",
+    "temperature": "${temperature}",
+    "stream": "${stream}",
+    "max_completion_tokens": "${max_output_tokens}"
+  },
+  "models": {
+    "endpoint": "/models",
+    "response_models_pointer": "/data",
+    "response_model_id": "id"
+  },
+  "streaming": {
+    "transport": "sse",
+    "endpoint": "/chat/completions",
+    "request_body": {
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    "allow_clean_eof": false
+  },
+  "reasoning_effort": {
+    "body_pointer": "/reasoning_effort",
+    "values": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "aliases": [
+      "/reasoning/effort"
+    ]
+  },
+  "response_format": "chat-completions",
+  "structured_output": {
+    "/response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "structured_response",
+        "strict": true,
+        "schema": "${json_schema}"
+      }
+    }
+  }
+}

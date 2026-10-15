@@ -78,6 +78,7 @@ from .stage_runtime import (
     _split_source_once,
     prompt_middle_digests,
 )
+from .term_knowledge import source_range
 from .summary_provenance import write_fragment_summary
 from .term_library import (
     _candidate_source_order,
@@ -109,15 +110,16 @@ def _summary_participation(
     }
 
 
-def _summary_covered_segments(
+def _summary_reusable_fragments(
     project: Path,
     segments: list[dict[str, Any]],
     *,
     prompt_digests: Callable[[list[dict[str, Any]]], set[str]],
     model: str,
     target_language: str,
-) -> set[str]:
+) -> tuple[set[str], set[str]]:
     valid_slices: dict[str, dict[str, dict[str, Any]]] = {}
+    reusable_ids: set[str] = set()
     artifacts = read_content_summaries(project, kind="fragment", status="completed")
     by_id = {str(item["segment_id"]): item for item in segments}
     for artifact in artifacts:
@@ -204,6 +206,7 @@ def _summary_covered_segments(
             and artifact.get("model") == model
             and artifact.get("target_language") == target_language
         ):
+            reusable_ids.add(str(artifact["record_id"]))
             for value in stable_values:
                 valid_slices.setdefault(value["segment_id"], {})[
                     str(value["slice_id"])
@@ -225,7 +228,7 @@ def _summary_covered_segments(
             }
         if len(source) in covered_positions:
             covered.add(segment_id)
-    return covered
+    return covered, reusable_ids
 
 
 def _validate_term_items(
@@ -287,6 +290,11 @@ async def run_terminology(
     include_draft_translation: bool = False,
     on_draft_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    from .term_knowledge import replacement_impacts
+    from .sqlite_storage import read_segments
+    impacts = replacement_impacts(project, [s for s in read_segments(project) if not s["is_empty"]]) if scope.force else []
+    if impacts and not scope.dry_run and not scope.confirm_knowledge_replacement:
+        raise UsageError(f"强制重扫会替换 {len(impacts)} 个相交说明片段，请先查看影响并明确确认（--confirm-knowledge-replacement）")
     if resume_run_id is not None:
         manifest = read_json(
             project, project / "runs" / resume_run_id / "manifest.json"
@@ -313,7 +321,7 @@ async def run_terminology(
     if include_draft_translation:
         from .stage_translation import run_translation
 
-        return await run_translation(
+        result = await run_translation(
             project,
             scope,
             http_client=http_client,
@@ -327,6 +335,7 @@ async def run_terminology(
             _include_summaries=include_summaries,
             _on_draft_progress=on_draft_progress,
         )
+        return {**result, "knowledge_replacement_impacts": impacts}
     logger = get_logger("terminology")
     preparation_started_at = time.perf_counter()
     scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
@@ -703,10 +712,10 @@ async def run_terminology(
         if include_summaries
         and (str(segment["file_id"]), str(segment["part_id"])) in summary_selection
     ]
-    covered_summary_ids = (
-        set()
+    covered_summary_ids, reusable_summary_ids = (
+        (set(), set())
         if scope.force
-        else _summary_covered_segments(
+        else _summary_reusable_fragments(
             project,
             summary_candidates,
             prompt_digests=summary_prompt_digests,
@@ -714,7 +723,7 @@ async def run_terminology(
             target_language=str(config["project"]["target_language"]),
         )
         if summary_candidates
-        else set()
+        else (set(), set())
     )
     work: list[dict[str, Any]] = []
     required_modes: dict[str, set[str]] = {}
@@ -983,7 +992,7 @@ async def run_terminology(
         preflight.exact_checked,
     )
 
-    if include_summaries and scope.force and not scope.dry_run:
+    if include_summaries and not scope.dry_run:
         summary_request_boundaries = {
             (str(item["file_id"]), str(item["part_id"]))
             for item in request_segments
@@ -995,7 +1004,9 @@ async def run_terminology(
         }
         refresh_boundaries = summary_selection & summary_request_boundaries
         if refresh_boundaries:
-            mark_content_summary_fragments_stale(project, refresh_boundaries)
+            mark_content_summary_fragments_stale(
+                project, refresh_boundaries, exclude_ids=reusable_summary_ids
+            )
 
     selected_by_id = {str(item["segment_id"]): item for item in selected}
 
@@ -1048,6 +1059,7 @@ async def run_terminology(
         return {
             "stage": "terminology",
             "dry_run": True,
+            "knowledge_replacement_impacts": impacts,
             "resume_run_id": resume_run_id,
             "active_task_id": task_id,
             "selected": len(selected),
@@ -1549,7 +1561,7 @@ async def run_terminology(
                 envelope_ok and parsed.summary_complete
             )
             async with write_lock:
-                if term_ok and parsed.terms:
+                if term_ok and failed_class is not TerminologyResponseMode.SUMMARY_ONLY:
                     append_jsonl(
                         project,
                         project / "terminology" / "candidates.jsonl",
@@ -1566,6 +1578,7 @@ async def run_terminology(
                             source_order=_candidate_source_order(
                                 unresolved, segment_order, part_original,
                             ),
+                            source_range=source_range(unresolved, selected_by_id, part_original),
                             terms=list(parsed.terms),
                         ),
                     )
@@ -1713,7 +1726,7 @@ async def run_terminology(
                     }
                 )
             async with write_lock:
-                if terms:
+                if response_complete:
                     append_jsonl(
                         project,
                         project / "terminology" / "candidates.jsonl",
@@ -1732,6 +1745,7 @@ async def run_terminology(
                             source_order=_candidate_source_order(
                                 unresolved, segment_order, part_original,
                             ),
+                            source_range=source_range(unresolved, selected_by_id, part_original),
                             terms=terms,
                         ),
                     )

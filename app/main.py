@@ -11,7 +11,6 @@ from typing import Any
 from .errors import AppError, UsageError
 from .execution import Scope, choose_running_run
 from .i18n import cli_language
-from .llm_migration import migrate_llm_resources
 from .locking import project_write_lock
 from .logging_utils import attach_project_log, configure_cli_logging, get_logger
 from .plugins import document_adapter_summaries, load_plugins
@@ -156,6 +155,8 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--dry-run", action="store_true")
         result_choice = command.add_mutually_exclusive_group()
         result_choice.add_argument("--force", action="store_true")
+        if name in {"terminology", "run-all"}:
+            command.add_argument("--confirm-knowledge-replacement", action="store_true", help="确认强制扫描替换相交的旧说明片段；先用 --dry-run 查看影响")
         result_choice.add_argument(
             "--reuse-mixed-fingerprints",
             action="store_true",
@@ -290,7 +291,6 @@ def emit_summary(summary: dict[str, Any]) -> None:
 
 
 def run(argv: list[str] | None = None) -> int:
-    migrate_llm_resources()
     configure_cli_logging()
     logger = get_logger()
     parser = build_parser()
@@ -553,6 +553,7 @@ def run(argv: list[str] | None = None) -> int:
             only_file=args.only_file,
             only_segment=args.only_segment,
             force=args.force,
+            confirm_knowledge_replacement=getattr(args, "confirm_knowledge_replacement", False),
             dry_run=args.dry_run,
         )
         resume_run_id = None

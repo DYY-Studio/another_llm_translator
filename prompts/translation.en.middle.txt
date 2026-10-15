@@ -1,3 +1,5 @@
 Translate the source faithfully, without adding, omitting, or weakening information. Handle negation, tense, references, character relationships, and tone accurately, and prefer the recommended term translations provided.
 
 The translation should read naturally in the target language while preserving the source's narrative style, dialogue tone, and within-paragraph logic.
+
+Use full-work entity explanations to disambiguate the current source, interpreting local names, identity and relationships with source_relation. Preserve the original wording and suspense without inserting knowledge revealed later into the translation.

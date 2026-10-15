@@ -1,11 +1,11 @@
 import { compactSegmentReferences } from "../segmentReferences";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, apiErrorFromResponse } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import { nativeBridgeAvailable, saveExport } from "../native";
 import { useClassicSelection } from "../useClassicSelection";
-import type { ProjectOverview, RunDecision, Segment, SummaryArtifact, SummaryBoundary, TaskOptions, TaskState } from "../types";
+import type { ProjectOverview, RunDecision, Segment, SummariesResponse, SummaryArtifact, SummaryBoundary, TaskOptions, TaskState } from "../types";
 import { fetchSummaries, queryKeys } from "../queries";
 import {
   boundarySelectionState,
@@ -34,6 +34,7 @@ import {
 } from "../summaryWorkspaceState";
 import { Modal } from "./Modal";
 import { RunDialog } from "./RunDialog";
+import { ConfirmDialog } from "./TermDialogs";
 
 interface SummaryWorkspaceProps {
   project: string;
@@ -381,6 +382,7 @@ function SelectionDialog({
 }
 
 export function SummaryWorkspace({ project, projectId, overview, language, task, onTask, onClose }: SummaryWorkspaceProps) {
+  const queryClient = useQueryClient();
   const initial = restoreSummaryWorkspaceState(workspaceCache, projectId);
   const [search, setSearch] = useState(initial.search);
   const [focusedBoundary, setFocusedBoundary] = useState(initial.focusedBoundary);
@@ -396,6 +398,7 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
   const [exportPath, setExportPath] = useState("summary.md");
   const [message, setMessage] = useState<{ text: string; type: "error" | "success" } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [clearOpen, setClearOpen] = useState(false);
   const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(new Set());
   const contentRef = useRef<HTMLDivElement>(null);
   const workspaceProjectRef = useRef(projectId);
@@ -410,6 +413,7 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
     task && (task.stage === "content_summary" || (task.stage === "terminology" && task.include_summaries))
     && ["queued", "running", "cancelling"].includes(task.status),
   );
+  const projectRunning = Boolean(task && ["queued", "running", "cancelling"].includes(task.status));
   const summariesQuery = useQuery({
     queryKey: queryKeys.summaries({ projectId }),
     queryFn: async ({ signal }) => {
@@ -685,6 +689,27 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
     }).catch((reason) => setMessage({ text: errorMessage(reason, language), type: "error" }));
   }
 
+  async function clearSummaries() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      await queryClient.cancelQueries({ queryKey: queryKeys.summaries({ projectId }) });
+      const value = await api<SummariesResponse>(`/api/v1/projects/${project}/summaries/clear`, {
+        method: "POST", body: JSON.stringify({ confirm: true }),
+      });
+      queryClient.setQueryData(queryKeys.summaries({ projectId }), value);
+      setSourceOpen(false);
+      setSourceSegmentIds([]);
+      setClearOpen(false);
+      setMessage({ text: translate("terms.summaryCleared", language), type: "success" });
+    } catch (error) {
+      setClearOpen(false);
+      setMessage({ text: errorMessage(error, language), type: "error" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className={`summary-workspace${sourceOpen ? " summary-source-open" : ""}`}>
       <header className="page-heading summary-action-heading">
@@ -697,6 +722,7 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
           <button className="quiet-button" type="button" disabled={busy || activeSummaryTask || participationSaving || !participation.size} onClick={() => void openSummaryRun("fragment")}>{translate("terms.summaryGenerate", language)}</button>
           <button className="quiet-button" type="button" disabled={busy || activeSummaryTask || participationSaving || !participation.size} onClick={() => void openSummaryRun("full")}>{translate("terms.summaryAggregate", language)}</button>
           <button className="quiet-button" type="button" disabled={busy} onClick={() => { setDialogSelection(new Set()); setDialog("export"); }}>{translate("terms.summaryExport", language)}</button>
+          <button className="danger-button" type="button" disabled={busy || projectRunning || participationSaving || !data?.artifacts.length} onClick={() => setClearOpen(true)}>{translate("terms.clearStage", language)}</button>
         </div>
       </header>
       <div className="summary-layout">
@@ -773,6 +799,15 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
         {sourceOpen && <SourcePanel project={project} boundary={focused} language={language} focusSegmentIds={sourceSegmentIds} onClose={() => setSourceOpen(false)} />}
       </div>
       {dialog === "export" && <SelectionDialog boundaries={boundaries} selected={dialogSelection} artifacts={data?.artifacts ?? []} names={names} language={language} path={exportPath} error={dialogError} onPath={(next) => { setExportPath(next); setDialogError(""); }} onSelection={(next) => { setDialogSelection(next); setDialogError(""); }} onClose={() => { setDialog(null); setDialogError(""); }} onConfirm={() => void exportMarkdown()} />}
+      {clearOpen && <ConfirmDialog
+        language={language}
+        title={translate("terms.summaryClearTitle", language)}
+        text={translate("terms.summaryClearText", language)}
+        confirmLabel={translate("terms.clearStageConfirm", language)}
+        confirming={busy}
+        onCancel={() => setClearOpen(false)}
+        onConfirm={() => void clearSummaries()}
+      />}
       {runOptions && runKind && <RunDialog
         key={`${runKind}-${runOptions.stage}-${runOptions.running_run?.run_id ?? "new"}-${runOptions.mismatched_fingerprint_completed}`}
         options={runOptions}

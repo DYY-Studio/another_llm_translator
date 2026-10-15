@@ -16,6 +16,7 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 
 from .errors import ConfigError, UsageError
 from .locking import project_write_lock
+from .prompt_resources import ProjectPrompts
 from .plugins import (
     document_adapter_replacement_options,
     document_adapter_summaries,
@@ -261,9 +262,10 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         return metadata
 
 
-    def project_repair_needed_read_only(root: Path) -> bool:
+    def project_repair_needed_read_only(root: Path, metadata: dict[str, Any]) -> bool:
+        resources = ProjectPrompts(root, builtin_root=app_root, metadata=metadata)
         prompt_missing = any(
-            not (root / "prompts" / prompt_file(stage, language)).is_file()
+            not resources.path(stage, language).is_file()
             for language in PROMPT_LANGUAGES
             for stage in PROMPT_RESOURCE_STAGES
         )
@@ -302,6 +304,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             4,
             5,
             6,
+            7,
             SCHEMA_VERSION,
         }:
             raise UsageError(
@@ -343,7 +346,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
                     "external": item.parent != projects_root.resolve(),
                     "file_count": metadata["file_count"],
                     "segment_count": metadata["segment_count"],
-                    "repair_needed": project_repair_needed_read_only(item),
+                    "repair_needed": project_repair_needed_read_only(item, metadata),
                 }
             )
         return {
@@ -503,8 +506,8 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         if app.state.tasks.is_project_running(root):
             raise UsageError("项目存在运行中的任务，结束或取消任务后才能修复项目")
         with project_write_lock(root):
-            warnings = ensure_missing_summary_prompts(root, app_root=app_root)
             ensure_supported(root)
+            warnings = ensure_missing_summary_prompts(root, app_root=app_root)
             metadata = read_json(root, root / "project.json")
         remember_project(root)
         selector = project_selector(root, metadata)

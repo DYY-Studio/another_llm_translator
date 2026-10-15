@@ -57,6 +57,7 @@ from .project import (
     load_source_files,
     prompt_file,
 )
+from .prompt_resources import ProjectPrompts, global_prompt_path
 from .prompt_library import (
     delete_prompt_library,
     list_prompt_library,
@@ -205,6 +206,8 @@ def register_resource_routes(
                 temperature=0,
                 max_output_tokens=int(preset.definition["max_output_tokens"]),
                 stream=bool(preset.definition["stream"]),
+                send_temperature=preset.definition["send_temperature"],
+                reasoning_effort=preset.definition["reasoning_effort"],
                 extra_body=preset.definition["extra_body"],
                 extra_headers=preset.definition["extra_headers"],
                 session_id="RUN-VALIDATION",
@@ -215,27 +218,14 @@ def register_resource_routes(
             temporary.unlink(missing_ok=True)
 
     def global_prompt_file(stage: str, language: str) -> Path:
-        return effective_path(
-            f"prompts/{prompt_file(stage, language)}", builtin_root=app_root
-        )
-
-    def effective_prompt_file(root: Path, stage: str, language: str) -> Path:
-        project_path = root / "prompts" / prompt_file(stage, language)
-        if root != app_root and project_path.is_file():
-            return project_path
-        return global_prompt_file(stage, language)
+        return global_prompt_path(stage, language, builtin_root=app_root)
 
     def prompt_languages_for(root: Path) -> dict[str, list[str]]:
-        """Available prompt languages per stage from an effective view."""
-
-        return {
-            stage: [
-                language
-                for language in PROMPT_LANGUAGES
-                if effective_prompt_file(root, stage, language).is_file()
-            ]
-            for stage in PROMPT_RESOURCE_STAGES
-        }
+        if root == app_root:
+            return {stage: [language for language in PROMPT_LANGUAGES if global_prompt_file(stage, language).is_file()]
+                    for stage in PROMPT_RESOURCE_STAGES}
+        resources = ProjectPrompts(root, builtin_root=app_root)
+        return {stage: resources.languages(stage) for stage in PROMPT_RESOURCE_STAGES}
 
     def validate_language(value: object) -> str:
         if value not in PROMPT_LANGUAGES:
@@ -299,7 +289,7 @@ def register_resource_routes(
                 phase: full_prompt(
                     stage, content, resolved, requirements_for(stage), phase=phase
                 )
-                for phase in ("adjudication", "consistency", "final_review")
+                for phase in ("adjudication", "consistency", "final_review", "containment")
             }
             result["assembled_phases"] = assembled_phases
             result["assembled"] = assembled_phases["adjudication"]
@@ -560,6 +550,7 @@ def register_resource_routes(
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         validate_language(language)
         root = project(name)
+        prompt_resources = ProjectPrompts(root, builtin_root=app_root)
         from .stage_runtime import document_prompt_context, document_prompt_requirements
 
         files = load_source_files(root)
@@ -602,24 +593,21 @@ def register_resource_routes(
         result = prompt_view(
             stage,
             language,
-            lambda value: root / "prompts" / prompt_file(stage, value),
-            [
-                value
-                for value in PROMPT_LANGUAGES
-                if (root / "prompts" / prompt_file(stage, value)).is_file()
-            ],
+            lambda value: prompt_resources.path(stage, value),
+            prompt_resources.languages(stage),
             global_file_for=lambda value: global_prompt_file(stage, value),
             translation_file_for=lambda value: (
-                root / "prompts" / prompt_file("translation", value)
+                prompt_resources.path("translation", value)
             ),
             fragment_summary_file_for=(
-                lambda value: root / "prompts" / prompt_file("fragment_summary", value)
+                lambda value: prompt_resources.path("fragment_summary", value)
             )
             if stage == "terminology"
             else None,
             document_requirements=requirements,
         )
 
+        result["inherited"] = prompt_file(stage, language) in prompt_resources.inherited
         result["document_context"] = {
             "file_id": selected["file_id"] if selected else None,
             "groups": list(groups.values()),
@@ -638,7 +626,17 @@ def register_resource_routes(
             raise UsageError("Prompt 不能为空")
         root = project(name)
         with project_write_lock(root):
-            atomic_write_text(root / "prompts" / prompt_file(stage, language), content)
+            ProjectPrompts(root, builtin_root=app_root).save(stage, language, content)
+        return {"saved": True}
+
+    @app.delete("/api/v1/projects/{name}/prompts/{stage}")
+    async def restore_project_prompt(name: str, stage: str, payload: dict[str, Any]) -> dict[str, bool]:
+        if payload.get("confirm") is not True:
+            raise UsageError("必须明确确认恢复 Prompt 继承")
+        language = validate_language(payload.get("language", "zh-CN"))
+        root = project(name)
+        with project_write_lock(root):
+            ProjectPrompts(root, builtin_root=app_root).restore(stage, language)
         return {"saved": True}
 
     @app.get("/api/v1/prompt-library/{stage}/{language}")
@@ -665,7 +663,7 @@ def register_resource_routes(
         if stage == "terminology_decision":
             assembled_phases = {
                 phase: full_prompt(stage, content, language, phase=phase)
-                for phase in ("adjudication", "consistency", "final_review")
+                for phase in ("adjudication", "consistency", "final_review", "containment")
             }
             result["assembled_phases"] = assembled_phases
             result["assembled"] = assembled_phases["adjudication"]
@@ -782,7 +780,8 @@ def register_resource_routes(
                 value = load_decision_preset(path)
                 if value["preset_id"] != preset_id:
                     raise ConfigError("Decision Preset ID 与文件名不一致")
-                values.append({"preset_id": preset_id, "protocol": value["protocol"], "model": value["model"], "valid": True})
+                model = value["llm_preset"] if value["protocol"] == "llm" else value["model"]
+                values.append({"preset_id": preset_id, "protocol": value["protocol"], "model": model, "valid": True})
             except AppError as exc:
                 values.append({"preset_id": preset_id, "valid": False, "error": str(exc)})
         return {"presets": values}
@@ -798,6 +797,9 @@ def register_resource_routes(
         definition = validate_decision_preset(payload)
         if definition["preset_id"] != preset_id:
             raise ConfigError("Decision Preset ID 与请求不一致")
+        if definition["protocol"] == "llm":
+            from .decision_llm import resolve_llm_resources
+            resolve_llm_resources(definition, app_root)
         atomic_write_json(write_user(relative), definition)
         return {"saved": True}
 
@@ -841,7 +843,7 @@ def register_resource_routes(
                         "adapter_id": preset.adapter_id,
                         "model": preset.definition["model"],
                         "stream": bool(preset.definition["stream"]),
-                        "temperature_supported": load_json_adapter(effective_path(f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root)).capabilities["temperature"],
+                        "temperature_supported": load_json_adapter(effective_path(f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root)).capabilities["temperature"] and preset.definition["send_temperature"],
                         "selected": preset.preset_id == selected,
                         "valid": True,
                         "digest": preset.digest,
@@ -887,6 +889,13 @@ def register_resource_routes(
             project_config = load_config(item / "config.toml")
             if project_config["llm"].get("preset") == preset_id:
                 raise UsageError(f"不能删除项目 {item.name} 正在使用的 LLM Preset")
+        decisions = await list_decision_presets()
+        for item in decisions["presets"]:
+            if item.get("protocol") != "llm":
+                continue
+            definition = await get_decision_preset(item["preset_id"])
+            if definition["protocol"] == "llm" and definition["llm_preset"] == preset_id:
+                raise UsageError(f"不能删除 Decision Preset {item['preset_id']} 正在使用的 LLM Preset")
         user_file = user_root() / "llm_presets" / f"{preset_id}.json"
         builtin_file = app_root / "llm_presets" / f"{preset_id}.json"
         if user_file.is_file():
@@ -911,6 +920,8 @@ def register_resource_routes(
             temperature=0.2,
             max_output_tokens=int(preset.definition["max_output_tokens"]),
             stream=bool(preset.definition["stream"]),
+            send_temperature=preset.definition["send_temperature"],
+            reasoning_effort=preset.definition["reasoning_effort"],
             extra_body=preset.definition["extra_body"],
             extra_headers=preset.definition["extra_headers"],
             session_id="RUN-PREVIEW",
@@ -966,19 +977,30 @@ def register_resource_routes(
         )
         timeout = float(preset.definition["request_timeout_seconds"])
         proxy = (connection.read()["proxy_url"] if plan else str(preset.definition["proxy_url"])) or None
+        models = []
+        query: dict[str, str] = {}
+        cursors: set[tuple[tuple[str, str], ...]] = set()
         try:
             async with httpx.AsyncClient(timeout=timeout, proxy=proxy, **({"trust_env": False} if plan else {})) as client:
-                response = await client.get(url, headers=headers)
+                while True:
+                    response = await client.get(url, headers=headers, params=query)
+                    if response.status_code >= 400:
+                        raise UsageError(f"模型列表请求失败：HTTP {response.status_code}")
+                    try:
+                        data = response.json()
+                    except ValueError as exc:
+                        raise UsageError("模型列表响应不是合法 JSON") from exc
+                    models.extend(adapter.parse_models_response(data))
+                    next_query = adapter.next_models_query(data)
+                    if next_query is None:
+                        break
+                    cursor = tuple(sorted(next_query.items()))
+                    if cursor in cursors:
+                        raise UsageError("模型列表返回重复分页游标")
+                    cursors.add(cursor)
+                    query = next_query
         except (httpx.HTTPError, OSError) as exc:
             raise UsageError(f"模型列表请求失败：{exc}") from exc
-        if response.status_code >= 400:
-            raise UsageError(f"模型列表请求失败：HTTP {response.status_code}")
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise UsageError("模型列表响应不是合法 JSON") from exc
-        try:
-            models = adapter.parse_models_response(data)
         except ExternalError as exc:
             raise UsageError(str(exc)) from exc
         return {"models": models, "count": len(models)}

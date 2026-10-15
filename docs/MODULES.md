@@ -57,18 +57,20 @@ FastAPI 应用装配、鉴权、生命周期、静态资源和 route 注册。�
 
 - `web_chatgpt_routes.py`：ChatGPT 状态、本机连接管理与 Plan 局域网会话边界。
 - `web_resource_routes.py`：全局配置、Prompt、Adapter、Preset、凭据和服务设置。
-- `web_decision_prompt_routes.py`：插件声明驱动的 Decision 提示词编辑与命名模板。
+- `web_decision_prompt_routes.py`：内置与插件声明驱动的 Decision 提示词编辑与命名模板。
 - `web_project_routes.py`：项目创建、打开、删除、File 管理与替换。
 - `web_segment_routes.py`：Segment 浏览、编辑和阶段结果重置。
+- `web_repetition_routes.py`：重复译文审查预检、草案读取、人工选择、应用和撤销入口。
 - `web_term_routes.py`：术语扫描、编辑、交换、发布与自动决策入口。
 - `web_summary_routes.py`：内容概括选择、运行、聚合、阅读和 Markdown 导出。
 - `web_task_routes.py`：阶段任务启动、状态、诊断和取消。
-- `web_continuous.py`：连续运行阶段区间、预检快照、阶段选项摘要和运行编排；复用共享阶段入口，不拥有第二套阶段语义。
+- `web_continuous.py`：连续运行阶段区间、预检快照、阶段选项摘要和运行编排；复用共享阶段入口，按显式选项插入一致性审查，在阶段边界装配证据并判断自动应用或待审停止，不拥有第二套阶段语义。
 - `web_export_routes.py`：项目导出、下载和桌面保存位置。
 - `web_storage_routes.py`：存储占用查询以及需要明确确认的可清理项入口。
 
 Route 只校验 HTTP 输入并调用共享后端。请求模型集中在 `web_payloads.py`；Web 进程内项目缓存
 和打开状态位于 `web_store.py`；任务生命周期位于 `web_tasks.py`。
+术语资源的同步读写由 FastAPI 线程池执行，写操作继续使用项目写锁。
 
 ## 4. 项目、存储与导出
 
@@ -80,7 +82,7 @@ Route 只校验 HTTP 输入并调用共享后端。请求模型集中在 `web_pa
 ### `app/sqlite_storage.py`
 
 项目数据库的唯一持久化实现，负责 schema 初始化/迁移、事务、File/Segment、术语、阶段结果、
-Run 索引、请求元数据共享、Adapter 状态无损压缩和内容概括记录；集中保存按摘要值去重的概括源文本快照，读取时还原生成时原文与切片身份。
+Run 索引、术语说明的事务性升级、重复译文应用与撤销事务、请求元数据共享、Adapter 状态及术语载荷无损压缩和内容概括记录；集中保存按摘要值去重的概括源文本快照，读取时还原生成时原文与切片身份。
 维护与源内容、Adapter 状态同事务更新的 Segment 格式计数投影，供 Web 读取，避免还原完整 Adapter 状态。
 批量解析应用正文的精确引用，业务副本与持久化载荷分离。调用者通过明确方法读写，不在 route 或阶段模块中直接拼接 SQL。
 
@@ -115,7 +117,7 @@ Run 索引、请求元数据共享、Adapter 状态无损压缩和内容概括�
 拥有 Scope、Chunk 规划、Run 生命周期、Token/用量汇总、有限并发调度和取消传播。Chunk 只在
 本次执行中存在；该模块不得用 Chunk 推断持久进度。
 
-内容处理 Prompt 在此按静态字段、任务和结果协议声明装配，联合执行按标识去重；设置预览复用同一入口。术语决策保留专用语义。
+各内容阶段及术语决策子阶段的 Prompt 在此按静态字段、任务和结果协议声明装配，联合模式声明参与阶段与附加协议，组装时按标识去重；设置预览与实际请求复用同一入口。术语决策输出约束由 `term_decision_protocol.py` 提供。
 
 ### `app/stage_runtime.py`
 
@@ -137,6 +139,12 @@ Run 索引、请求元数据共享、Adapter 状态无损压缩和内容概括�
 
 内容概括复用阶段执行、LLM、存储和 Document Adapter 边界，不建立另一套项目或请求框架。
 
+### 重复译文一致性审查
+
+- `repetition_consistency.py`：完整 Segment 候选检测、可选标点差异过滤、预算预检、Decision 初筛、按预算合并重复组的上下文比较、逐组响应校验、局部格式重试及完整组拆分、分阶段检查点及不可变草案保存。原文上下文与术语正文按内容去重，实体说明来源关系按各次局部上下文计算；资源预检与请求复用同一提示词、Decision 资源解析和执行指纹装配，分离输入证据与执行指纹，步骤来源引用 Run 与 continuation 快照。复用共享 Run 收尾、空响应拆分预算、模型客户端与有限并发调度。
+- `repetition_drafts.py`：人工选择与应用成员子集校验、输入依赖检查、译文校验、应用与撤销。独立应用入口取得项目写锁，连续任务复用持锁应用核心；生命周期、审核选择及实际改动引用存入 Run，正文从共享草案译文读取，避免为撤销保留历史结果链。
+- `web/src/components/RepetitionReview.tsx`：按需加载的草案审核面板，重复组及出现位置分页，上下文展开后渲染。
+
 ## 6. LLM 通信
 
 ### ChatGPT 连接
@@ -146,8 +154,12 @@ Run 索引、请求元数据共享、Adapter 状态无损压缩和内容概括�
 
 ### `app/llm_adapter.py`
 
-声明式 JSON LLM Adapter 的加载、严格校验、模板渲染、能力摘要、固定连接约束、响应指针和 SSE 规则。协议字段以
+声明式 JSON LLM Adapter 的加载、严格校验、模板渲染、JSON Schema 请求映射、能力摘要、固定连接约束、响应指针和 SSE 规则。协议字段以
 [Adapter 契约](ADAPTERS.md)为准。
+
+### `app/llm_native.py`
+
+原生供应商响应协议：正文聚合、结束原因、流内错误和精确用量计数。由 Adapter 的响应格式选择，不拥有 HTTP 请求、调度或阶段状态。
 
 ### `app/llm_preset.py` 与 `app/llm_keys.py`
 
@@ -200,12 +212,16 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 按上下文预算缩减调用方提供的上文，向实时诊断报告请求生命周期。
 通过公共 DecisionService 提供结构化决策调用，不拥有业务规则或结果提交。
 
+`decision_llm.py` 解析并冻结 LLM Decision 使用的 Preset、Adapter 与系统提示词，复用
+`LLMClient` 执行请求，按问题生成可选 JSON Schema，将 TypeSafe 格式响应交回统一 Decision 校验器。提示词资源、项目覆盖及模板库仍由共享提示词模块管理。
+
 ## 8. 术语
 
 - `term_library.py`：术语规范化、候选合并、发布库、override 和组关系；统一检测组主 Alias 重叠，并记录归组移除的 Alias 供发布边界同步。
+- `term_knowledge.py`：扫描片段来源、归属及生命周期、引用校验、实体聚合、有效性判断和事务说明操作；管理操作内证据复用、持久库与运行时投影边界，以及模型请求的来源区间表示、完整实体预算分批、响应引用隔离与部分重试。复用候选记录与发布库，不新增表。
 - `term_exchange.py`：JSON/CSV 交换格式的完整校验、导入与导出。
-- `term_matching.py`：运行时逐 Segment 匹配和注入选择，不持久化 occurrence。
-- `term_decision.py`：自动术语决策执行入口和阶段编排。
+- `term_matching.py`：运行时逐 Segment 匹配和注入选择，在阶段内复用实体来源索引，生成请求相对位置与实体内证据编号，不持久化 occurrence。
+- `term_decision.py`：自动术语决策执行入口、阶段编排、按完整依赖组件保留终审失败成果和检查点续用。
 - `term_decision_batches.py`：批次规划与关联项分组。
 - `term_decision_protocol.py`：模型输入输出的解析与严格校验。
 - `term_decision_rules.py`：确定性决策、冲突和保护规则，以及供模型复核的包含关系候选。
@@ -258,4 +274,8 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 
 ### `app/decision_prompt.py`
 
-声明并校验插件拥有的 Decision 提示词，解析项目／全局覆盖与插件默认内容，加载运行快照。固定选项来自插件声明；动态问题定位与结果处理属于校验器。
+声明并校验内置任务与插件拥有的 Decision 提示词，解析项目／全局覆盖与声明默认内容，加载运行快照。固定选项来自声明；动态问题定位与结果处理属于调用任务或校验器。
+
+### `app/prompt_resources.py`
+
+解析显式 LLM Prompt 继承，按阶段和语言统一项目／全局资源定位。设置预览、阶段装配、预检、指纹及模板修复复用此解析；恢复与保存更新现有项目元数据中的继承声明。

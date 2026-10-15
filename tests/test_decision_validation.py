@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.helpers import write_term_library
 
 import json
 from pathlib import Path
@@ -81,7 +82,7 @@ async def test_alignment_uses_plain_ruby_evidence_and_preserves_finding_offsets(
 async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypatch, choice, confidence, repairs, status, warning_threshold):
     project = await create_project(tmp_path, "Alice arrived.")
     metadata = read_json(project, project / "project.json")
-    write_json(project, project / "terminology" / "terms.json", record_header(
+    write_term_library(project, project / "terminology" / "terms.json", record_header(
         "terminology_library", metadata["project_id"], terms_revision=1,
         terms=[dict(record_id="TERM-A", source="Alice", normalized="alice", category="人名",
                     description="A character", preferred_translation="爱丽丝", aliases=[],
@@ -149,7 +150,7 @@ async def test_translation_decision_context_toggle_and_count(tmp_path, monkeypat
     from app.sqlite_storage import read_segment_sources
     project = await create_project(tmp_path, "前文一\n前文二\nAlice arrived.")
     metadata = read_json(project, project / "project.json")
-    write_json(project, project / "terminology" / "terms.json", record_header(
+    write_term_library(project, project / "terminology" / "terms.json", record_header(
         "terminology_library", metadata["project_id"], terms_revision=1,
         terms=[dict(record_id="TERM-A", source="Alice", normalized="alice", category="人名",
                     description="A character", preferred_translation="爱丽丝", aliases=[],
@@ -305,7 +306,7 @@ async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monke
 async def test_alignment_phase_prevents_invalid_terminology_requests(tmp_path, monkeypatch, gate, term_requests, status):
     project = await create_project(tmp_path, "Alice one.\nAlice two.\nAlice three.\nAlice four.")
     metadata = read_json(project, project / "project.json")
-    write_json(project, project / "terminology" / "terms.json", record_header(
+    write_term_library(project, project / "terminology" / "terms.json", record_header(
         "terminology_library", metadata["project_id"], terms_revision=1,
         terms=[dict(record_id="TERM-A", source="Alice", normalized="alice", category="人名",
                     description="Character", preferred_translation="爱丽丝", aliases=[], group_primary=None, conflicts={})]))
@@ -438,7 +439,7 @@ async def test_alignment_uses_complete_segments_in_split_and_joint_requests(tmp_
 async def test_final_terminology_phase_repairs_only_affected_segments(tmp_path):
     project = await create_project(tmp_path, "One.\nAlice.")
     metadata = read_json(project, project / "project.json")
-    write_json(project, project / "terminology" / "terms.json", record_header(
+    write_term_library(project, project / "terminology" / "terms.json", record_header(
         "terminology_library", metadata["project_id"], terms_revision=1,
         terms=[dict(record_id="TERM-A", source="Alice", normalized="alice", category="人名",
                     description=None, preferred_translation="爱丽丝", aliases=[], group_primary=None, conflicts={})]))

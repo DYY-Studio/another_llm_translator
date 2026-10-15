@@ -65,3 +65,56 @@ def test_builtin_examples_cover_both_protocols(tmp_path):
             response = client.get(f"/api/v1/global/decision-presets/{item['preset_id']}")
             assert response.status_code == 200
             assert response.json()["credential"]["kind"] == "environment"
+
+
+def test_llm_decision_preset_and_shared_prompt_resources(tmp_path):
+    root = make_app_root(tmp_path)
+    with TestClient(create_app(app_root=root, projects_root=tmp_path / "projects", log_path=tmp_path / "app.log")) as client:
+        path = "/api/v1/global/decision-presets/judge"
+        value = dict(preset_id="judge", protocol="llm", llm_preset="default", prompt_language="en")
+        assert client.put(path, json=value).status_code == 200
+        assert client.get(path).json() == value
+        assert client.put(path, json={**value, "llm_preset": "missing"}).status_code == 400
+        prompt = client.get("/api/v1/global/prompts/decision_llm?language=en")
+        assert prompt.status_code == 200
+        assert prompt.json()["content"] in prompt.json()["assembled"]
+        assert "probabilities" in prompt.json()["assembled"]
+        assert client.put("/api/v1/prompt-library/decision_llm/en/custom", json={"content": "Use evidence"}).status_code == 200
+
+
+def test_llm_decision_project_override_and_run_snapshot(tmp_path):
+    from app.config import load_run_config, resolve_project_config
+    from app.execution import _write_llm_snapshots, stage_fingerprint
+    from app.prompt_resources import ProjectPrompts
+    from app.sqlite_storage import atomic_write_json
+
+    root = make_app_root(tmp_path)
+    source = tmp_path / "source.txt"
+    source.write_text("Evidence")
+    projects = tmp_path / "projects"
+    project, _ = init_project([str(source)], name="sample", app_root=root, projects_root=projects)
+    preset = dict(preset_id="judge", protocol="llm", llm_preset="default", prompt_language="en")
+    atomic_write_json(root / "decision_presets" / "judge.json", preset)
+    config = load_config(project / "config.toml")
+    config["decision"]["preset"] = "judge"
+    config["validation"]["translation"]["validators"] = ["segment_alignment"]
+    with TestClient(create_app(app_root=root, projects_root=projects, log_path=tmp_path / "app.log")) as client:
+        path = "/api/v1/projects/sample/prompts/decision_llm"
+        assert client.put(path, json={"language": "en", "content": "Project decision policy"}).status_code == 200
+        preview = client.get(path + "?language=en")
+        assert preview.status_code == 200
+        assert "Project decision policy" in preview.json()["assembled"]
+        resolved = resolve_project_config(config, project=project, presets_root=root)
+        fingerprint = stage_fingerprint(resolved, "translation", {"translation": "en"})
+        run = tmp_path / "run"
+        run.mkdir()
+        (run / "config.toml").write_text(dump_config(config))
+        _write_llm_snapshots(run, resolved)
+        ProjectPrompts(project, builtin_root=root).save("decision_llm", "en", "New policy")
+        changed = resolve_project_config(load_config(run / "config.toml"), project=project, presets_root=root)
+        assert stage_fingerprint(changed, "translation", {"translation": "en"}) != fingerprint
+        frozen = load_run_config(run)
+        assert frozen["_decision_preset_definitions"]["judge"] == resolved["_decision_preset_definitions"]["judge"]
+        response = client.request("DELETE", path, json={"confirm": True, "language": "en"})
+        assert response.status_code == 200
+        assert client.get(path + "?language=en").json()["inherited"] is True

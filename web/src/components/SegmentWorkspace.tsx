@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
@@ -6,6 +6,7 @@ import type {
   ProjectOverview,
   Segment,
   SegmentDetail,
+  SegmentTermMatch,
   SegmentQueryResponse,
 } from "../types";
 import {
@@ -15,6 +16,7 @@ import {
 } from "../segmentReadState";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
+const RepetitionReview = lazy(() => import("./RepetitionReview").then(module => ({ default: module.RepetitionReview })));
 
 interface WorkspaceCacheEntry {
   orderedIds: string[];
@@ -143,6 +145,7 @@ export function SegmentWorkspace({
       .map((key) => [key, translate(`status.${key}`, language)]),
   );
   const selection = useClassicSelection();
+  const [repetitionOpen, setRepetitionOpen] = useState(false);
   const [boundary, setBoundary] = useState("all");
   const [status, setStatus] = useState("all");
   const [search, setSearch] = useState("");
@@ -579,6 +582,18 @@ export function SegmentWorkspace({
   }
 
   const review = stage === "translation" || !selected ? null : selected.reviews[stage];
+  const matchedTerms = focusedDetail?.segment_id === selected?.segment_id ? focusedDetail?.matched_terms ?? [] : [];
+  const termMembers = new Map<string, SegmentTermMatch[]>();
+  for (const term of matchedTerms) {
+    if (!term.primary_source || term.group_claims?.length) continue;
+    const members = termMembers.get(term.primary_source) ?? [];
+    members.push(term);
+    termMembers.set(term.primary_source, members);
+  }
+
+  if (repetitionOpen && stage === "translation") return <Suspense fallback={<section className="term-decision-workspace">{translate("common.loading", language)}</section>}><RepetitionReview key={projectId} project={project} files={overview.files} language={language}
+        onClose={() => setRepetitionOpen(false)} onChanged={async () => { await onRefresh(); await reloadIndex(); }} /></Suspense>;
+
   return (
     <div className="workspace">
       <section className="segment-browser">
@@ -605,6 +620,7 @@ export function SegmentWorkspace({
           <div className="batch-toolbar segment-batch-toolbar">
             <span>{translate("workspace.selectedCount", language, { selected: selectedVisibleIds.length, total })}</span>
             <div className="segment-batch-actions">
+              {stage === "translation" && <button className="quiet-button repetition-entry" onClick={() => setRepetitionOpen(true)}>{translate("repetition.title", language)}</button>}
               {stage !== "translation" && (
                 <>
                   <button className="quiet-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "apply", scope: "selected" })}>{translate("workspace.applySelected", language)}</button>
@@ -679,15 +695,15 @@ export function SegmentWorkspace({
                 <p>{translate("workspace.segmentTermsEmpty", language)}</p>
               ) : (
                 <div className="segment-term-list">
-                  {focusedDetail.matched_terms.map((term) => (
-                    <button className="segment-term" type="button" key={term.source} aria-label={term.source} onClick={() => onFindTerm(term.source)}>
-                      <span className="segment-term-heading"><strong>{term.source}</strong><span>{term.preferred_translation || translate("workspace.noPreferredTranslation", language)}</span>{term.category && <small>{term.category}</small>}</span>
-                      {term.aliases.length > 0 && <span className="segment-term-detail">{translate("workspace.matchedAliases", language, { aliases: term.aliases.join(", ") })}</span>}
-                      {term.primary_source && <span className="segment-term-detail">{translate("terms.groupPrimaryBadge", language, { source: term.primary_source })}</span>}
-                      {term.group_claims?.map((claim) => <span className="segment-term-detail warning-text" key={JSON.stringify(claim)}>{translate("workspace.termClaim", language, { alias: claim.alias, entry: claim.entry, owner: claim.claimed_by })}</span>)}
-                      {term.description && <span className="segment-term-description">{term.description}</span>}
-                    </button>
-                  ))}
+                  {matchedTerms.filter((term) => !term.primary_source || term.group_claims?.length).map((term) => {
+                    const members = termMembers.get(term.source) ?? [];
+                    return (
+                      <div className="segment-term-group" key={term.source} role={members.length ? "group" : undefined} aria-label={members.length ? term.source : undefined}>
+                        <SegmentTermRow term={term} role={members.length ? "primary" : undefined} language={language} onFindTerm={onFindTerm} />
+                        {members.length > 0 && <div className="segment-term-members">{members.map((member) => <SegmentTermRow key={member.source} term={member} role="member" language={language} onFindTerm={onFindTerm} />)}</div>}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </details>
@@ -747,6 +763,26 @@ export function SegmentWorkspace({
         />
       )}
     </div>
+  );
+}
+
+function SegmentTermRow({ term, role, language, onFindTerm }: {
+  term: SegmentTermMatch;
+  role?: "primary" | "member";
+  language: Language;
+  onFindTerm: (source: string) => void;
+}) {
+  return (
+    <button className="segment-term" type="button" aria-label={term.source} onClick={() => onFindTerm(term.source)}>
+      <span className="segment-term-heading">
+        {role && <span className="segment-term-role">{translate(role === "primary" ? "workspace.termPrimary" : "workspace.termMember", language)}</span>}
+        <strong>{term.source}</strong><span>{term.preferred_translation || translate("workspace.noPreferredTranslation", language)}</span>{term.category && <small>{term.category}</small>}
+        {!!term.group_claims?.length && <span className="segment-term-role disputed">{translate("workspace.termRelationPending", language)}</span>}
+      </span>
+      {term.aliases.length > 0 && <span className="segment-term-aliases"><span>{translate("workspace.matchedAliases", language)}</span>{term.aliases.map((alias) => <span className="segment-term-alias" key={alias}>{alias}</span>)}</span>}
+      {term.group_claims?.map((claim) => <span className="segment-term-detail warning-text" key={JSON.stringify(claim)}>{translate("workspace.termClaim", language, { alias: claim.alias, entry: claim.entry, owner: claim.claimed_by })}</span>)}
+      {term.description && <span className="segment-term-description">{term.description}</span>}
+    </button>
   );
 }
 

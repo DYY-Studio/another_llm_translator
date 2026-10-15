@@ -22,6 +22,7 @@
   .segment-batch-toolbar:not(.term-actions-toolbar) > span:first-child { margin-right: 0; }
   .segment-batch-toolbar:not(.term-actions-toolbar) .segment-batch-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .segment-batch-toolbar:not(.term-actions-toolbar) .segment-batch-actions button { min-width: 0; width: 100%; }
+  .segment-batch-actions .repetition-entry { grid-column: 1 / -1; }
   .term-actions-toolbar { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; }
   .term-actions-toolbar > span:first-child { margin-right: 0; padding-top: 8px; }
   .term-actions-toolbar .segment-batch-actions { display: flex; }
@@ -169,7 +170,8 @@
   .segment-list, .term-list { flex: 0 0 clamp(320px, 48svh, 460px); min-height: 320px; }
   .term-editor > .page-heading { padding: 22px 16px 0; }
   .term-tabs { padding: 0 16px; }
-  .term-edit-panel { padding: 18px 14px 50px; }
+  .term-edit-panel { padding: 18px 14px; }
+  .term-actions { padding: 18px 14px; }
   .term-group-panel { padding: 18px 14px 50px; }
   .term-group-row { grid-template-columns: minmax(0, 1fr) auto; }
   .term-group-row > :last-child { grid-column: 2; justify-self: end; }

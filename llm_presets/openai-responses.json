@@ -1,5 +1,5 @@
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "preset_id": "openai-responses",
   "adapter_id": "openai-responses",
   "base_url": "https://api.openai.com/v1",
@@ -21,5 +21,9 @@
   "credential": {
     "kind": "environment",
     "name": "OPENAI_API_KEY"
-  }
+  },
+  "send_temperature": true,
+  "reasoning_effort": null,
+  "extra_headers": {},
+  "json_schema_enabled": false
 }

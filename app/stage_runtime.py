@@ -68,6 +68,7 @@ from .project import (
     load_source_files,
     prompt_file,
 )
+from .prompt_resources import ProjectPrompts
 from .sqlite_storage import (
     latest_stage_states,
     resolve_stage_result_texts,
@@ -254,6 +255,7 @@ def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
         "only_segment": None if force_all else scope.only_segment,
         "segment_ids": None if force_all else list(scope.segment_ids or []) or None,
         "force": scope.force,
+        **({"confirm_knowledge_replacement": True} if scope.confirm_knowledge_replacement else {}),
     }
 
 
@@ -530,6 +532,7 @@ def _split_oversized_preflight(
             except ConfigError as exc:
                 fail_planning(exc)
                 raise
+            accepted["_original_segment_id"] = str(segment["segment_id"])
             accepted["_source_offset"] = source_offset
             source_offset += len(str(accepted["source"]))
             request_segments.append(accepted)
@@ -1118,8 +1121,9 @@ def _prompt_language_for_stages(
 def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
     """Per-language middle content digests; missing languages are omitted."""
     digests: dict[str, str] = {}
+    resources = ProjectPrompts(project)
     for language in PROMPT_LANGUAGES:
-        path = project / "prompts" / prompt_file(stage, language)
+        path = resources.path(stage, language)
         if path.is_file():
             digests[language] = hashlib.sha256(path.read_bytes()).hexdigest()
     return digests
@@ -1138,10 +1142,11 @@ def prompt_preflight(
     language = requested or resolve_language()
     if language not in SUPPORTED_LANGUAGES:
         raise UsageError(f"不支持的 Prompt 语言：{language}", reason="prompt_language_missing")
+    resources = ProjectPrompts(project)
     missing = [
         prompt_file(stage, language)
         for stage in stages
-        if not (project / "prompts" / prompt_file(stage, language)).is_file()
+        if not resources.path(stage, language).is_file()
     ]
     return {
         "ok": not missing,
@@ -1189,29 +1194,10 @@ def _prompt_factory(
     )
     language = _prompt_language_for_stages(project, language, required_stages)
     prompt_stage = "fragment_summary" if summary_only else stage
-    name = prompt_file(prompt_stage, language)
-    try:
-        middle = (project / "prompts" / name).read_text(encoding="utf-8")
-    except OSError as exc:
-        raise StorageError(f"无法读取 Prompt：{name}: {exc}") from exc
-
-    fragment_summary_middle: str | None = None
-    if summary_mode and not summary_only:
-        fragment_name = prompt_file("fragment_summary", language)
-        try:
-            fragment_summary_middle = (
-                project / "prompts" / fragment_name
-            ).read_text(encoding="utf-8")
-        except OSError as exc:
-            raise StorageError(f"无法读取 Prompt：{fragment_name}: {exc}") from exc
-
-    translation_middle = (
-        (project / "prompts" / prompt_file("translation", language)).read_text(
-            encoding="utf-8"
-        )
-        if translation_mode
-        else None
-    )
+    resources = ProjectPrompts(project)
+    middle = resources.read(prompt_stage, language)
+    fragment_summary_middle = resources.read("fragment_summary", language) if summary_mode and not summary_only else None
+    translation_middle = resources.read("translation", language) if translation_mode else None
 
     def build(requirements: Iterable[str]) -> str:
         return full_prompt(

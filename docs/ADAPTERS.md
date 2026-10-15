@@ -17,7 +17,8 @@
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
+  "response_format": "json-pointer",
   "adapter_id": "openai-compatible",
   "endpoint": "/chat/completions",
   "headers": {
@@ -45,7 +46,7 @@
 }
 ```
 
-该字段可省略；内置 OpenAI-compatible 定义按上述顺序兼容两种字段。已有配置仍可
+该字段用于 JSON Pointer 模式；原生 Chat Completions 模式按上述顺序读取两种字段。JSON Pointer 定义可
 使用单数的 `response_reasoning_content_pointer`，但单数与复数不能同时配置。候选
 路径只在前一路径缺失时继续尝试；首个存在的 `null` 表示没有 reasoning，多个字段
 不会拼接。
@@ -74,6 +75,41 @@ Adapter 摘要通过 `capabilities` 返回这些能力，Preset 编辑器据此�
 `proxy_source: "preset" | "connection"`；保存与执行必须满足这些约束。
 当前授权连接代理由 `chatgpt` 凭据提供。
 连接描述不替代凭据模块对令牌目标和授权的安全校验。
+
+### JSON Schema 结构化输出
+
+Adapter 可选 `structured_output` 是 JSON Pointer 到请求值模板的非空映射。模板仅支持独占字符串值的
+`${json_schema}`，用于插入任务声明的完整 Schema。例如 Chat Completions：
+
+```json
+{
+  "structured_output": {
+    "/response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "structured_response",
+        "strict": true,
+        "schema": "${json_schema}"
+      }
+    }
+  }
+}
+```
+
+宿主复用请求字段写入逻辑按 Pointer 插入，保留同一父对象内的其他字段；与 Adapter body、流式 body
+或 Extra Body 的目标字段冲突时失败。`capabilities.json_schema` 表示 Adapter 是否声明此能力。
+内置 OpenAI Chat Completions 使用 `response_format`，Responses 使用 `text.format`，见
+[OpenAI 结构化输出](https://developers.openai.com/api/docs/guides/structured-outputs)；Anthropic 使用
+`output_config.format`，见 [Claude 结构化输出](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)；
+Gemini Generate Content 使用 `generationConfig.responseMimeType` 与 `responseJsonSchema`，见
+[GenerationConfig](https://ai.google.dev/api/generate-content#v1beta.GenerationConfig)。具体模型或端点不支持时明确失败，不改用其他模式。
+
+LLM Preset 的可选布尔值 `json_schema_enabled` 默认 false，缺字段的已有 Preset 视为关闭，
+可在编辑器手动开启并保存，资源版本不变。开启后要求 Adapter 声明能力。
+`LLMClient.chat` 和 Adapter `build_request` 接收可选 `json_schema`；客户端仅在 Preset 开启且任务
+提供 Schema 时发送约束。任务未声明 Schema 时沿用自身输出契约，JSONL 阶段不作格式转换。
+调用方按同一 Adapter 渲染包含 Schema 的完整请求进行 Token 估算；请求正文与 Schema 一同进入诊断及已启用的 Debug 保存。
+Preset 开关和 Adapter 声明随现有资源快照保存并参与指纹。Schema 约束不替代任务自己的结果校验。
 
 ### ChatGPT Plan 连接
 
@@ -120,7 +156,7 @@ ID Token 验证签名、issuer、audience、expiry 和 nonce，授权以返回 s
 
 ### SSE 流式规则（可选）
 
-schema 3 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter 摘要中以
+schema 4 的 JSON Pointer Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter 摘要中以
 `streaming_supported` 报告该能力。当前唯一支持的传输是 SSE：
 
 ```json
@@ -180,9 +216,11 @@ schema 3 的 Adapter 可以增加 `streaming` 对象；宿主在全局 Adapter �
 
 ### 响应边界
 
-`response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串或 null；null 规范化为空正文。只有明确命中声明的截断或拒绝结束原因时，正文路径缺失才规范化为空正文。JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`-1` 为最后一个元素、`-2` 为倒数第二。
+JSON Pointer 模式的 `response_content_pointer` 是必需的 RFC 6901 JSON Pointer，结果必须是字符串或 null；null 规范化为空正文。只有明确命中声明的截断或拒绝结束原因时，正文路径缺失才规范化为空正文。JSON Pointer 的数组索引 token 支持负索引 `-N`（RFC 6901 扩展）：`-1` 为最后一个元素、`-2` 为倒数第二。
 
-当思考块总是排在最前、文本块在最后时 （Anthropic `content`、Gemini `parts`），负索引可稳定取到最后文本块。未命中已声明的截断或拒绝结束原因时，越界、空数组与普通缺失路径同样快速失败。可选的 `response_reasoning_content_pointer` 结果必须是字符串或 null。
+原生 `response_format` 可选 `chat-completions`、`responses`、`anthropic`、`gemini`；宿主聚合各协议的全部正文文本，Gemini 仅取首个 candidate 并排除 thought。原生模式不能同时声明正文、思考正文、结束原因或 usage 映射。原生 streaming 只声明 `transport`、`endpoint`、可选 `request_body` 和 `allow_clean_eof`，事件解析由响应格式决定。
+
+Chat Completions 使用 `[DONE]`，Responses 使用 completed/incomplete，Anthropic 使用 message_stop，Gemini 收到 finishReason 后继续读到自然 EOF，以收集后续 usage。拒绝响应优先失败，即使已经收到部分正文，也不触发空正文重试。截断响应进入已有的有界截断重试策略。
 
 也可使用非空的 `response_reasoning_content_pointers` 数组声明有序候选路径：路径缺失时继续尝试，首个存在的 `null` 规范化为 null，字段存在但类型错误时当前请求失败，不猜测或拼接多个字段。
 
@@ -238,6 +276,7 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
   ID 不一致时立即拒绝；Key 缺失、格式错误或序号越界均立即报告。
 - Preset 编辑器保留可手工输入的模型 ID；发现结果在字段下方按名称或 ID
   本地搜索。选择结果只更新当前草稿并收起列表，必须显式保存才会生效。
+- 原生 Anthropic 与 Gemini 格式读取全部分页，重复游标或任一页失败时整体报错；Gemini 仅保留支持 `generateContent` 的模型。
 - `response_models_pointer` 指向模型条目数组；`response_model_id` 是条目内
   必填键名；`response_model_display` 与 `response_model_strip_prefix` 可选。
 - 展示名缺失时回退为模型 ID；`response_model_strip_prefix` 从模型 ID 前缀
@@ -245,7 +284,7 @@ Adapter 可声明可选的 `models` 规格。宿主只在用户手动触发时�
 - 缺少 `models` 规格、缺失或格式错误的 credential、HTTP 错误或网络异常都明确
   报告，不猜测、不 fallback。请求使用 Preset 的代理与超时设置。
 
-Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为规范化计数：
+JSON Pointer Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为规范化计数：
 
 ```json
 {
@@ -261,34 +300,26 @@ Adapter 可声明可选的 `usage` 映射，把端点响应中的消耗换算为
   任务标记为 partial；保留已观测计数但吞吐量不可用，不使用本地启发式估算冒充
   端点账单。完全没有可观测 usage 时显示 unavailable。
 - 宿主在每个尝试收到 usage 后累计规范化计数，任务结束时写入任务摘要与 Run
-  `manifest.json` 的 `usage` 字段。Adapter 未声明 `usage` 时任务与 Run
+  `manifest.json` 的 `usage` 字段。JSON Pointer Adapter 未声明 `usage` 时任务与 Run
   摘要不包含 usage 字段。
 - 主请求的限速、重试与错误语义不受影响。
 
+原生模式直接读取供应商用量字段。Anthropic 输入包含基础输入、缓存读取和创建，输出使用已包含 thinking 的 `output_tokens`；Gemini 输出包含 candidate 与 thoughts。流式累计计数采用最终值，非法计数直接报错。
+
 ### 内置 Adapter 定义
 
-- `openai-compatible`：
-  - 使用 Bearer API Key 和 Chat Completions body。
-  - 正文 pointer 为 `/choices/0/message/content`。
-  - 推理 pointers 为 `/choices/0/message/reasoning_content` 和
-    `/choices/0/message/reasoning`。
-  - SSE 推理增量对应 `/choices/0/delta/reasoning_content` 和
-    `/choices/0/delta/reasoning`。
-- `anthropic`：`x-api-key` 与 `anthropic-version: 2023-06-01`，body 顶层 `system`，pointer `/content/-1/text`。
+| Adapter | 请求协议 | 原生响应格式 | 输出上限字段 |
+| --- | --- | --- | --- |
+| `openai-compatible` | Chat Completions | `chat-completions` | `max_tokens` |
+| `openai-chat` | OpenAI Chat Completions | `chat-completions` | `max_completion_tokens` |
+| `openai-responses` | Responses | `responses` | `max_output_tokens` |
+| `chatgpt-plan` | Responses，固定授权连接 | `responses` | 仅用于本地预算 |
+| `anthropic` | Messages | `anthropic` | `max_tokens`，最小值 1 |
+| `google-gemini` | generateContent | `gemini` | `generationConfig.maxOutputTokens` |
 
-  未启用 thinking 时 content 首块即文本；负索引使 `extra_body` 日后启用 thinking 时仍可稳定取到最后文本块。不配置 reasoning 指针；需要思考正文时可复制定义并设 `/content/-2/thinking`。
+Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由实际输入和输出相加；流式 usage 使用最终累计值。Gemini 保留官方 totalTokenCount，不以可见正文 token 重算。原生拒绝、promptFeedback 拦截和流内失败保持显式，供应商错误消息不会变成通用缺少正文路径。
 
-  未启用 thinking 或思考块缺失时结果为 null；字段存在但不是字符串或 null 时快速失败。
-- `google-gemini`：`x-goog-api-key`（密钥不进入 URL），model 由 Adapter `endpoint` 的 `${model}` 占位符进入请求路径，pointer `/candidates/0/content/parts/-1/text`。
-
-  不内置 thinkingConfig，思考模型默认思考开启时 text 块仍恒为最后一个 part。不配置 reasoning 指针；可自配 `/candidates/0/content/parts/-2/text`，缺失路径结果为 null，字段存在但不是字符串或 null 时快速失败。
-- `openai-responses`：`input` 原样接收规范化消息（system/user/assistant），body 含 `"store": false`，pointer `/output/-1/content/-1/text`。
-
-  宿主直接解析 REST JSON，不使用 SDK 才提供的 `output_text` 便利属性；当前请求不声明 tool，因此最终 message 是最后一个 output，正文是其最后一个 content。响应缺少该结构时快速失败。
-
-四个内置定义都声明 `streaming`、`models` 与 `usage` 映射；示例 Preset 见 `llm_presets/anthropic-claude.json`、`google-gemini.json` 与 `openai-responses.json`。
-
-Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。所有内置 Adapter 的主请求、流式和 `models` 端点都不含版本前缀；版本前缀（`/v1`、`/v1beta`）必须写在 Preset `base_url` 中。
+版本前缀 `/v1`、`/v1beta` 写在 Preset `base_url` 中。普通和流式 endpoint 仍由 Adapter 声明。
 
 ### 术语提取实验响应
 
@@ -300,14 +331,45 @@ Anthropic 无 total 计数，Gemini 的模型 ID 经 `models/` 前缀剥离。�
 
 ### 自动术语决策关系校验
 
+名称与关系决策各阶段的 `description` 为按术语当前归属拼接的全部有效、未停用说明片段，每段以方括号标明原术语归属；`applied_description` 单独提供已应用实体说明作对照。两者均只读。片段可能重复、存在分歧或描述不同位置，排列顺序不表示事实发生时间。拼接文本计入现有分批预算，不截断。
+
 `changes` 按完整最终状态检查 [术语组规则](MINIMAL.md#51-术语)，覆盖新增 Alias、
 组关系变更和成员重新启用。新增非法关系返回 `invalid_relationship`；普通决策无法完整
 解决时使用 `needs_review`，自动终审仍必须给出合法最终状态，否则执行失败。
-受保护条目只作为只读证据。草案应用时对实际接受的组合重新检查，未解决的受影响关系拒绝写入。
+受保护条目的名称等字段只作为只读证据，实体说明允许提出更新。草案应用时对实际接受的组合重新检查，未解决的受影响关系拒绝写入。
 在此前阶段的最终状态上，额外以 `containment` 请求复核原文长短包含而译名疑似不一致的组合。
 子串关系只筛选候选，不构成硬冲突；可明确保留独立译法，无法可靠判断则将关联组件恢复到原状态并进入 `needs_review`。
 同一复核组合中发生的修改作为整体建议接受或拒绝；复核不能修改受保护条目，不能通过修改制造新的未确认包含冲突。
-此复核位于可选自动终审之后，仍可产生待审项。当前决策规则版本为 9；旧规则草案须重新生成，不作转换。
+此复核位于可选自动终审之后，仍可产生待审项。当前决策规则版本为 11；旧规则草案须重新生成，不作转换。
+
+固定 Prefix 按阶段声明输入字段、只读参考与任务，固定 Suffix 按阶段声明输出协议；JSONL 响应追加一次结束约束。可编辑中段位于两者之间，负责信息取舍、详略与表达策略；来源边界、引用及输出覆盖要求由固定协议定义。联合模式声明参与阶段和附加输出协议；设置预览与实际请求共用组装入口，固定规则版本纳入 fingerprint。名称与关系阶段的 `description` 和 `applied_description` 均为只读。
+
+### 实体说明决策与接口
+
+名称与关系确定后，`phase: "knowledge"` 发送 `target_language` 和 `entities` 数组；各实体包含 `entity`、`members`、`current_items` 和全部有效 `fragments`。片段包含整次请求内唯一的短 ID（如 `K1`）、原归属、当前归属、说明及来源范围。实体证据完整且不可拆分，按现有软目标、硬限制和安全系数装箱，批次共用现有并发调度与 KeyPool。超限实体单独失败。Prompt 使用独立资源 `terminology_knowledge` 的中段，不携带名称与关系决策中段；该资源不是独立执行阶段或模型设置。
+
+请求中的 `source_range` 将连续源文表示为区间，每项包含 `file_id`、`part_id`、`first: {position, start}` 和 `last: {position, end}`。`position` 是从 0 开始的 Segment 位置，偏移是首尾 Segment 内的字符位置，`end` 为不包含端点。跨文件、分部、位置间断或切片空缺分别保留。无来源片段为 `null`。持久化来源和引用校验仍使用完整 Segment 范围。
+
+每个请求实体恰好返回一条实体记录，允许乱序，最后返回终止记录：
+
+```jsonl
+{"type":"entity_knowledge","entity":"alice","items":[{"text":"船长","refs":["K1"]}],"reason":"源文明确身份"}
+{"type":"end"}
+```
+
+字段严格校验，条目文字非空且引用非空。完整文档中的缺失或重复实体、非法条目、未知或跨实体引用仅使对应实体失败；成功实体立即保存检查点，只重试未完成实体，格式反馈纳入预算并重新分批。未知实体、损坏 JSONL 或缺少终止记录使整次响应无效。停用或失效证据不发送。宿主将短引用转换为持久化 `fragment_ids`；扫描片段以候选记录 ID 和条目序号标识，并关联原 Segment、实际输入切片范围及原文/模型输入摘要。
+
+术语查询附加 `entity_key`、`knowledge_status`（`current`、`pending`、`stale`）、`description_items`，保留只读 `description` 投影。条目只返回 `text` 和 `fragment_ids`。`GET /api/v1/projects/{name}/terms/knowledge?normalized=...` 返回条目、片段和导航所需的引用范围，不暴露来源摘要。
+
+翻译、校对、润色和联合粗翻的 `entity_knowledge.items` 提供 `text`、`source_relation` 和布尔 `unsourced`，每个命中实体只提供一次全部已应用条目。`source_relation` 最多包含三个指示，例如 `["before 1", "within", "after 2"]`；无来源说明使用空数组及 `unsourced: true`，混合引用同时保留相对关系和无来源标记。位置以本次待处理源文的首尾范围为准，使用原 Segment 位置和实际切片偏移，结束偏移不包含端点；范围内空缺归为 `within`，参考上下文不扩大范围。`before`、`after` 分别按同一实体各条目的最早相关证据位置升序编号，同位置同号，`within` 不编号。位置和编号表示证据先后，不表示事实生效范围或事件时间。生成请求不发送具体来源区间或当前位置数组；持久来源、实体详情和导航保留完整范围。
+
+`PUT` 同一路径使用现有写锁和事务，必须提供 `normalized`、`expected_revision`、`action`，操作字段分别为：
+
+- `save_items`：`items: [{text, fragment_ids}]`，空引用明确创建无来源人工片段。
+- `set_fragment_enabled`：`fragment_id` 和布尔 `enabled`。
+- `confirm_keep`：仅接受有效的当前已应用说明。
+
+术语编辑可携带 `description_items`，同时必须提供 `expected_revision`（新库为 0），旧 `description` 写入被拒绝。强制术语扫描有相交片段时必须提供 `confirm_knowledge_replacement: true`，CLI 对应 `--confirm-knowledge-replacement`。
 
 ## 2. Document Adapter（Beta）
 
@@ -636,9 +698,15 @@ Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter 
 
 Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和影响阶段语义的定义内容 Hash；单独修改 `target_chunk_input_tokens` 不会改变该指纹。
 
-当前 Preset schema 为 7。`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力；普通与流式 Endpoint 均由 Adapter 定义。`target_chunk_input_tokens` 是完整输入 Prompt 的 Chunk 软目标；每个阶段使用其实际解析的 Preset 值，实际请求仍受上下文硬限制、Token 安全系数和启用的 ITPM 约束。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
+当前 Preset schema 为 8。`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力；普通与流式 Endpoint 均由 Adapter 定义。`target_chunk_input_tokens` 是完整输入 Prompt 的 Chunk 软目标；每个阶段使用其实际解析的 Preset 值，实际请求仍受上下文硬限制、Token 安全系数和启用的 ITPM 约束。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
 
-schema 2–6 用户 Preset 在 CLI、Web 或桌面 sidecar 启动时原子迁移为 schema 7，补入缺失字段；旧 `endpoint` 与 `stream_endpoint` 字段原样保留，但不校验、不参与请求或指纹。`target_chunk_input_tokens` 的迁移默认值为 `8192`，`max_parallel_per_key` 默认为 `max_parallel`。Run 内历史 Preset 快照只在内存中补齐默认值，不改写审计文件；schema 1/2 Adapter 快照不兼容 schema 3，不从 Preset 回退 Endpoint。项目配置中曾出现的同名 Chunk 字段是遗留兼容字段：旧项目可继续读取和保存，但其值无效；新项目不再写入该字段。
+旧协议不在运行期自动转换。全局 schema 7 Preset 使用 `python -m app.llm_migration` 预览，添加 `--apply` 后备份并迁移；历史 Run 快照不改写，旧协议 Run 只供查看，正式执行需创建新 Run。
+
+`send_temperature` 为必填布尔值；关闭后省略请求模板中的温度，禁止在 Extra Body 中再次添加。阶段温度不参与关闭发送后的阶段指纹。`reasoning_effort` 为字符串或 null，null 不发送参数；等级必须属于 Adapter 的声明，不能在 Extra Body 中重复填写声明位置或别名位置。Effort 不自动调整温度、thinking 开关或思考摘要。
+
+内建 Effort 写入位置：Chat Completions 为 `/reasoning_effort`，Responses 与 Plan 为 `/reasoning/effort`，Anthropic 为 `/output_config/effort`，Gemini 为 `/generationConfig/thinkingConfig/thinkingLevel`。等级列表来自 Adapter 声明；具体模型不支持时保留供应商错误，不根据模型名自动转换。Gemini 2.5 示例保持 null，不将等级换算为 thinkingBudget。
+
+Adapter 可声明 `max_output_tokens_minimum` 非负整数，默认 0；宿主按该值校验输出上限。可选 `reasoning_effort` 对象包含 `body_pointer`、非空唯一字符串数组 `values` 和可选 `aliases` JSON Pointer 数组。请求在完成 Extra Body 合并后向声明路径写入 Effort，仅创建必要的 JSON 对象，已有叶子字段或非对象中间路径直接失败。
 
 启用流式但 Adapter 没有 `streaming` 规则时保存、创建 Run 和发送请求都会快速失败。
 
@@ -692,7 +760,7 @@ Preset 仍只记录一个 credential 引用；其环境变量或钥匙串值按�
 
 ## 5. Decision Preset 与服务（实验）
 
-全局 `decision_presets/<preset_id>.json` 保存 `preset_id`、`protocol`、`url`、`model`、
+HTTP 模式的全局 `decision_presets/<preset_id>.json` 保存 `preset_id`、`protocol`、`url`、`model`、
 `credential`、`proxy_url`、`context_window_tokens`、`context_safety_margin_tokens`、`token_safety_factor`、
 `request_timeout_seconds`、`requests_per_minute`、`max_parallel`。
 `protocol` 为 `typesafe` 或 `openai-decisions`；`url` 是含最终 Path 的完整 HTTP(S) URL，
@@ -706,6 +774,21 @@ Preset 仍只记录一个 credential 引用；其环境变量或钥匙串值按�
 仓库附带 TypeSafe 和 OpenAI Decisions Example Preset，分别使用
 [TypeSafe 官方接口](https://api.typesafe.ai/redoc)和
 [OpenAI 官方接口](https://developers.openai.com/api/docs/guides/decisions)。
+
+LLM 模式的 `protocol` 为 `llm`，Preset 仅保存 `preset_id`、`protocol`、`llm_preset`、
+`prompt_language`（`zh-CN` 或 `en`）。连接、凭据、Adapter、流式响应、上下文窗口、Token
+安全系数、限流及输出上限由所选 LLM Preset 管理，请求温度为 0（仅在 Preset 允许时发送）。
+用户消息包含 `state` 和 `questions`，正文仅返回含 `answers` 的 JSON 对象。宿主使用所选
+LLM Preset 的模型标识填入 `model`，再复用 TypeSafe 响应校验，包括完整问题及选项覆盖、有限概率、概率和及显式拒答。
+Decision 在 Preset 开启 JSON Schema 时按本次问题生成约束，固定问题名称、选项及概率字段，并包含拒答分支；
+完整请求预算包含 Schema，概率取值、概率和及置信度仍由现有校验器检查。
+请求与格式错误共享 `retry.http_max_attempts` 发送预算；空响应沿用 LLM 的专用重试规则。
+
+`decision_llm` 使用普通 LLM 提示词资源机制：Prefix 按字段声明拼接输入结构及指令边界，
+中段定义判断策略和拒答条件，Suffix 定义输出结构及字段约束。中段按语言提供全局资源、
+项目覆盖、恢复继承、内置草稿及命名模板。运行冻结完整系统提示词、所选 LLM Preset 和 Adapter，
+保存在 Decision Preset 快照的 `_resources` 中，参与指纹及续作资源解析；不写入密钥。
+缺失资源或无效输出明确失败，不降级到其他协议。
 
 TypeSafe 将共享证据写入 `state`，问题写入 `questions` 映射，读取 `answers` 映射。
 OpenAI Decisions 将共享证据编码为 JSON 字符串写入 `input`，问题写入带唯一 `name` 的
@@ -739,8 +822,34 @@ Segment ID、证据摘要、耗时和用量；生成与校验用量合并汇总�
 
 插件可通过 `PluginDescriptor.decision_prompts` 声明 `DecisionPromptDeclaration(validator_id, choice_ids, default)`；未声明的插件不提供编辑入口。声明必须属于本插件的校验器且不重复，固定选项为 2 至 255 个唯一非空 ID。`default` 提供一份默认内容，只含非空 `instructions` 和按固定 ID 填写非空描述的 `criteria`。宿主不允许用户增删选项。逐段校验器从 `context.decision_prompts[validator_id]` 取得运行时冻结内容，动态问题定位由校验器附加。
 
-Decision 提示词资源接口使用 `/api/v1/global/decision-prompts/{validator_id}` 与 `/api/v1/projects/{name}/decision-prompts/{validator_id}`：GET 读取有效内容，项目响应附 `global_sync`（available、same；全局无效时附 error），PUT 接收 `{content}`，项目 DELETE 删除覆盖。`/api/v1/decision-prompts` 列举已加载声明。命名模板由 `/api/v1/decision-prompt-library/{validator_id}` 列举，其 `/{prompt_id}` 提供 GET、PUT `{content}` 和 DELETE。
+内置任务 `repetition_screening` 同样使用该编辑契约，固定选项为 `compare`、`skip`；该标识由宿主保留，不属于翻译校验器，也不受校验器启用配置控制。Decision 的判断说明和选项描述为完整可编辑内容，不追加 Prefix 或 Suffix，无语言限制。
 
-`/api/v1/decision-prompts/{validator_id}/default` GET 读取插件默认内容，供用户显式加载草稿，便于修正无效覆盖。Run 在 `decision_prompts/{validator_id}.json` 保存 `{choice_ids, content}` 快照，加载时检查与已安装声明一致。
+Decision 提示词资源接口使用 `/api/v1/global/decision-prompts/{validator_id}` 与 `/api/v1/projects/{name}/decision-prompts/{validator_id}`：GET 读取有效内容，项目响应附 `global_sync`（available、same；全局无效时附 error），PUT 接收 `{content}`，项目 DELETE 接收 `{confirm: true}` 后验证全局内容并删除覆盖。`/api/v1/decision-prompts` 列举已加载声明。命名模板由 `/api/v1/decision-prompt-library/{validator_id}` 列举，其 `/{prompt_id}` 提供 GET、PUT `{content}` 和 DELETE。
+
+`/api/v1/decision-prompts/{validator_id}/default` GET 读取声明默认内容，供用户显式加载草稿，便于修正无效覆盖。Run 在 `decision_prompts/{validator_id}.json` 保存 `{choice_ids, content}` 快照，加载时检查与已安装声明一致。
+
+LLM 项目 Prompt 的 `/api/v1/projects/{name}/prompts/{stage}` GET 返回有效资源及 `inherited`。PUT 接收 `{language, content}` 并建立项目覆盖；DELETE 接收 `{language, confirm: true}`，验证全局资源后解除当前阶段、语言的覆盖。显式继承记录在项目元数据 `inherited_llm_prompts`，以 Prompt 文件名标识资源；普通文件缺失不视为继承。
 
 LLM Prompt 的 `/api/v1/prompts/{stage}/default?language=...` GET 直接读取程序分发的原始 Prompt，组合预览也只使用内置资源，不读取用户全局覆盖。资源缺失时明确失败。
+
+### 重复译文上下文比较
+
+连续运行预检与启动增加 `include_repetition_consistency`、`apply_repetition_consistency`，均默认 `false`，并传递上述两个筛选布尔值。请求的 `stages` 保持原规范连续区间；启用后返回的执行步骤在翻译后或校对起点前包含 `repetition_consistency`，其动作通过 `run_actions` 指定。续作仅接受整项目 Run 并恢复原筛选开关。上游翻译尚需执行时，审查步骤 `count_deferred: true`，`selected: 0` 不表示没有候选；未完成 Run 可返回 `compatibility_deferred: true`，证据兼容性在到达该阶段时再次检查。
+
+连续运行的 `apply_terminology_decision` 与 `apply_repetition_consistency` 在末尾步骤同样生效，默认 `false`；衔接后续阶段时必须授权自动应用，存在待审项时保留草案。一致性审查因上下文及超预算待审停止后，审查步骤状态为 `waiting_review`，保留 `run_id`，步骤 `summary.needs_review` 是待审出现数；连续任务摘要 `waiting_review: true`，后续步骤为 `not_executed`。该审查 Run 已成功生成草案，未应用，任务没有模型失败计数。连续任务累计实际调用用量，未执行步骤与零请求续作不新增未知用量。启用自动应用且无待审时应用限定本次 Run 的草案，保留正常应用和撤销契约。
+
+重复审查预检与任务启动接收布尔值 `exclude_punctuation_only` 和 `screening_enabled`，分别默认 `true` 和 `false`；预检返回 `excluded_punctuation_groups`，Run 保存本次选择与排除数量。关闭初筛时 `decision_model` 为 `null`，不读取初筛 Prompt 或 Preset，也不保存其快照。
+
+预检与启动支持 `run_action`：`resume` 续用、`decline` 结束旧 Run 并新建。预检的 `running_run` 沿用共享未完成 Run 描述，并包含已保存步骤数和总步骤数；`completed` 表示已完成审查的出现数，预检估算在续用模式下只统计未完成步骤。预检返回实际采用的 `only_file` 和两个筛选开关；续用模式恢复原值，启动时再次检查证据兼容性、当前执行指纹与 Run 身份。`running_run.execution_changed` 表示当前设置与最近一次执行不同，兼容时仍可显式 `resume`；超预算统计及剩余预算只针对尚未完成的工作。
+
+支持续作的 Run 保存 `repetition_checkpoint: 2`、独立的 `repetition_protocol` 版本和 `repetition_input_fingerprint`。输入指纹不包含 Prompt、模型或预算状态；`stage_fingerprint` 与 continuation 指纹记录实际执行设置，包含 LLM Adapter hash。旧版未完成 Run 明确要求新建，不迁移检查点。
+
+`repetition_checkpoints/{group_id}.json` 按组原子保存 `screening`、`confidence`、`screening_execution_index`，完成处置后增加 `result`（`proposals`、`keep`、`uncertain`）和 `comparison_execution_index`。来源索引从 1 开始：1 引用原始 Run，N 引用 `continuations/{N-1:04d}`；没有对应模型调用时为 null。初筛跳过结果引用初筛来源，超预算待审结果没有比较来源，续作时重新判定预算并保留已有初筛来源。检查点只保存结果和快照引用，不复制原文、上下文或资源正文。
+
+原始执行及每次 continuation 使用共享快照装配保存实际 LLM 与 Decision 资源；术语证据在 Run 中保存一次。失败和取消保持 Run 为 `running`，未完成出现不计为失败，`last_interruption` 记录错误、步骤进度及可取得的请求 ID。Run 收集去重的预检、续作和客户端警告，实际 LLM 调用保存带执行来源索引的密钥审计；使用共享用量累计，零请求续作保留已有用量。
+
+`repetition_consistency` 是独立 Prompt 资源，使用标准 Prefix、中段、Suffix 装配；模型连接沿用翻译 Preset。输入包含 `target_language`、请求内共享的 `context`、`terms`、`files`、`parts`，以及 `repetitions` 数组。每个重复组含稳定的短 `id`、`source`、`translations` 与 `occurrences`；出现短 ID 仅在所属重复组内有效，不得跨组引用。每次出现携带短 ID、File/part、位置、从零开始的译文索引、前后文引用和术语引用。`file` 是项目文件顺序中从 1 开始的索引，`files` 将本请求涉及的索引映射到文件名；`part` 是请求内 `parts` 表从 1 开始的索引，表中声明内容边界名称，每个 File/part 边界单独编号；`position` 是文件内从 0 开始的 Segment 序号，包含空片段。术语正文仅发送一次，命中的别名保存在各次出现的术语引用 `aliases` 中；术语引用的 `source_relations` 按顺序对应 `entity_knowledge.items`，关系以该次出现的局部上下文为基准。
+
+响应为单个 JSON 对象，仅含 `repetitions` 数组，每个输入重复组恰好对应一个结果，含原样组 `id`、`groups`、`keep`、`uncertain`。每个统一子组含 `members`、`target`、`apply`、`reason`；成员至少两个，`target` 必须是组内成员并选择其现有译文，`apply` 是 `members` 的无重复子集，可以为空，`reason` 使用目标语言。各次出现的短 ID 必须完整、不重复地划入子组或保留、待审列表。该协议不输出 JSONL 或结束记录。
+
+草案审核选择以建议 ID 索引，含 `accepted`、`target` 及可选 `apply`；应用成员遵守相同子集规则。未提供 `apply` 时使用建议默认值；已有建议缺少该字段时使用全部成员。初筛跳过组由读取接口提供默认关闭的人工建议，ID 为 `{group_id}-manual`，成员为该重复组全部出现，选择仍保存于 Run；不可变草案正文保持原样。

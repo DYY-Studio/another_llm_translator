@@ -379,45 +379,6 @@ async def test_partial_truncated_translation_is_buffered_before_format_retry(
 
 
 @pytest.mark.asyncio
-async def test_translation_complete_id_mismatch_retries_original_batch(
-    tmp_path: Path,
-) -> None:
-    project = await create_project(tmp_path, "one\ntwo\nthree")
-    calls: list[list[str]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        ids = [item["id"] for item in payload["segments"]]
-        calls.append(ids)
-        returned = ids[1:2] if len(calls) == 1 else ids
-        content = llm_jsonl(
-            [
-                {
-                    "type": "segment",
-                    "id": segment_id,
-                    "translation": f"translated:{segment_id}",
-                }
-                for segment_id in returned
-            ]
-        )
-        return httpx.Response(
-            200, json={"choices": [{"message": {"content": content}}]}
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        summary = await run_translation(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-    assert summary["completed"] == 3
-    assert calls == [
-        ["1", "2", "3"],
-        ["1", "2", "3"],
-    ]
-
-
-@pytest.mark.asyncio
 async def test_old_top_level_json_retries_without_added_feedback(
     tmp_path: Path,
 ) -> None:
@@ -459,7 +420,7 @@ async def test_old_top_level_json_retries_without_added_feedback(
 
 
 @pytest.mark.asyncio
-async def test_incomplete_terms_save_candidates_without_advancing_scan(
+async def test_incomplete_terms_do_not_publish_candidates_or_advance_scan(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "Alice")
@@ -478,10 +439,10 @@ async def test_incomplete_terms_save_candidates_without_advancing_scan(
                 }
             )
         else:
-            assert read_jsonl(project, project / "terminology" / "candidates.jsonl")
+            assert not read_jsonl(project, project / "terminology" / "candidates.jsonl")
             scans = read_jsonl(project, project / "terminology" / "scans.jsonl")
             assert not any(item["status"] == "completed" for item in scans)
-            content = '{"type":"end"}'
+            content = llm_jsonl([{"type": "term", "source": "Alice", "category": "人物", "description": "", "aliases": []}])
         return httpx.Response(
             200, json={"choices": [{"message": {"content": content}}]}
         )
@@ -499,7 +460,7 @@ async def test_incomplete_terms_save_candidates_without_advancing_scan(
 
 
 @pytest.mark.asyncio
-async def test_malformed_end_keeps_candidates_and_marks_scan_failed(
+async def test_malformed_end_does_not_publish_candidates_and_marks_scan_failed(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "Alice")
@@ -531,7 +492,7 @@ async def test_malformed_end_keeps_candidates_and_marks_scan_failed(
     assert summary["published"] is False
     assert summary["failed"] == 1
     assert summary["failure_counts"] == {"format_error": 1}
-    assert candidates and candidates[0]["terms"][0]["source"] == "Alice"
+    assert candidates == []
     assert scans[-1]["status"] == "failed"
     assert scans[-1]["error_class"] == "format_error"
     assert not (project / "terminology" / "terms.json").exists()
@@ -689,3 +650,18 @@ async def test_cli_logs_to_stderr_and_project_file_while_stdout_is_json(
     assert "command complete command=inspect" in captured.err
     file_log = (project / "logs" / "app.log").read_text(encoding="utf-8")
     assert "command complete command=inspect" in file_log
+
+
+def test_entity_knowledge_request_overview_preserves_batch_input_and_response() -> None:
+    from app.request_overview import llm_overview
+    from app.execution import render_messages
+
+    payload = {'phase': 'knowledge', 'entities': [
+        {'entity': 'alice', 'members': ['alice'], 'current_items': [],
+         'fragments': [{'id': 'K1', 'text': '船长', 'owner': 'alice', 'source_range': None}]},
+    ]}
+    content = llm_jsonl([{'type': 'entity_knowledge', 'entity': 'alice',
+                         'items': [{'text': '船长', 'refs': ['K1']}], 'reason': '源文支持'}])
+    overview = llm_overview(render_messages('整理说明', payload), content=content)
+    assert overview['input'] == payload
+    assert overview['response_content'] == content

@@ -341,3 +341,180 @@ def test_decision_hub_publishes_answers_in_incremental_summary(tmp_path, task_id
             request_kind="decision", overview={"request_kind": "decision", "input": {"source": "Alice"}, "answers": {}})
         diagnostics.complete_request("DEC", content="response", reasoning_content=None, overview_answers=answer)
         assert diagnostics.snapshot()["requests"]["items"][0]["overview"]["answers"] == answer
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("schema_enabled", [False, True])
+@pytest.mark.parametrize("returned_model", [None, "untrusted-model"])
+def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path, monkeypatch, stream, returned_model, schema_enabled):
+    from app.config import load_config
+    from app.decision import load_decision_preset
+    from app.decision_llm import resolve_llm_resources
+    from app.sqlite_storage import atomic_write_json
+    from tests.test_foundation import make_app_root
+
+    root = make_app_root(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "secret")
+    selected_path = root / "llm_presets" / "default.json"
+    selected = json.loads(selected_path.read_text())
+    selected.update(stream=stream, requests_per_minute=0, input_tokens_per_minute=0, json_schema_enabled=schema_enabled)
+    selected_path.write_text(json.dumps(selected))
+    value = dict(preset_id="judge", protocol="llm", llm_preset="default", prompt_language="en")
+    validate_decision_preset(value)
+    value = resolve_llm_resources(value, root)
+    snapshot = tmp_path / "decision_presets" / "judge.json"
+    atomic_write_json(snapshot, value)
+    frozen = load_decision_preset(snapshot, snapshot=True)
+    (root / "prompts" / "decision_llm.en.middle.txt").write_text("Changed prompt")
+    attempts = []
+    def respond(request):
+        payload = json.loads(request.content)
+        attempts.append(payload)
+        if schema_enabled:
+            schema = payload["response_format"]["json_schema"]["schema"]
+            assert schema["required"] == ["answers"]
+            answers_schema = schema["properties"]["answers"]
+            assert answers_schema["required"] == ["term"]
+            choice, refusal = answers_schema["properties"]["term"]["anyOf"]
+            assert choice["properties"]["choice"]["enum"] == ["a", "b"]
+            assert choice["properties"]["probabilities"]["required"] == ["a", "b"]
+            assert refusal["properties"]["type"]["enum"] == ["refusal"]
+        else:
+            assert "response_format" not in payload
+        assert "Changed prompt" not in json.dumps(payload)
+        evidence = json.loads(payload["messages"][-1]["content"])
+        assert set(evidence) == {"state", "questions"}
+        assert evidence["state"] == {"text": "Evidence"}
+        assert evidence["questions"]["term"]["criteria"] == {"a": "A", "b": "B"}
+        probabilities = {"a": 0.9, "b": 0.1} if len(attempts) > 1 else {"a": 0.9}
+        answer = {"answers": {"term": {
+            "type": "choice", "choice": "a", "probabilities": probabilities, "confidence": 0.9}}}
+        if returned_model is not None:
+            answer["model"] = returned_model
+        if stream:
+            from tests.test_llm_streaming import stream_response
+            return stream_response({"choices": [{"delta": {"content": json.dumps(answer)}, "finish_reason": None}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop"}],
+                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}, "[DONE]")
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}})
+    async def run():
+        diagnostics = Diagnostics(tmp_path / "llm.log")
+        with diagnostics.activate("project", "translation"):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+                retry = load_config(root / "config" / "config.toml")["retry"]
+                retry["http_max_attempts"] = 2
+                client = DecisionClient(frozen, http_client=http, retry=retry, debug_directory=tmp_path / "debug")
+                result = await client.choose({"text": "Evidence"}, [DecisionQuestion("term", "Choose", {"a": "A", "b": "B"})])
+                assert result["term"].choice == "a"
+                assert client.usage_summary()["total_tokens"] == 30
+                assert len(client.records) == 2
+                assert client.records[-1]["model"] == "example-model"
+                assert diagnostics.snapshot()["decision"]["metrics"]["total_requests"] == 2
+                assert diagnostics.snapshot()["metrics"]["total_requests"] == 0
+                activity = diagnostics.snapshot()["decision"]["activities"][0]
+                assert activity["completed"] == 1
+                assert activity["failed"] == 1
+    asyncio.run(run())
+    assert len(attempts) == 2
+    debug = tmp_path / "debug"
+    records = [json.loads(line) for line in (debug / "attempts.jsonl").read_text().splitlines()]
+    assert [r["status"] for r in records] == ["failed", "completed"]
+    assert [r["outcome"] for r in records] == ["response_parse_error", "succeeded"]
+    failed, completed = [json.loads((debug / "payloads" / f"{r['record_id']}.overview.json").read_text()) for r in records]
+    assert failed["answers"] == {}
+    assert failed["error"] == "response_parse_error"
+    assert completed["answers"]["term"]["choice"] == "a"
+    assert completed["error"] is None
+    error = json.loads((debug / "payloads" / f"{records[0]['record_id']}.error.json").read_text())
+    assert error["outcome"] == "response_parse_error"
+
+
+def test_llm_decision_http_and_parse_errors_share_send_budget(tmp_path, monkeypatch):
+    from app.config import load_config
+    from app.decision_llm import resolve_llm_resources
+    from tests.test_foundation import make_app_root
+
+    root = make_app_root(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "secret")
+    value = resolve_llm_resources(dict(preset_id="judge", protocol="llm", llm_preset="default", prompt_language="en"), root)
+    attempts = []
+    def respond(request):
+        attempts.append(request)
+        if len(attempts) == 1:
+            return httpx.Response(429, headers={"retry-after": "0"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            retry = load_config(root / "config" / "config.toml")["retry"]
+            retry["http_max_attempts"] = 2
+            client = DecisionClient(value, http_client=http, retry=retry)
+            with pytest.raises(ExternalError, match="Decision 响应无效，重试预算耗尽"):
+                await client.choose("Evidence", [DecisionQuestion("term", "Choose", {"a": "A", "b": "B"})])
+    asyncio.run(run())
+    assert len(attempts) == 2
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("content", ['{"answers":{"q":{"type":"refusal"}}}', '{}', ''])
+def test_llm_decision_debug_records_final_outcome(tmp_path, monkeypatch, stream, content):
+    from app.decision_llm import resolve_llm_resources
+    from tests.test_foundation import make_app_root
+
+    root = make_app_root(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "secret")
+    preset = resolve_llm_resources(dict(preset_id="judge", protocol="llm", llm_preset="default", prompt_language="en"), root)
+    preset["_resources"]["preset"]["stream"] = stream
+
+    def respond(request):
+        if stream:
+            from tests.test_llm_streaming import stream_response
+            return stream_response({"choices": [{"delta": {"content": content}, "finish_reason": "stop"}]}, "[DONE]")
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            client = DecisionClient(preset, http_client=http, debug_directory=tmp_path / "debug")
+            question = DecisionQuestion("q", "Choose", {"a": "A", "b": "B"})
+            if "refusal" in content:
+                assert (await client.choose("Evidence", [question]))["q"].refused
+            else:
+                with pytest.raises(ExternalError):
+                    await client.choose("Evidence", [question])
+
+    asyncio.run(run())
+    debug = tmp_path / "debug"
+    records = [json.loads(line) for line in (debug / "attempts.jsonl").read_text().splitlines()]
+    assert len(records) == 1
+    record = records[0]
+    overview = json.loads((debug / "payloads" / f"{record['record_id']}.overview.json").read_text())
+    if "refusal" in content:
+        assert record["status"] == "completed"
+        assert record["outcome"] == "succeeded"
+        assert overview["answers"]["q"]["refused"] is True
+    else:
+        error = "response_parse_error" if content else "empty_response_unknown"
+        assert record["status"] == "failed"
+        assert record["outcome"] == overview["error"] == error
+
+
+def test_llm_decision_schema_is_included_in_context_preflight(tmp_path):
+    from app.decision_llm import resolve_llm_resources
+    from tests.test_foundation import make_app_root
+
+    root = make_app_root(tmp_path)
+    value = resolve_llm_resources(dict(preset_id='judge', protocol='llm', llm_preset='default', prompt_language='en'), root)
+    questions = [DecisionQuestion(f'q_{i}', 'Choose', {'a':'A', 'b':'B'}) for i in range(10)]
+    plain = DecisionClient(value)
+    _, plain_estimate = plain.request_plan('Evidence', questions)
+    value['_resources']['preset']['json_schema_enabled'] = True
+    client = DecisionClient(value)
+    _, schema_estimate = client.request_plan('Evidence', questions)
+    assert schema_estimate > plain_estimate
+    client.preset['context_window_tokens'] = plain_estimate + client.preset['context_safety_margin_tokens']
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: pytest.fail('Must fail before HTTP'))) as http:
+            client.http_client = http
+            with pytest.raises(ExternalError, match='超过可用上下文'):
+                await client.choose('Evidence', questions)
+    asyncio.run(run())

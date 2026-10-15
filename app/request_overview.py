@@ -15,7 +15,7 @@ def llm_overview(messages: list[dict[str, str]], segment_id_map: dict[str, str] 
             value = json.loads(message["content"])
         except (ValueError, TypeError):
             continue
-        if isinstance(value, dict) and any(key in value for key in ("segments", "source_segments", "terms", "summaries")):
+        if isinstance(value, dict) and any(key in value for key in ("segments", "source_segments", "terms", "summaries", "entities")):
             payload = value
             break
     return {"request_kind": "llm", "input": payload, "segment_id_map": dict(segment_id_map or {}),

@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "adapter_id": "openai-compatible",
   "endpoint": "/chat/completions",
   "headers": {
@@ -12,23 +12,10 @@
     "max_tokens": "${max_output_tokens}",
     "stream": "${stream}"
   },
-  "response_content_pointer": "/choices/0/message/content",
-  "response_reasoning_content_pointers": [
-    "/choices/0/message/reasoning_content",
-    "/choices/0/message/reasoning"
-  ],
-  "response_finish_reason_pointer": "/choices/0/finish_reason",
-  "truncated_finish_reasons": ["length"],
-  "blocked_finish_reasons": ["content_filter"],
   "models": {
     "endpoint": "/models",
     "response_models_pointer": "/data",
     "response_model_id": "id"
-  },
-  "usage": {
-    "input_tokens_pointer": "/usage/prompt_tokens",
-    "output_tokens_pointer": "/usage/completion_tokens",
-    "total_tokens_pointer": "/usage/total_tokens"
   },
   "streaming": {
     "transport": "sse",
@@ -38,30 +25,32 @@
         "include_usage": true
       }
     },
-    "content_events": [
-      {"pointer": "/choices/0/delta/content"}
+    "allow_clean_eof": true
+  },
+  "reasoning_effort": {
+    "body_pointer": "/reasoning_effort",
+    "values": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
     ],
-    "reasoning_events": [
-      {"pointer": "/choices/0/delta/reasoning_content"},
-      {"pointer": "/choices/0/delta/reasoning"}
-    ],
-    "finish_reason_events": [{"pointer": "/choices/0/finish_reason"}],
-    "terminal": {"sentinel": "[DONE]"},
-    "allow_clean_eof": true,
-    "error_events": [
-      {
-        "when": {
-          "pointer": "/choices/0/finish_reason",
-          "equals": "error"
-        },
-        "message_pointer": "/error/message",
-        "status_pointer": "/error/status"
+    "aliases": [
+      "/reasoning/effort"
+    ]
+  },
+  "response_format": "chat-completions",
+  "structured_output": {
+    "/response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "structured_response",
+        "strict": true,
+        "schema": "${json_schema}"
       }
-    ],
-    "usage": {
-      "input_tokens_pointers": ["/usage/prompt_tokens"],
-      "output_tokens_pointers": ["/usage/completion_tokens"],
-      "total_tokens_pointers": ["/usage/total_tokens"]
     }
   }
 }

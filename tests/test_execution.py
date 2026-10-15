@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import os
 from collections import Counter
 from pathlib import Path
@@ -18,7 +17,7 @@ from app.errors import (
     RequestSizeError,
     StorageError,
 )
-from app.execution import CJK_RE, ChunkPlan, PreviousContextIndex, Scope, build_chunk_plans, classify_stage, classify_stage_states, combine_usage, contiguous_groups, continue_run, create_run, dispatch_chunks, estimate_messages, estimate_messages_upper_bound, estimate_single_segment_preflight, estimate_tokens, finalize_run, full_prompt, iter_chunk_plans, localize_request_ids, materialize_chunk_stream, render_messages, save_debug_chunks, select_scope, stage_fingerprint
+from app.execution import ChunkPlan, PreviousContextIndex, Scope, build_chunk_plans, classify_stage, classify_stage_states, combine_usage, contiguous_groups, continue_run, create_run, dispatch_chunks, estimate_messages, estimate_messages_upper_bound, estimate_single_segment_preflight, estimate_tokens, finalize_run, full_prompt, iter_chunk_plans, localize_request_ids, materialize_chunk_stream, render_messages, save_debug_chunks, select_scope, stage_fingerprint
 from app.llm_client import LLMClient, SlidingWindowLimiter
 from app.llm_keys import KeyPool
 from app.llm_adapter import load_json_adapter
@@ -110,24 +109,16 @@ def test_stage_fingerprint_tracks_document_prompt_requirements() -> None:
     assert stage_fingerprint(current, "translation", {}) != baseline
 
 
-def test_token_estimate_matches_the_previous_character_accounting() -> None:
-    samples = [
-        "",
-        "English words and punctuation!",
-        "简体中文、繁體中文、日本語、한국어",
-        "line\n\twith\u2003unicode whitespace",
-        '\\"quoted\\" \\ slash \\u0000 control',
-        "😀" * 17,
-    ]
-    for text in samples:
-        cjk_count = len(CJK_RE.findall(text))
-        non_cjk = CJK_RE.sub("", text)
-        non_space = sum(not char.isspace() for char in non_cjk)
-        whitespace = sum(char.isspace() for char in non_cjk)
-        expected = max(
-            1,
-            math.ceil(cjk_count * 1.1 + non_space / 4 + whitespace / 8),
-        ) if text else 0
+def test_token_estimate_accounts_for_scripts_whitespace_and_rounding() -> None:
+    for text, expected in [
+        ("", 0),
+        ("a", 1),
+        ("abcde", 2),
+        ("中日あ한", 5),
+        (" \n\t\u2003" * 2, 1),
+        ("中文abcd        ", 5),
+        ("😀" * 17, 5),
+    ]:
         assert estimate_tokens(text) == expected
 
 
@@ -1023,7 +1014,7 @@ def test_chunk_builder_partitions_alternating_empty_lines_within_soft_target() -
                 }
             )
     current = config()
-    current["execution"]["target_chunk_input_tokens"] = 600
+    current["execution"]["target_chunk_input_tokens"] = 1000
     work = [item for item in source if not item["is_empty"]]
     plans = build_chunk_plans(
         work,
@@ -1049,7 +1040,7 @@ def test_chunk_builder_partitions_alternating_empty_lines_within_soft_target() -
         for plan in plans
         for item in plan.segments
     )
-    assert all(plan.estimated_input_tokens <= 600 for plan in plans)
+    assert all(plan.estimated_input_tokens <= 1000 for plan in plans)
 
 
 def test_single_segment_may_exceed_soft_target_but_not_input_limit() -> None:
@@ -1573,14 +1564,6 @@ async def test_llm_client_rejects_structured_and_embedded_reasoning_together(
     tmp_path: Path,
 ) -> None:
     current = config()
-    definition = dict(current["_llm_adapter"].definition)
-    definition["response_reasoning_content_pointers"] = [
-        "/choices/0/message/reasoning_content"
-    ]
-    adapter_file = tmp_path / "adapter.json"
-    adapter_file.write_text(json.dumps(definition), encoding="utf-8")
-    current["_llm_adapter"] = load_json_adapter(adapter_file)
-
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -2122,7 +2105,8 @@ async def test_llm_client_without_usage_mapping_has_no_summary(
 ) -> None:
     current = config()
     definition = dict(current["_llm_adapter"].definition)
-    definition.pop("usage")
+    definition.update(response_format="json-pointer", response_content_pointer="/choices/0/message/content")
+    definition.pop("streaming")
     adapter_file = tmp_path / "adapter.json"
     adapter_file.write_text(json.dumps(definition), encoding="utf-8")
     current["_llm_adapter"] = load_json_adapter(adapter_file)
@@ -2553,3 +2537,24 @@ async def test_llm_client_sends_openai_responses_format_request(
     assert sent["input"] == render_messages("prompt", {"segments": []})
     assert sent["store"] is False
     assert sent["stream"] is False
+
+
+def test_old_llm_run_requires_decline_and_preserves_snapshot(tmp_path: Path) -> None:
+    from app.execution import choose_running_run, run_protocol_is_current
+    from app.errors import UsageError
+    project = _finalize_project(tmp_path)
+    run_id, directory = create_run(
+        project, config=config(), stage="translation", fingerprint="fingerprint",
+        prompt="prompt", selected_count=1, requested_count=1, reused_count=0,
+        details={"scope": {"all_nonempty": True}},
+    )
+    assert run_protocol_is_current(project, run_id)
+    path = directory / "llm_preset.json"
+    snapshot = json.loads(path.read_text())
+    snapshot["schema_version"] = 7
+    path.write_text(json.dumps(snapshot))
+    original = path.read_bytes()
+    with pytest.raises(UsageError, match="旧 LLM 协议"):
+        choose_running_run(project, "translation", action="resume", dry_run=False)
+    assert choose_running_run(project, "translation", action="decline", dry_run=False)[0] is None
+    assert path.read_bytes() == original

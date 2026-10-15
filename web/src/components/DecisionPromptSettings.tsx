@@ -85,8 +85,8 @@ export function DecisionPromptSettings({ project, scope, language, validator, st
           });
         }}
         onRestore={() => {
-          if (!confirmReplace()) return;
-          void action(async () => { await api(path, { method: "DELETE" }); apply(await api<View>(path)); setMessage(translate("decision.promptRestored", language)); });
+          if (!window.confirm(translate("decision.promptRestoreConfirm", language))) return;
+          void action(async () => { await api(path, { method: "DELETE", body: JSON.stringify({ confirm: true }) }); apply(await api<View>(path)); setMessage(translate("decision.promptRestored", language)); });
         }} />}
       <PromptLibraryControls language={language} hint={translate("decision.promptLibraryHint", language)} entries={entries} selected={selected} loading={libraryLoading} saveOpen={saveOpen} id={id} overwrite={overwrite}
         onId={(value) => { setId(value); setOverwrite(false); }} onCancel={() => { setSaveOpen(false); setId(""); setOverwrite(false); }}

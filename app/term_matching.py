@@ -386,16 +386,30 @@ class _TermMatchCache:
         library: dict[str, Any] | None,
         spec: TermNormalization,
         limit: int,
+        *, segments: list[dict[str, Any]], warnings: list[str] | None = None,
     ) -> None:
         self.matcher = _PreparedTermMatcher(library, spec) if library else None
         self.spec = spec
         self.limit = limit
+        self.positions = {str(s["segment_id"]): i for i, s in enumerate(segments)}
+        self.warnings = warnings if warnings is not None else []
         self._cache: dict[tuple[str, str], tuple[dict, ...]] = {}
+        self._entity_sources: dict[str, list[dict[str, Any]]] = {}
 
     def _matches_for_item(self, item: dict[str, Any]) -> tuple[dict, ...]:
         key = (str(item["segment_id"]), str(item["source"]))
         matches = self._cache.get(key)
         if matches is None:
+            if self.matcher is not None:
+                names = self.matcher._candidate_names_for_source(str(item["source"]))
+                for index in {i for name in names for i in self.matcher._name_terms.get(name, ())}:
+                    term = self.matcher.terms[index]
+                    if term.get("knowledge_status") == "stale":
+                        raise UsageError(f"实体说明已过期，请更新后再执行：{term['source']}")
+                    if term.get("knowledge_status") == "pending":
+                        warning = f"实体说明待聚合，当前只使用已应用说明：{term['source']}"
+                        if warning not in self.warnings:
+                            self.warnings.append(warning)
             matches = tuple(
                 self.matcher.match(str(item["source"]), self.limit)
                 if self.matcher is not None
@@ -413,40 +427,81 @@ class _TermMatchCache:
             str(item["source"]), list(self._matches_for_item(item))
         )
 
+    def _prepare_entity(self, origin: dict[str, Any]) -> list[dict[str, Any]]:
+        from .term_knowledge import compact_source_ranges
+        result = []
+        for entry in origin.get("description_items", []):
+            unique = {(r["segment_id"], r["start"], r["end"]): r
+                      for refs in entry["sources"] if refs is not None for r in refs}
+            ranges = sorted(unique.values(), key=lambda r: (self.positions[r["segment_id"]], r["start"], r["end"]))
+            intervals = compact_source_ranges(ranges, self.positions) or []
+            # Intervals can overlap when an item cites multiple scan requests.
+            merged: list[tuple[tuple[int, int], tuple[int, int]]] = []
+            for interval in intervals:
+                start = (interval["first"]["position"], interval["first"]["start"])
+                end = (interval["last"]["position"], interval["last"]["end"])
+                if merged and start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+            result.append({"text": entry["text"], "unsourced": any(refs is None for refs in entry["sources"]),
+                           "starts": tuple(start for start, _ in merged), "ends": tuple(end for _, end in merged)})
+        return result
+
+    def _relative_items(self, entity: str, origin: dict[str, Any], first: tuple[int, int], last: tuple[int, int]) -> list[dict[str, Any]]:
+        from bisect import bisect_right
+        prepared = self._entity_sources.get(entity)
+        if prepared is None:
+            prepared = self._prepare_entity(origin)
+            self._entity_sources[entity] = prepared
+        relations = []
+        for entry in prepared:
+            starts, ends = entry["starts"], entry["ends"]
+            before = starts[0] if starts and starts[0] < first else None
+            index = bisect_right(ends, first)
+            within = index < len(starts) and starts[index] < last
+            index = bisect_right(ends, last)
+            after = max(starts[index], last) if index < len(starts) else None
+            relations.append((before, within, after))
+        before_ranks = {position: rank for rank, position in enumerate(sorted({before for before, _, _ in relations if before is not None}), 1)}
+        after_ranks = {position: rank for rank, position in enumerate(sorted({after for _, _, after in relations if after is not None}), 1)}
+        return [{"text": entry["text"], "unsourced": entry["unsourced"],
+                 "source_relation": [*([f"before {before_ranks[before]}"] if before is not None else []),
+                                     *(["within"] if within else []),
+                                     *([f"after {after_ranks[after]}"] if after is not None else [])]}
+                for entry, (before, within, after) in zip(prepared, relations, strict=True)]
+
     def for_items(self, items: list[dict[str, Any]]) -> list[dict]:
         by_source: dict[str, dict] = {}
+        entities: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
         for item in items:
-            matches = self._matches_for_item(item)
-            for term in matches:
+            for term in self._matches_for_item(item):
                 source = str(term["source"])
                 current = by_source.get(source)
                 if current is None:
                     current = dict(term)
-                    aliases = {
-                        str(alias)
-                        for alias in term.get("aliases", [])
-                        if alias
-                    }
-                    current["aliases"] = sorted(
-                        aliases,
-                        key=lambda value: (normalize_term(value, self.spec), value),
-                    )
+                    current.pop("description", None)
+                    current["aliases"] = set()
                     by_source[source] = current
-                    continue
-                aliases = {
-                    str(alias)
-                    for alias in current.get("aliases", [])
-                    if alias
-                }
-                aliases.update(
-                    str(alias)
-                    for alias in term.get("aliases", [])
-                    if alias
-                )
-                current["aliases"] = sorted(
-                    aliases,
-                    key=lambda value: (normalize_term(value, self.spec), value),
-                )
+                    if self.matcher is not None and "primary_source" not in term:
+                        normalized = normalize_term(source, self.spec)
+                        origin = self.matcher.by_normalized[normalized]
+                        entity = str(origin.get("entity_key") or origin.get("group_primary") or normalized)
+                        entities.setdefault(entity, (current, origin))
+                current["aliases"].update(str(alias) for alias in term.get("aliases", []) if alias)
+        if entities:
+            bounds = []
+            for item in items:
+                original_id = str(item.get("_original_segment_id") or item["segment_id"])
+                if original_id not in self.positions:
+                    raise UsageError("请求缺少可追溯的当前源文位置")
+                start = int(item.get("_source_offset", 0))
+                bounds.append(((self.positions[original_id], start), (self.positions[original_id], start + len(str(item["source"])))))
+            first, last = min(start for start, _ in bounds), max(end for _, end in bounds)
+            for entity, (current, origin) in entities.items():
+                current["entity_knowledge"] = {"entity": entity, "items": self._relative_items(entity, origin, first, last)}
+        for current in by_source.values():
+            current["aliases"] = sorted(current["aliases"], key=lambda value: (normalize_term(value, self.spec), value))
         return list(by_source.values())
 
 def match_terms(

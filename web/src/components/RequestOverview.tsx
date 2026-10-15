@@ -1,11 +1,11 @@
 import { translate, type Language } from "../i18n";
-import { object, text, records, parseRequestOverview, type RequestOverviewSnapshot, type OverviewRecord } from "../requestOverview";
+import { object, text, records, parseRequestOverview, parseRepetitionOverview, parseRepetitionOverviews, type RequestOverviewSnapshot, type OverviewRecord } from "../requestOverview";
 import type { TermDecisionState } from "../types";
 import { compactSegmentReferences } from "../segmentReferences";
 import { TermDecisionChanges } from "./TermDecisionChanges";
 
-function SourceBlock({ values, title }: {values: string[]; title?: string}) {
-  return <section className="overview-cell">{title && <h4>{title}</h4>}{values.map((value, index) => <p key={index}>{value}</p>)}</section>;
+function SourceBlock({ values, title, className = "" }: {values: string[]; title?: string; className?: string}) {
+  return <section className={`overview-cell ${className}`}>{title && <h4>{title}</h4>}{values.map((value, index) => <p key={index}>{value}</p>)}</section>;
 }
 function termState(item: OverviewRecord): TermDecisionState {
   return {normalized: text(item.normalized), source: text(item.source), category: text(item.category) || null,
@@ -39,7 +39,7 @@ function DecisionOverview({ snapshot, language }: {snapshot: RequestOverviewSnap
         <div className="overview-answer"><strong>{answer?.refused ? translate("overview.refused", language) : choiceLabel}</strong>
           {answer && !answer.refused && <span>Confidence: {answer.confidence.toLocaleString(language, {maximumFractionDigits: 4})}</span>}
         </div>
-        {answer && !answer.refused && <div className="overview-scores"><span>Scores</span>{Object.entries(answer.probabilities).map(([choice, score]) => <span key={choice} title={question.choices[choice]} className={choice === answer.choice ? "selected" : ""}>{choice}: {score.toLocaleString(language, {maximumFractionDigits: 4})}</span>)}</div>}
+        {answer && !answer.refused && <div className="overview-scores"><span>probabilities</span>{Object.entries(answer.probabilities).map(([choice, probability]) => <span key={choice} title={question.choices[choice]} className={choice === answer.choice ? "selected" : ""}>{choice}: {probability.toLocaleString(language, {maximumFractionDigits: 4})}</span>)}</div>}
       </article>;
     })}</div>
   </div>;
@@ -47,6 +47,33 @@ function DecisionOverview({ snapshot, language }: {snapshot: RequestOverviewSnap
 
 export function RequestOverview({ snapshot, language, truncated = false }: {snapshot?: RequestOverviewSnapshot | null; language: Language; truncated?: boolean}) {
   if (!snapshot || snapshot.input == null) return <div className="diagnostics-empty">{translate(truncated ? "overview.truncated" : "overview.notRecorded", language)}</div>;
+  if (snapshot.request_kind === "llm" && (Array.isArray(object(snapshot.input).occurrences) || Array.isArray(object(snapshot.input).repetitions))) {
+    const values = Array.isArray(object(snapshot.input).repetitions) ? parseRepetitionOverviews(snapshot) : [{id: "", ...parseRepetitionOverview(snapshot)}];
+    const t = (key: string) => translate(`repetition.${key}`, language);
+    return <div className="request-overview">
+      {snapshot.error && <p className="warning-banner">{snapshot.error}</p>}
+      {values.map(value => <section key={value.id}>
+      {(truncated || value.invalid) && <p className="warning-banner">{translate(truncated ? "overview.truncated" : "overview.incomplete", language)}</p>}
+      <SourceBlock title={`${t("source")}${value.id ? ` ${value.id}` : ""}`} values={[value.source]} />
+      {value.groups.map((group, index) => <section className="overview-repetition-reason" key={index}>
+        <strong>{translate("repetition.unify", language, {count: group.members.length})} ({group.members.join(", ")})</strong>
+        <p className="decision-reason">{group.reason}</p>
+      </section>)}
+      {value.occurrences.map(item => <article className="overview-segment" key={item.id}>
+        <span className="overview-row-number">{item.id}</span>
+        <div className="overview-cell"><small>{item.file} / {item.filename} / {item.part} / Position {item.position}</small>
+          <div className="overview-pair"><SourceBlock title={t("before")} values={[item.current]} />
+            <SourceBlock className={`repetition-result${item.result !== null ? " is-applied" : ""}`} title={item.result !== null ? t("after") : item.uncertain ? t("needsReview") : item.kept ? t("keep") : translate("overview.noResult", language)} values={[item.result ?? item.current]} /></div>
+          <details className="overview-repetition-context"><summary>{t("context")}</summary>
+            <SourceBlock title={t("previousContext")} values={item.previous} />
+            <div className="overview-repetition-source"><SourceBlock title={t("source")} values={[value.source]} /></div>
+            <SourceBlock title={t("nextContext")} values={item.next} />
+          </details>
+        </div>
+      </article>)}
+      </section>)}
+    </div>;
+  }
   const value = parseRequestOverview(snapshot);
   const reference = Array.isArray(value.input.reference_context) ? value.input.reference_context : [];
   const targets = records(value.input.terms);
@@ -64,7 +91,7 @@ export function RequestOverview({ snapshot, language, truncated = false }: {snap
   return <div className="request-overview">
     {truncated && <p className="warning-banner">{translate("overview.truncated", language)}</p>}
     {snapshot.error && <p className="warning-banner">{snapshot.error}</p>}
-    <div className="overview-coverage">{translate("overview.coverage", language, {count: snapshot.request_kind === "decision" ? snapshot.questions?.length ?? 0 : isTermDecision ? targets.length : value.pairs.length || value.sources.length || summariesInput.length})}</div>
+    <div className="overview-coverage">{translate("overview.coverage", language, {count: snapshot.request_kind === "decision" ? snapshot.questions?.length ?? 0 : value.entities.length || (isTermDecision ? targets.length : value.pairs.length || value.sources.length || summariesInput.length)})}</div>
     {snapshot.request_kind === "decision" ? <DecisionOverview snapshot={snapshot} language={language} /> : <>
       {value.issues.length > 0 && <p className="warning-banner">{translate("overview.incomplete", language)}</p>}
       {value.pairs.map((pair, index) => <article className="overview-segment" key={`${pair.id}:${index}`}>
@@ -87,6 +114,31 @@ export function RequestOverview({ snapshot, language, truncated = false }: {snap
           {!value.terms.length && <span className="muted">{translate(value.noTerms ? "overview.noTerms" : "overview.noResult", language)}</span>}
         </section>
       </div>}
+      {value.entities.map((entity) => <article className="term-decision-proposal" key={entity.entity}>
+        <header className="term-decision-proposal-heading"><strong>{entity.entity}</strong><span>{entity.members.join(" · ")}</span></header>
+        <div className="overview-pair">
+          <section className="overview-cell">
+            {entity.currentItems.length > 0 && <details><summary>{translate("knowledge.before", language)}</summary>
+              {entity.currentItems.map((item, index) => <p key={index}>{text(item.text)}</p>)}
+            </details>}
+            <h4>{translate("knowledge.fragments", language)} ({entity.fragments.length})</h4>
+            {entity.fragments.map((fragment) => <article className="overview-term" key={text(fragment.id)}>
+              <strong>{text(fragment.id)}</strong><small>{text(fragment.original_source) || text(fragment.owner)}</small>
+              <p>{text(fragment.text)}</p>
+              {fragment.source_range === null && <small>{translate("knowledge.noSource", language)}</small>}
+            </article>)}
+          </section>
+          <section className="overview-cell"><h4>{translate("overview.knowledgeResult", language)}</h4>
+            {!entity.result ? <span className="muted">{translate("overview.noResult", language)}</span> : <>
+              {records(entity.result.items).map((item, index) => <article className="overview-term" key={index}>
+                <p>{text(item.text)}</p><small>{translate("knowledge.references", language)}: {Array.isArray(item.refs) ? item.refs.map(text).join(", ") : ""}</small>
+              </article>)}
+              {!records(entity.result.items).length && <span className="muted">{translate("overview.emptyKnowledge", language)}</span>}
+              <p className="decision-reason">{text(entity.result.reason)}</p>
+            </>}
+          </section>
+        </div>
+      </article>)}
       {isTermDecision && <div className="term-decision-list">{before.map((state) => {
         const matches = value.decisions.filter((item) => item.normalized === state.normalized);
         const result = matches.length === 1 ? matches[0] : null;

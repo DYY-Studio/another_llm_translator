@@ -72,6 +72,9 @@ class TaskStartPayload(_WebPayload):
     only_file: str | None = None
     only_segment: str | None = None
     force: StrictBool = False
+    confirm_knowledge_replacement: StrictBool = False
+    exclude_punctuation_only: StrictBool = True
+    screening_enabled: StrictBool = False
     replace_draft: StrictBool = False
     acknowledge_manual_review: StrictBool = False
     include_summaries: StrictBool = False
@@ -82,6 +85,8 @@ class TaskStartPayload(_WebPayload):
     run_action: str | None = None
     stages: list[StrictStr] = Field(default_factory=list)
     run_actions: dict[StrictStr, StrictStr] = Field(default_factory=dict)
+    include_repetition_consistency: StrictBool = False
+    apply_repetition_consistency: StrictBool = False
     apply_terminology_decision: StrictBool = False
     summary_selection: list[BoundaryPayload] = Field(default_factory=list)
 

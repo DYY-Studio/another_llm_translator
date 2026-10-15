@@ -56,7 +56,7 @@ async def test_empty_original_retry_preserves_request_and_usage(
                                 "content": content,
                                 "reasoning_content": "thinking",
                             },
-                            "finish_reason": reason,
+                            "finish_reason": reason if len(bodies) == 1 else "stop",
                         }
                     ],
                     "usage": {
@@ -76,7 +76,7 @@ async def test_empty_original_retry_preserves_request_and_usage(
                             "content": content,
                             "reasoning_content": "thinking",
                         },
-                        "finish_reason": reason,
+                        "finish_reason": reason if len(bodies) == 1 else "stop",
                     }
                 ],
                 "usage": {

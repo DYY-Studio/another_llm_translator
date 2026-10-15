@@ -837,6 +837,7 @@ async def _request_batch(
                 spec=spec,
                 phase=phase,
                 conflicts=conflicts,
+                descriptions={item["normalized"]: item["description"] for item in payload["terms"]},
             )
             if ignored_read_only:
                 llm.logger.warning(

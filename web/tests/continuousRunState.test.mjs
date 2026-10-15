@@ -42,6 +42,10 @@ test("continuous payload forces middle decision review and explicit apply", () =
     ),
     {
       stage: "continuous",
+      include_repetition_consistency: false,
+      apply_repetition_consistency: false,
+      exclude_punctuation_only: true,
+      screening_enabled: false,
       stages: ["terminology", "terminology_decision", "translation"],
       final_review: true,
       apply_terminology_decision: true,
@@ -55,7 +59,7 @@ test("continuous payload forces middle decision review and explicit apply", () =
   );
 });
 
-test("terminal decision keeps optional final review and does not authorize apply", () => {
+test("terminal decision keeps optional final review and automatic application", () => {
   assert.deepEqual(
     continuousPayload(["terminology", "terminology_decision"], {
       finalReview: true,
@@ -69,9 +73,13 @@ test("terminal decision keeps optional final review and does not authorize apply
     }),
     {
       stage: "continuous",
+      include_repetition_consistency: false,
+      apply_repetition_consistency: false,
+      exclude_punctuation_only: true,
+      screening_enabled: false,
       stages: ["terminology", "terminology_decision"],
       final_review: true,
-      apply_terminology_decision: false,
+      apply_terminology_decision: true,
       force: true,
       reuse_mixed_fingerprints: false,
       run_actions: {},
@@ -141,4 +149,27 @@ test("continuous joint options require terminology and aggregation requires summ
   assert.equal(standard.include_draft_translation, false);
   assert.equal(standard.include_summaries, false);
   assert.equal(standard.aggregate_full_summaries, false);
+});
+
+test("repetition review is optional and applies only with explicit authorization", () => {
+  const defaults = {
+    finalReview: false, applyTerminologyDecision: false, force: false,
+    reuseMixedFingerprints: false, runActions: {}, includeDraftTranslation: false,
+    includeSummaries: false, aggregateFullSummaries: false,
+  };
+  const enabled = continuousPayload(["translation", "proofreading"], {
+    ...defaults, includeRepetitionConsistency: true, applyRepetitionConsistency: true,
+    excludePunctuationOnly: false, screeningEnabled: true,
+  });
+  assert.equal(enabled.include_repetition_consistency, true);
+  assert.equal(enabled.apply_repetition_consistency, true);
+  assert.equal(enabled.exclude_punctuation_only, false);
+  assert.equal(enabled.screening_enabled, true);
+  const terminal = continuousPayload(["translation"], { ...defaults, includeRepetitionConsistency: true, applyRepetitionConsistency: true });
+  assert.equal(terminal.apply_repetition_consistency, true);
+  const disabled = continuousPayload(["translation"], { ...defaults, applyRepetitionConsistency: true });
+  assert.equal(disabled.include_repetition_consistency, false);
+  assert.equal(disabled.apply_repetition_consistency, false);
+  assert.equal(disabled.exclude_punctuation_only, true);
+  assert.equal(disabled.screening_enabled, false);
 });

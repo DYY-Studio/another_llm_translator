@@ -122,6 +122,29 @@
 .modal label.check-row { display: flex; }
 .modal input[type=file] { padding: 7px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
+.repetition-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-block: 12px; }
+.repetition-actions select { max-width: 100%; }
+.repetition-group { display: grid; gap: 12px; }
+.repetition-group .repetition-actions { margin-block: 0; }
+.repetition-group > h3, .repetition-group > p, .repetition-group .term-decision-proposal p { margin: 0; }
+.repetition-group label { display: grid; gap: 6px; min-width: 0; }
+.repetition-group select { width: 100%; min-width: 0; }
+.repetition-text { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin-block: 8px; }
+.repetition-filters { grid-template-columns: auto minmax(0, 1fr) auto; }
+.repetition-filters .term-decision-pages { padding: 0; }
+.repetition-scope, .repetition-summary { grid-column: 1 / -1; }
+.repetition-heading { justify-content: space-between; }
+.repetition-group .repetition-occurrence-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+.repetition-occurrence-heading > small { overflow-wrap: anywhere; }
+.repetition-group .repetition-apply-toggle { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.repetition-result { min-width: 0; padding: 4px 10px; border-left: 3px solid var(--row-border); }
+.repetition-result.is-applied { border-left-color: var(--accent); background: var(--accent-soft); }
+.repetition-result.is-applied > strong, .repetition-result.is-applied > h4 { color: var(--accent-text); }
+.repetition-occurrences { display: grid; align-content: start; gap: 8px; max-height: min(640px, 65vh); overflow: auto; }
+.repetition-occurrences > .term-decision-proposal { padding: 10px 14px; gap: 8px; }
+.repetition-occurrences .decision-state-pair .repetition-text { margin-block: 4px 0; }
+.repetition-occurrences .overview-repetition-context { margin-top: 0; }
+.repetition-workspace .term-decision-content { overscroll-behavior: auto; }
 .replacement-modal { width: min(560px, calc(100vw - 32px)); }
 .replacement-heading h2 { margin: 0 0 6px; }
 .replacement-heading p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }

@@ -12,12 +12,16 @@ from app.errors import UsageError
 from app.execution import create_run, segment_model_source
 from app.project import init_project
 from app.sqlite_storage import (
+    append_jsonl,
+    database_path,
     read_content_summaries,
     read_json,
     read_segments,
+    read_summary_runs,
     record_header,
     write_content_summary,
     write_summary_participation,
+    write_summary_run,
 )
 from app.stage_terminology import _digest
 from app.summary_aggregation import aggregate_summaries
@@ -86,6 +90,66 @@ def _full_fragment(project):
             model="test-model",
         ),
     )
+
+
+def test_summary_clear_requires_confirmation_and_preserves_other_state(tmp_path):
+    import sqlite3
+
+    project = _project(tmp_path)
+    _full_fragment(project)
+    fragment = read_content_summaries(project)[0]
+    for kind in ("reduction", "full"):
+        write_content_summary(project, {**fragment, "record_id": kind, "kind": kind})
+    selection = [{"file_id": "F0001", "part_id": "document", "selected": True}]
+    write_summary_participation(project, selection)
+    run_id, run_dir = create_run(
+        project, config=load_project_config(project, stage="content_summary"),
+        stage="content_summary", fingerprint="old", prompt="old prompt",
+        selected_count=1, requested_count=1, reused_count=0,
+    )
+    for status in ("completed", "running"):
+        write_summary_run(project, record_header(
+            "summary_run", fragment["project_id"], record_id=f"SUMMARY-{status}", run_id=f"SUMMARY-{status}",
+            mode="aggregation", status=status, source_ranges=[],
+            input_digest="sha256:input", prompt_digest="sha256:prompt", model="test-model",
+        ))
+    append_jsonl(project, project / "stages" / "translation.jsonl", record_header(
+        "stage_result", fragment["project_id"], stage="translation",
+        segment_id="F0001-S000001", status="completed", text="保留译文",
+    ))
+    client = TestClient(create_app(projects_root=project.parent))
+    before_terms = client.get("/api/v1/projects/demo/terms").json()
+    for payload in ({}, {"confirm": False}, {"confirm": "true"}):
+        assert client.post("/api/v1/projects/demo/summaries/clear", json=payload).status_code == 400
+        assert len(read_content_summaries(project)) == 3
+    cleared = client.post("/api/v1/projects/demo/summaries/clear", json={"confirm": True})
+    assert cleared.status_code == 200
+    assert cleared.json()["artifacts"] == []
+    assert cleared.json()["participation"] == selection
+    assert cleared.json()["boundaries"][0]["segment_count"] == 2
+    assert client.get("/api/v1/projects/demo/terms").json() == before_terms
+    assert read_json(project, run_dir / "manifest.json")["run_id"] == run_id
+    assert read_json(project, run_dir / "manifest.json")["status"] == "interrupted"
+    assert {item["run_id"]: item["status"] for item in read_summary_runs(project)} == {
+        "SUMMARY-completed": "completed", "SUMMARY-running": "interrupted",
+    }
+    assert task_options(project, "content_summary")["running_run"] is None
+    with sqlite3.connect(database_path(project)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM summary_source_texts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM stage_results WHERE stage = 'translation'").fetchone()[0] == 1
+
+
+def test_summary_clear_rejects_running_project(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    _full_fragment(project)
+    app = create_app(projects_root=project.parent)
+    monkeypatch.setattr(app.state.tasks, "is_project_running", lambda _root: True)
+    response = TestClient(app).post(
+        "/api/v1/projects/demo/summaries/clear", json={"confirm": True}
+    )
+    assert response.status_code == 400
+    assert "运行中的任务" in response.json()["error"]
+    assert read_content_summaries(project)
 
 
 def test_summary_routes_expose_selection_preflight_and_export(tmp_path):

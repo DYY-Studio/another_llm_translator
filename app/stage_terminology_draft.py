@@ -255,10 +255,11 @@ class DraftTerminologyScan:
             else None
         )
         self.summary_done: set[str] = set()
+        self.reusable_summary_ids: set[str] = set()
         if self.summary_selected and not scope.force:
-            from .stage_terminology import _summary_covered_segments
+            from .stage_terminology import _summary_reusable_fragments
 
-            self.summary_done = _summary_covered_segments(
+            self.summary_done, self.reusable_summary_ids = _summary_reusable_fragments(
                 project,
                 [
                     item
@@ -384,8 +385,9 @@ class DraftTerminologyScan:
                     if item.get("_draft_summary")
                 }
             )
-            if self.scope.force:
-                mark_content_summary_fragments_stale(self.project, set(boundaries))
+            mark_content_summary_fragments_stale(
+                self.project, boundaries, exclude_ids=self.reusable_summary_ids
+            )
             self.summary_run = record_header(
                 "summary_run",
                 self.project_id,
@@ -607,8 +609,8 @@ class DraftTerminologyScan:
         part_original: dict[str, str],
         original_parts: dict[str, list[str]],
     ) -> None:
-        if terms:
-            append_jsonl(
+        from .term_knowledge import source_range
+        append_jsonl(
                 self.project,
                 self.project / "terminology" / "candidates.jsonl",
                 record_header(
@@ -624,6 +626,7 @@ class DraftTerminologyScan:
                     source_order=_candidate_source_order(
                         items, self.segment_order, part_original,
                     ),
+                    source_range=source_range(items, self.selected_items, part_original),
                     terms=terms,
                 ),
             )

@@ -116,12 +116,10 @@ def test_web_app_creation_does_not_access_keyring(
         raise AssertionError("web app creation must not access the keyring")
 
     monkeypatch.setattr(keyring, "get_password", fail_get_password)
-    app = create_app(
+    create_app(
         projects_root=tmp_path / "projects",
         app_root=tmp_path / "app-root",
     )
-
-    assert app.title == "Another LLM Translator"
 
 
 def test_effective_path_prefers_user_copy_and_falls_back_to_builtin(

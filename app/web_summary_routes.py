@@ -14,6 +14,7 @@ from .i18n import SUPPORTED_LANGUAGES
 from .locking import project_write_lock
 from .project import load_segments
 from .sqlite_storage import (
+    clear_content_summaries,
     read_content_summaries,
     read_summary_participation,
     write_summary_participation,
@@ -147,6 +148,17 @@ def register_summary_routes(
                 [dict(value, selected=selected) for value in values],
             )
         return {"participation": read_summary_participation(project(name))}
+
+    @app.post("/api/v1/projects/{name}/summaries/clear")
+    def clear_summaries(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("confirm") is not True:
+            raise UsageError("必须明确确认清空内容概括")
+        root = project(name)
+        with project_write_lock(root):
+            if app.state.tasks.is_project_running(root):
+                raise UsageError("项目存在运行中的任务，结束或取消后才能清空内容概括")
+            clear_content_summaries(root)
+            return _summary_view(root)
 
     @app.post("/api/v1/projects/{name}/summaries/aggregation-preflight")
     async def preflight(

@@ -12,7 +12,7 @@ export function PromptSyncCard({ language, sync, dirty, loadedGlobal, inherited,
     <div><strong>{translate(title, language)}</strong><small>{inherited === undefined ? "" : `${translate(inherited ? "decision.promptInherited" : "decision.promptOverride", language)}${detail || sync.error ? " · " : ""}`}{sync.error ?? detail}</small></div>
     <div className="button-group">
       {sync.available && !sync.same && !loadedGlobal && <button className="quiet-button" onClick={onLoadGlobal}>{translate("settings.promptLoadGlobal", language)}</button>}
-      {onRestore && <button className="quiet-button" disabled={inherited} onClick={onRestore}>{translate("decision.promptRestore", language)}</button>}
+      {onRestore && <button className="quiet-button" disabled={(inherited && !dirty) || !sync.available} onClick={onRestore}>{translate("decision.promptRestore", language)}</button>}
     </div>
   </div>;
 }

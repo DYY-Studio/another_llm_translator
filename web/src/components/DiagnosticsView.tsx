@@ -587,11 +587,11 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
                         ))}
                       </div>
                     )}
-                    {detail.request_kind === "decision" && <article className="exchange-body">
+                    {detail.request_body && <article className="exchange-body">
                       {detail.request_body_truncated && <p>{translate("diagnostics.truncated100kDot", language)}</p>}
                       <pre>{detail.request_body}</pre>
                     </article>}
-                    <div className="exchange-messages">
+                    {!detail.request_body && <div className="exchange-messages">
                       {detail.messages.map((message, index) => (
                         <article key={`${message.role}-${index}`}>
                           <header>
@@ -601,7 +601,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
                           <pre>{message.content}</pre>
                         </article>
                       ))}
-                    </div>
+                    </div>}
                   </div>
                 )}
                 {detailTab === "content" && (

@@ -44,7 +44,7 @@ def register_decision_prompt_routes(app: FastAPI, project: Callable[[str], Path]
     @app.get("/api/v1/decision-prompts")
     async def list_prompts() -> dict:
         summaries = {value["validator_id"]: value for _, value in resolve_translation_validators()}
-        return {"prompts": [{"validator_id": key, "label": summaries[key]["label"], "choice_ids": list(value.choice_ids)} for key, value in prompt_declarations().items()]}
+        return {"prompts": [{"validator_id": key, "label": "重复译文初筛" if key == "repetition_screening" else summaries[key]["label"], "choice_ids": list(value.choice_ids)} for key, value in prompt_declarations().items()]}
 
     @app.get("/api/v1/decision-prompts/{validator_id}/default")
     async def get_default(validator_id: str) -> dict:
@@ -68,10 +68,13 @@ def register_decision_prompt_routes(app: FastAPI, project: Callable[[str], Path]
         return save(validator_id, payload, project(name))
 
     @app.delete("/api/v1/projects/{name}/decision-prompts/{validator_id}")
-    async def restore_project(name: str, validator_id: str) -> dict:
-        get_declaration(validator_id)
+    async def restore_project(name: str, validator_id: str, payload: dict) -> dict:
+        if payload.get("confirm") is not True:
+            raise UsageError("必须明确确认恢复 Prompt 继承")
+        declaration = get_declaration(validator_id)
         root = project(name)
         with project_write_lock(root):
+            resolve_prompt(declaration)
             prompt_path(root, validator_id).unlink(missing_ok=True)
         return {"saved": True}
 

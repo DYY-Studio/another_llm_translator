@@ -44,6 +44,10 @@ export function ContinuousRunDialog({
   onClose: () => void;
   onStart: (decision: ContinuousRunDecision) => Promise<void>;
 }) {
+  const [includeRepetitionConsistency, setIncludeRepetitionConsistency] = useState(false);
+  const [applyRepetitionConsistency, setApplyRepetitionConsistency] = useState(false);
+  const [excludePunctuationOnly, setExcludePunctuationOnly] = useState(true);
+  const [screeningEnabled, setScreeningEnabled] = useState(false);
   const [startStage, setStartStage] = useState<ContinuousStartStage>("translation");
   const [endIndex, setEndIndex] = useState(CONTINUOUS_ORDER.indexOf("translation"));
   const [preflight, setPreflight] = useState<{ request: string; options: ContinuousTaskOptions } | null>(null);
@@ -53,6 +57,7 @@ export function ContinuousRunDialog({
   }>({ project, steps: {} });
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<unknown>(null);
+  const [knowledgeConfirmed, setKnowledgeConfirmed] = useState(false);
   const [submitError, setSubmitError] = useState<unknown>(null);
   const [finalReview, setFinalReview] = useState(false);
   const [applyTerminologyDecision, setApplyTerminologyDecision] = useState(false);
@@ -64,14 +69,21 @@ export function ContinuousRunDialog({
   const [submitting, setSubmitting] = useState(false);
 
   const stages = useMemo(() => chainFor(startStage, endIndex), [endIndex, startStage]);
+  const repetitionAvailable = stages.includes("translation") || startStage === "proofreading";
+  const repetitionEnabled = repetitionAvailable && includeRepetitionConsistency;
+  const repetitionLocked = submitting || runActions.repetition_consistency?.action === "resume";
   const terminalDecision = stages.at(-1) === "terminology_decision";
   const hasDecision = stages.includes("terminology_decision");
   const decisionInMiddle = hasDecision && !terminalDecision;
   const params = new URLSearchParams();
   for (const stage of stages) params.append("stages", stage);
   params.set("language", language);
+  params.set("include_repetition_consistency", String(repetitionEnabled));
+  params.set("apply_repetition_consistency", String(repetitionEnabled && applyRepetitionConsistency));
+  params.set("exclude_punctuation_only", String(excludePunctuationOnly));
+  params.set("screening_enabled", String(screeningEnabled));
   params.set("final_review", String(hasDecision && (terminalDecision ? finalReview : true)));
-  params.set("apply_terminology_decision", String(decisionInMiddle && applyTerminologyDecision));
+  params.set("apply_terminology_decision", String(hasDecision && applyTerminologyDecision));
   params.set("include_draft_translation", String(includeDraftTranslation));
   params.set("include_summaries", String(includeSummaries));
   params.set("aggregate_full_summaries", String(aggregateFullSummaries));
@@ -107,12 +119,12 @@ export function ContinuousRunDialog({
   useEffect(() => {
     setRunActions((current) => {
       const scoped = Object.fromEntries(
-        Object.entries(current).filter(([stage]) => stages.includes(stage as LLMStage)
+        Object.entries(current).filter(([stage]) => (stage === "repetition_consistency" && repetitionEnabled) || stages.includes(stage as LLMStage)
           || (stage === "content_summary" && aggregateFullSummaries)),
       );
       return options ? reconcileRunActions(scoped, options.steps) : scoped;
     });
-  }, [options, stages, aggregateFullSummaries]);
+  }, [options, stages, aggregateFullSummaries, repetitionEnabled]);
 
   useEffect(() => {
     if (options?.steps?.some((step) => step.mismatched_fingerprint_completed)) {
@@ -124,6 +136,10 @@ export function ContinuousRunDialog({
 
   function changeStartStage(next: ContinuousStartStage) {
     setStartStage(next);
+    setIncludeRepetitionConsistency(false);
+    setApplyRepetitionConsistency(false);
+    setExcludePunctuationOnly(true);
+    setScreeningEnabled(false);
     setEndIndex(CONTINUOUS_ORDER.indexOf(next));
     setRunActions({});
     setApplyTerminologyDecision(false);
@@ -142,6 +158,7 @@ export function ContinuousRunDialog({
     setRunActions((current) => Object.fromEntries(
       Object.entries(current).filter(([stage]) => {
         if (stage === "content_summary") return aggregateFullSummaries;
+        if (stage === "repetition_consistency") return includeRepetitionConsistency && (startStage === "proofreading" || nextEndIndex >= CONTINUOUS_ORDER.indexOf("translation"));
         const index = CONTINUOUS_ORDER.indexOf(stage as LLMStage);
         return index >= CONTINUOUS_ORDER.indexOf(startStage) && index <= nextEndIndex;
       }),
@@ -152,6 +169,10 @@ export function ContinuousRunDialog({
     const run = stepFor(options, stage)?.running_run;
     if (!run) return;
     setRunActions((current) => ({ ...current, [stage]: { action, runId: run.run_id } }));
+    if (stage === "repetition_consistency" && action === "resume") {
+      setExcludePunctuationOnly(run.exclude_punctuation_only!);
+      setScreeningEnabled(run.screening_enabled!);
+    }
     setResultPolicy((current) => resultPolicyAfterRunAction(current, stage, action));
   }
 
@@ -165,6 +186,8 @@ export function ContinuousRunDialog({
       || (resultPolicy !== "reuse" && resultPolicy !== "force"))
     && !isContinuousBlockingResolved(item.code, item.stage, runActions, resultPolicy)
   ));
+  const replacementImpacts = options?.terminology_options?.knowledge_replacement_impacts ?? [];
+  const replacementNeeded = stages.includes("terminology") && resultPolicy === "force" && replacementImpacts.length > 0;
   const localBlocking: Array<{ code: string; message: string; stage?: string }> = [
     ...missingActions.map((step) => ({
       code: "run_action_required",
@@ -181,7 +204,7 @@ export function ContinuousRunDialog({
       message: translate("continuousRun.resumePolicyConflict", language),
     }] : []),
   ];
-  const allBlocking = [...blocking, ...localBlocking];
+  const allBlocking = [...blocking, ...localBlocking, ...(replacementNeeded && !knowledgeConfirmed ? [{code: "knowledge_replacement_confirmation", message: translate("knowledge.confirmReplacement", language)}] : [])];
   const globalBlocking = allBlocking.filter((item) => !item.stage);
   const canStart = Boolean(
     options
@@ -198,7 +221,11 @@ export function ContinuousRunDialog({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await onStart(continuousPayload(stages, {
+      await onStart({ ...continuousPayload(stages, {
+        includeRepetitionConsistency: repetitionEnabled,
+        applyRepetitionConsistency,
+        excludePunctuationOnly,
+        screeningEnabled,
         finalReview,
         applyTerminologyDecision,
         force: resultPolicy === "force",
@@ -207,13 +234,25 @@ export function ContinuousRunDialog({
         includeDraftTranslation,
         includeSummaries,
         aggregateFullSummaries,
-      }));
+      }), confirm_knowledge_replacement: replacementNeeded && knowledgeConfirmed });
     } catch (reason) {
       setSubmitError(reason);
     } finally {
       setSubmitting(false);
     }
   }
+
+  const repetitionStep = stepFor(options, "repetition_consistency");
+  const repetitionControl = <label className={`continuous-run-stage ${repetitionEnabled ? "selected" : repetitionAvailable ? "next" : "disabled"}`}>
+    <input type="checkbox" checked={repetitionEnabled} disabled={submitting || !repetitionAvailable} onChange={(event) => { setIncludeRepetitionConsistency(event.target.checked); setApplyRepetitionConsistency(false); }} />
+    <span className="continuous-run-stage-main">
+      <strong>{translate("repetition.title", language)}</strong>
+      {repetitionEnabled && <>
+        <small>{repetitionStep?.preset && `${repetitionStep.preset.id} · ${repetitionStep.preset.model} · `}{repetitionStep?.count_deferred ? translate("continuousRun.repetitionDeferred", language) : repetitionStep ? translate("continuousRun.repetitionCount", language, { count: repetitionStep.selected }) : translate("common.loading", language)}</small>
+        {blocking.filter((item) => item.stage === "repetition_consistency").map((item) => <small className="error-text" key={item.code}>{item.message}</small>)}
+      </>}
+    </span>
+  </label>;
 
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
@@ -260,6 +299,7 @@ export function ContinuousRunDialog({
               const stageBlocking = blocking.filter((item) => item.stage === stage);
               return (
                 <Fragment key={stage}>
+                  {stage === "proofreading" && startStage === "proofreading" && repetitionControl}
                   <label className={`continuous-run-stage ${stageState}`}>
                     <input
                       type="checkbox"
@@ -285,6 +325,7 @@ export function ContinuousRunDialog({
                       ))}
                     </span>
                   </label>
+                  {stage === "translation" && repetitionControl}
                   {stage === "terminology" && aggregateFullSummaries && <label className="continuous-run-stage selected">
                     <input type="checkbox" checked disabled />
                     <span className="continuous-run-stage-main">
@@ -330,14 +371,28 @@ export function ContinuousRunDialog({
                   <span>{translate("continuousRun.terminalFinalReview", language)}</span>
                 </label>
               )}
-              {decisionInMiddle && (
-                <label className="check-row">
-                  <input type="checkbox" checked={applyTerminologyDecision} onChange={(event) => setApplyTerminologyDecision(event.target.checked)} disabled={submitting} />
-                  <span>{translate(includeDraftTranslation ? "continuousRun.applyDecisionAfterDraft" : "continuousRun.applyDecision", language)}</span>
-                </label>
-              )}
+              <label className="check-row">
+                <input type="checkbox" checked={applyTerminologyDecision} onChange={(event) => setApplyTerminologyDecision(event.target.checked)} disabled={submitting} />
+                <span>{translate("continuousRun.applyDecision", language)}</span>
+              </label>
             </section>
           )}
+
+          {repetitionEnabled && <section className="continuous-run-section">
+            <h3>{translate("repetition.title", language)}</h3>
+            <label className="check-row">
+              <input type="checkbox" checked={excludePunctuationOnly} disabled={repetitionLocked} onChange={(event) => setExcludePunctuationOnly(event.target.checked)} />
+              <span>{translate("repetition.excludePunctuationOnly", language)}</span>
+            </label>
+            <label className="check-row">
+              <input type="checkbox" checked={screeningEnabled} disabled={repetitionLocked} onChange={(event) => setScreeningEnabled(event.target.checked)} />
+              <span>{translate("repetition.screeningEnabled", language)}</span>
+            </label>
+            <label className="check-row">
+              <input type="checkbox" checked={applyRepetitionConsistency} disabled={submitting} onChange={(event) => setApplyRepetitionConsistency(event.target.checked)} />
+              <span>{translate("continuousRun.applyRepetition", language)}</span>
+            </label>
+          </section>}
 
           {stages.includes("proofreading") && stages.at(-1) === "polishing" && (
             <p className="muted continuous-run-auto-apply">
@@ -368,6 +423,8 @@ export function ContinuousRunDialog({
                 return (
                   <fieldset className="continuous-run-running" key={step.stage}>
                     <legend>{stageLabel(step.stage, language)} · {run.run_id}</legend>
+                    {run.execution_changed && runActions[step.stage]?.action === "resume" && <p className="warning-banner">{translate("runDialog.resumeChangedHint", language)}</p>}
+                    {run.compatibility_deferred && <small>{translate("continuousRun.repetitionResumeDeferred", language)}</small>}
                     <label className="radio-option decision-option">
                       <input type="radio" checked={runActions[step.stage]?.action === "resume"} disabled={run.resume_compatible === false || submitting} onChange={() => chooseRunAction(step.stage, "resume")} />
                       <span><strong>{translate("continuousRun.resume", language)}</strong><small>{run.resume_compatible === false ? run.resume_incompatibility_reason : translate("continuousRun.resumeHint", language)}</small></span>
@@ -393,6 +450,11 @@ export function ContinuousRunDialog({
             {loading && <p className="muted">{translate("common.loading", language)}</p>}
             {loadError != null && <p className="error-text" role="alert">{errorMessage(loadError, language)}</p>}
             {loadError != null && Object.keys(displaySteps).length > 0 && <p className="muted">{translate("continuousRun.previousPreflight", language)}</p>}
+            {replacementNeeded && <div className="warning-banner run-warning">
+              <strong>{translate("knowledge.replacement", language, { count: replacementImpacts.length })}</strong>
+              <details><summary>{translate("knowledge.fragments", language)}</summary>{replacementImpacts.map((fragment) => <p key={fragment.fragment_id}>{fragment.owner}: {fragment.text}</p>)}</details>
+              <label className="checkbox-label"><input type="checkbox" checked={knowledgeConfirmed} onChange={(event) => setKnowledgeConfirmed(event.target.checked)} />{translate("knowledge.confirmReplacement", language)}</label>
+            </div>}
             {submitError != null && <p className="error-text" role="alert">{errorMessage(submitError, language)}</p>}
           </div>
         </div>

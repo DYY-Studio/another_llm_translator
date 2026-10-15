@@ -2,7 +2,7 @@ import { Fragment, useLayoutEffect, useEffect, useId, useMemo, useRef, useState,
 import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import { openExternalUrl } from "../native";
-import type { AdapterCapabilities, CredentialSummary, DecisionPreset, DecisionPresetSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
+import type { AdapterCapabilities, CredentialSummary, HTTPDecisionPreset, DecisionPreset, DecisionPresetSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
 import { ChatGPTSettings, type ChatGPTConnectionSummary } from "./ChatGPTSettings";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
@@ -413,7 +413,7 @@ function CredentialPicker({ language, credential, credentials, onChange }: {
   language: Language;
   credential: LLMPreset["credential"];
   credentials: CredentialSummary[];
-  onChange: (value: DecisionPreset["credential"]) => void;
+  onChange: (value: HTTPDecisionPreset["credential"]) => void;
 }) {
   return <>
     <select value={credential.kind} onChange={(event) => onChange({ kind: event.target.value === "keychain" ? "keychain" : "environment", name: "" })}>
@@ -451,6 +451,7 @@ function PresetIdDialog({ language, existingIds, onCancel, onCreate }: { languag
 
 function DecisionPresetSettings({ language }: { language: Language }) {
   const [presets, setPresets] = useState<DecisionPresetSummary[]>([]);
+  const [llmPresets, setLLMPresets] = useState<LLMPresetSummary[]>([]);
   const [selected, setSelected] = useState("");
   const [preset, setPreset] = useState<DecisionPreset | null>(null);
   const [loading, setLoading] = useState(false);
@@ -469,6 +470,9 @@ function DecisionPresetSettings({ language }: { language: Language }) {
   }
   useEffect(() => {
     void loadList().catch((reason) => setError(errorMessage(reason, language)));
+    void api<{ presets: LLMPresetSummary[] }>("/api/v1/global/presets")
+      .then((result) => setLLMPresets(result.presets))
+      .catch((reason) => setError(errorMessage(reason, language)));
     void api<{ credentials: CredentialSummary[] }>("/api/v1/credentials")
       .then((result) => setCredentials(result.credentials))
       .catch((reason) => setError(errorMessage(reason, language)));
@@ -483,9 +487,23 @@ function DecisionPresetSettings({ language }: { language: Language }) {
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [selected]);
-  function update(change: (draft: DecisionPreset) => void) {
+  function update(change: (draft: HTTPDecisionPreset) => void) {
     setMessage(""); setError("");
-    setPreset((current) => { if (!current) return current; const next = structuredClone(current); change(next); return next; });
+    setPreset((current) => { if (!current || current.protocol === "llm") return current; const next = structuredClone(current); change(next); return next; });
+  }
+  function changeProtocol(protocol: DecisionPreset["protocol"]) {
+    if (!preset || preset.protocol === protocol) return;
+    setMessage(""); setError("");
+    if (protocol === "llm") {
+      setPreset({ preset_id: preset.preset_id, protocol, llm_preset: "", prompt_language: language });
+    } else if (preset.protocol !== "llm") {
+      setPreset({ ...preset, protocol });
+    } else {
+      setPreset({ preset_id: preset.preset_id, protocol, url: "", model: "", proxy_url: "",
+        credential: { kind: "environment", name: "" }, context_window_tokens: 32000,
+        context_safety_margin_tokens: 512, token_safety_factor: 1.25,
+        request_timeout_seconds: 120, requests_per_minute: 0, max_parallel: 1 });
+    }
   }
   async function perform(action: () => Promise<void>) {
     setBusy(true); setError(""); setMessage("");
@@ -514,7 +532,11 @@ function DecisionPresetSettings({ language }: { language: Language }) {
       {error && <div className="error-banner">{error}</div>}
       {message && <p className="success-text">{message}</p>}
       {!preset ? <p className="muted">{translate(loading ? "preset.loadingPreset" : "preset.selectHint", language)}</p> : <fieldset className="config-grid preset-fields" disabled={busy || switchingPreset}>
-        <Field label={translate("decision.protocol", language)}><select value={preset.protocol} onChange={(event) => update((draft) => { draft.protocol = event.target.value as DecisionPreset["protocol"]; })}><option value="typesafe">TypeSafe</option><option value="openai-decisions">OpenAI Decisions</option></select></Field>
+        <Field label={translate("decision.protocol", language)}><select value={preset.protocol} onChange={(event) => changeProtocol(event.target.value as DecisionPreset["protocol"])}><option value="typesafe">TypeSafe</option><option value="openai-decisions">OpenAI Decisions</option><option value="llm">LLM</option></select></Field>
+        {preset.protocol === "llm" ? <>
+          <Field label="LLM Preset" help={translate("decision.llmPresetHint", language)}><select value={preset.llm_preset} onChange={(event) => { setMessage(""); setError(""); setPreset({ ...preset, llm_preset: event.target.value }); }}><option value="">{translate("decision.selectLLMPreset", language)}</option>{llmPresets.filter((item) => item.valid).map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>
+          <Field label={translate("settings.promptLanguage", language)} help={translate("decision.llmPromptHint", language)}><select value={preset.prompt_language} onChange={(event) => { setMessage(""); setError(""); setPreset({ ...preset, prompt_language: event.target.value as Language }); }}><option value="zh-CN">zh-CN</option><option value="en">en</option></select></Field>
+        </> : <>
         <Field label={translate("decision.url", language)} help={translate("decision.urlHint", language)}><input value={preset.url} onChange={(event) => update((draft) => { draft.url = event.target.value; })} /></Field>
         <Field label={translate("preset.credential", language)} help={translate("preset.credentialHint", language)}><div className="credential-selector"><CredentialPicker language={language} credential={preset.credential} credentials={credentials} onChange={(value) => update((draft) => { draft.credential = value; })} /></div></Field>
         <Field label={translate("preset.modelId", language)}><input value={preset.model} onChange={(event) => update((draft) => { draft.model = event.target.value; })} /></Field>
@@ -525,6 +547,7 @@ function DecisionPresetSettings({ language }: { language: Language }) {
         <NumberField label={translate("preset.rpm", language)} value={preset.requests_per_minute} min={0} step={1} help={translate("preset.rpmHint", language)} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} />
         <NumberField label={translate("preset.maxConcurrency", language)} value={preset.max_parallel} min={1} step={1} help={translate("preset.maxConcurrencyHint", language)} onChange={(value) => update((draft) => { draft.max_parallel = value; })} />
         <NumberField label={translate("preset.timeoutSeconds", language)} value={preset.request_timeout_seconds} min={0.01} step={1} help={translate("decision.timeoutHint", language)} onChange={(value) => update((draft) => { draft.request_timeout_seconds = value; })} />
+        </>}
       </fieldset>}
     </section>
     {creating && <PresetIdDialog language={language} existingIds={presets.map((item) => item.preset_id)} onCancel={() => setCreating(false)} onCreate={createPreset} />}
@@ -711,7 +734,17 @@ function PresetSettings({ language }: { language: Language }) {
               <Field label={translate("preset.proxyUrl", language)} help={translate(fixedConnection?.proxy_source === "connection" ? "preset.connectionProxyHint" : "preset.proxyUrlHint", language)}>{fixedConnection?.proxy_source === "connection" ? <span>{chatgpt?.proxy_url || translate("preset.noProxy", language)}</span> : <input value={preset.proxy_url} onChange={(event) => updateConnection((draft) => { draft.proxy_url = event.target.value; })} />}</Field>
               <NumberField label={translate("preset.contextWindow", language)} value={preset.context_window_tokens} min={1} step={1} help={translate("preset.contextWindowHint", language)} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} />
               <NumberField label={translate("preset.targetChunkInputTokens", language)} value={preset.target_chunk_input_tokens} min={1} step={1} help={translate("preset.targetChunkInputTokensHint", language)} onChange={(value) => update((draft) => { draft.target_chunk_input_tokens = value; })} />
-              <NumberField label={translate(capabilities?.max_output_tokens === false ? "preset.outputBudget" : "preset.maxOutputTokens", language)} value={preset.max_output_tokens} min={0} step={1} help={translate(capabilities?.max_output_tokens === false ? "preset.outputBudgetHint" : "preset.maxOutputTokensHint", language)} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} />
+              <NumberField label={translate(capabilities?.max_output_tokens === false ? "preset.outputBudget" : "preset.maxOutputTokens", language)} value={preset.max_output_tokens} min={capabilities?.max_output_tokens_minimum ?? 0} step={1} help={translate(capabilities?.max_output_tokens === false ? "preset.outputBudgetHint" : (capabilities?.max_output_tokens_minimum ?? 0) > 0 ? "preset.requiredOutputTokensHint" : "preset.maxOutputTokensHint", language, { minimum: capabilities?.max_output_tokens_minimum ?? 0 })} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} />
+              <ToggleField label="JSON Schema" checked={preset.json_schema_enabled ?? false} disabled={!capabilities?.json_schema && !preset.json_schema_enabled} help={translate(capabilities?.json_schema ? "preset.jsonSchemaHint" : "preset.jsonSchemaUnsupported", language)} onChange={(value) => update((draft) => { draft.json_schema_enabled = value; })} />
+              <ToggleField label={translate("preset.sendTemperature", language)} checked={preset.send_temperature} disabled={!capabilities?.temperature && !preset.send_temperature} help={translate("preset.sendTemperatureHint", language)} onChange={(value) => update((draft) => { draft.send_temperature = value; })} />
+              {(capabilities?.reasoning_effort || preset.reasoning_effort !== null) && <Field label="Reasoning Effort" help={translate("preset.reasoningEffortHint", language)}>
+                <select value={preset.reasoning_effort ?? ""} onChange={(event) => update((draft) => { draft.reasoning_effort = event.target.value || null; })}>
+                  <option value="">{translate("preset.reasoningDefault", language)}</option>
+                  {preset.reasoning_effort && !(capabilities?.reasoning_effort?.values ?? []).includes(preset.reasoning_effort) && <option value={preset.reasoning_effort}>{preset.reasoning_effort} — {translate("preset.reasoningUnsupported", language)}</option>}
+                  {(capabilities?.reasoning_effort?.values ?? []).map((value) => <option key={value} value={value}>{value}</option>)}
+                </select>
+              </Field>}
+              {preset.reasoning_effort !== null && (!capabilities?.reasoning_effort || !capabilities.reasoning_effort.values.includes(preset.reasoning_effort)) && <p className="error-banner">{translate("preset.reasoningUnsupported", language)}</p>}
               <NumberField label={translate("preset.contextSafetyMargin", language)} value={preset.context_safety_margin_tokens} min={0} step={1} help={translate("preset.contextSafetyMarginHint", language)} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} />
               <NumberField label={translate("preset.tokenSafetyFactor", language)} value={preset.token_safety_factor} min={0.01} step={0.05} help={translate("preset.tokenSafetyFactorHint", language)} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} />
               <NumberField label={translate("preset.rpm", language)} value={preset.requests_per_minute} min={0} step={1} help={translate("preset.rpmHint", language)} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} />
@@ -988,6 +1021,7 @@ function NumberField({ label, value, onChange, help, min, max, step, disabled }:
 function ToggleField({ label, checked, onChange, help, disabled = false, className = "" }: { label: string; checked: boolean; onChange: (value: boolean) => void; help?: string; disabled?: boolean; className?: string }) { return <label className={`config-toggle${className ? ` ${className}` : ""}`}><span><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />{label}</span>{help && <small>{help}</small>}</label>; }
 
 interface PromptView {
+  inherited?: boolean;
   content: string;
   language: string;
   assembled: string;
@@ -1009,8 +1043,8 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   const [error, setError] = useState("");
   useEffect(() => { let active = true; void api<{ prompts: DecisionPromptSummary[] }>("/api/v1/decision-prompts").then((value) => { if (active) setDecisionPrompts(value.prompts); }).catch((reason) => { if (active) setError(errorMessage(reason, language)); }); return () => { active = false; }; }, []);
   const stageControl = <label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}>
-    <optgroup label="LLM">{[["terminology", "stage.terminology"], ["terminology_decision", "stage.terminologyDecision"], ["content_summary", "stage.contentSummary"], ["fragment_summary", "stage.fragmentSummary"], ["translation", "stage.translation"], ["proofreading", "stage.proofreading"], ["polishing", "stage.polishing"]].map(([id, label]) => <option key={id} value={id}>{translate(label, language)}</option>)}</optgroup>
-    {decisionPrompts.length > 0 && <optgroup label="Decision">{decisionPrompts.map((prompt) => <option key={prompt.validator_id} value={`decision:${prompt.validator_id}`}>{prompt.validator_id === "preferred_term_usage" ? translate("settings.preferredTermUsage", language) : prompt.validator_id === "segment_alignment" ? translate("settings.segmentAlignment", language) : prompt.label}</option>)}</optgroup>}
+    <optgroup label="LLM">{[["decision_llm", "decision.llmPrompt"], ["terminology", "stage.terminology"], ["terminology_decision", "stage.terminologyDecision"], ["terminology_knowledge", "stage.terminologyKnowledge"], ["content_summary", "stage.contentSummary"], ["fragment_summary", "stage.fragmentSummary"], ["translation", "stage.translation"], ["repetition_consistency", "repetition.comparisonPrompt"], ["proofreading", "stage.proofreading"], ["polishing", "stage.polishing"]].map(([id, label]) => <option key={id} value={id}>{translate(label, language)}</option>)}</optgroup>
+    {decisionPrompts.length > 0 && <optgroup label="Decision">{decisionPrompts.map((prompt) => <option key={prompt.validator_id} value={`decision:${prompt.validator_id}`}>{prompt.validator_id === "preferred_term_usage" ? translate("settings.preferredTermUsage", language) : prompt.validator_id === "segment_alignment" ? translate("settings.segmentAlignment", language) : prompt.validator_id === "repetition_screening" ? translate("repetition.screeningPrompt", language) : prompt.label}</option>)}</optgroup>}
   </select></label>;
   return <>{error && <div className="error-banner">{error}</div>}{stage.startsWith("decision:")
     ? <DecisionPromptSettings key={`${scope}:${project}:${stage}`} project={project} scope={scope} language={language} validator={stage.slice(9)} stageControl={stageControl} />
@@ -1021,6 +1055,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
   const [promptLanguage, setPromptLanguage] = useState("zh-CN");
   const [content, setContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
+  const [inherited, setInherited] = useState(false);
   const [assembled, setAssembled] = useState("");
   const [assembledPhases, setAssembledPhases] = useState<Record<string, string>>({});
   const [assembledModes, setAssembledModes] = useState<Record<string, string>>({});
@@ -1055,6 +1090,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
   function applyPromptView(value: PromptView) {
     setContent(value.content);
     setSavedContent(value.content);
+    setInherited(value.inherited ?? false);
     applyPromptPreview(value);
     setGlobalSync(value.global_sync);
     setLoadedGlobalDraft(false);
@@ -1134,6 +1170,16 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
     } catch (reason) { setError(errorMessage(reason, language)); }
   }
 
+  async function restoreInheritance() {
+    if (!window.confirm(translate("decision.promptRestoreConfirm", language))) return;
+    setError("");
+    try {
+      await api(path, { method: "DELETE", body: JSON.stringify({ language: promptLanguage, confirm: true }) });
+      await loadPrompt();
+      setMessage(translate("decision.promptRestored", language));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
   async function loadLibraryEntry(promptId: string) {
     if (!promptId || (content !== savedContent && !window.confirm(translate("settings.promptSyncDraftConfirm", language)))) return;
     try {
@@ -1208,7 +1254,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
     </div>
     {stageControl}
     <label className="stage-select">{translate("settings.promptLanguage", language)}<select value={promptLanguage} onChange={(event) => setPromptLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
-    {showSyncCard && <PromptSyncCard language={language} sync={globalSync} dirty={draftDirty} loadedGlobal={loadedGlobalDraft} onLoadGlobal={() => void loadGlobalDraft()} />}
+    {showSyncCard && <PromptSyncCard language={language} sync={globalSync} dirty={draftDirty} loadedGlobal={loadedGlobalDraft} inherited={inherited} onLoadGlobal={() => void loadGlobalDraft()} onRestore={() => void restoreInheritance()} />}
     <PromptLibraryControls language={language} entries={libraryEntries} selected={selectedLibraryEntry} loading={libraryLoading} saveOpen={librarySaveOpen} id={libraryIdDraft} overwrite={!!libraryOverwriteId}
       onId={(value) => { setLibraryIdDraft(value); setLibraryOverwriteId(""); }} onCancel={() => { setLibrarySaveOpen(false); setLibraryIdDraft(""); setLibraryOverwriteId(""); }}
       onSelect={(value) => void loadLibraryEntry(value)} onDelete={() => void deleteLibraryEntry()} onSave={() => void saveToLibrary()} />
@@ -1232,6 +1278,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
           <button type="button" role="tab" aria-selected={previewPhase === "adjudication"} className={previewPhase === "adjudication" ? "active" : ""} onClick={() => setPreviewPhase("adjudication")}>{translate("settings.promptPhaseAdjudication", language)}</button>
           <button type="button" role="tab" aria-selected={previewPhase === "consistency"} className={previewPhase === "consistency" ? "active" : ""} onClick={() => setPreviewPhase("consistency")}>{translate("settings.promptPhaseConsistency", language)}</button>
           <button type="button" role="tab" aria-selected={previewPhase === "final_review"} className={previewPhase === "final_review" ? "active" : ""} onClick={() => setPreviewPhase("final_review")}>{translate("settings.promptPhaseFinalReview", language)}</button>
+          <button type="button" role="tab" aria-selected={previewPhase === "containment"} className={previewPhase === "containment" ? "active" : ""} onClick={() => setPreviewPhase("containment")}>{translate("settings.promptPhaseContainment", language)}</button>
         </div>
       </>}
       <pre>{(assembledPhases[previewPhase] ?? modePreview ?? assembled) || translate("settings.promptAssembledEmpty", language)}</pre>
