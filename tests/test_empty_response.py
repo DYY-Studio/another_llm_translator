@@ -112,6 +112,8 @@ async def test_empty_original_retry_preserves_request_and_usage(
     assert parent["status"] == "failed"
     assert parent["error"] == ("empty_response_truncated" if reason == "length" else "empty_response_unknown")
     assert child["parent_request_id"] == parent["request_id"]
+    for item in (parent, child):
+        assert item["usage"] == {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30, "available": True, "partial": False}
 
 
 @pytest.mark.asyncio

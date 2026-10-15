@@ -377,12 +377,18 @@ class LLMClient:
                 self.usage_complete = False
             self._key_audits[key_index]["usage_complete"] = False
 
-    def _record_usage(self, usage: Usage, key_index: int) -> None:
+    def _record_usage(self, usage: Usage, key_index: int, *, request_id: str, complete: bool = True) -> None:
         self.usage = Usage(
             input_tokens=self.usage.input_tokens + usage.input_tokens,
             output_tokens=self.usage.output_tokens + usage.output_tokens,
             total_tokens=self.usage.total_tokens + usage.total_tokens,
         )
+        diagnostics = current_diagnostics()
+        if diagnostics is not None:
+            diagnostics.record_request_usage(request_id, {
+                "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+            }, complete=complete)
         self.usage_observed = True
         entry = self._key_audits[key_index]
         previous = entry["usage"]
@@ -1093,6 +1099,7 @@ class LLMClient:
             attempt_stream_received_bytes: int | None = None
             attempt_stream_first_event_latency_ms: float | None = None
             request_retry_round = attempt
+            elapsed: float | None = None
             if diagnostics is not None:
                 diagnostics.request_started(request_id)
             self._audit_attempt(key_index)
@@ -1178,6 +1185,7 @@ class LLMClient:
                     self._record_stream_usage(
                         exc.usage_values,
                         key_index,
+                        request_id=request_id,
                         affects_global=True,
                     )
                 elapsed = time.monotonic() - started
@@ -1306,6 +1314,7 @@ class LLMClient:
                     self._record_stream_usage(
                         exc.usage_values,
                         key_index,
+                        request_id=request_id,
                         affects_global=True,
                     )
                 await debug_attempt(
@@ -1393,7 +1402,7 @@ class LLMClient:
                         attempt=send_attempt,
                         retry_round=request_retry_round,
                         key_index=key_index + 1,
-                        latency_seconds=time.monotonic() - started,
+                        latency_seconds=elapsed if elapsed is not None else time.monotonic() - started,
                         status=response_status,
                         error=attempt_error
                         or response_status is None
@@ -1466,7 +1475,7 @@ class LLMClient:
                         self.config["debug"],
                         self.send_count,
                     )
-                    self._record_stream_usage(stream_usage, key_index)
+                    self._record_stream_usage(stream_usage, key_index, request_id=request_id)
                     self.logger.info(
                         "stream complete request=%s key=%d attempt=%d retry_round=%d status=%d events=%d bytes=%d termination=%s elapsed=%.2fs",
                         request_id,
@@ -1489,7 +1498,7 @@ class LLMClient:
                 response_data = {"raw_text": response.text}
             extracted = self.adapter.extract_usage(response_data)
             if extracted is not None:
-                self._record_usage(extracted, key_index)
+                self._record_usage(extracted, key_index, request_id=request_id)
             else:
                 self._audit_usage_missing(key_index, affects_global=True)
             if 200 <= response.status_code < 300:
@@ -1757,6 +1766,7 @@ class LLMClient:
         values: dict[str, int],
         key_index: int,
         *,
+        request_id: str,
         affects_global: bool = True,
     ) -> None:
         if not self.adapter.usage_supported:
@@ -1794,6 +1804,8 @@ class LLMClient:
                     total_tokens=values.get("total_tokens", 0),
                 ),
                 key_index,
+                request_id=request_id,
+                complete=required.issubset(values),
             )
         if not required.issubset(values):
             if affects_global:
