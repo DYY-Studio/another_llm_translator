@@ -380,6 +380,7 @@ export type DiagnosticsRequestStatus =
   | "interrupted";
 
 export interface DiagnosticsRequestSummary {
+  parent_request_id: string | null;
   overview?: RequestOverviewSnapshot | null;
   overview_truncated?: boolean;
   request_kind: "llm" | "decision";
@@ -472,6 +473,7 @@ export interface DiagnosticsResponse {
 }
 
 export interface DiagnosticsRequestDetail {
+  parent_request_id: string | null;
   overview: RequestOverviewSnapshot | null;
   overview_truncated: boolean;
   request_kind: "llm" | "decision";

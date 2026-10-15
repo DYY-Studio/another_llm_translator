@@ -56,7 +56,9 @@
 .request-list button:disabled { cursor: not-allowed; opacity: .55; }
 .request-row-main { min-width: 0; display: grid; flex: 1; gap: 5px; }
 .request-row-main header { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 11px; }
-.request-row-main code, .request-row-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.request-row-main code span { white-space: nowrap; }
+.request-row-main time { flex: none; }
+.request-row-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .request-row-main > span { color: var(--muted); font-size: 11px; }
 .request-status { margin-right: 7px; color: var(--muted); font-style: normal; font-weight: 700; }
 .status-running, .status-retrying { color: var(--status-warning); }

@@ -6,7 +6,6 @@ import { HistoricalDiagnosticsView } from "./HistoricalDiagnosticsView";
 import type {
   DecisionActivity,
   DiagnosticsRequestDetail,
-  DiagnosticsRequestStatus,
   DiagnosticsRequestSummary,
   DiagnosticsResponse,
 } from "../types";
@@ -54,6 +53,13 @@ function clock(value: string, language: Language) {
   });
 }
 
+function requestStatusLabel(request: Pick<DiagnosticsRequestSummary, "status" | "error">, language: Language) {
+  if (request.status === "failed" && ["format_error", "empty_response_unknown", "empty_response_truncated", "context_length_error"].includes(request.error ?? "")) {
+    return translate(`reqResult.${request.error}`, language);
+  }
+  return translate(`reqStatus.${request.status}`, language);
+}
+
 function layoutDetailsColumns(bar: HTMLDivElement) {
   const spans = Array.from(bar.querySelectorAll<HTMLElement>(":scope > span"));
   if (!spans.length) return;
@@ -82,14 +88,12 @@ const RequestGroup = memo(function RequestGroup({
   items,
   language,
   onOpen,
-  statusLabels,
   title,
 }: {
   className: string;
   items: DiagnosticsRequestSummary[];
   language: Language;
   onOpen: (requestId: string) => void;
-  statusLabels: Record<DiagnosticsRequestStatus, string>;
   title: string;
 }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -128,10 +132,10 @@ const RequestGroup = memo(function RequestGroup({
                 }}
               >
                 <div className="request-row-main">
-                  <header><code>{item.request_id}</code><time>{clock(item.timestamp, language)}</time></header>
+                  <header><code>{item.parent_request_id && <><span>{item.parent_request_id}</span>{" → "}</>}<span>{item.request_id}</span></code><time>{clock(item.timestamp, language)}</time></header>
                   <strong>{item.model}</strong>
                   <span>
-                    <i className={`request-status status-${item.status}`}>{statusLabels[item.status]}</i>
+                    <i className={`request-status status-${item.status}`}>{requestStatusLabel(item, language)}</i>
                     {translate("diagnostics.attempts", language, { count: item.attempt_count })}
                     {item.last_http_status ? ` · HTTP ${item.last_http_status}` : ""}
                     {item.provider_error_status !== null ? ` · ${translate("diagnostics.providerErrorStatus", language, { status: item.provider_error_status })}` : ""}
@@ -159,10 +163,6 @@ const RequestGroup = memo(function RequestGroup({
 });
 
 function RuntimeDiagnosticsView({ language }: { language: Language }) {
-  const statusLabels = useMemo(() => Object.fromEntries(
-    ["running", "retrying", "completed", "failed", "interrupted"]
-      .map((key) => [key, translate(`reqStatus.${key}`, language)]),
-  ) as Record<DiagnosticsRequestStatus, string>, [language]);
   const [value, setValue] = useState<DiagnosticsResponse | null>(null);
   const [requestSummaries, setRequestSummaries] = useState<Map<string, DiagnosticsRequestSummary>>(
     () => new Map(),
@@ -485,7 +485,6 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
                 items={requestGroups.active}
                 language={language}
                 onOpen={openDetail}
-                statusLabels={statusLabels}
                 title={translate("diagnostics.activeRequests", language)}
               />
             )}
@@ -495,7 +494,6 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
                 items={requestGroups.finished}
                 language={language}
                 onOpen={openDetail}
-                statusLabels={statusLabels}
                 title={translate("diagnostics.finishedRequests", language)}
               />
             )}
@@ -526,7 +524,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
           </nav>
           <div className="exchange-detail">
             {decisionRequests.length ? <div className="decision-request-cards">{decisionRequests.slice(currentDecisionPage * 20, (currentDecisionPage + 1) * 20).map((item) => <article key={item.request_id}>
-              <header className="overview-request-heading"><code>{item.segment_id ?? "—"}</code><time>{clock(item.timestamp, language)}</time><span className={`request-status status-${item.status}`}>{statusLabels[item.status]}</span><span>{number(item.latest_latency_ms, language, " ms")} · {translate("diagnostics.tabAttempts", language)} {item.attempt_count}</span><button className="quiet-button" onClick={() => openDetail(item.request_id)}>{translate("diagnostics.view", language)}</button></header>
+              <header className="overview-request-heading"><code>{item.segment_id ?? "—"}</code><time>{clock(item.timestamp, language)}</time><span className={`request-status status-${item.status}`}>{requestStatusLabel(item, language)}</span><span>{number(item.latest_latency_ms, language, " ms")} · {translate("diagnostics.tabAttempts", language)} {item.attempt_count}</span><button className="quiet-button" onClick={() => openDetail(item.request_id)}>{translate("diagnostics.view", language)}</button></header>
               <RequestOverview snapshot={item.overview} truncated={item.overview_truncated} language={language} />
             </article>)}</div> : <div className="diagnostics-empty">{translate("diagnostics.decisionNoRecent", language)}</div>}
           </div>
@@ -549,7 +547,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
             <header className="exchange-dialog-heading">
               <div>
                 <h2 id="exchange-dialog-title">{translate("diagnostics.detailsTitle", language)}</h2>
-                <code>{selectedRequest}</code>
+                <code>{detail?.parent_request_id && `${detail.parent_request_id} → `}{selectedRequest}</code>
               </div>
               <button className="quiet-button" onClick={closeDetail} aria-label={translate("diagnostics.closeDetails", language)}>{translate("diagnostics.close", language)}</button>
             </header>
@@ -579,7 +577,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
                 <div className="exchange-meta">
                   {detail.request_kind === "decision" && <span>Decision · {detail.segment_id} · {translate("diagnostics.decisionQuestions", language)} {detail.question_count}</span>}
                   <span>{translate("diagnostics.model", language)} <strong>{detail.model}</strong></span>
-                  <span>{translate("diagnostics.status", language)} <strong>{statusLabels[detail.status]}</strong></span>
+                  <span>{translate("diagnostics.status", language)} <strong>{requestStatusLabel(detail, language)}</strong></span>
                   {detail.transport === "sse" && <span>{translate("diagnostics.streamProgress", language)} <strong>{detail.stream_event_count} events · {bytes(detail.stream_received_bytes, language)}{detail.stream_first_event_latency_ms === null ? "" : ` · ${detail.stream_first_event_latency_ms} ms first`}</strong></span>}
                 </div>
                 {detailTab === "overview" && <RequestOverview snapshot={detail.overview} truncated={detail.overview_truncated || detail.response_content_truncated} language={language} />}
