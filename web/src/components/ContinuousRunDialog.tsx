@@ -1,3 +1,4 @@
+import { Modal } from "./Modal";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import {
@@ -204,16 +205,32 @@ export function ContinuousRunDialog({
       message: translate("continuousRun.resumePolicyConflict", language),
     }] : []),
   ];
-  const allBlocking = [...blocking, ...localBlocking, ...(replacementNeeded && !knowledgeConfirmed ? [{code: "knowledge_replacement_confirmation", message: translate("knowledge.confirmReplacement", language)}] : [])];
-  const globalBlocking = allBlocking.filter((item) => !item.stage);
+  const allBlocking = [
+    ...blocking,
+    ...localBlocking,
+    ...(resultPolicy === null ? [{
+      code: "result_policy_required",
+      message: translate("continuousRun.resultPolicyRequired", language),
+      stage: undefined,
+    }] : []),
+    ...(decisionInMiddle && !applyTerminologyDecision
+      && !blocking.some((item) => item.code === "apply_terminology_decision_required") ? [{
+        code: "apply_terminology_decision_required",
+        message: translate("continuousRun.applyDecisionRequired", language),
+        stage: "terminology_decision",
+      }] : []),
+    ...(replacementNeeded && !knowledgeConfirmed ? [{
+      code: "knowledge_replacement_confirmation",
+      message: translate("knowledge.confirmReplacement", language),
+      stage: "terminology",
+    }] : []),
+  ];
   const canStart = Boolean(
     options
       && !loading
       && !submitting
-      && resultPolicy !== null
       && loadError == null
-      && !allBlocking.length
-      && (!decisionInMiddle || applyTerminologyDecision),
+      && !allBlocking.length,
   );
 
   async function submit() {
@@ -255,14 +272,7 @@ export function ContinuousRunDialog({
   </label>;
 
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <div
-        className="modal continuous-run-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="continuous-run-dialog-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
+    <Modal ariaLabel={translate("continuousRun.title", language)} className="continuous-run-dialog" onClose={submitting ? undefined : onClose}>
         <div className="continuous-run-dialog-heading page-heading">
           <div>
             <h2 id="continuous-run-dialog-title">{translate("continuousRun.title", language)}</h2>
@@ -315,7 +325,7 @@ export function ContinuousRunDialog({
                       {displayStep?.preset && <small>{displayStep.preset.id} · {displayStep.preset.model} · {displayStep.selected}</small>}
                       {stage === "translation" && includeDraftTranslation
                         ? <small>{translate("continuousRun.jointDraftSkipped", language)}</small>
-                        : step?.status === "skipped" && <small>{translate("continuousRun.skipped", language, { reason: step.reason ?? "" })}</small>}
+                        : step?.status === "skipped" && <small>{translate("continuousRun.skipped", language, { reason: step.reason === "no_published_terms" ? translate("continuousRun.noPublishedTerms", language) : step.reason === "no_work" ? translate("continuousRun.noWork", language) : step.reason ?? "" })}</small>}
                       {stageBlocking.map((item) => (
                         <small className="error-text" key={item.code}>
                           {item.code === "mismatched_fingerprint"
@@ -439,31 +449,29 @@ export function ContinuousRunDialog({
             </section>
           )}
 
-          <div className="continuous-run-feedback">
-            {globalBlocking.length > 0 && (
-              <div className="error-text continuous-run-blocking" role="alert">
-                {globalBlocking.map((item) => (
-                  <p key={`${item.code}-${item.stage ?? ""}`}>{item.message}</p>
-                ))}
-              </div>
-            )}
-            {loading && <p className="muted">{translate("common.loading", language)}</p>}
-            {loadError != null && <p className="error-text" role="alert">{errorMessage(loadError, language)}</p>}
+          {(replacementNeeded || loadError != null) && <div className="continuous-run-feedback">
             {loadError != null && Object.keys(displaySteps).length > 0 && <p className="muted">{translate("continuousRun.previousPreflight", language)}</p>}
             {replacementNeeded && <div className="warning-banner run-warning">
               <strong>{translate("knowledge.replacement", language, { count: replacementImpacts.length })}</strong>
               <details><summary>{translate("knowledge.fragments", language)}</summary>{replacementImpacts.map((fragment) => <p key={fragment.fragment_id}>{fragment.owner}: {fragment.text}</p>)}</details>
               <label className="checkbox-label"><input type="checkbox" checked={knowledgeConfirmed} onChange={(event) => setKnowledgeConfirmed(event.target.checked)} />{translate("knowledge.confirmReplacement", language)}</label>
             </div>}
-            {submitError != null && <p className="error-text" role="alert">{errorMessage(submitError, language)}</p>}
-          </div>
+          </div>}
         </div>
 
-        <div className="modal-actions">
-          <button className="quiet-button" onClick={onClose} disabled={submitting}>{translate("common.cancel", language)}</button>
-          <button className="primary-button" onClick={() => { void submit(); }} disabled={!canStart}>{submitting ? translate("run.buttonStarting", language) : translate("continuousRun.start", language)}</button>
+        <div className="continuous-run-footer">
+          {allBlocking.length > 0 && <div id="continuous-start-blockers" className="error-text continuous-run-blocking" role="status">
+            <strong>{translate("continuousRun.missingConditions", language)}</strong>
+            {allBlocking.map((item, index) => <p key={`${item.code}-${item.stage ?? ""}-${index}`}>{item.stage ? `${stageLabel(item.stage, language)}：` : ""}{(item.code === "apply_terminology_decision_required" ? translate("continuousRun.applyDecisionRequired", language) : item.message)}</p>)}
+          </div>}
+          {loading && <p className="muted">{translate("common.loading", language)}</p>}
+          {loadError != null && <p className="error-text" role="alert">{errorMessage(loadError, language)}</p>}
+          {submitError != null && <p className="error-text" role="alert">{errorMessage(submitError, language)}</p>}
+          <div className="modal-actions">
+            <button className="quiet-button" onClick={onClose} disabled={submitting}>{translate("common.cancel", language)}</button>
+            <button className="primary-button" onClick={() => { void submit(); }} disabled={!canStart} aria-describedby={allBlocking.length ? "continuous-start-blockers" : undefined}>{submitting ? translate("run.buttonStarting", language) : translate("continuousRun.start", language)}</button>
+          </div>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
