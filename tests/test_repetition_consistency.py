@@ -103,6 +103,35 @@ def test_screening_preserves_skip_and_refusal(tmp_path, monkeypatch, choice):
     assert current_draft(project)["groups"][0]["screening"] == choice
 
 
+@pytest.mark.parametrize("protocol", ["typesafe", "llm"])
+def test_screening_creates_its_own_client(tmp_path, monkeypatch, protocol):
+    from app.repetition_consistency import current_draft, run_repetition
+    project = repetition_project(tmp_path, monkeypatch)
+    if protocol == "llm":
+        (config.APP_ROOT / "decision_presets" / "local.json").write_text(json.dumps({
+            "preset_id": "local", "protocol": "llm", "llm_preset": "default", "prompt_language": "en",
+        }))
+    requests = []
+    original_client = httpx.AsyncClient
+    decision_transport = transport(choice="skip", requests=requests)
+
+    def respond(request):
+        if protocol == "typesafe":
+            return decision_transport.handle_request(request)
+        requests.append(json.loads(request.content))
+        answer = {"answers": {"value": {"type": "choice", "choice": "skip", "confidence": 1,
+                                        "probabilities": {"compare": 0, "skip": 1}}}}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)},
+                                                     "finish_reason": "stop"}]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(
+        transport=httpx.MockTransport(respond), **kwargs))
+    result = asyncio.run(run_repetition(project, Scope(), screening_enabled=True))
+    assert result["completed"] == 3
+    assert len(requests) == 1
+    assert current_draft(project)["groups"][0]["screening"] == "skip"
+
+
 def test_invalid_group_fails_without_replacing_existing_draft(tmp_path, monkeypatch):
     from app.repetition_consistency import current_draft, run_repetition
     project = repetition_project(tmp_path, monkeypatch)

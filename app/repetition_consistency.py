@@ -476,7 +476,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
         return usage, warnings
 
     try:
-        async with httpx.AsyncClient(proxy=plan["decision_preset"]["proxy_url"] or None) if decision and http_client is None else _borrow_client(http_client) as decision_http:
+        async with httpx.AsyncClient(proxy=plan["decision_preset"]["proxy_url"] or None) if decision and decision.llm_config is None and http_client is None else _borrow_client(http_client) as decision_http:
             if decision:
                 decision.http_client = decision_http
             async with LLMClient(config, limiter, run_dir=run_dir, project_id=metadata["project_id"],
