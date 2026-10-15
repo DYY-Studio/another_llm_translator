@@ -380,6 +380,9 @@ export type DiagnosticsRequestStatus =
   | "interrupted";
 
 export interface DiagnosticsRequestSummary {
+  usage: TaskUsage;
+  latency_ms: number | null;
+  output_tokens_per_second: number | null;
   parent_request_id: string | null;
   overview?: RequestOverviewSnapshot | null;
   overview_truncated?: boolean;
@@ -473,6 +476,9 @@ export interface DiagnosticsResponse {
 }
 
 export interface DiagnosticsRequestDetail {
+  usage: TaskUsage;
+  latency_ms: number | null;
+  output_tokens_per_second: number | null;
   parent_request_id: string | null;
   overview: RequestOverviewSnapshot | null;
   overview_truncated: boolean;
