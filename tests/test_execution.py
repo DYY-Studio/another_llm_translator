@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import os
 from collections import Counter
 from pathlib import Path
@@ -18,7 +17,7 @@ from app.errors import (
     RequestSizeError,
     StorageError,
 )
-from app.execution import CJK_RE, ChunkPlan, PreviousContextIndex, Scope, build_chunk_plans, classify_stage, classify_stage_states, combine_usage, contiguous_groups, continue_run, create_run, dispatch_chunks, estimate_messages, estimate_messages_upper_bound, estimate_single_segment_preflight, estimate_tokens, finalize_run, full_prompt, iter_chunk_plans, localize_request_ids, materialize_chunk_stream, render_messages, save_debug_chunks, select_scope, stage_fingerprint
+from app.execution import ChunkPlan, PreviousContextIndex, Scope, build_chunk_plans, classify_stage, classify_stage_states, combine_usage, contiguous_groups, continue_run, create_run, dispatch_chunks, estimate_messages, estimate_messages_upper_bound, estimate_single_segment_preflight, estimate_tokens, finalize_run, full_prompt, iter_chunk_plans, localize_request_ids, materialize_chunk_stream, render_messages, save_debug_chunks, select_scope, stage_fingerprint
 from app.llm_client import LLMClient, SlidingWindowLimiter
 from app.llm_keys import KeyPool
 from app.llm_adapter import load_json_adapter
@@ -110,24 +109,16 @@ def test_stage_fingerprint_tracks_document_prompt_requirements() -> None:
     assert stage_fingerprint(current, "translation", {}) != baseline
 
 
-def test_token_estimate_matches_the_previous_character_accounting() -> None:
-    samples = [
-        "",
-        "English words and punctuation!",
-        "简体中文、繁體中文、日本語、한국어",
-        "line\n\twith\u2003unicode whitespace",
-        '\\"quoted\\" \\ slash \\u0000 control',
-        "😀" * 17,
-    ]
-    for text in samples:
-        cjk_count = len(CJK_RE.findall(text))
-        non_cjk = CJK_RE.sub("", text)
-        non_space = sum(not char.isspace() for char in non_cjk)
-        whitespace = sum(char.isspace() for char in non_cjk)
-        expected = max(
-            1,
-            math.ceil(cjk_count * 1.1 + non_space / 4 + whitespace / 8),
-        ) if text else 0
+def test_token_estimate_accounts_for_scripts_whitespace_and_rounding() -> None:
+    for text, expected in [
+        ("", 0),
+        ("a", 1),
+        ("abcde", 2),
+        ("中日あ한", 5),
+        (" \n\t\u2003" * 2, 1),
+        ("中文abcd        ", 5),
+        ("😀" * 17, 5),
+    ]:
         assert estimate_tokens(text) == expected
 
 

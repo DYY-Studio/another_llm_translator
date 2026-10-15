@@ -595,141 +595,77 @@ async def test_run_all_rejects_inconsistent_shared_limits_without_pool(
 
 
 @pytest.mark.asyncio
-async def test_review_complete_id_mismatch_retries_original_batch(
-    tmp_path: Path,
+@pytest.mark.parametrize(("stage", "mismatch"), [
+    ("translation", "missing"),
+    ("translation", "duplicate"),
+    ("translation", "unknown"),
+    ("proofreading", "missing"),
+    ("polishing", "missing"),
+])
+async def test_complete_id_mismatch_retries_original_batch(
+    tmp_path: Path, stage: str, mismatch: str,
 ) -> None:
     project = await create_project(tmp_path, "one\ntwo\nthree")
-    review_calls: list[list[str]] = []
+    calls: list[dict] = []
+    result_path = project / "stages" / f"{stage}.jsonl"
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        system = body["messages"][0]["content"]
         payload = json.loads(body["messages"][1]["content"])
+        calls.append(payload)
+        # On retry the previous response has been processed, but none of it may persist.
+        assert not read_jsonl(project, result_path)
+        assert "format_correction" not in payload
+        if stage != "translation":
+            assert "accepted 仅含 type、id、status" in body["messages"][0]["content"]
+            assert '"suggested_text":"完整建议"' in body["messages"][0]["content"]
         ids = [item["id"] for item in payload["segments"]]
-        if "完整 translation" in system:
-            records = [
-                {
-                    "type": "segment",
-                    "id": item["id"],
-                    "translation": f"译:{item['source']}",
-                }
-                for item in payload["segments"]
-            ]
-        else:
-            review_calls.append(ids)
-            assert "format_correction" not in payload
-            assert "accepted 仅含 type、id、status" in system
-            assert '"suggested_text":"完整建议"' in system
-            returned = ids[1:2] if len(review_calls) == 1 else ids
-            records = [
-                {
-                    "type": "segment",
-                    "id": segment_id,
-                    "status": "accepted",
-                    "suggested_text": None,
-                    "reason": None,
-                }
-                for segment_id in returned
-            ]
+        if len(calls) == 1:
+            if mismatch == "missing":
+                ids = ids[:-1]
+            elif mismatch == "duplicate":
+                ids = [ids[0], *ids]
+            else:
+                ids = [*ids, "unknown"]
+        records = [
+            {"type": "segment", "id": segment_id, "translation": f"ok:{segment_id}"}
+            if stage == "translation" else
+            {"type": "segment", "id": segment_id, "status": "accepted",
+             "suggested_text": None, "reason": None}
+            for segment_id in ids
+        ]
         return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
-        await run_translation(project, Scope(), http_client=client)
-        summary = await run_review(
-            project, "proofreading", Scope(), http_client=client
-        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+            if stage != "translation":
+                await run_translation(project, Scope(), http_client=client)
+            if stage == "polishing":
+                await run_review(project, "proofreading", Scope(), http_client=client)
+                run_apply(project, "proofreading", Scope(),
+                          allow_outdated_base=False, confirmed_all=True)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            if stage == "translation":
+                summary = await run_translation(project, Scope(), http_client=client)
+            else:
+                summary = await run_review(project, stage, Scope(), http_client=client)
     finally:
-        await client.aclose()
         del os.environ["LLM_API_KEY"]
+
     assert summary["completed"] == 3
-    assert review_calls == [
-        ["1", "2", "3"],
-        ["1", "2", "3"],
-    ]
-
-
-@pytest.mark.asyncio
-async def test_complete_id_mismatch_retries_original_batch_for_all_segment_stages(
-    tmp_path: Path,
-) -> None:
-    project = await create_project(tmp_path, "one\ntwo\nthree")
-    stage_calls: dict[str, list[list[str]]] = {
-        "translation": [],
-        "proofreading": [],
-        "polishing": [],
-    }
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        system = body["messages"][0]["content"]
-        payload = json.loads(body["messages"][1]["content"])
-        if "完整 translation" in system:
-            stage = "translation"
-        elif "改善译文表达" in system:
-            stage = "polishing"
-        else:
-            stage = "proofreading"
-        ids = [item["id"] for item in payload["segments"]]
-        stage_calls[stage].append(ids)
-        if stage != "translation" and len(stage_calls[stage]) == 1:
-            returned = ids[:-1]
-        else:
-            returned = ids
-        if stage == "translation":
-            records = [
-                {
-                    "type": "segment",
-                    "id": segment_id,
-                    "translation": f"译:{segment_id}",
-                }
-                for segment_id in returned
-            ]
-        else:
-            records = [
-                {
-                    "type": "segment",
-                    "id": segment_id,
-                    "status": "accepted",
-                }
-                for segment_id in returned
-            ]
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        translation = await run_translation(project, Scope(), http_client=client)
-        proofreading = await run_review(
-            project, "proofreading", Scope(), http_client=client
-        )
-        run_apply(
-            project,
-            "proofreading",
-            Scope(),
-            allow_outdated_base=False,
-            confirmed_all=True,
-        )
-        polishing = await run_review(
-            project, "polishing", Scope(), http_client=client
-        )
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-
-    assert translation["completed"] == 3
-    assert proofreading["completed"] == 3
-    assert polishing["completed"] == 3
-    assert stage_calls == {
-        "translation": [["1", "2", "3"]],
-        "proofreading": [["1", "2", "3"], ["1", "2", "3"]],
-        "polishing": [["1", "2", "3"], ["1", "2", "3"]],
-    }
+    assert summary["failed"] == 0
+    assert len(calls) == 2
+    assert [item["id"] for item in calls[0]["segments"]] == ["1", "2", "3"]
+    assert calls[1] == calls[0]
+    records = read_jsonl(project, result_path)
+    assert len(records) == 3
+    assert all(record["status"] == "completed" for record in records)
+    if stage == "translation":
+        assert [record["text"] for record in records] == ["ok:1", "ok:2", "ok:3"]
+    else:
+        assert all(record["review_status"] == "accepted" for record in records)
 
 
 @pytest.mark.asyncio
