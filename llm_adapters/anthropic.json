@@ -38,5 +38,11 @@
     "aliases": []
   },
   "max_output_tokens_minimum": 1,
-  "response_format": "anthropic"
+  "response_format": "anthropic",
+  "structured_output": {
+    "/output_config/format": {
+      "type": "json_schema",
+      "schema": "${json_schema}"
+    }
+  }
 }

@@ -49,7 +49,7 @@ def register_repetition_routes(*, app: FastAPI, project: Callable[[str], Path]) 
                 "over_budget_groups": running["over_budget_groups"] if resuming else sum(g["over_budget"] for g in plan["groups"]),
                 "estimated_requests": running["estimated_requests"] if resuming else plan["estimated_requests"], "estimated_input_tokens": running["estimated_input_tokens"] if resuming else plan["estimated_input_tokens"],
                 "preset": {"id": plan["config"]["_llm_preset_id"], "model": plan["config"]["llm"]["model"]},
-                "decision_model": plan["decision_preset"]["model"] if plan["decision_preset"] else None, "model": plan["config"]["llm"]["model"]}
+                "decision_model": (plan["decision_preset"]["_resources"]["preset"]["model"] if plan["decision_preset"]["protocol"] == "llm" else plan["decision_preset"]["model"]) if plan["decision_preset"] else None, "model": plan["config"]["llm"]["model"]}
 
     @app.get("/api/v1/projects/{name}/repetition")
     def state(name: str) -> dict[str, Any]:

@@ -181,6 +181,9 @@ def repetition_resources(project: Path, prompt_language: str | None, screening_e
             str(decision_preset_path(Path(), preset_id)), builtin_root=config_module.APP_ROOT))
         if preset["preset_id"] != preset_id:
             raise UsageError("Decision Preset ID 与配置不一致")
+        if preset["protocol"] == "llm":
+            from .decision_llm import resolve_llm_resources
+            preset = resolve_llm_resources(preset, config_module.APP_ROOT, project=project)
         config["_decision_preset_definitions"][preset_id] = preset
     return config, prompt, screen_content, screen, preset, language
 
@@ -235,7 +238,7 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
     groups = []
     decision = DecisionClient(preset) if preset else None
     llm_limit = config["llm"]["context_window_tokens"] - config["llm"]["context_safety_margin_tokens"]
-    decision_limit = preset["context_window_tokens"] - preset["context_safety_margin_tokens"] if preset else 0
+    decision_limit = decision.preset["context_window_tokens"] - decision.preset["context_safety_margin_tokens"] if decision else 0
     for number, items in enumerate(candidates, 1):
         variants = list(dict.fromkeys(bases[str(s["segment_id"])]["text"] for s in items))
         variant_indices = {text: i for i, text in enumerate(variants)}

@@ -1079,6 +1079,7 @@ export interface ProjectConfig {
 }
 
 export interface AdapterCapabilities {
+  json_schema: boolean;
   temperature: boolean;
   max_output_tokens_minimum: number;
   reasoning_effort: { body_pointer: string; values: string[]; aliases: string[] } | null;
@@ -1087,7 +1088,7 @@ export interface AdapterCapabilities {
   connection: { base_url: string; credential: LLMPreset["credential"]; proxy_source: "preset" | "connection" } | null;
 }
 
-export interface DecisionPreset {
+export interface HTTPDecisionPreset {
   preset_id: string;
   protocol: "typesafe" | "openai-decisions";
   url: string;
@@ -1101,6 +1102,15 @@ export interface DecisionPreset {
   requests_per_minute: number;
   max_parallel: number;
 }
+
+export interface LLMDecisionPreset {
+  preset_id: string;
+  protocol: "llm";
+  llm_preset: string;
+  prompt_language: "zh-CN" | "en";
+}
+
+export type DecisionPreset = HTTPDecisionPreset | LLMDecisionPreset;
 
 export interface DecisionPresetSummary {
   preset_id: string;
@@ -1134,6 +1144,7 @@ export interface LLMPreset {
   target_chunk_input_tokens: number;
   max_output_tokens: number;
   send_temperature: boolean;
+  json_schema_enabled?: boolean;
   reasoning_effort: string | null;
   context_safety_margin_tokens: number;
   token_safety_factor: number;

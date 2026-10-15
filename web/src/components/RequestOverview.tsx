@@ -39,7 +39,7 @@ function DecisionOverview({ snapshot, language }: {snapshot: RequestOverviewSnap
         <div className="overview-answer"><strong>{answer?.refused ? translate("overview.refused", language) : choiceLabel}</strong>
           {answer && !answer.refused && <span>Confidence: {answer.confidence.toLocaleString(language, {maximumFractionDigits: 4})}</span>}
         </div>
-        {answer && !answer.refused && <div className="overview-scores"><span>Scores</span>{Object.entries(answer.probabilities).map(([choice, score]) => <span key={choice} title={question.choices[choice]} className={choice === answer.choice ? "selected" : ""}>{choice}: {score.toLocaleString(language, {maximumFractionDigits: 4})}</span>)}</div>}
+        {answer && !answer.refused && <div className="overview-scores"><span>probabilities</span>{Object.entries(answer.probabilities).map(([choice, probability]) => <span key={choice} title={question.choices[choice]} className={choice === answer.choice ? "selected" : ""}>{choice}: {probability.toLocaleString(language, {maximumFractionDigits: 4})}</span>)}</div>}
       </article>;
     })}</div>
   </div>;

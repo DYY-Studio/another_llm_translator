@@ -272,8 +272,11 @@ class LLMClient:
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
         on_usage: Callable[[dict[str, Any] | None], None] | None = None,
         preparation_started_at: float | None = None,
+        decision_overview: dict[str, Any] | None = None,
     ) -> None:
         self.config = config
+        self.decision_overview = decision_overview
+        self._decision_debug_attempt: tuple[tuple[Any, ...], dict[str, Any]] | None = None
         self.limiter = limiter
         self.key_pool = limiter if isinstance(limiter, KeyPool) else None
         self._api_keys: tuple[str, ...] | None = None
@@ -775,6 +778,17 @@ class LLMClient:
                 ),
             )
 
+    async def finish_decision_debug(self, error: str | None = None) -> None:
+        pending = self._decision_debug_attempt
+        if pending is None:
+            return
+        self._decision_debug_attempt = None
+        args, kwargs = pending
+        await self._debug_attempt(*args, **{
+            **kwargs, "error": error, "outcome": error or "succeeded",
+            "overview": {**self.decision_overview, "error": error},
+        })
+
     async def chat(
         self,
         *,
@@ -784,6 +798,7 @@ class LLMClient:
         request_id: str | None = None,
         parent_request_id: str | None = None,
         segment_id_map: dict[str, str] | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> tuple[LLMResponse, str]:
         retried = {"truncated": 0, "unknown": 0}
         while True:
@@ -794,15 +809,17 @@ class LLMClient:
                 request_id=request_id,
                 parent_request_id=parent_request_id,
                 segment_id_map=segment_id_map,
+                json_schema=json_schema,
             )
             diagnostics = current_diagnostics()
             if response.finish_reason in self.adapter.blocked_finish_reasons:
+                await self.finish_decision_debug("response_blocked")
                 message = f"模型拒绝生成正文（{response.finish_reason}）"
                 if diagnostics is not None:
                     diagnostics.fail_request(actual_id, "response_blocked")
                 raise ExternalError(message)
             if response.content.strip() and response.finish_reason not in self.adapter.truncated_finish_reasons:
-                if diagnostics is not None:
+                if diagnostics is not None and self.decision_overview is None:
                     diagnostics.complete_request(
                         actual_id,
                         content=response.content,
@@ -820,6 +837,7 @@ class LLMClient:
                 if kind == "truncated"
                 else "正文为空：原因未知"
             )
+            await self.finish_decision_debug(f"empty_response_{kind}")
             if diagnostics is not None:
                 diagnostics.fail_request(actual_id, f"empty_response_{kind}")
             mode = self.config["retry"][f"empty_{kind}_mode"]
@@ -854,9 +872,11 @@ class LLMClient:
         request_id: str | None = None,
         parent_request_id: str | None = None,
         segment_id_map: dict[str, str] | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> tuple[LLMResponse, str]:
         if self.client is None:
             raise RuntimeError("LLMClient must be used as an async context manager")
+        json_schema = json_schema if self.config["llm"].get("json_schema_enabled", False) else None
         self._prepare_keys()
         api_keys = self._api_keys
         request_id = request_id or f"REQ-{uuid.uuid4().hex[:12].upper()}"
@@ -891,6 +911,10 @@ class LLMClient:
         async def debug_attempt(*args: Any, overview_content: str | None = None, **kwargs: Any) -> None:
             if not self.config["debug"]["enabled"]:
                 return
+            if self.decision_overview is not None and kwargs.get("error") is None:
+                # Decision owns the final outcome after validating the response body.
+                self._decision_debug_attempt = (args, kwargs)
+                return
             response_data = kwargs.get("response")
             overview_error = None
             if overview_content is None and response_data is not None and "events" not in response_data:
@@ -898,7 +922,7 @@ class LLMClient:
                     overview_content = normalize_llm_response(self.adapter.parse_response(response_data)).content
                 except ExternalError as exc:
                     overview_error = str(exc)
-            overview = llm_overview(messages, segment_id_map, overview_content)
+            overview = dict(self.decision_overview) if self.decision_overview is not None else llm_overview(messages, segment_id_map, overview_content)
             overview["error"] = overview_error
             await self._debug_attempt(*args, overview=overview, **kwargs)
 
@@ -912,6 +936,10 @@ class LLMClient:
                 max_attempts=attempts,
                 segment_id_map=segment_id_map,
                 transport="sse" if stream_enabled else "non_streaming",
+                request_kind="decision" if self.decision_overview is not None else "llm",
+                segment_id=self.decision_overview.get("segment_id") if self.decision_overview is not None else None,
+                question_count=len(self.decision_overview["questions"]) if self.decision_overview is not None else 0,
+                overview=self.decision_overview,
             )
         attempt = 1
         send_attempt = 0
@@ -987,7 +1015,10 @@ class LLMClient:
                     extra_headers=self.config.get("_llm_extra_headers"),
                     session_id=self.run_id,
                     request_id=request_id,
+                    json_schema=json_schema,
                 )
+                if diagnostics is not None and json_schema is not None:
+                    diagnostics.set_request_body(request_id, json.dumps(payload, ensure_ascii=False, indent=2))
             except ExternalError as exc:
                 if lease is not None:
                     await lease.release()

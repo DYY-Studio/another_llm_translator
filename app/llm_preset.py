@@ -26,6 +26,7 @@ _PRESET_KEYS = frozenset(
         "target_chunk_input_tokens",
         "max_output_tokens",
         "send_temperature",
+        "json_schema_enabled",
         "reasoning_effort",
         "context_safety_margin_tokens",
         "token_safety_factor",
@@ -42,7 +43,7 @@ _PRESET_KEYS = frozenset(
     }
 )
 _LEGACY_ENDPOINT_KEYS = frozenset({"endpoint", "stream_endpoint"})
-_REQUIRED_PRESET_KEYS = _PRESET_KEYS - _LEGACY_ENDPOINT_KEYS
+_REQUIRED_PRESET_KEYS = _PRESET_KEYS - _LEGACY_ENDPOINT_KEYS - {"json_schema_enabled"}
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,8 @@ def _parse_llm_preset(value: Any, *, model_discovery: bool = False) -> LLMPreset
     schema_version = value.get("schema_version")
     if schema_version != 8:
         raise ConfigError("LLM Preset schema_version 必须是 8；请运行 python -m app.llm_migration 预览迁移")
+    if type(value.get("json_schema_enabled", False)) is not bool:
+        raise ConfigError("json_schema_enabled 必须是布尔值")
     if type(value.get("send_temperature")) is not bool:
         raise ConfigError("send_temperature 必须是布尔值")
     if value.get("reasoning_effort") is not None and not isinstance(value["reasoning_effort"], str):

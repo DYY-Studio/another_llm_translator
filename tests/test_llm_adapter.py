@@ -857,3 +857,46 @@ def test_adapter_rejects_managed_effort_in_stream_request_body(tmp_path: Path) -
     value["streaming"]["request_body"] = {"reasoning": {"effort": "high"}}
     with pytest.raises(ConfigError, match="Reasoning Effort"):
         load_json_adapter(write_adapter(tmp_path, value))
+
+
+@pytest.mark.parametrize('adapter_id,pointer', [
+    ('openai-compatible', '/response_format/json_schema/schema'),
+    ('openai-chat', '/response_format/json_schema/schema'),
+    ('openai-responses', '/text/format/schema'),
+    ('chatgpt-plan', '/text/format/schema'),
+    ('anthropic', '/output_config/format/schema'),
+    ('google-gemini', '/generationConfig/responseJsonSchema'),
+])
+def test_structured_output_maps_schema_without_replacing_request_fields(adapter_id, pointer):
+    from app.llm_adapter import _resolve_json_pointer
+    root = Path(__file__).parents[1]
+    adapter = load_json_adapter(root / 'llm_adapters' / f'{adapter_id}.json')
+    schema = {'type': 'object', 'properties': {'result': {'type': 'string'}}, 'required': ['result'], 'additionalProperties': False}
+    arguments = dict(api_key='key', model='model', messages=[{'role':'user', 'content':'Return JSON'}],
+                     temperature=0.2, max_output_tokens=100, stream=True,
+                     send_temperature=adapter.capabilities['temperature'])
+    before = adapter.build_request(**arguments)[1]
+    body = adapter.build_request(**arguments, json_schema=schema)[1]
+    assert _resolve_json_pointer(body, pointer) == schema
+    for key, value in before.items():
+        if isinstance(value, dict):
+            assert value.items() <= body[key].items()
+        else:
+            assert body[key] == value
+    assert adapter.build_request(**arguments)[1] == before
+    extra = {}
+    parent = extra
+    tokens = pointer.strip('/').split('/')
+    for token in tokens[:-1]:
+        parent[token] = {}
+        parent = parent[token]
+    parent[tokens[-1]] = 'conflict'
+    with pytest.raises(ConfigError, match='冲突'):
+        adapter.build_request(**arguments, json_schema=schema, extra_body=extra)
+
+
+def test_custom_adapter_structured_output_requires_explicit_mapping(tmp_path):
+    adapter = load_json_adapter(write_adapter(tmp_path, definition()))
+    with pytest.raises(ConfigError, match='JSON Schema'):
+        adapter.build_request(api_key='key', model='model', messages=[], temperature=0,
+                              max_output_tokens=10, stream=False, json_schema={'type':'object'})

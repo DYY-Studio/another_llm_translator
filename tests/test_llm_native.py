@@ -169,3 +169,48 @@ async def test_anthropic_stream_keeps_final_thinking_usage(tmp_path):
     assert response.content == "ok"
     usage = llm.usage_summary()
     assert (usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (5, 7, 12)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('enabled,declares_schema,reject_schema', [(True, True, False), (True, False, False), (False, True, False), (True, True, True)])
+async def test_generic_client_only_sends_schema_when_preset_and_task_enable_it(tmp_path, monkeypatch, enabled, declares_schema, reject_schema):
+    import json
+    import httpx
+    from app.diagnostics import DiagnosticsHub
+    from app.config import load_global_config
+    from app.llm_client import LLMClient, SlidingWindowLimiter
+
+    monkeypatch.setenv('LLM_API_KEY', 'synthetic-key')
+    config = load_global_config(ROOT)
+    config['llm']['json_schema_enabled'] = enabled
+    config['retry']['http_max_attempts'] = 1
+    schema = {'type':'object', 'properties':{'result':{'type':'string'}}, 'required':['result'], 'additionalProperties':False}
+    def respond(request):
+        body = json.loads(request.content)
+        if enabled and declares_schema:
+            assert body['response_format']['json_schema']['schema'] == schema
+        else:
+            assert 'response_format' not in body
+        if reject_schema:
+            return httpx.Response(400, json={'error':{'message':'JSON Schema unsupported'}})
+        return httpx.Response(200, json={'choices':[{'message':{'content':'{"result":"ok"}'}, 'finish_reason':'stop'}]})
+    diagnostics = DiagnosticsHub(tmp_path / 'app.log')
+    with diagnostics.activate('P', 'translation', task_id='TASK'):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            async with LLMClient(config, SlidingWindowLimiter(0, 0), run_dir=tmp_path,
+                                 project_id='P', run_id='R', stage='translation', client=http) as client:
+                if reject_schema:
+                    with pytest.raises(ExternalError, match='HTTP 400'):
+                        await client.chat(messages=[{'role':'user','content':'Return JSON'}], temperature=0,
+                                          estimated_input_tokens=100, json_schema=schema)
+                    assert client.send_count == 1
+                    return
+                response, request_id = await client.chat(messages=[{'role':'user', 'content':'Return JSON'}],
+                    temperature=0, estimated_input_tokens=100, json_schema=schema if declares_schema else None)
+                assert json.loads(response.content) == {'result':'ok'}
+            detail = diagnostics.request_detail(request_id)
+            if enabled and declares_schema:
+                assert json.loads(detail['request_body'])['response_format']['json_schema']['schema'] == schema
+                assert 'synthetic-key' not in detail['request_body']
+            else:
+                assert detail['request_body'] is None

@@ -86,6 +86,9 @@ Plan 任务；连接管理只在主机本地提供。
 首次翻译前，至少需要一个可用的 LLM Preset。Preset 保存 Base URL、模型、Chunk 输入目标、限流参数、Adapter
 和凭据引用，但不保存 API Key 本身。
 
+LLM Preset 的“JSON Schema”开关为声明了输出结构的任务启用结构化输出，目前由 LLM Decision 使用。
+已有 Preset 未包含该设置时默认关闭，可手动开启并保存。翻译等 JSONL 任务继续使用原输出格式。
+
 1. 打开右上角“设置”。不需要先打开项目也可以编辑全局设置。
 2. 进入全局 Preset 管理，选择一个内置示例或创建同名用户版本。
 3. 选择定义请求 Endpoint 的 Adapter，填写实际的 Base URL、模型、目标 Chunk 输入 Token 和限流参数。目标值会用于该 Preset 所在阶段的 Chunk 分组；它不在项目设置中配置。RPM 和
@@ -345,8 +348,10 @@ warning。该校验器默认关闭，不会强制替换过于通用的匹配。
 
 该插件可开启“Decision 语义复核（实验）”：先在全局设置的 Decision Preset 中选择协议，填写
 包含最终 Path 的请求 URL、模型和凭据，再在翻译校验中选择此 Preset 并设置置信度门槛。
-需要代理时在 Decision Preset 中填写代理 URL。
-按模型容量设置上下文窗口、安全余量和 Token 安全系数。
+也可以将协议设为 LLM，选择一个已有 LLM Preset 和提示词语言；连接、代理和请求参数由所选 LLM Preset 管理。
+在 Prompt 页的 LLM 分组选择“Decision LLM”，按现有方式编辑系统提示词中段、保存模板或设置项目覆盖。
+HTTP 协议需要代理时在 Decision Preset 中填写代理 URL。
+HTTP 协议按模型容量设置上下文窗口、安全余量和 Token 安全系数。
 可在插件设置中开启携带上文并填写 Segment 数量；上文仅携带同一文件、同一分区的原文。
 超出窗口时优先移除最远上文，日志显示缩减情况；不携带上文仍超限则报错。
 确认需要术语修复时会进行一次定向修复；日常用法或正确的简称译法放行；无法判断时保留 warning。

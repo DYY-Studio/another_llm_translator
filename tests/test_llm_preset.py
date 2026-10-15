@@ -564,3 +564,18 @@ def test_effective_temperature_and_effort_change_stage_fingerprint(tmp_path: Pat
     path.write_text(json.dumps(preset))
     changed = load_project_config(project, presets_root=app_root)
     assert stage_fingerprint(changed, "translation", {}) != first
+
+
+def test_missing_schema_switch_is_disabled_and_explicit_enable_is_validated(tmp_path):
+    value = preset_definition()
+    value.pop('json_schema_enabled', None)
+    loaded = load_llm_preset(write_preset(tmp_path, value))
+    adapter = load_json_adapter(ROOT / 'llm_adapters/openai-compatible.json')
+    adapter.validate_preset(loaded.definition)
+    value['json_schema_enabled'] = True
+    enabled = load_llm_preset(write_preset(tmp_path, value))
+    adapter.validate_preset(enabled.definition)
+    assert enabled.digest != loaded.digest
+    value['json_schema_enabled'] = 'yes'
+    with pytest.raises(ConfigError, match='json_schema_enabled'):
+        load_llm_preset(write_preset(tmp_path, value))

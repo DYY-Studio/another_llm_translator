@@ -9,7 +9,7 @@ import pytest
 from app.chatgpt_oauth import ChatGPTConnection
 from app.config import _resolve_llm_config, load_global_config
 from app.errors import ConfigError, ExternalError, FatalExternalError
-from app.llm_adapter import load_json_adapter
+from app.llm_adapter import load_json_adapter, load_json_adapter
 from app.llm_client import LLMClient, SlidingWindowLimiter
 from app.llm_preset import load_llm_preset
 from tests.test_chatgpt_oauth import oauth_server
@@ -27,7 +27,7 @@ def plan_config(tmp_path):
     value.update(adapter_id="chatgpt-plan", stream=True, send_temperature=False, proxy_url="", credential={"kind": "chatgpt", "name": "default"})
     path = tmp_path / "preset.json"
     path.write_text(json.dumps(value))
-    return _resolve_llm_config(load_global_config(ROOT), adapter_file=ROOT / "llm_adapters/chatgpt-plan.json", preset=load_llm_preset(path))
+    return _resolve_llm_config(load_global_config(ROOT), adapter=load_json_adapter(ROOT / "llm_adapters/chatgpt-plan.json"), preset=load_llm_preset(path))
 
 
 def test_plan_contract_and_developer_messages(tmp_path):
@@ -189,7 +189,7 @@ async def test_plan_missing_content_type_warns_but_explicit_wrong_type_fails(tmp
 def test_adapter_capabilities_follow_template_and_fixed_connection(tmp_path):
     plan = load_json_adapter(ROOT / "llm_adapters/chatgpt-plan.json")
     assert plan.capabilities == {
-        "temperature": False, "max_output_tokens": False, "streaming": "required",
+        "temperature": False, "max_output_tokens": False, "streaming": "required", "json_schema": True,
         "max_output_tokens_minimum": 0, "reasoning_effort": plan.definition["reasoning_effort"],
         "connection": {"base_url": "https://api.openai.com/v1", "credential": {"kind": "chatgpt", "name": "default"}, "proxy_source": "connection"},
     }
@@ -204,7 +204,7 @@ def test_adapter_capabilities_follow_template_and_fixed_connection(tmp_path):
     preset_path = tmp_path / "preset.json"
     preset_path.write_text(json.dumps(preset))
     with pytest.raises(ConfigError, match="固定连接"):
-        _resolve_llm_config(load_global_config(ROOT), adapter_file=path, preset=load_llm_preset(preset_path))
+        _resolve_llm_config(load_global_config(ROOT), adapter=load_json_adapter(path), preset=load_llm_preset(preset_path))
     definition["body"]["stream"] = True
     path.write_text(json.dumps(definition))
     adapter = load_json_adapter(path)
