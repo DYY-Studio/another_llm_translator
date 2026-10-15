@@ -72,6 +72,7 @@ STAGE_FILES = {
 }
 
 STAGE_CODES = {
+    "repetition_consistency": "REP",
     "terminology": "TERM",
     "terminology_decision": "TERMD",
     "content_summary": "SUM",
@@ -548,8 +549,47 @@ _COMMON_SUFFIX: dict[str, str] = {
     ),
 }
 
+_FIELD_PREFIX.update({
+    "repetition.groups": {
+        "zh-CN": "repetitions: 本次请求的独立重复组数组，每组有唯一 id、source、translations 和 occurrences。occurrences 短 id 仅在所属重复组内有效，禁止跨组引用成员。files、parts、context 和 terms 为整个请求共享的证据。",
+        "en": "repetitions: Independent repeated groups in this request, each with a unique id, source, translations, and occurrences. Occurrence short ids are local to their repeated group; never reference members across groups. files, parts, context, and terms are shared evidence for the entire request.",
+    },
+    "repetition.source": {
+        "zh-CN": "repetitions[].source: 该重复组各次出现完全相同的原文。",
+        "en": "repetitions[].source: The exact source shared by all occurrences in that repeated group.",
+    },
+    "repetition.translations": {
+        "zh-CN": "repetitions[].translations: 该重复组的现有译文数组，occurrences.variant 是从 0 开始的索引。",
+        "en": "repetitions[].translations: Existing translation variants for that repeated group; occurrences.variant is a zero-based index.",
+    },
+    "repetition.context": {
+        "zh-CN": "context: 以短 id 索引的共享原文上下文，由各次出现的 previous、next 按顺序引用。",
+        "en": "context: Shared source context indexed by short id, referenced in order by each occurrence's previous and next.",
+    },
+    "repetition.terms": {
+        "zh-CN": "terms: 短 id 索引的共享术语、推荐译法及实体说明。每次出现的 terms 引用适用于其原文与局部上下文的条目，aliases 为该次命中的别名。source_relations 与 entity_knowledge.items 按顺序对应，before N、within、after N 表示说明来源相对该次局部上下文的位置，N 为该实体内部的位置顺序；unsourced 表示无原文依据的说明。",
+        "en": "terms: Shared terminology, preferred translations, and entity knowledge indexed by short id. Each occurrence references entries matched in its source and local context; aliases lists the aliases matched there. source_relations aligns with entity_knowledge.items: before N, within, and after N locate knowledge sources relative to that occurrence's local context; N ranks positions within the entity. unsourced marks knowledge without source evidence.",
+    },
+    "repetition.occurrences": {
+        "zh-CN": "repetitions[].occurrences: 该重复组各次出现的短 id、文件、章节、位置、译文索引、上下文及术语引用。file 是项目文件顺序中从 1 开始的索引，files 将索引映射到文件名。part 是请求内 parts 表从 1 开始的索引，对应文件内的内容边界名称；每个 File/part 边界单独编号。position 是文件内从 0 开始的 Segment 序号，包含空片段，不是章节内序号或字符偏移。",
+        "en": "repetitions[].occurrences: Short id, file, part, position, translation index, context, and terminology references for each occurrence. file is the one-based index in project file order; files maps indices to filenames. part is a one-based index into the request's parts table of content boundary names; each File/part boundary receives its own index. position is the zero-based Segment index within the file, counting empty segments, not an index within the part or a character offset.",
+    },
+})
+_TASK_PREFIX["repetition_consistency"] = {
+    "zh-CN": "你负责重复译文一致性审查。",
+    "en": "You perform repeated translation consistency review.",
+}
+_RESULT_PROTOCOLS["repetition_consistency"] = {
+    "zh-CN": '只返回一个 JSON 对象，无 Markdown 或额外字段：{"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"依据"}],"keep":["3"],"uncertain":[]}]}。每个输入重复组恰好返回一个结果，id 原样使用 repetitions 的组 id。成员及 target 必须使用该重复组 occurrences 中的短 id。每个成员恰好属于一个子组、keep 或 uncertain；子组至少两个成员且不可重叠。target 必须是该子组成员，选用其现有译文，不生成新译文。apply 是本次建议应用的成员短 id 数组，必须是 members 的无重复子集，可以为空；成员关联与应用选择独立。reason 使用 target_language 简述依据。没有可统一子组时 groups 为空。',
+    "en": 'Return only one JSON object, without Markdown or extra fields: {"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"evidence"}],"keep":["3"],"uncertain":[]}]}. Return exactly one result per input repeated group, copying its repetitions id verbatim. Use only that group\'s occurrence short ids for members and target. Every occurrence must belong exactly once to a subgroup, keep, or uncertain; subgroups must have at least two members and cannot overlap. target must be a subgroup member selecting its existing translation; do not generate a new translation. apply lists occurrence short ids to update, a unique subset of members that may be empty. Group membership and application are separate. Write a brief reason in target_language. Use an empty groups array if no subgroup can be unified.',
+}
+
 # Each declaration selects input fields, a task, and output contracts.
 _PROMPT_DECLARATIONS = {
+    ("repetition_consistency", None): {
+        "fields": ("target_language", "repetition.groups", "repetition.source", "repetition.translations", "repetition.context", "repetition.terms", "repetition.occurrences"),
+        "task": "repetition_consistency", "protocols": ("repetition_consistency",),
+    },
     ("terminology", None): {
         "fields": ("target_language", "source_segments", "reference_context"),
         "task": "terminology", "protocols": ("terminology",),
@@ -715,7 +755,9 @@ def full_prompt(
         *mode_protocols,
     ))
     stage_suffix = " ".join(_RESULT_PROTOCOLS[key][language] for key in protocol_ids)
-    suffix_parts.extend((stage_suffix, _COMMON_SUFFIX[language]))
+    suffix_parts.append(stage_suffix)
+    if stage != "repetition_consistency":
+        suffix_parts.append(_COMMON_SUFFIX[language])
     return "\n\n".join((prefix, effective_middle.strip(), " ".join(suffix_parts)))
 
 

@@ -57,6 +57,7 @@ from .project import (
     load_source_files,
     prompt_file,
 )
+from .prompt_resources import ProjectPrompts, global_prompt_path
 from .prompt_library import (
     delete_prompt_library,
     list_prompt_library,
@@ -217,27 +218,14 @@ def register_resource_routes(
             temporary.unlink(missing_ok=True)
 
     def global_prompt_file(stage: str, language: str) -> Path:
-        return effective_path(
-            f"prompts/{prompt_file(stage, language)}", builtin_root=app_root
-        )
-
-    def effective_prompt_file(root: Path, stage: str, language: str) -> Path:
-        project_path = root / "prompts" / prompt_file(stage, language)
-        if root != app_root and project_path.is_file():
-            return project_path
-        return global_prompt_file(stage, language)
+        return global_prompt_path(stage, language, builtin_root=app_root)
 
     def prompt_languages_for(root: Path) -> dict[str, list[str]]:
-        """Available prompt languages per stage from an effective view."""
-
-        return {
-            stage: [
-                language
-                for language in PROMPT_LANGUAGES
-                if effective_prompt_file(root, stage, language).is_file()
-            ]
-            for stage in PROMPT_RESOURCE_STAGES
-        }
+        if root == app_root:
+            return {stage: [language for language in PROMPT_LANGUAGES if global_prompt_file(stage, language).is_file()]
+                    for stage in PROMPT_RESOURCE_STAGES}
+        resources = ProjectPrompts(root, builtin_root=app_root)
+        return {stage: resources.languages(stage) for stage in PROMPT_RESOURCE_STAGES}
 
     def validate_language(value: object) -> str:
         if value not in PROMPT_LANGUAGES:
@@ -562,6 +550,7 @@ def register_resource_routes(
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         validate_language(language)
         root = project(name)
+        prompt_resources = ProjectPrompts(root, builtin_root=app_root)
         from .stage_runtime import document_prompt_context, document_prompt_requirements
 
         files = load_source_files(root)
@@ -604,24 +593,21 @@ def register_resource_routes(
         result = prompt_view(
             stage,
             language,
-            lambda value: root / "prompts" / prompt_file(stage, value),
-            [
-                value
-                for value in PROMPT_LANGUAGES
-                if (root / "prompts" / prompt_file(stage, value)).is_file()
-            ],
+            lambda value: prompt_resources.path(stage, value),
+            prompt_resources.languages(stage),
             global_file_for=lambda value: global_prompt_file(stage, value),
             translation_file_for=lambda value: (
-                root / "prompts" / prompt_file("translation", value)
+                prompt_resources.path("translation", value)
             ),
             fragment_summary_file_for=(
-                lambda value: root / "prompts" / prompt_file("fragment_summary", value)
+                lambda value: prompt_resources.path("fragment_summary", value)
             )
             if stage == "terminology"
             else None,
             document_requirements=requirements,
         )
 
+        result["inherited"] = prompt_file(stage, language) in prompt_resources.inherited
         result["document_context"] = {
             "file_id": selected["file_id"] if selected else None,
             "groups": list(groups.values()),
@@ -640,7 +626,17 @@ def register_resource_routes(
             raise UsageError("Prompt 不能为空")
         root = project(name)
         with project_write_lock(root):
-            atomic_write_text(root / "prompts" / prompt_file(stage, language), content)
+            ProjectPrompts(root, builtin_root=app_root).save(stage, language, content)
+        return {"saved": True}
+
+    @app.delete("/api/v1/projects/{name}/prompts/{stage}")
+    async def restore_project_prompt(name: str, stage: str, payload: dict[str, Any]) -> dict[str, bool]:
+        if payload.get("confirm") is not True:
+            raise UsageError("必须明确确认恢复 Prompt 继承")
+        language = validate_language(payload.get("language", "zh-CN"))
+        root = project(name)
+        with project_write_lock(root):
+            ProjectPrompts(root, builtin_root=app_root).restore(stage, language)
         return {"saved": True}
 
     @app.get("/api/v1/prompt-library/{stage}/{language}")

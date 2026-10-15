@@ -997,6 +997,7 @@ function NumberField({ label, value, onChange, help, min, max, step, disabled }:
 function ToggleField({ label, checked, onChange, help, disabled = false, className = "" }: { label: string; checked: boolean; onChange: (value: boolean) => void; help?: string; disabled?: boolean; className?: string }) { return <label className={`config-toggle${className ? ` ${className}` : ""}`}><span><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />{label}</span>{help && <small>{help}</small>}</label>; }
 
 interface PromptView {
+  inherited?: boolean;
   content: string;
   language: string;
   assembled: string;
@@ -1018,8 +1019,8 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
   const [error, setError] = useState("");
   useEffect(() => { let active = true; void api<{ prompts: DecisionPromptSummary[] }>("/api/v1/decision-prompts").then((value) => { if (active) setDecisionPrompts(value.prompts); }).catch((reason) => { if (active) setError(errorMessage(reason, language)); }); return () => { active = false; }; }, []);
   const stageControl = <label className="stage-select">{translate("settings.stageSelect", language)}<select value={stage} onChange={(event) => setStage(event.target.value)}>
-    <optgroup label="LLM">{[["terminology", "stage.terminology"], ["terminology_decision", "stage.terminologyDecision"], ["terminology_knowledge", "stage.terminologyKnowledge"], ["content_summary", "stage.contentSummary"], ["fragment_summary", "stage.fragmentSummary"], ["translation", "stage.translation"], ["proofreading", "stage.proofreading"], ["polishing", "stage.polishing"]].map(([id, label]) => <option key={id} value={id}>{translate(label, language)}</option>)}</optgroup>
-    {decisionPrompts.length > 0 && <optgroup label="Decision">{decisionPrompts.map((prompt) => <option key={prompt.validator_id} value={`decision:${prompt.validator_id}`}>{prompt.validator_id === "preferred_term_usage" ? translate("settings.preferredTermUsage", language) : prompt.validator_id === "segment_alignment" ? translate("settings.segmentAlignment", language) : prompt.label}</option>)}</optgroup>}
+    <optgroup label="LLM">{[["terminology", "stage.terminology"], ["terminology_decision", "stage.terminologyDecision"], ["terminology_knowledge", "stage.terminologyKnowledge"], ["content_summary", "stage.contentSummary"], ["fragment_summary", "stage.fragmentSummary"], ["translation", "stage.translation"], ["repetition_consistency", "repetition.comparisonPrompt"], ["proofreading", "stage.proofreading"], ["polishing", "stage.polishing"]].map(([id, label]) => <option key={id} value={id}>{translate(label, language)}</option>)}</optgroup>
+    {decisionPrompts.length > 0 && <optgroup label="Decision">{decisionPrompts.map((prompt) => <option key={prompt.validator_id} value={`decision:${prompt.validator_id}`}>{prompt.validator_id === "preferred_term_usage" ? translate("settings.preferredTermUsage", language) : prompt.validator_id === "segment_alignment" ? translate("settings.segmentAlignment", language) : prompt.validator_id === "repetition_screening" ? translate("repetition.screeningPrompt", language) : prompt.label}</option>)}</optgroup>}
   </select></label>;
   return <>{error && <div className="error-banner">{error}</div>}{stage.startsWith("decision:")
     ? <DecisionPromptSettings key={`${scope}:${project}:${stage}`} project={project} scope={scope} language={language} validator={stage.slice(9)} stageControl={stageControl} />
@@ -1030,6 +1031,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
   const [promptLanguage, setPromptLanguage] = useState("zh-CN");
   const [content, setContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
+  const [inherited, setInherited] = useState(false);
   const [assembled, setAssembled] = useState("");
   const [assembledPhases, setAssembledPhases] = useState<Record<string, string>>({});
   const [assembledModes, setAssembledModes] = useState<Record<string, string>>({});
@@ -1064,6 +1066,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
   function applyPromptView(value: PromptView) {
     setContent(value.content);
     setSavedContent(value.content);
+    setInherited(value.inherited ?? false);
     applyPromptPreview(value);
     setGlobalSync(value.global_sync);
     setLoadedGlobalDraft(false);
@@ -1143,6 +1146,16 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
     } catch (reason) { setError(errorMessage(reason, language)); }
   }
 
+  async function restoreInheritance() {
+    if (!window.confirm(translate("decision.promptRestoreConfirm", language))) return;
+    setError("");
+    try {
+      await api(path, { method: "DELETE", body: JSON.stringify({ language: promptLanguage, confirm: true }) });
+      await loadPrompt();
+      setMessage(translate("decision.promptRestored", language));
+    } catch (reason) { setError(errorMessage(reason, language)); }
+  }
+
   async function loadLibraryEntry(promptId: string) {
     if (!promptId || (content !== savedContent && !window.confirm(translate("settings.promptSyncDraftConfirm", language)))) return;
     try {
@@ -1217,7 +1230,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
     </div>
     {stageControl}
     <label className="stage-select">{translate("settings.promptLanguage", language)}<select value={promptLanguage} onChange={(event) => setPromptLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
-    {showSyncCard && <PromptSyncCard language={language} sync={globalSync} dirty={draftDirty} loadedGlobal={loadedGlobalDraft} onLoadGlobal={() => void loadGlobalDraft()} />}
+    {showSyncCard && <PromptSyncCard language={language} sync={globalSync} dirty={draftDirty} loadedGlobal={loadedGlobalDraft} inherited={inherited} onLoadGlobal={() => void loadGlobalDraft()} onRestore={() => void restoreInheritance()} />}
     <PromptLibraryControls language={language} entries={libraryEntries} selected={selectedLibraryEntry} loading={libraryLoading} saveOpen={librarySaveOpen} id={libraryIdDraft} overwrite={!!libraryOverwriteId}
       onId={(value) => { setLibraryIdDraft(value); setLibraryOverwriteId(""); }} onCancel={() => { setLibrarySaveOpen(false); setLibraryIdDraft(""); setLibraryOverwriteId(""); }}
       onSelect={(value) => void loadLibraryEntry(value)} onDelete={() => void deleteLibraryEntry()} onSave={() => void saveToLibrary()} />

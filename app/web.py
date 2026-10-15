@@ -413,6 +413,8 @@ def create_app(
     )
     from .web_segment_routes import register_segment_routes
     register_segment_routes(app=app, projects_root=projects_root, app_root=app_root, project=project)
+    from .web_repetition_routes import register_repetition_routes
+    register_repetition_routes(app=app, project=project)
     from .web_export_routes import register_export_routes
     register_export_routes(app=app, projects_root=projects_root, app_root=app_root, project=project)
     from .web_summary_routes import register_summary_routes

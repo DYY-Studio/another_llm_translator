@@ -727,10 +727,14 @@ def register_task_routes(
         from .config import LLM_MODEL_STAGES
         from .web_chatgpt_routes import require_project_plan_session
         stages = (payload.stages or LLM_MODEL_STAGES) if stage == "continuous" else LLM_MODEL_STAGES if stage == "run-all" else (stage,)
+        if stage == "repetition_consistency":
+            stages = ("translation",)
         if stage == "continuous":
             stages = tuple(value for value in stages if not (value == "translation" and payload.include_draft_translation))
             if payload.aggregate_full_summaries:
                 stages = (*stages, "content_summary")
+            if payload.include_repetition_consistency:
+                stages = (*stages, "translation")
         require_project_plan_session(request, project(name), stages)
         scope = Scope(
             from_file=payload.from_file,
@@ -759,6 +763,8 @@ def register_task_routes(
                 else None
             ),
             replace_draft=payload.replace_draft,
+            exclude_punctuation_only=payload.exclude_punctuation_only,
+            screening_enabled=payload.screening_enabled,
             acknowledge_manual_review=payload.acknowledge_manual_review,
             include_summaries=payload.include_summaries,
             include_draft_translation=payload.include_draft_translation,
@@ -768,6 +774,8 @@ def register_task_routes(
             continuous_stages=payload.stages,
             continuous_run_actions=payload.run_actions,
             apply_terminology_decision=payload.apply_terminology_decision,
+            include_repetition_consistency=payload.include_repetition_consistency,
+            apply_repetition_consistency=payload.apply_repetition_consistency,
         )
 
     @app.get("/api/v1/projects/{name}/task-options/{stage}")
@@ -782,6 +790,10 @@ def register_task_routes(
         final_review: bool = False,
         stages: list[str] = Query(default=[]),  # noqa: B008
         apply_terminology_decision: bool = False,
+        include_repetition_consistency: bool = False,
+        apply_repetition_consistency: bool = False,
+        exclude_punctuation_only: bool = True,
+        screening_enabled: bool = False,
     ) -> dict[str, Any]:
         from .config import LLM_MODEL_STAGES
         from .web_chatgpt_routes import require_project_plan_session
@@ -790,6 +802,8 @@ def register_task_routes(
             checked_stages = tuple(value for value in checked_stages if not (value == "translation" and include_draft_translation))
             if aggregate_full_summaries:
                 checked_stages = (*checked_stages, "content_summary")
+            if include_repetition_consistency:
+                checked_stages = (*checked_stages, "translation")
         require_project_plan_session(request, project(name), checked_stages)
         return task_options(
             project(name),
@@ -803,6 +817,10 @@ def register_task_routes(
             final_review=final_review,
             continuous_stages=stages,
             apply_terminology_decision=apply_terminology_decision,
+            include_repetition_consistency=include_repetition_consistency,
+            apply_repetition_consistency=apply_repetition_consistency,
+            exclude_punctuation_only=exclude_punctuation_only,
+            screening_enabled=screening_enabled,
         )
 
     @app.get("/api/v1/tasks/active")

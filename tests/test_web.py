@@ -6469,8 +6469,9 @@ def test_continuous_terminology_revision_policy_preflight_requires_explicit_stra
 
 
 @pytest.mark.asyncio
-async def test_continuous_terminal_decision_does_not_apply_draft(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("auto_apply", [False, True])
+async def test_continuous_terminal_decision_optional_application(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, auto_apply: bool
 ) -> None:
     _projects_root, project = make_project(tmp_path)
     library = {
@@ -6502,15 +6503,16 @@ async def test_continuous_terminal_decision_does_not_apply_draft(
             "completed": 1,
             "failed": 0,
             "pending": 0,
-            "needs_review": 1,
+            "needs_review": 0 if auto_apply else 1,
         }
 
-    def fail_apply(**_: object) -> None:
+    def fake_apply(*args: object, **kwargs: object) -> dict[str, object]:
         nonlocal applied
         applied = True
+        return {"applied": 1}
 
     monkeypatch.setattr("app.web_continuous.run_terminology_decision", fake_decision)
-    monkeypatch.setattr("app.web_continuous.apply_decision_draft", fail_apply)
+    monkeypatch.setattr("app.web_continuous.apply_decision_draft", fake_apply)
     stages = ("terminology", "terminology_decision")
     preflight = inspect_continuous(project, stages)
 
@@ -6524,10 +6526,11 @@ async def test_continuous_terminal_decision_does_not_apply_draft(
         stages,
         limiters=_continuous_limiter_map(project, stages),
         planned_steps=preflight["steps"],
+        apply_terminology_decision=auto_apply,
     )
 
     assert result["steps"][-1]["status"] == "completed"
-    assert applied is False
+    assert applied is auto_apply
 
 
 @pytest.mark.asyncio

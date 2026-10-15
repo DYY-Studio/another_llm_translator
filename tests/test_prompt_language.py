@@ -918,3 +918,77 @@ def test_editable_policies_are_not_forced_by_fixed_prompt(tmp_path, language):
     assert "refs" not in summary_middle
     summary = full_prompt("fragment_summary", summary_middle, language)
     assert "source_segments[].id:" in summary and "refs" in summary
+
+
+@pytest.mark.parametrize("stage,language", [("translation", "zh-CN"), ("translation", "en"), ("terminology_decision", "en"), ("repetition_consistency", "en")])
+def test_explicit_prompt_inheritance_is_shared_by_preview_runtime_and_fingerprint(tmp_path, stage, language):
+    from app.stage_runtime import _prompt
+    from app.project import ensure_missing_summary_prompts, sync_global_templates
+    project = create_project_sync(tmp_path)
+    app = create_app(projects_root=project.parent, app_root=tmp_path / "app-root")
+    path = f"/api/v1/projects/{project.name}/prompts/{stage}"
+    global_path = f"/api/v1/global/prompts/{stage}"
+    local_file = project / "prompts" / f"{stage}.{language}.middle.txt"
+    original = local_file.read_text()
+    with TestClient(app) as client:
+        assert client.request("DELETE", path, json={"language": language, "confirm": False}).status_code == 400
+        assert local_file.read_text() == original
+        assert client.put(global_path, json={"language": language, "content": "Global policy one"}).status_code == 200
+        assert client.request("DELETE", path, json={"language": language, "confirm": True}).status_code == 200
+        view = client.get(path, params={"language": language}).json()
+        assert view["inherited"] and view["content"] == "Global policy one"
+        assert not local_file.exists()
+        assert _prompt(project, stage, language) == view["assembled"]
+        digest = prompt_middle_digests(project, stage)[language]
+        assert ensure_missing_summary_prompts(project, app_root=tmp_path / "app-root") == []
+        sync_global_templates(project, app_root=tmp_path / "app-root", choice="update")
+        assert not local_file.exists()
+        assert client.put(global_path, json={"language": language, "content": "Global policy two"}).status_code == 200
+        assert prompt_middle_digests(project, stage)[language] != digest
+        assert "Global policy two" in _prompt(project, stage, language)
+        assert client.get(path, params={"language": language}).json()["content"] == "Global policy two"
+        assert client.put(path, json={"language": language, "content": "Local policy"}).status_code == 200
+        assert not client.get(path, params={"language": language}).json()["inherited"]
+        assert local_file.read_text() == "Local policy"
+        assert client.put(global_path, json={"language": language, "content": "Global policy three"}).status_code == 200
+        assert "Local policy" in _prompt(project, stage, language)
+
+
+@pytest.mark.asyncio
+async def test_inherited_translation_request_freezes_prompt_across_global_updates(tmp_path):
+    from app.execution import Scope
+    from app.prompt_resources import ProjectPrompts
+    from app.user_config import write_user
+    from app.locking import project_write_lock
+    project = await create_project(tmp_path)
+    global_file = write_user("prompts/translation.en.middle.txt")
+    global_file.write_text("Global policy one")
+    with project_write_lock(project):
+        ProjectPrompts(project).restore("translation", "en")
+    observed = []
+    def handler(request):
+        body = json.loads(request.content)
+        observed.append(body["messages"][0]["content"])
+        records = [{"type": "segment", "id": item["id"], "translation": f"译:{item['source']}"}
+            for item in json.loads(body["messages"][1]["content"])["segments"]]
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_translation(project, Scope(), http_client=client, prompt_language="en")
+    assert observed and all("Global policy one" in prompt for prompt in observed)
+    snapshot = project / "runs" / result["run_id"] / "prompt.txt"
+    original = snapshot.read_text()
+    global_file.write_text("Global policy two")
+    assert snapshot.read_text() == original and "Global policy one" in original
+
+
+def test_invalid_global_prompt_blocks_restore_without_removing_project_override(tmp_path):
+    from app.user_config import write_user
+    project = create_project_sync(tmp_path)
+    local = project / "prompts" / "translation.en.middle.txt"
+    original = local.read_bytes()
+    write_user("prompts/translation.en.middle.txt").write_text("")
+    with TestClient(create_app(projects_root=project.parent, app_root=tmp_path / "app-root")) as client:
+        path = f"/api/v1/projects/{project.name}/prompts/translation"
+        assert client.request("DELETE", path, json={"language": "en", "confirm": True}).status_code == 400
+        assert local.read_bytes() == original
+        assert not client.get(path, params={"language": "en"}).json()["inherited"]

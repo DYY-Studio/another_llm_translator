@@ -1,11 +1,11 @@
 import { translate, type Language } from "../i18n";
-import { object, text, records, parseRequestOverview, type RequestOverviewSnapshot, type OverviewRecord } from "../requestOverview";
+import { object, text, records, parseRequestOverview, parseRepetitionOverview, parseRepetitionOverviews, type RequestOverviewSnapshot, type OverviewRecord } from "../requestOverview";
 import type { TermDecisionState } from "../types";
 import { compactSegmentReferences } from "../segmentReferences";
 import { TermDecisionChanges } from "./TermDecisionChanges";
 
-function SourceBlock({ values, title }: {values: string[]; title?: string}) {
-  return <section className="overview-cell">{title && <h4>{title}</h4>}{values.map((value, index) => <p key={index}>{value}</p>)}</section>;
+function SourceBlock({ values, title, className = "" }: {values: string[]; title?: string; className?: string}) {
+  return <section className={`overview-cell ${className}`}>{title && <h4>{title}</h4>}{values.map((value, index) => <p key={index}>{value}</p>)}</section>;
 }
 function termState(item: OverviewRecord): TermDecisionState {
   return {normalized: text(item.normalized), source: text(item.source), category: text(item.category) || null,
@@ -47,6 +47,33 @@ function DecisionOverview({ snapshot, language }: {snapshot: RequestOverviewSnap
 
 export function RequestOverview({ snapshot, language, truncated = false }: {snapshot?: RequestOverviewSnapshot | null; language: Language; truncated?: boolean}) {
   if (!snapshot || snapshot.input == null) return <div className="diagnostics-empty">{translate(truncated ? "overview.truncated" : "overview.notRecorded", language)}</div>;
+  if (snapshot.request_kind === "llm" && (Array.isArray(object(snapshot.input).occurrences) || Array.isArray(object(snapshot.input).repetitions))) {
+    const values = Array.isArray(object(snapshot.input).repetitions) ? parseRepetitionOverviews(snapshot) : [{id: "", ...parseRepetitionOverview(snapshot)}];
+    const t = (key: string) => translate(`repetition.${key}`, language);
+    return <div className="request-overview">
+      {snapshot.error && <p className="warning-banner">{snapshot.error}</p>}
+      {values.map(value => <section key={value.id}>
+      {(truncated || value.invalid) && <p className="warning-banner">{translate(truncated ? "overview.truncated" : "overview.incomplete", language)}</p>}
+      <SourceBlock title={`${t("source")}${value.id ? ` ${value.id}` : ""}`} values={[value.source]} />
+      {value.groups.map((group, index) => <section className="overview-repetition-reason" key={index}>
+        <strong>{translate("repetition.unify", language, {count: group.members.length})} ({group.members.join(", ")})</strong>
+        <p className="decision-reason">{group.reason}</p>
+      </section>)}
+      {value.occurrences.map(item => <article className="overview-segment" key={item.id}>
+        <span className="overview-row-number">{item.id}</span>
+        <div className="overview-cell"><small>{item.file} / {item.filename} / {item.part} / Position {item.position}</small>
+          <div className="overview-pair"><SourceBlock title={t("before")} values={[item.current]} />
+            <SourceBlock className={`repetition-result${item.result !== null ? " is-applied" : ""}`} title={item.result !== null ? t("after") : item.uncertain ? t("needsReview") : item.kept ? t("keep") : translate("overview.noResult", language)} values={[item.result ?? item.current]} /></div>
+          <details className="overview-repetition-context"><summary>{t("context")}</summary>
+            <SourceBlock title={t("previousContext")} values={item.previous} />
+            <div className="overview-repetition-source"><SourceBlock title={t("source")} values={[value.source]} /></div>
+            <SourceBlock title={t("nextContext")} values={item.next} />
+          </details>
+        </div>
+      </article>)}
+      </section>)}
+    </div>;
+  }
   const value = parseRequestOverview(snapshot);
   const reference = Array.isArray(value.input.reference_context) ? value.input.reference_context : [];
   const targets = records(value.input.terms);

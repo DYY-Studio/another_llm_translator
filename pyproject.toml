@@ -48,6 +48,8 @@ prompts = [
   "prompts/polishing.zh-CN.middle.txt",
   "prompts/proofreading.en.middle.txt",
   "prompts/proofreading.zh-CN.middle.txt",
+  "prompts/repetition_consistency.en.middle.txt",
+  "prompts/repetition_consistency.zh-CN.middle.txt",
   "prompts/terminology.en.middle.txt",
   "prompts/terminology.zh-CN.middle.txt",
   "prompts/terminology_decision.en.middle.txt",

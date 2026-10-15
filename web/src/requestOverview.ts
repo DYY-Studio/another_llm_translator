@@ -15,6 +15,68 @@ export function object(value: unknown): OverviewRecord {
 export function text(value: unknown): string { return typeof value === "string" ? value : ""; }
 export function records(value: unknown): OverviewRecord[] { return Array.isArray(value) ? value.map(object) : []; }
 
+export function parseRepetitionOverview(snapshot: RequestOverviewSnapshot) {
+  const input = object(snapshot.input);
+  let output: OverviewRecord = {};
+  let invalid = false;
+  if (snapshot.response_content) {
+    try { output = object(JSON.parse(snapshot.response_content)); }
+    catch { invalid = true; }
+    if (!Array.isArray(output.groups) || !Array.isArray(output.keep) || !Array.isArray(output.uncertain)) invalid = true;
+  }
+  return repetitionOverview(input, output, invalid);
+}
+
+export function parseRepetitionOverviews(snapshot: RequestOverviewSnapshot) {
+  const input = object(snapshot.input);
+  let output: OverviewRecord = {};
+  let invalid = false;
+  if (snapshot.response_content) {
+    try { output = object(JSON.parse(snapshot.response_content)); }
+    catch { invalid = true; }
+    if (!Array.isArray(output.repetitions)) invalid = true;
+  }
+  const results = new Map<string, OverviewRecord[]>();
+  for (const item of records(output.repetitions)) {
+    const id = text(item.id);
+    results.set(id, [...(results.get(id) ?? []), item]);
+  }
+  return records(input.repetitions).map(group => {
+    const matches = results.get(text(group.id)) ?? [];
+    const result = matches.length === 1 ? matches[0] : {};
+    const incomplete = !!snapshot.response_content && (matches.length !== 1 || !Array.isArray(result.groups)
+      || !Array.isArray(result.keep) || !Array.isArray(result.uncertain));
+    return {id: text(group.id), ...repetitionOverview({...input, ...group}, result, invalid || incomplete)};
+  });
+}
+
+function repetitionOverview(input: OverviewRecord, output: OverviewRecord, invalid: boolean) {
+  const translations = Array.isArray(input.translations) ? input.translations.map(text) : [];
+  const contexts = object(input.context);
+  const files = object(input.files);
+  const parts = object(input.parts);
+  const occurrences = records(input.occurrences);
+  const members = new Map(occurrences.map(item => [item.id, item]));
+  const groups = records(output.groups);
+  const proposals = new Map(groups.flatMap(group => Array.isArray(group.members) ? group.members.map(id => [id, group] as const) : []));
+  const appliedMembers = new Set(groups.flatMap(group => Array.isArray(group.apply) ? group.apply : Array.isArray(group.members) ? group.members : []));
+  const uncertain = new Set(Array.isArray(output.uncertain) ? output.uncertain : []);
+  const kept = new Set(Array.isArray(output.keep) ? output.keep : []);
+  return {source: text(input.source), invalid,
+    groups: groups.map(group => ({members: Array.isArray(group.members) ? group.members.map(text) : [], reason: text(group.reason)})),
+    occurrences: occurrences.map(item => {
+    const proposal = proposals.get(item.id);
+    const applied = proposal && appliedMembers.has(item.id);
+    const target = applied ? members.get(proposal.target) : undefined;
+    const context = (refs: unknown) => Array.isArray(refs) ? refs.map(id => text(contexts[String(id)])) : [];
+    return {id: text(item.id), file: String(item.file), filename: text(files[String(item.file)]),
+      part: typeof item.part === "number" ? text(parts[String(item.part)]) : text(item.part), position: String(item.position), current: translations[Number(item.variant)] ?? "",
+      result: target ? translations[Number(target.variant)] : null,
+      uncertain: uncertain.has(item.id), kept: kept.has(item.id) || !!proposal && !applied,
+      previous: context(item.previous), next: context(item.next)};
+  })};
+}
+
 export function parseRequestOverview(snapshot: RequestOverviewSnapshot) {
   const input = object(snapshot.input);
   const output: OverviewRecord[] = [];

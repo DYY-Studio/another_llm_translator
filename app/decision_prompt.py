@@ -1,4 +1,4 @@
-"""Plugin-owned Decision prompt declarations and strict content validation."""
+"""Core and plugin Decision prompt declarations and strict content validation."""
 from __future__ import annotations
 
 import json
@@ -49,7 +49,12 @@ def declaration_from_file(validator_id: str, choices: tuple[str, ...], path: Pat
 
 def prompt_declarations() -> dict[str, DecisionPromptDeclaration]:
     from .plugins import load_plugins
-    return {prompt.validator_id: prompt for plugin in load_plugins() for prompt in plugin.decision_prompts}
+    declarations = {prompt.validator_id: prompt for plugin in load_plugins() for prompt in plugin.decision_prompts}
+    if "repetition_screening" in declarations:
+        raise ConfigError("插件 Decision 提示词与内置重复译文初筛重名")
+    declarations["repetition_screening"] = declaration_from_file("repetition_screening", ("compare", "skip"),
+        Path(__file__).parent / "decision_prompts" / "repetition_screening.json")
+    return declarations
 
 
 def get_declaration(validator_id: str) -> DecisionPromptDeclaration:

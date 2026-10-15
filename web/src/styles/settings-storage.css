@@ -123,6 +123,7 @@
 .prompt-sync-card.out-of-sync { border-color: var(--warning-border); background: var(--warning-bg); color: var(--warning-text); }
 .prompt-sync-card.synced { border-color: var(--info-border); }
 .prompt-sync-card > div, .prompt-library-card > div:first-child { display: grid; gap: 4px; min-width: 0; }
+.prompt-sync-card > .button-group { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; }
 .prompt-sync-card strong, .prompt-library-card strong { font-size: 13px; }
 .prompt-sync-card small, .prompt-library-card small { color: inherit; font-size: 12px; line-height: 1.45; }
 .prompt-library-card { display: grid; justify-content: stretch; margin-top: 16px; border-color: var(--border); background: var(--surface-soft); color: var(--text); }

@@ -71,6 +71,8 @@ def test_prompt_routes_project_override_restore_and_library(tmp_path):
         unavailable = client.get(path).json()
         assert unavailable["content"] == custom
         assert not unavailable["global_sync"]["available"] and unavailable["global_sync"]["error"]
+        assert client.request("DELETE", path, json={"confirm": True}).status_code == 400
+        assert client.get(path).json()["content"] == custom
         assert client.put(global_path, json={"content": content}).status_code == 200
         assert client.put(path, json={"content": content}).status_code == 200
         equal_override = client.get(path).json()
@@ -87,7 +89,9 @@ def test_prompt_routes_project_override_restore_and_library(tmp_path):
         assert client.get(path).status_code == 400
         assert client.get("/api/v1/decision-prompts/preferred_term_usage/default").json()["content"]["instructions"]
         assert client.put(global_path, json={"language": "en", "content": content}).status_code == 400
-        assert client.delete(path).status_code == 200
+        assert client.request("DELETE", path, json={"confirm": False}).status_code == 400
+        assert (project / "decision_prompts/preferred_term_usage.json").read_text() == '{"bad": true}'
+        assert client.request("DELETE", path, json={"confirm": True}).status_code == 200
         assert client.get(path).json()["content"] == content
         custom_language = {**content, "instructions": "允许使用昵称和缩写。"}
         assert client.put(path, json={"content": custom_language}).status_code == 200
@@ -193,7 +197,7 @@ def test_optional_plugin_custom_choices_uninstall_and_reinstall(tmp_path, monkey
     custom = {**content, "instructions": "Saved custom policy"}
     atomic_write_json(path, custom)
     monkeypatch.setattr(plugins, "_PLUGIN_CACHE", ())
-    assert prompt_declarations() == {}
+    assert set(prompt_declarations()) == {"repetition_screening"}
     assert path.is_file()
     with pytest.raises(ConfigError, match="未安装"):
         plugins.resolve_translation_validators(["custom_validator"])

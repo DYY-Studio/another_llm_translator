@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
@@ -16,6 +16,7 @@ import {
 } from "../segmentReadState";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
+const RepetitionReview = lazy(() => import("./RepetitionReview").then(module => ({ default: module.RepetitionReview })));
 
 interface WorkspaceCacheEntry {
   orderedIds: string[];
@@ -144,6 +145,7 @@ export function SegmentWorkspace({
       .map((key) => [key, translate(`status.${key}`, language)]),
   );
   const selection = useClassicSelection();
+  const [repetitionOpen, setRepetitionOpen] = useState(false);
   const [boundary, setBoundary] = useState("all");
   const [status, setStatus] = useState("all");
   const [search, setSearch] = useState("");
@@ -589,6 +591,9 @@ export function SegmentWorkspace({
     termMembers.set(term.primary_source, members);
   }
 
+  if (repetitionOpen && stage === "translation") return <Suspense fallback={<section className="term-decision-workspace">{translate("common.loading", language)}</section>}><RepetitionReview key={projectId} project={project} files={overview.files} language={language}
+        onClose={() => setRepetitionOpen(false)} onChanged={async () => { await onRefresh(); await reloadIndex(); }} /></Suspense>;
+
   return (
     <div className="workspace">
       <section className="segment-browser">
@@ -615,6 +620,7 @@ export function SegmentWorkspace({
           <div className="batch-toolbar segment-batch-toolbar">
             <span>{translate("workspace.selectedCount", language, { selected: selectedVisibleIds.length, total })}</span>
             <div className="segment-batch-actions">
+              {stage === "translation" && <button className="quiet-button repetition-entry" onClick={() => setRepetitionOpen(true)}>{translate("repetition.title", language)}</button>}
               {stage !== "translation" && (
                 <>
                   <button className="quiet-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "apply", scope: "selected" })}>{translate("workspace.applySelected", language)}</button>

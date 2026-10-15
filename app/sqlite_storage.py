@@ -21,6 +21,7 @@ SCHEMA_VERSION = 8
 
 STAGES = frozenset(
     {
+        "repetition_consistency",
         "terminology",
         "terminology_decision",
         "content_summary",
@@ -2850,6 +2851,51 @@ def list_runs(project: Path, stage: str | None = None, status: str | None = None
         ]
     finally:
         connection.close()
+
+
+def read_repetition_run(project: Path, states: tuple[str, ...]) -> dict[str, Any] | None:
+    """Read one consistency draft/application without hydrating Run history."""
+    connection = _with_db(project)
+    try:
+        row = connection.execute(
+            "SELECT run_id, stage, status, started_at, payload_json FROM runs "
+            "WHERE stage = 'repetition_consistency' "
+            f"AND json_extract(payload_json, '$.draft_status') IN ({','.join('?' for _ in states)}) "
+            "ORDER BY rowid DESC LIMIT 1", states,
+        ).fetchone()
+        return _hydrate_run(row, _project_id(connection)) if row is not None else None
+    finally:
+        connection.close()
+
+
+def write_repetition_state(
+    project: Path, *, records: list[dict[str, Any]], manifests: list[dict[str, Any]]
+) -> list[str]:
+    """Commit changed translations and consistency Run transitions together."""
+    connection = _with_db(project)
+    try:
+        with connection:
+            if records:
+                _insert_stage(connection, records)
+            connection.executemany(
+                "INSERT INTO runs(run_id, stage, status, started_at, payload_json) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(run_id) DO UPDATE SET stage=excluded.stage, status=excluded.status, "
+                "started_at=excluded.started_at, payload_json=excluded.payload_json",
+                [(m["run_id"], m["stage"], m["status"], m.get("started_at"), _run_residual(m)) for m in manifests],
+            )
+            if records:
+                prune_stage_results(connection, [(str(r["stage"]), r.get("segment_id")) for r in records])
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法原子更新重复译文审查：{project}: {exc}") from exc
+    finally:
+        connection.close()
+    warnings = []
+    for manifest in manifests:
+        try:
+            atomic_write_json(project / "runs" / manifest["run_id"] / "manifest.json", manifest)
+        except OSError as exc:
+            warnings.append(f"数据库已保存，但 Run 文件镜像写入失败：{exc}")
+    return warnings
 
 
 def _read_only_connection(project: Path) -> sqlite3.Connection:
