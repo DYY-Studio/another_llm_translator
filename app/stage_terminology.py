@@ -110,15 +110,16 @@ def _summary_participation(
     }
 
 
-def _summary_covered_segments(
+def _summary_reusable_fragments(
     project: Path,
     segments: list[dict[str, Any]],
     *,
     prompt_digests: Callable[[list[dict[str, Any]]], set[str]],
     model: str,
     target_language: str,
-) -> set[str]:
+) -> tuple[set[str], set[str]]:
     valid_slices: dict[str, dict[str, dict[str, Any]]] = {}
+    reusable_ids: set[str] = set()
     artifacts = read_content_summaries(project, kind="fragment", status="completed")
     by_id = {str(item["segment_id"]): item for item in segments}
     for artifact in artifacts:
@@ -205,6 +206,7 @@ def _summary_covered_segments(
             and artifact.get("model") == model
             and artifact.get("target_language") == target_language
         ):
+            reusable_ids.add(str(artifact["record_id"]))
             for value in stable_values:
                 valid_slices.setdefault(value["segment_id"], {})[
                     str(value["slice_id"])
@@ -226,7 +228,7 @@ def _summary_covered_segments(
             }
         if len(source) in covered_positions:
             covered.add(segment_id)
-    return covered
+    return covered, reusable_ids
 
 
 def _validate_term_items(
@@ -710,10 +712,10 @@ async def run_terminology(
         if include_summaries
         and (str(segment["file_id"]), str(segment["part_id"])) in summary_selection
     ]
-    covered_summary_ids = (
-        set()
+    covered_summary_ids, reusable_summary_ids = (
+        (set(), set())
         if scope.force
-        else _summary_covered_segments(
+        else _summary_reusable_fragments(
             project,
             summary_candidates,
             prompt_digests=summary_prompt_digests,
@@ -721,7 +723,7 @@ async def run_terminology(
             target_language=str(config["project"]["target_language"]),
         )
         if summary_candidates
-        else set()
+        else (set(), set())
     )
     work: list[dict[str, Any]] = []
     required_modes: dict[str, set[str]] = {}
@@ -990,7 +992,7 @@ async def run_terminology(
         preflight.exact_checked,
     )
 
-    if include_summaries and scope.force and not scope.dry_run:
+    if include_summaries and not scope.dry_run:
         summary_request_boundaries = {
             (str(item["file_id"]), str(item["part_id"]))
             for item in request_segments
@@ -1002,7 +1004,9 @@ async def run_terminology(
         }
         refresh_boundaries = summary_selection & summary_request_boundaries
         if refresh_boundaries:
-            mark_content_summary_fragments_stale(project, refresh_boundaries)
+            mark_content_summary_fragments_stale(
+                project, refresh_boundaries, exclude_ids=reusable_summary_ids
+            )
 
     selected_by_id = {str(item["segment_id"]): item for item in selected}
 

@@ -1471,23 +1471,31 @@ def write_content_summary(project: Path, value: dict[str, Any]) -> None:
 def mark_content_summary_fragments_stale(
     project: Path,
     boundaries: Iterable[tuple[str, str]],
+    *,
+    exclude_ids: Iterable[str] = (),
 ) -> int:
     boundary_values = {(str(file_id), str(part_id)) for file_id, part_id in boundaries}
     if not boundary_values:
         return 0
+    excluded = set(exclude_ids)
     connection = _with_db(project)
     deleted = 0
     try:
         with connection:
             for file_id, part_id in boundary_values:
-                cursor = connection.execute(
+                rows = connection.execute(
                     """
-                    UPDATE content_summaries
-                       SET status = 'stale', updated_at = ?
+                    SELECT summary_id FROM content_summaries
                      WHERE kind = 'fragment' AND status = 'completed'
                        AND file_id = ? AND part_id = ?
                     """,
-                    (utc_now(), file_id, part_id),
+                    (file_id, part_id),
+                ).fetchall()
+                now = utc_now()
+                cursor = connection.executemany(
+                    "UPDATE content_summaries SET status = 'stale', updated_at = ? "
+                    "WHERE summary_id = ?",
+                    [(now, row["summary_id"]) for row in rows if row["summary_id"] not in excluded],
                 )
                 deleted += max(0, int(cursor.rowcount))
     except sqlite3.Error as exc:

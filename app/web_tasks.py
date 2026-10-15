@@ -416,7 +416,7 @@ def task_options(
             else ("terminology",),
         )
     if stage == "terminology" and include_summaries and not include_draft_translation:
-        from .stage_terminology import _summary_covered_segments
+        from .stage_terminology import _summary_reusable_fragments
         from .stage_runtime import (
             _project_context,
             _prompt_factory,
@@ -439,7 +439,7 @@ def task_options(
             language = str(result["summary_prompt_preflight"]["language"])
             factory = _prompt_factory(project, "fragment_summary", language)
             requirements, _ = _document_prompt_requirement_helpers(context, language)
-            covered = _summary_covered_segments(
+            covered, _ = _summary_reusable_fragments(
                 project,
                 summary_segments,
                 prompt_digests=lambda items: {digest(factory(requirements(items)))},
