@@ -127,8 +127,19 @@ const RequestGroup = memo(function RequestGroup({
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
                 style={{ transform: `translateY(${virtualRow.start}px)` }}
-                onDoubleClick={() => {
+                role="button"
+                aria-label={`${item.request_id} ${requestStatusLabel(item, language)}`}
+                tabIndex={item.detail_available ? 0 : -1}
+                aria-disabled={!item.detail_available}
+                title={!item.detail_available ? translate("diagnostics.detailExpired", language) : undefined}
+                onClick={() => {
                   if (item.detail_available) onOpen(item.request_id);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    if (item.detail_available) onOpen(item.request_id);
+                  }
                 }}
               >
                 <div className="request-row-main">
@@ -143,16 +154,7 @@ const RequestGroup = memo(function RequestGroup({
                     {item.transport === "sse" ? ` · SSE ${item.stream_event_count} · ${bytes(item.stream_received_bytes, language)}${item.stream_first_event_latency_ms === null ? "" : ` · ${item.stream_first_event_latency_ms} ms first`}` : ""}
                   </span>
                 </div>
-                <button
-                  className="quiet-button"
-                  disabled={!item.detail_available}
-                  title={!item.detail_available ? translate("diagnostics.detailExpired", language) : undefined}
-                  onClick={() => onOpen(item.request_id)}
-                >
-                  {item.detail_available
-                    ? translate("diagnostics.view", language)
-                    : translate("diagnostics.expired", language)}
-                </button>
+                {!item.detail_available && <span className="muted">{translate("diagnostics.expired", language)}</span>}
               </article>
             );
           })}

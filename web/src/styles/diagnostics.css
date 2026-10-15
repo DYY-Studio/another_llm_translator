@@ -47,13 +47,15 @@
 .request-list { min-height: 0; flex: 1; overflow: auto; }
 .request-list-content { position: relative; width: 100%; }
 .request-list article { position: absolute; top: 0; left: 0; width: 100%; display: flex; align-items: center; gap: 12px; padding: 13px 14px; border-bottom: 1px solid var(--row-border); }
-.request-list article:hover { background: var(--hover); }
+.request-list article[role="button"] { cursor: pointer; }
+.request-list article[role="button"]:not([aria-disabled="true"]):hover { background: var(--hover); }
+.request-list article[role="button"]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.request-list article[aria-disabled="true"] { cursor: not-allowed; }
 .decision-activities article { position: static; align-items: stretch; flex-direction: column; }
 .decision-activities .button-group { margin: 0; }
 .decision-dialog { display: flex; flex-direction: column; }
 .decision-dialog > :not(.exchange-detail) { flex: none; }
 .decision-dialog .exchange-detail { min-height: 0; }
-.request-list button:disabled { cursor: not-allowed; opacity: .55; }
 .request-row-main { min-width: 0; display: grid; flex: 1; gap: 5px; }
 .request-row-main header { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 11px; }
 .request-row-main code span { white-space: nowrap; }
