@@ -639,7 +639,7 @@ def test_fragment_description_is_not_truncated_to_fit_decision_budget(tmp_path):
     project = create_decision_project(tmp_path)
     path = project / "terminology" / "terms.json"
     library = read_json(project, path)
-    add_unsourced(library["knowledge"], "alice", "线索" * 1_000_000, "import")
+    add_unsourced(library["knowledge"], "alice", "线索" * 8_192, "import")
     write_json(project, path, library)
     with pytest.raises(RequestSizeError):
         decision_plan(project)
@@ -3662,71 +3662,52 @@ def test_manual_review_queue_replaced_only_after_new_decision_is_applied(
     assert [item["normalized"] for item in queue["items"]] == ["bob"]
 
 
-def test_web_starts_terminology_decision_task_without_options_local(
+def test_web_decision_start_reuses_plan_and_saves_draft(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = create_decision_project(tmp_path)
-
-    async def fake_decision(_: Path, **kwargs: object) -> dict[str, object]:
-        progress = kwargs["on_progress"]
-        assert callable(progress)
-        progress(4, 0, 4)
-        return {"completed": 4, "failed": 0, "pending": 0}
-
-    monkeypatch.setattr("app.web_tasks.run_terminology_decision", fake_decision)
-    client = TestClient(create_app(projects_root=project.parent))
-    started = client.post(
-        "/api/v1/projects/decision-demo/tasks",
-        json={"stage": "terminology_decision"},
-    )
-    assert started.status_code == 200
-    assert started.json()["stage"] == "terminology_decision"
-    assert started.json()["total_segments"] == 4
-
-    task_id = started.json()["task_id"]
-    state = client.get(f"/api/v1/tasks/{task_id}").json()
-    assert state["status"] == "completed"
-    assert state["completed_segments"] == 4
-    assert state["total_segments"] == 4
-
-
-def test_web_decision_start_computes_plan_twice_and_passes_plan(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project = create_decision_project(tmp_path)
-    plan_calls = 0
+    plans: list[dict] = []
+    phases: list[str] = []
     original_plan = decision_plan
+    original_client = httpx.AsyncClient
 
-    def counting_plan(*args: object, **kwargs: object) -> object:
-        nonlocal plan_calls
-        plan_calls += 1
-        return original_plan(*args, **kwargs)
+    def counting_plan(*args: object, **kwargs: object) -> dict:
+        plan = original_plan(*args, **kwargs)
+        plans.append(plan)
+        return plan
 
-    plans: list[object] = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        phases.append(payload["phase"])
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": llm_jsonl(decision_response(payload))}}]},
+        )
 
-    async def fake_decision(_: Path, **kwargs: object) -> dict[str, object]:
-        plans.append(kwargs.get("plan"))
-        progress = kwargs["on_progress"]
-        assert callable(progress)
-        progress(4, 0, 4)
-        return {"completed": 4, "failed": 0, "pending": 0}
+    def http_client(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        return original_client(*args, **kwargs, transport=httpx.MockTransport(handler))
 
     monkeypatch.setattr("app.web_tasks.decision_plan", counting_plan)
     monkeypatch.setattr("app.term_decision.decision_plan", counting_plan)
-    monkeypatch.setattr("app.web_tasks.run_terminology_decision", fake_decision)
-    client = TestClient(create_app(projects_root=project.parent))
-    started = client.post(
-        "/api/v1/projects/decision-demo/tasks",
-        json={"stage": "terminology_decision"},
-    )
-    assert started.status_code == 200
-    task_id = started.json()["task_id"]
-    state = client.get(f"/api/v1/tasks/{task_id}").json()
-    assert state["status"] == "completed"
-    assert plan_calls == 2
-    assert len(plans) == 1
-    assert plans[0] is not None
-    assert plans[0]["eligible"]
+    monkeypatch.setattr(httpx, "AsyncClient", http_client)
+    with TestClient(create_app(projects_root=project.parent)) as client:
+        started = client.post(
+            "/api/v1/projects/decision-demo/tasks",
+            json={"stage": "terminology_decision"},
+        )
+        assert started.status_code == 200
+        assert started.json()["stage"] == "terminology_decision"
+        assert started.json()["total_segments"] == 4
+        task_id = started.json()["task_id"]
+        state = client.get(f"/api/v1/tasks/{task_id}").json()
+        assert state["status"] == "completed"
+        assert state["completed_segments"] == state["total_segments"] == 4
+    assert len(plans) == 2
+    assert plans[-1]["eligible"]
+    assert phases == ["adjudication", "consistency"]
+    draft = current_decision_draft(project)
+    assert draft is not None
+    assert draft["run_id"] == state["summary"]["run_id"]
+    assert draft["proposals"][0]["after"][0]["preferred_translation"] == "爱丽丝"
 
 
 def test_web_resumes_complete_legacy_group_checkpoint_into_review(

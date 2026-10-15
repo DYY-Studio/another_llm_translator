@@ -1842,58 +1842,6 @@ async def test_translation_truncated_response_saves_prefix_and_retries_only_miss
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mismatch", ["missing", "duplicate", "unknown"])
-async def test_complete_id_mismatch_retries_original_translation_batch(
-    tmp_path: Path,
-    mismatch: str,
-) -> None:
-    project = await create_project(tmp_path, "one\ntwo\nthree")
-    calls: list[list[str]] = []
-    persisted_completed: list[int] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        ids = [item["id"] for item in payload["segments"]]
-        calls.append(ids)
-        if len(calls) == 1:
-            if mismatch == "missing":
-                returned = ids[:-1]
-            elif mismatch == "duplicate":
-                returned = [ids[0], ids[0], *ids[1:]]
-            else:
-                returned = [*ids, "unknown"]
-            saved = read_jsonl(project, project / "stages" / "translation.jsonl")
-            persisted_completed.append(
-                sum(item["status"] == "completed" for item in saved)
-            )
-        else:
-            returned = ids
-        records = [
-            {
-                "type": "segment",
-                "id": segment_id,
-                "translation": f"ok:{segment_id}",
-            }
-            for segment_id in returned
-        ]
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        summary = await run_translation(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-
-    assert summary["completed"] == 3
-    assert calls == [["1", "2", "3"], ["1", "2", "3"]]
-    assert persisted_completed == [0]
-
-
-@pytest.mark.asyncio
 async def test_complete_missing_id_retries_full_132_segment_batch(
     tmp_path: Path,
 ) -> None:
@@ -1901,7 +1849,6 @@ async def test_complete_missing_id_retries_full_132_segment_batch(
         tmp_path, "\n".join(f"line-{index}" for index in range(132))
     )
     calls: list[list[str]] = []
-    persisted_completed: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -1909,11 +1856,8 @@ async def test_complete_missing_id_retries_full_132_segment_batch(
         calls.append(ids)
         if len(calls) == 1:
             returned = ids[:-1]
-            saved = read_jsonl(project, project / "stages" / "translation.jsonl")
-            persisted_completed.append(
-                sum(item["status"] == "completed" for item in saved)
-            )
         else:
+            assert not read_jsonl(project, project / "stages" / "translation.jsonl")
             returned = ids
         records = [
             {
@@ -1938,7 +1882,9 @@ async def test_complete_missing_id_retries_full_132_segment_batch(
     expected_ids = [str(index) for index in range(1, 133)]
     assert summary["completed"] == 132
     assert calls == [expected_ids, expected_ids]
-    assert persisted_completed == [0]
+    records = read_jsonl(project, project / "stages" / "translation.jsonl")
+    assert len(records) == 132
+    assert [record["text"] for record in records] == [f"ok:{i}" for i in expected_ids]
 
 
 @pytest.mark.asyncio

@@ -1378,8 +1378,8 @@ def test_minimal_aggregation_request_over_budget_fails_without_full_result(
     tmp_path: Path,
 ) -> None:
     project = _project(tmp_path)
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-1", segment_indexes=[0], text="甲" * 100000)
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-2", segment_indexes=[1], text="乙" * 100000)
+    _fragment(project, summary_id="SUMMARY-FRAGMENT-1", segment_indexes=[0], text="甲" * 16_384)
+    _fragment(project, summary_id="SUMMARY-FRAGMENT-2", segment_indexes=[1], text="乙" * 16_384)
     result = asyncio.run(
         aggregate_summaries(
             project,

@@ -2962,6 +2962,13 @@ def test_web_term_group_member_can_leave_group(tmp_path: Path) -> None:
             json={"source": source, "aliases": [], "disabled": False},
         )
         assert response.status_code == 200
+    related = client.post(
+        "/api/v1/projects/sample/terms/related",
+        json={"normalized": "john smith"},
+    )
+    assert related.status_code == 200
+    assert related.json()["related"][0]["normalized"] == "john"
+
     grouped = client.post(
         "/api/v1/projects/sample/terms/group-related",
         json={
@@ -2972,6 +2979,8 @@ def test_web_term_group_member_can_leave_group(tmp_path: Path) -> None:
         },
     )
     assert grouped.status_code == 200
+    rows = {item["normalized"]: item for item in grouped.json()["terms"]}
+    assert rows["john"]["group_primary"] == "john smith"
 
     missing_confirmation = client.post(
         "/api/v1/projects/sample/terms/leave-group",
@@ -2994,39 +3003,6 @@ def test_web_term_group_member_can_leave_group(tmp_path: Path) -> None:
     assert primary.status_code == 400
     assert primary.json()["code"] == "term_group_error"
     assert primary.json()["params"]["reason"] == "not_group_member"
-
-
-def test_web_related_term_actions_are_exposed(tmp_path: Path) -> None:
-    projects_root, _ = make_project(tmp_path)
-    client = TestClient(create_app(projects_root=projects_root))
-    assert client.post(
-        "/api/v1/projects/sample/terms",
-        json={"source": "John Smith", "aliases": [], "disabled": False},
-    ).status_code == 200
-    assert client.post(
-        "/api/v1/projects/sample/terms",
-        json={"source": "John", "aliases": [], "disabled": False},
-    ).status_code == 200
-
-    related = client.post(
-        "/api/v1/projects/sample/terms/related",
-        json={"normalized": "john smith"},
-    )
-    assert related.status_code == 200
-    assert related.json()["related"][0]["normalized"] == "john"
-
-    grouped = client.post(
-        "/api/v1/projects/sample/terms/group-related",
-        json={
-            "normalized": "john smith",
-            "related_normalized": "john",
-            "primary_normalized": "john smith",
-            "confirm": True,
-        },
-    )
-    assert grouped.status_code == 200
-    rows = {item["normalized"]: item for item in grouped.json()["terms"]}
-    assert rows["john"]["group_primary"] == "john smith"
 
 
 def test_web_related_alias_conversion_route_is_exposed(tmp_path: Path) -> None:
@@ -4691,20 +4667,26 @@ async def test_web_run_all_initial_total_excludes_completed_terminology_stage(
     await manager.tasks[started["task_id"]].asyncio_task
 
 
-def test_web_selection_snapshot_includes_document_adapter_state(
-    tmp_path: Path,
-) -> None:
+def test_selection_snapshots_track_source_and_adapter_state(tmp_path: Path) -> None:
     project = init_epub(tmp_path)
     before = web_tasks_module._selection_snapshot(project, Scope())
+    continuous_before = inspect_continuous(project, ["translation"])["snapshot"]["selections"]
     file_record = read_files(project)[0]
     state_path = project / str(file_record["document_adapter_state"])
     state = read_json(project, state_path)
+    segments = read_segments(project)
+    segments[0]["source"] += " changed"
+    replace_source(project, read_files(project), segments,
+                   read_json(project, project / "project.json"), adapter_states=[state])
+    after_source = web_tasks_module._selection_snapshot(project, Scope())
+    continuous_after_source = inspect_continuous(project, ["translation"])["snapshot"]["selections"]
+    assert after_source != before
+    assert continuous_after_source != continuous_before
+
     state["run_options"]["ruby_mode"] = "base_only"
     write_json(project, state_path, state)
-
-    after = web_tasks_module._selection_snapshot(project, Scope())
-
-    assert before != after
+    assert web_tasks_module._selection_snapshot(project, Scope()) != after_source
+    assert inspect_continuous(project, ["translation"])["snapshot"]["selections"] != continuous_after_source
 
 
 @pytest.mark.asyncio
@@ -6645,29 +6627,6 @@ async def test_continuous_dispatch_preserves_run_options(
     assert received["continuous_stages"] == ("translation", "proofreading")
     assert received["continuous_run_actions"] == {"translation": "resume"}
     assert received["apply_terminology_decision"] is True
-
-
-def test_continuous_selection_snapshot_contains_source_and_adapter_context(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _projects_root, project = make_project(tmp_path)
-    captured: list[object] = []
-    original_digest = web_continuous_module._stable_digest
-
-    def capture(value: object) -> str:
-        captured.append(value)
-        return original_digest(value)
-
-    monkeypatch.setattr(web_continuous_module, "_stable_digest", capture)
-    inspect_continuous(project, ["translation"])
-
-    selection_values = [
-        value["translation"]
-        for value in captured
-        if isinstance(value, dict) and "translation" in value
-    ]
-    assert selection_values
-    assert len(selection_values[0][0]) == 8
 
 
 def test_continuous_decision_resume_preflight_rejects_incompatible_run(

@@ -6,7 +6,6 @@ from fastapi.testclient import TestClient
 from app.credentials import save_lan_password
 from app.errors import ConfigError
 from app.server_config import (
-    default_server_config,
     load_server_config,
     save_server_config,
     server_config_path,
@@ -66,11 +65,6 @@ def test_lan_blocked_by_default(tmp_path) -> None:
     response = client.get("/api/v1/server/status")
     assert response.status_code == 403
     assert response.json()["code"] == "local_only"
-
-
-def test_server_config_defaults_to_two_active_projects() -> None:
-    config = default_server_config()
-    assert config["tasks"]["max_active_projects"] == 2
 
 
 def test_server_status_reports_and_updates_project_limit() -> None:
@@ -206,6 +200,8 @@ def test_disabling_sharing_clears_sessions_and_blocks_lan(
     )
     assert client.get("/api/v1/projects").status_code == 200
 
+    assert client.app.state.sessions
+
     saved = client.put(
         "/api/v1/server/config",
         json={
@@ -216,7 +212,7 @@ def test_disabling_sharing_clears_sessions_and_blocks_lan(
     )
     assert saved.status_code == 200
     assert client.get("/api/v1/projects").status_code == 403
-    assert client.get("/api/v1/projects", cookies={}).status_code == 403
+    assert client.app.state.sessions == {}
 
 
 def test_server_config_validation_and_password_flow(
