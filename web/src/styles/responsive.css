@@ -208,8 +208,9 @@
   .storage-overview-grid { gap: 18px; }
   .storage-panel { margin-bottom: 18px; }
   .storage-panel-heading, .storage-section-heading { padding-inline: 14px; }
+  .storage-project-filter { padding-inline: 14px; }
   .storage-table th, .storage-table td { padding-inline: 14px; }
-  .storage-detail-backdrop { padding: 10px; }
+  .modal-backdrop:has(> .storage-detail-modal) { padding: 10px; }
   .modal.storage-detail-modal { width: calc(100vw - 20px); height: calc(100dvh - 20px); max-height: calc(100dvh - 20px); }
   .storage-detail-heading { align-items: stretch; flex-direction: column; }
   .storage-detail-actions { width: 100%; justify-content: space-between; }

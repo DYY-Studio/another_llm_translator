@@ -274,6 +274,7 @@ export interface DatabaseMaintenanceResult {
 }
 
 export interface StorageProjectDetail {
+  snapshot_runs: StorageSnapshotRun[];
   database_maintenance: {
     obsolete_stage_records: number | null;
     deduplicatable_applied_records: number | null;
@@ -286,6 +287,18 @@ export interface StorageProjectDetail {
   output_files: StorageOutputFile[];
   logs: StorageLogGroup[];
   errors: string[];
+}
+
+export interface StorageSnapshotRun {
+  run_id: string;
+  stage: string | null;
+  status: string | null;
+  started_at: string | null;
+  bytes: number;
+  parts: Record<"config" | "execution" | "draft" | "checkpoint", number>;
+  reclaimable_bytes: number;
+  can_clear: boolean;
+  blocked_reason: string | null;
 }
 
 export interface StorageCleanupResult {
@@ -380,6 +393,10 @@ export type DiagnosticsRequestStatus =
   | "interrupted";
 
 export interface DiagnosticsRequestSummary {
+  usage: TaskUsage;
+  latency_ms: number | null;
+  output_tokens_per_second: number | null;
+  parent_request_id: string | null;
   overview?: RequestOverviewSnapshot | null;
   overview_truncated?: boolean;
   request_kind: "llm" | "decision";
@@ -472,6 +489,10 @@ export interface DiagnosticsResponse {
 }
 
 export interface DiagnosticsRequestDetail {
+  usage: TaskUsage;
+  latency_ms: number | null;
+  output_tokens_per_second: number | null;
+  parent_request_id: string | null;
   overview: RequestOverviewSnapshot | null;
   overview_truncated: boolean;
   request_kind: "llm" | "decision";
@@ -884,6 +905,7 @@ export interface TermDecisionProposal {
 }
 
 export interface TermDecisionDraft {
+  warnings: string[];
   final_review_error?: { error: string; code: string; params: Record<string, unknown> };
   run_id: string;
   source_terms_revision: number;

@@ -1,3 +1,4 @@
+import { useDialogs, Feedback } from "./InteractionProvider";
 import { useEffect, useRef, useState, useId, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import { api, apiErrorFromResponse, errorPayloadFrom } from "../api";
 import { nativeBridgeAvailable, pickNativeFile, pickNativeFolder, saveExport } from "../native";
@@ -6,6 +7,7 @@ import { useClassicSelection } from "../useClassicSelection";
 import { errorMessage, formatErrorPayload, translate, type Language } from "../i18n";
 import type { AdapterOptions, PendingInput } from "./ProjectInputs";
 import type { ProjectOverview, ProjectSummary } from "../types";
+import { ProjectStorageDialog } from "./StorageView";
 import { ProjectBar } from "./ProjectPicker";
 import { InputQueue, AddFilesDialog } from "./ProjectInputs";
 import { ReplacementDialog } from "./ReplacementDialog";
@@ -56,6 +58,7 @@ export function Overview({
   repairing: boolean;
   language: Language;
 }) {
+  const dialogs = useDialogs();
   const selection = useClassicSelection();
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
   const [adapterOptions, setAdapterOptions] = useState<AdapterOptions>({});
@@ -67,6 +70,7 @@ export function Overview({
   const [deleting, setDeleting] = useState(false);
   const [compacting, setCompacting] = useState(false);
   const [storageMessage, setStorageMessage] = useState("");
+  const [storageDetails, setStorageDetails] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [optimisticOrder, setOptimisticOrder] = useState<OptimisticFileOrder | null>(null);
@@ -344,7 +348,7 @@ export function Overview({
   }
 
   async function compactStorage() {
-    if (!window.confirm(translate("overview.compactConfirm", language))) return;
+    if (!await dialogs.confirm(translate("overview.compactConfirm", language))) return;
     setCompacting(true);
     setError("");
     setStorageMessage("");
@@ -378,7 +382,9 @@ export function Overview({
         <div className="overview-identity">
           <h1>{value.name}</h1>
           <p>{value.path}</p>
-          <dl className="overview-storage" aria-label={translate("overview.storage", language)}>
+          <dl className="overview-storage" role="button" tabIndex={0} aria-haspopup="dialog" aria-label={translate("overview.storage", language)} onClick={() => setStorageDetails(true)} onKeyDown={event => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setStorageDetails(true); }
+          }}>
             <div>
               <dt>{translate("overview.storageTotal", language)}</dt>
               <dd>{formatSize(value.storage.total_bytes)}</dd>
@@ -443,8 +449,8 @@ export function Overview({
           </button>
         </div>
         </div>
-        {error && <button className="error-banner" onClick={() => setError("")}>{error}</button>}
-        {storageMessage && <button className="success-banner" onClick={() => setStorageMessage("")}>{storageMessage}</button>}
+        {error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
+        {storageMessage && <Feedback message={storageMessage} type="success" />}
         {buttonReorderMode && (
           <div className="mobile-reorder-toolbar" role="toolbar" aria-label={translate("overview.reorderToolbar", language)}>
             <span aria-live="polite">
@@ -589,6 +595,7 @@ export function Overview({
           </div>
         </div>
       )}
+      {storageDetails && <ProjectStorageDialog project={project} language={language} onClose={() => setStorageDetails(false)} onChanged={onFilesChanged} />}
       {deleting && (
         <div className="modal-backdrop" onMouseDown={() => setDeleting(false)}>
           <div className="modal" role="dialog" aria-modal="true" aria-label={translate("overview.deleteTitle", language)} onMouseDown={(event) => event.stopPropagation()}>

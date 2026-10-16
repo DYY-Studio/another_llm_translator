@@ -1,3 +1,4 @@
+import { Modal } from "./Modal";
 import { useEffect, useState, type ReactNode } from "react";
 import { translate, type Language } from "../i18n";
 import type { RunDecision, RunningRun, TaskOptions } from "../types";
@@ -22,12 +23,10 @@ export interface RepetitionRunOptions {
 function RunDialogFrame({ title, subtitle, onClose, children }: {
   title: string; subtitle: string; onClose: () => void; children: ReactNode;
 }) {
-  return <div className="modal-backdrop" onMouseDown={onClose}>
-    <div aria-labelledby="run-dialog-title" aria-modal="true" className="modal run-dialog" role="dialog" onMouseDown={event => event.stopPropagation()}>
+  return <Modal ariaLabel={title} className="run-dialog" onClose={onClose}>
       <div className="page-heading"><div><h2 id="run-dialog-title">{title}</h2><p>{subtitle}</p></div></div>
       {children}
-    </div>
-  </div>;
+  </Modal>;
 }
 
 type StageRunDialogProps = {

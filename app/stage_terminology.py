@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 from .config import load_project_config
+from .diagnostics import current_diagnostics
 
 from .errors import (
     ContextLengthError,
@@ -1106,7 +1107,7 @@ async def run_terminology(
             manifest["document_adapter_prompt_requirements"] = primary_requirements
         atomic_write_json(
             snapshot_dir / "document_adapter_prompt_requirements.json",
-            primary_requirements,
+            primary_requirements, compact=True,
         )
         write_json(project, run_dir / "manifest.json", manifest)
     write_lock = asyncio.Lock()
@@ -1631,6 +1632,9 @@ async def run_terminology(
                 report_progress()
             if term_ok and summary_ok:
                 return len(unresolved), 0
+            diagnostics = current_diagnostics()
+            if diagnostics is not None:
+                diagnostics.fail_request(request_id, "format_error")
             if (
                 not envelope_ok
                 and response_mode is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY
@@ -1750,6 +1754,9 @@ async def run_terminology(
                         ),
                     )
             if not response_complete:
+                diagnostics = current_diagnostics()
+                if diagnostics is not None:
+                    diagnostics.fail_request(request_id, "format_error")
                 logger.warning(
                     "format correction request=%s attempt=%d errors=%d",
                     request_id,

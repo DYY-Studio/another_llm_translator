@@ -1,11 +1,14 @@
+import { useDialogs, Feedback } from "./InteractionProvider";
 import { useEffect, useMemo, useState } from "react";
 import { errorMessage, translate, type Language } from "../i18n";
 import { applyDataRootRelocation, nativeBridgeAvailable, pickNativeFolder } from "../native";
 import { ConfirmDialog } from "./TermDialogs";
 import { DirectoryPicker } from "./DirectoryPicker";
+import { Modal } from "./Modal";
 import {
   cancelDataRootRelocation,
   clearDebugAttachments,
+  clearRunCheckpoints,
   clearGlobalLogs,
   clearOutputFile,
   clearProjectLogs,
@@ -77,6 +80,9 @@ function blockedLabel(reason: string | null, language: Language): string {
     "存在活动 Web 任务": "storage.globalTaskRunning",
     "Run 正在运行": "storage.runRunning",
     "该输出文件不可清理": "storage.outputProtected",
+    "没有可清理断点": "storage.noCheckpoints",
+    "断点仍需保留": "storage.checkpointsProtected",
+    "草稿仍待处理，保留断点": "storage.pendingDraftCheckpoints",
   };
   const key = knownReasons[reason];
   return key ? translate(key, language) : reason;
@@ -103,21 +109,18 @@ function EmptyStorage({ language, text }: { language: Language; text?: string })
 }
 
 export function StorageView({ language }: { language: Language }) {
+  const dialogs = useDialogs();
   const [summary, setSummary] = useState<StorageSummary | null>(null);
   const [dataRoot, setDataRoot] = useState<DataRootStatus | null>(null);
   const [directoryPicker, setDirectoryPicker] = useState(false);
   const [rootBusy, setRootBusy] = useState(false);
-  const [databaseConfirm, setDatabaseConfirm] = useState(false);
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
-  const [detail, setDetail] = useState<StorageProjectDetail | null>(null);
+  const [projectFilter, setProjectFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [detailRevision, setDetailRevision] = useState(0);
 
   async function loadSummary(signal?: AbortSignal): Promise<StorageSummary> {
     const value = await fetchStorage(signal);
@@ -154,33 +157,11 @@ export function StorageView({ language }: { language: Language }) {
     return () => controller.abort();
   }, []);
 
-  useEffect(() => {
-    if (!selectedProject) {
-      setDetail(null);
-      setDetailLoading(false);
-      setDetailError("");
-      return;
-    }
-    const controller = new AbortController();
-    setDetail(null);
-    setDetailError("");
-    setDetailLoading(true);
-    void fetchStorageProject(selectedProject, controller.signal)
-      .then((value) => setDetail(value))
-      .catch((reason: unknown) => {
-        if (!controller.signal.aborted) setDetailError(errorMessage(reason, language));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setDetailLoading(false);
-      });
-    return () => controller.abort();
-  }, [selectedProject, detailRevision]);
-
-  const projects = useMemo(
-    () => [...(summary?.projects ?? [])].sort((left, right) => right.total_bytes - left.total_bytes),
-    [summary?.projects],
-  );
-  const selectedSummary = summary?.projects.find((item) => item.selector === selectedProject) ?? null;
+  const projects = useMemo(() => {
+    const query = projectFilter.trim().toLowerCase();
+    return (summary?.projects ?? []).filter(item => !query || item.name.toLowerCase().includes(query) || item.path.toLowerCase().includes(query))
+      .sort((left, right) => right.total_bytes - left.total_bytes);
+  }, [summary?.projects, projectFilter]);
 
   function openProjectDetail(selector: string) {
     setError("");
@@ -188,35 +169,12 @@ export function StorageView({ language }: { language: Language }) {
     setSelectedProject(selector);
   }
 
-  function closeProjectDetail() {
-    if (busyAction !== null) return;
-    setSelectedProject(null);
-    setDatabaseConfirm(false);
-    setDetail(null);
-    setDetailError("");
-    setError("");
-    setMessage("");
-  }
-
-  useEffect(() => {
-    if (!selectedProject) return;
-    function closeOnEscape(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape" && busyAction === null) {
-        if (databaseConfirm) setDatabaseConfirm(false);
-        else closeProjectDetail();
-      }
-    }
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [busyAction, selectedProject, databaseConfirm]);
-
   async function refresh() {
     setRefreshing(true);
     setError("");
     setMessage("");
     try {
       await loadSummary();
-      setDetailRevision((current) => current + 1);
     } catch (reason) {
       setError(errorMessage(reason, language));
     } finally {
@@ -245,7 +203,7 @@ export function StorageView({ language }: { language: Language }) {
     setError("");
     try {
       const warning = await applyDataRootRelocation();
-      if (warning) window.alert(warning);
+      if (warning) await dialogs.alert(warning);
       window.location.reload();
     } catch (reason) {
       setError(errorMessage(reason, language));
@@ -264,7 +222,7 @@ export function StorageView({ language }: { language: Language }) {
     const confirmationKey = nativeBridgeAvailable()
       ? "storage.dataRootConfirmNative"
       : "storage.dataRootConfirmWeb";
-    if (!window.confirm(translate(confirmationKey, language, {
+    if (!await dialogs.confirm(translate(confirmationKey, language, {
       source: dataRoot.active_root,
       target: targetRoot,
     }))) return;
@@ -276,7 +234,7 @@ export function StorageView({ language }: { language: Language }) {
       if (nativeBridgeAvailable()) {
         setDataRoot(await fetchDataRoot());
         const warning = await applyDataRootRelocation();
-        if (warning) window.alert(warning);
+        if (warning) await dialogs.alert(warning);
         window.location.reload();
       } else {
         setDataRoot(await fetchDataRoot());
@@ -324,89 +282,22 @@ export function StorageView({ language }: { language: Language }) {
     }
   }
 
-  async function runCleanup(
-    key: string,
-    confirmation: string,
-    operation: () => Promise<StorageCleanupResult>,
-  ) {
-    if (!window.confirm(confirmation)) return;
-    setBusyAction(key);
+  async function clearGlobalLogCategory(category: StorageCategory) {
+    if (!category.can_clear || !await dialogs.confirm(translate("storage.confirmGlobalLogs", language))) return;
+    setBusyAction("global-logs");
     setError("");
     setMessage("");
     try {
-      const result = await operation();
+      const result = await clearGlobalLogs();
       await loadSummary();
-      setDetailRevision((current) => current + 1);
       setMessage(translate("storage.cleanupDone", language, {
-        files: result.affected_files,
-        size: formatSize(result.reclaimed_bytes),
+        files: result.affected_files, size: formatSize(result.reclaimed_bytes),
       }));
     } catch (reason) {
       setError(errorMessage(reason, language));
     } finally {
       setBusyAction(null);
     }
-  }
-
-  async function maintainDatabase() {
-    if (!selectedProject || !detail?.database_maintenance.can_maintain) return;
-    setDatabaseConfirm(false);
-    setBusyAction("database");
-    setError("");
-    setMessage("");
-    try {
-      const result = await maintainProjectDatabase(selectedProject);
-      setMessage(translate("storage.databaseDone", language, {
-        records: result.deleted_records, deduplicated: result.deduplicated_applied_records, size: formatSize(result.reclaimed_bytes),
-      }));
-    } catch (reason) {
-      setError(errorMessage(reason, language));
-    } finally {
-      try {
-        await loadSummary();
-      } catch (reason) {
-        const refreshError = translate("storage.refreshFailed", language, { message: errorMessage(reason, language) });
-        setError((current) => current ? `${current}\n${refreshError}` : refreshError);
-      }
-      setDetailRevision((current) => current + 1);
-      setBusyAction(null);
-    }
-  }
-
-  function clearGlobalLogCategory(category: StorageCategory) {
-    if (!category.can_clear) return;
-    void runCleanup(
-      "global-logs",
-      translate("storage.confirmGlobalLogs", language),
-      () => clearGlobalLogs(),
-    );
-  }
-
-  function clearDebugRun(run: StorageDebugRun) {
-    if (!selectedProject || !detail?.complete || !detail.project.complete || !run.can_clear) return;
-    void runCleanup(
-      `debug-${run.run_id}`,
-      translate("storage.confirmDebug", language, { run: run.run_id, size: formatSize(run.bytes) }),
-      () => clearDebugAttachments(selectedProject, run.run_id),
-    );
-  }
-
-  function clearOutput(output: StorageOutputFile) {
-    if (!selectedProject || !detail?.complete || !detail.project.complete || !output.can_clear) return;
-    void runCleanup(
-      `output-${output.path}`,
-      translate("storage.confirmOutput", language, { path: output.path, size: formatSize(output.bytes) }),
-      () => clearOutputFile(selectedProject, output.path),
-    );
-  }
-
-  function clearProjectLog(log: StorageLogGroup) {
-    if (!selectedProject || !detail?.complete || !detail.project.complete || !log.can_clear) return;
-    void runCleanup(
-      `project-logs-${log.id}`,
-      translate("storage.confirmProjectLogs", language),
-      () => clearProjectLogs(selectedProject),
-    );
   }
 
   if (loading && !summary) {
@@ -424,8 +315,8 @@ export function StorageView({ language }: { language: Language }) {
           {refreshing ? translate("storage.refreshing", language) : translate("storage.refresh", language)}
         </button>
       </header>
-      {!selectedProject && error && <div className="error-banner" role="alert">{error}</div>}
-      {!selectedProject && message && <p className="success-text storage-message">{message}</p>}
+      {!selectedProject && error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
+      {!selectedProject && message && <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
       {dataRoot && (
         <section className="storage-panel storage-root-panel">
           <div className="storage-panel-heading">
@@ -501,7 +392,8 @@ export function StorageView({ language }: { language: Language }) {
               <div className="storage-panel-heading">
                 <div><h2>{translate("storage.projects", language)}</h2><p>{translate("storage.projectsHint", language)}</p></div>
               </div>
-              {projects.length === 0 ? <EmptyStorage language={language} text={translate("storage.noProjects", language)} /> : (
+              <div className="storage-project-filter"><input type="search" aria-label={translate("storage.searchProjects", language)} placeholder={translate("storage.searchProjects", language)} value={projectFilter} onChange={event => setProjectFilter(event.target.value)} /></div>
+              {projects.length === 0 ? <EmptyStorage language={language} text={translate(summary?.projects.length ? "project.noMatch" : "storage.noProjects", language)} /> : (
                 <div className="storage-table-wrap storage-project-list">
                   <table className="storage-table storage-project-table">
                     <thead><tr><th>{translate("storage.project", language)}</th><th>{translate("storage.size", language)}</th><th>{translate("storage.reclaimable", language)}</th><th>{translate("storage.status", language)}</th></tr></thead>
@@ -535,22 +427,154 @@ export function StorageView({ language }: { language: Language }) {
           </div>
         </>
       )}
-      {selectedSummary && (
-        <div className="modal-backdrop storage-detail-backdrop" onMouseDown={closeProjectDetail}>
-          <section className="modal storage-detail-modal" role="dialog" aria-modal="true" aria-labelledby="storage-detail-title" onMouseDown={(event) => event.stopPropagation()}>
+      {selectedProject && <ProjectStorageDialog project={selectedProject} language={language} onClose={() => setSelectedProject(null)} onChanged={loadSummary} />}
+      {directoryPicker && dataRoot && <DirectoryPicker
+        initialPath={pathParent(dataRoot.active_root)}
+        language={language}
+        onClose={() => setDirectoryPicker(false)}
+        onSelect={(parentDir) => {
+          setDirectoryPicker(false);
+          void relocateDataRoot(parentDir, joinRoot(parentDir, dataRoot.active_root));
+        }}
+      />}
+    </section>
+  );
+}
+
+export function ProjectStorageDialog({ project: selectedProject, language, onClose, onChanged }: {
+  project: string;
+  language: Language;
+  onClose: () => void;
+  onChanged: () => Promise<unknown>;
+}) {
+  const dialogs = useDialogs();
+  const [detail, setDetail] = useState<StorageProjectDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(true);
+  const [detailError, setDetailError] = useState("");
+  const [detailRevision, setDetailRevision] = useState(0);
+  const [databaseConfirm, setDatabaseConfirm] = useState(false);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const selectedSummary = detail?.project;
+  const clearableSnapshots = detail?.snapshot_runs.filter(run => run.can_clear) ?? [];
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setDetail(null);
+    setDetailError("");
+    setDetailLoading(true);
+    void fetchStorageProject(selectedProject, controller.signal)
+      .then((value) => setDetail(value))
+      .catch((reason: unknown) => {
+        if (!controller.signal.aborted) setDetailError(errorMessage(reason, language));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDetailLoading(false);
+      });
+    return () => controller.abort();
+  }, [selectedProject, detailRevision]);
+
+  function closeProjectDetail() {
+    if (busyAction === null) onClose();
+  }
+
+  async function runCleanup(
+    key: string,
+    confirmation: string,
+    operation: () => Promise<StorageCleanupResult>,
+  ) {
+    if (!await dialogs.confirm(confirmation)) return;
+    setBusyAction(key);
+    setError("");
+    setMessage("");
+    try {
+      const result = await operation();
+      setMessage(translate("storage.cleanupDone", language, {
+        files: result.affected_files,
+        size: formatSize(result.reclaimed_bytes),
+      }));
+    } catch (reason) {
+      setError(errorMessage(reason, language));
+    } finally {
+      try {
+        await onChanged();
+      } catch (reason) {
+        const refreshError = translate("storage.refreshFailed", language, { message: errorMessage(reason, language) });
+        setError((current) => current ? `${current}\n${refreshError}` : refreshError);
+      }
+      setDetailRevision((current) => current + 1);
+      setBusyAction(null);
+    }
+  }
+
+  async function maintainDatabase() {
+    if (!detail?.database_maintenance.can_maintain) return;
+    setDatabaseConfirm(false);
+    setBusyAction("database");
+    setError("");
+    setMessage("");
+    try {
+      const result = await maintainProjectDatabase(selectedProject);
+      setMessage(translate("storage.databaseDone", language, {
+        records: result.deleted_records, deduplicated: result.deduplicated_applied_records, size: formatSize(result.reclaimed_bytes),
+      }));
+    } catch (reason) {
+      setError(errorMessage(reason, language));
+    } finally {
+      try {
+        await onChanged();
+      } catch (reason) {
+        const refreshError = translate("storage.refreshFailed", language, { message: errorMessage(reason, language) });
+        setError((current) => current ? `${current}\n${refreshError}` : refreshError);
+      }
+      setDetailRevision((current) => current + 1);
+      setBusyAction(null);
+    }
+  }
+
+  function clearDebugRun(run: StorageDebugRun) {
+    if (!detail?.complete || !detail.project.complete || !run.can_clear) return;
+    void runCleanup(
+      `debug-${run.run_id}`,
+      translate("storage.confirmDebug", language, { run: run.run_id, size: formatSize(run.bytes) }),
+      () => clearDebugAttachments(selectedProject, run.run_id),
+    );
+  }
+
+  function clearOutput(output: StorageOutputFile) {
+    if (!detail?.complete || !detail.project.complete || !output.can_clear) return;
+    void runCleanup(
+      `output-${output.path}`,
+      translate("storage.confirmOutput", language, { path: output.path, size: formatSize(output.bytes) }),
+      () => clearOutputFile(selectedProject, output.path),
+    );
+  }
+
+  function clearProjectLog(log: StorageLogGroup) {
+    if (!detail?.complete || !detail.project.complete || !log.can_clear) return;
+    void runCleanup(
+      `project-logs-${log.id}`,
+      translate("storage.confirmProjectLogs", language),
+      () => clearProjectLogs(selectedProject),
+    );
+  }
+
+  return <>
+    <Modal className="storage-detail-modal" ariaLabel={translate("storage.projectDetails", language)} onClose={busyAction === null ? closeProjectDetail : undefined}>
             <header className="storage-panel-heading storage-detail-heading">
               <div>
-                <h2 id="storage-detail-title">{translate("storage.projectDetails", language)} · {selectedSummary.name}</h2>
-                <p><code>{selectedSummary.path}</code></p>
+                <h2 id="storage-detail-title">{translate("storage.projectDetails", language)}{selectedSummary ? ` · ${selectedSummary.name}` : ""}</h2>
+                {selectedSummary && <p><code>{selectedSummary.path}</code></p>}
               </div>
               <div className="storage-detail-actions">
-                <span className="storage-detail-total">{formatSize(selectedSummary.total_bytes)}</span>
+                {selectedSummary && <span className="storage-detail-total">{formatSize(selectedSummary.total_bytes)}</span>}
                 <button className="quiet-button" type="button" disabled={busyAction !== null} onClick={closeProjectDetail}>{translate("storage.closeDetails", language)}</button>
               </div>
             </header>
             <div className="storage-detail-body">
-              {error && <div className="error-banner" role="alert">{error}</div>}
-              {message && <p className="success-text storage-message">{message}</p>}
+              {error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
+              {message && <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
               {detailLoading && <p className="muted">{translate("storage.detailLoading", language)}</p>}
               {detailError && <div className="error-banner" role="alert">{detailError}<button className="quiet-button" type="button" onClick={() => setDetailRevision((current) => current + 1)}>{translate("common.retry", language)}</button></div>}
               {detail && (
@@ -574,15 +598,41 @@ export function StorageView({ language }: { language: Language }) {
                       </button>
                     </div>
                   </section>
+                  <section className="storage-detail-section">
+                    <div className="storage-section-heading"><div><h3>{translate("storage.runSnapshots", language)}</h3></div>
+                      <button className="danger-button" type="button" disabled={busyAction !== null || !clearableSnapshots.length} onClick={() => void runCleanup(
+                        "all-checkpoints",
+                        translate("storage.confirmAllCheckpoints", language, { count: clearableSnapshots.length, size: formatSize(clearableSnapshots.reduce((total, run) => total + run.reclaimable_bytes, 0)) }),
+                        () => clearRunCheckpoints(selectedProject),
+                      )}>{translate("storage.clearAllCheckpoints", language)}</button>
+                    </div>
+                    {detail.snapshot_runs.length === 0 ? <EmptyStorage language={language} /> : <div className="storage-run-list storage-detail-list">
+                      {detail.snapshot_runs.map(run => <article className="storage-run-item" key={run.run_id}>
+                        <div className="storage-section-heading">
+                          <div><code>{run.run_id}</code><p>{stageLabel(run.stage, language)} · {statusLabel(run.status, language)}{run.started_at ? ` · ${formatScannedAt(run.started_at, language)}` : ""}</p></div>
+                          <strong>{formatSize(run.bytes)}</strong>
+                        </div>
+                        <details><summary>{translate("storage.snapshotBreakdown", language)}</summary><div className="storage-detail-categories">
+                          {(["config", "execution", "draft", "checkpoint"] as const).map(part => <div key={part}><span>{translate(`storage.snapshotPart.${part}`, language)}</span><strong>{formatSize(run.parts[part])}</strong></div>)}
+                        </div></details>
+                        <div className="storage-run-actions"><span>{translate("storage.reclaimable", language)} {formatSize(run.reclaimable_bytes)}</span>
+                          <button className="danger-button" type="button" disabled={busyAction !== null || !run.can_clear} onClick={() => void runCleanup(
+                            `checkpoints-${run.run_id}`,
+                            translate("storage.confirmCheckpoints", language, { run: run.run_id, size: formatSize(run.reclaimable_bytes) }),
+                            () => clearRunCheckpoints(selectedProject, run.run_id),
+                          )}>{translate("storage.clearCheckpoints", language)}</button>
+                          {!run.can_clear && <ItemStatus canClear={false} blockedReason={run.blocked_reason} language={language} />}
+                        </div>
+                      </article>)}
+                    </div>}
+                  </section>
                   <StorageDebugSection language={language} runs={detail.debug_runs} busyAction={busyAction} onClear={clearDebugRun} />
                   <StorageOutputSection language={language} files={detail.output_files} busyAction={busyAction} onClear={clearOutput} />
                   <StorageLogsSection language={language} logs={detail.logs} busyAction={busyAction} onClear={clearProjectLog} />
                 </>
               )}
             </div>
-          </section>
-        </div>
-      )}
+    </Modal>
       {databaseConfirm && <ConfirmDialog
         language={language} title={translate("storage.databaseMaintain", language)}
         text={translate("storage.confirmDatabase", language)}
@@ -590,17 +640,7 @@ export function StorageView({ language }: { language: Language }) {
         confirming={busyAction !== null} onCancel={() => setDatabaseConfirm(false)}
         onConfirm={() => void maintainDatabase()}
       />}
-      {directoryPicker && dataRoot && <DirectoryPicker
-        initialPath={pathParent(dataRoot.active_root)}
-        language={language}
-        onClose={() => setDirectoryPicker(false)}
-        onSelect={(parentDir) => {
-          setDirectoryPicker(false);
-          void relocateDataRoot(parentDir, joinRoot(parentDir, dataRoot.active_root));
-        }}
-      />}
-    </section>
-  );
+  </>;
 }
 
 function StorageDebugSection({

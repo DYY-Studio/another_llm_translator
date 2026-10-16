@@ -266,7 +266,7 @@ def _load_checkpoint(
         checkpoint = _new_checkpoint(
             project_id, run_id, revision, final_review=final_review
         )
-        atomic_write_json(path, checkpoint)
+        atomic_write_json(path, checkpoint, compact=True)
         return checkpoint
     checkpoint = _read_checkpoint_file(path)
     if (
@@ -778,6 +778,7 @@ async def run_terminology_decision(
     final_responses_complete = False
     knowledge_updates: dict[str, Any] = {}
     knowledge_errors: dict[str, str] = {}
+    cleanup_warnings: list[str] = []
 
     def save_draft(failure: AppError | None = None) -> dict[str, Any]:
         draft_conflicts = _merge_conflict_evidence(
@@ -805,7 +806,7 @@ async def run_terminology_decision(
             knowledge_updates=knowledge_updates,
             knowledge_errors=knowledge_errors,
         )
-        atomic_write_json(_drafts._draft_path(project, run_id), draft)
+        atomic_write_json(_drafts._draft_path(project, run_id), draft, compact=True)
         manifest = read_json(project, run_dir / "manifest.json")
         manifest.update(
             decision_status="pending",
@@ -829,7 +830,10 @@ async def run_terminology_decision(
             old_manifest.update(decision_status="superseded", superseded_by_run_id=run_id)
             if "final_review_error" in old_manifest:
                 old_manifest.update(status="completed", completed_at=utc_now())
-            write_json(project, old_path, old_manifest)
+            cleanup_warnings.extend(write_json(project, old_path, old_manifest))
+            if cleanup_warnings:
+                manifest["warnings"] = list(dict.fromkeys([*manifest.get("warnings", []), *cleanup_warnings]))
+                write_json(project, run_dir / "manifest.json", manifest)
         return draft
 
     def append_llm_warnings(manifest: dict[str, Any]) -> None:
@@ -955,7 +959,7 @@ async def run_terminology_decision(
                         "model_fingerprint": model_fingerprint,
                         "prompt_fingerprint": prompt_fingerprints["adjudication"],
                     }
-                atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
+                atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True)
                 completed += len(focus)
                 if on_progress:
                     on_progress(completed, 0, total)
@@ -1044,7 +1048,7 @@ async def run_terminology_decision(
                         "model_fingerprint": model_fingerprint,
                         "prompt_fingerprint": prompt_fingerprints["consistency"],
                     }
-                atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
+                atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True)
                 completed += len(focus)
                 if on_progress:
                     on_progress(completed, 0, total)
@@ -1182,7 +1186,7 @@ async def run_terminology_decision(
                                 _FINAL_REVIEW_PHASE
                             ],
                         }
-                    atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
+                    atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True)
                     completed += len(focus)
                     if on_progress:
                         on_progress(completed, 0, total)
@@ -1248,7 +1252,7 @@ async def run_terminology_decision(
                         "model_fingerprint": model_fingerprint,
                         "prompt_fingerprint": prompt_fingerprints["containment"],
                     }
-                atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
+                atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True)
                 completed += len(focus)
                 if on_progress:
                     on_progress(completed, 0, total)
@@ -1342,7 +1346,7 @@ async def run_terminology_decision(
                     result["source_order"] = view["source_order"]
                     cached[root] = {"decision": deepcopy(result), "decision_fingerprint": fingerprint,
                                     "model_fingerprint": model_fingerprint, "prompt_fingerprint": prompt_fingerprints["knowledge"]}
-                    atomic_write_json(_checkpoint_path(project, run_id), checkpoint)
+                    atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True)
                     completed += 1
                 if on_progress:
                     on_progress(completed, len(knowledge_errors), total)
@@ -1387,7 +1391,7 @@ async def run_terminology_decision(
             status="completed",
             completed=total,
             failed=0,
-            warnings=(active_llm.warnings if active_llm is not None else []),
+            warnings=[*(active_llm.warnings if active_llm is not None else []), *cleanup_warnings],
             usage=usage,
             usage_invoked=usage_invoked,
             key_audit=(
@@ -1408,6 +1412,7 @@ async def run_terminology_decision(
             "failed": 0,
             "pending": 0,
             "usage": usage or unavailable_usage(),
+            "warnings": cleanup_warnings,
         }
     except BaseException as exc:
         if active_llm is not None:

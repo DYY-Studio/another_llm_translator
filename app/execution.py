@@ -1425,7 +1425,7 @@ def _write_prompt_variants(
         if primary_mode is not None:
             entry["primary_mode"] = primary_mode
         metadata[name] = entry
-    atomic_write_json(directory / "prompt_variants.json", metadata)
+    atomic_write_json(directory / "prompt_variants.json", metadata, compact=True)
     return paths
 
 def create_run(
@@ -1453,7 +1453,7 @@ def create_run(
     _write_llm_snapshots(run_dir, config)
     atomic_write_json(
         run_dir / "document_adapter_prompt_requirements.json",
-        config.get("_document_adapter_prompt_requirements", {}),
+        config.get("_document_adapter_prompt_requirements", {}), compact=True,
     )
     if prompt is not None:
         (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
@@ -1658,7 +1658,7 @@ def continue_run(
     _write_llm_snapshots(snapshot_dir, config)
     atomic_write_json(
         snapshot_dir / "document_adapter_prompt_requirements.json",
-        config.get("_document_adapter_prompt_requirements", {}),
+        config.get("_document_adapter_prompt_requirements", {}), compact=True,
     )
     if prompt is not None:
         (snapshot_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
@@ -1707,18 +1707,18 @@ def continue_run(
 
 def _write_llm_snapshots(path: Path, config: dict[str, Any]) -> None:
     for validator_id, definition in config.get("_decision_prompt_definitions", {}).items():
-        atomic_write_json(path / "decision_prompts" / f"{validator_id}.json", definition)
+        atomic_write_json(path / "decision_prompts" / f"{validator_id}.json", definition, compact=True)
     for preset_id, definition in config.get("_decision_preset_definitions", {}).items():
-        atomic_write_json(path / "decision_presets" / f"{preset_id}.json", definition)
+        atomic_write_json(path / "decision_presets" / f"{preset_id}.json", definition, compact=True)
     adapter = config.get("_llm_adapter")
     if not isinstance(adapter, JSONLLMAdapter):
         raise ConfigError("项目配置缺少已加载的 LLM Adapter")
-    atomic_write_json(path / "llm_adapter.json", adapter.definition)
+    atomic_write_json(path / "llm_adapter.json", adapter.definition, compact=True)
     preset = config.get("_llm_preset_definition")
     if preset is not None:
         if not isinstance(preset, dict):
             raise ConfigError("项目配置中的 LLM Preset 快照无效")
-        atomic_write_json(path / "llm_preset.json", preset)
+        atomic_write_json(path / "llm_preset.json", preset, compact=True)
 
 def finalize_run(
     project: Path,

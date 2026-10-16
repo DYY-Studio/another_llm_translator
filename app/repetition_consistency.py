@@ -488,7 +488,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                     saved = {"screening": group["screening"], "confidence": group.get("confidence"),
                         "screening_execution_index": group.get("screening_execution_index"), "result": result,
                         "comparison_execution_index": continuation_index + 1 if comparison else None}
-                    atomic_write_json(checkpoint_path(run_dir, group["id"]), saved)
+                    atomic_write_json(checkpoint_path(run_dir, group["id"]), saved, compact=True)
                     checkpoints[group["id"]] = saved
                     group.update(result)
                     completed += len(group["occurrences"])
@@ -510,7 +510,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                         saved.update(screening=("refusal" if answer.refused else answer.choice) if answer else "disabled",
                                      confidence=answer.confidence if answer else None, screening_execution_index=continuation_index + 1 if answer else None)
                         if decision and saved["screening"] != "skip":
-                            atomic_write_json(checkpoint_path(run_dir, group["id"]), saved)
+                            atomic_write_json(checkpoint_path(run_dir, group["id"]), saved, compact=True)
                             checkpoints[group["id"]] = dict(saved)
                     group.update(screening=saved["screening"], confidence=saved.get("confidence"), screening_execution_index=saved.get("screening_execution_index"))
                     if saved["screening"] == "skip":

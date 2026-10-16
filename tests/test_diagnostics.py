@@ -19,6 +19,63 @@ from app.web import create_app
 from tests.test_execution import config
 
 
+@pytest.mark.parametrize("samples,expected_usage,expected_rate", [
+    (2, {"input_tokens": 20, "output_tokens": 4, "total_tokens": 24, "available": True, "partial": False}, 4.0),
+    (1, {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "available": False, "partial": True}, None),
+    (0, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "available": False, "partial": False}, None),
+])
+def test_request_usage_accumulates_only_its_attempts(tmp_path, samples, expected_usage, expected_rate):
+    diagnostics = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with diagnostics.activate("sample", "translation", task_id="usage"):
+        diagnostics.begin_request(request_id="REQ-USAGE", model="test", messages=[], max_attempts=2)
+        for attempt in (1, 2):
+            diagnostics.request_started("REQ-USAGE")
+            diagnostics.request_finished(request_id="REQ-USAGE", attempt=attempt, latency_seconds=0.5, status=200, error=False)
+            if attempt <= samples:
+                diagnostics.record_request_usage("REQ-USAGE", {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}, complete=True)
+        detail = diagnostics.request_detail("REQ-USAGE")
+        assert detail["usage"] == expected_usage
+        assert detail["latency_ms"] == 1000
+        assert detail["output_tokens_per_second"] == expected_rate
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["translation", "terminology"])
+async def test_format_retry_reports_parent_result_and_direct_source(tmp_path: Path, stage: str) -> None:
+    from tests.helpers import llm_jsonl
+    from tests.test_terminology_translation import create_project
+    from app.execution import Scope
+    from app.stage_translation import run_translation
+    from app.stage_terminology import run_terminology
+
+    project = await create_project(tmp_path, "Hello")
+    diagnostics = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        content = "invalid" if calls == 1 else llm_jsonl(
+            [{"type": "segment", "id": "1", "translation": "你好"}]
+            if stage == "translation" else []
+        )
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    with diagnostics.activate("sample", stage, task_id="retry-check"):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            run_stage = run_translation if stage == "translation" else run_terminology
+            result = await run_stage(project, Scope(), http_client=client)
+        assert result["failed"] == 0
+        requests = diagnostics.snapshot()["requests"]["items"]
+        assert len(requests) == 2
+        parent, child = sorted(requests, key=lambda item: item["timestamp"])
+        assert parent["status"] == "failed"
+        assert parent["error"] == "format_error"
+        assert parent["parent_request_id"] is None
+        assert child["parent_request_id"] == parent["request_id"]
+        assert diagnostics.request_detail(child["request_id"])["parent_request_id"] == parent["request_id"]
+
+
 @pytest.mark.parametrize("diagnostics_type", [Diagnostics, DiagnosticsHub])
 def test_throughput_uses_current_invocation_usage(
     tmp_path: Path, diagnostics_type: type[Diagnostics]
@@ -548,6 +605,7 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
             "project": "sample",
             "stage": "translation",
             "request_id": "REQ-1",
+            "parent_request_id": None,
             "model": "test-model",
             "request_kind": "llm",
             "segment_id": None,
@@ -557,6 +615,9 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
             "attempt_count": 2,
             "last_http_status": 200,
             "latest_latency_ms": 100.0,
+            "latency_ms": 350.0,
+            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "available": False, "partial": False},
+            "output_tokens_per_second": None,
             "has_content": True,
             "has_reasoning": True,
             "error": None,
@@ -1059,6 +1120,8 @@ async def test_llm_runtime_reports_safe_diagnostics(tmp_path: Path) -> None:
     request_summary = snapshot["requests"]["items"][0]
     assert request_summary["status"] == "completed"
     assert request_summary["attempt_count"] == 2
+    assert request_summary["usage"] == {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10, "available": False, "partial": True}
+    assert request_summary["output_tokens_per_second"] is None
     assert request_summary["has_content"] is True
     assert request_summary["has_reasoning"] is True
     request_detail = diagnostics.request_detail(request_summary["request_id"])

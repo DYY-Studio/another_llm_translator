@@ -44,6 +44,8 @@
 .storage-panel-heading > div, .storage-section-heading > div { min-width: 0; }
 .storage-panel-heading h2, .storage-section-heading h3 { margin: 0 0 5px; }
 .storage-panel-heading p, .storage-section-heading p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.storage-project-filter { padding: 0 20px 14px; }
+.storage-project-filter input { width: 100%; }
 .storage-global-list { border-top: 1px solid var(--row-border); }
 .storage-global-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 16px; padding: 13px 16px; border-bottom: 1px solid var(--row-border); }
 .storage-global-row:last-child { border-bottom: 0; }
@@ -71,12 +73,23 @@
 .storage-action-cell .danger-button { min-height: 32px; padding-inline: 10px; font-size: 12px; }
 .storage-status { display: block; max-width: 230px; color: var(--muted); font-size: 11px; line-height: 1.4; white-space: normal; }
 .storage-status.ready { color: var(--success); }
+.storage-run-list { display: grid; gap: 10px; }
+.storage-run-item { min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 7px; }
+.storage-run-item code { overflow-wrap: anywhere; font-size: 12px; }
+.storage-run-item .storage-section-heading { align-items: start; }
+.storage-run-item .storage-section-heading > div { min-width: 0; }
+.storage-run-item .storage-section-heading > strong { flex: none; }
+.storage-run-item summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.storage-run-item .storage-detail-categories { margin-top: 10px; }
+.storage-run-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 12px; }
+.storage-run-actions > span { color: var(--muted); font-size: 12px; }
+.storage-run-actions button { min-height: 32px; padding-inline: 10px; font-size: 12px; }
 .storage-status.blocked { color: var(--warning-text); }
 .storage-empty { margin: 0; padding: 20px; font-size: 12px; }
 .storage-message { max-width: 1280px; margin: -4px auto 18px; }
 .storage-project-list { max-height: clamp(320px, calc(100vh - 350px), 560px); overflow: auto; }
 .storage-project-list .storage-table th { position: sticky; top: 0; z-index: 1; background: var(--surface); }
-.storage-detail-backdrop { padding: 16px; }
+.modal-backdrop:has(> .storage-detail-modal) { padding: 16px; }
 .modal.storage-detail-modal { width: min(1080px, calc(100vw - 32px)); height: min(820px, calc(100dvh - 32px)); max-height: calc(100dvh - 32px); display: flex; flex-direction: column; overflow: hidden; padding: 0; }
 .storage-detail-heading { flex: none; align-items: center; border-bottom: 1px solid var(--border); }
 .storage-detail-heading code { overflow-wrap: anywhere; }

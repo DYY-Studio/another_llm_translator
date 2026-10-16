@@ -260,3 +260,38 @@ def test_database_maintenance_confirmation_busy_guard_and_result(tmp_path: Path,
     assert response.json()["deleted_records"] == 0
     assert response.json()["deduplicated_applied_records"] == 0
     assert response.json()["reclaimed_bytes"] >= 0
+
+
+def test_bulk_run_checkpoint_cleanup_preserves_protected_runs(tmp_path: Path, monkeypatch) -> None:
+    from app.config import load_project_config
+    from app.execution import create_run, finalize_run
+    projects_root, project = make_project(tmp_path)
+    checkpoints, drafts = [], []
+    for stage, state in [("terminology_decision", "pending"), ("terminology_decision", "applied"), ("repetition_consistency", "pending")]:
+        _, run_dir = create_run(project, config=load_project_config(project, stage="translation"),
+            stage=stage, fingerprint="bulk-test", prompt=None, selected_count=1,
+            requested_count=1, reused_count=0,
+            details={"decision_status" if stage == "terminology_decision" else "draft_status": state})
+        path = run_dir / ("terminology_decision_checkpoint.json" if stage == "terminology_decision" else "repetition_checkpoints/1.json")
+        path.parent.mkdir(exist_ok=True)
+        path.write_text('{"progress":1}')
+        draft = run_dir / ("terminology_decision_draft.json" if stage == "terminology_decision" else "repetition_draft.json")
+        draft.write_text('{"review":"preserved"}')
+        checkpoints.append(path)
+        drafts.append(draft)
+        finalize_run(project, run_dir, status="completed", completed=1, failed=0)
+    app = create_app(projects_root=projects_root)
+    client = TestClient(app)
+    url = "/api/v1/projects/sample/storage/checkpoints/clear"
+    assert client.post(url, json={"confirm": False}).status_code == 400
+    monkeypatch.setattr(app.state.tasks, "is_project_running", lambda _: True)
+    assert client.post(url, json={"confirm": True}).status_code == 400
+    assert all(path.exists() for path in checkpoints)
+    monkeypatch.setattr(app.state.tasks, "is_project_running", lambda _: False)
+    result = client.post(url, json={"confirm": True})
+    assert result.status_code == 200, result.text
+    assert result.json() == {"affected_files": 2, "reclaimed_bytes": len('{"progress":1}') * 2}
+    assert checkpoints[0].is_file() and not any(path.exists() for path in checkpoints[1:])
+    assert all(path.is_file() for path in drafts)
+    runs = client.get("/api/v1/storage/projects/sample").json()["snapshot_runs"]
+    assert len(runs) == 3 and not any(run["can_clear"] for run in runs)
