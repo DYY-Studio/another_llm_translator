@@ -969,23 +969,27 @@ class StorageManager:
                 payloads.rmdir()
         return {"affected_files": affected, "reclaimed_bytes": reclaimed}
 
-    def clear_run_checkpoints(self, project: Path, run_id: str, *, confirm: object) -> dict[str, int]:
+    def clear_run_checkpoints(self, project: Path, run_id: str | None = None, *, confirm: object) -> dict[str, int]:
         _require_confirm(confirm)
-        safe_run_id = _safe_run_id(run_id)
+        safe_run_id = _safe_run_id(run_id) if run_id is not None else None
         root = _safe_resolve(project)
         with project_write_lock(root):
             scan = self._assert_project_cleanable(root)
-            reason = _checkpoint_blocked(scan.run_index.get(safe_run_id, {}))
-            if reason is not None:
-                raise UsageError(reason)
-            stats = scan.snapshot_stats.get(safe_run_id)
-            if scan.categories["run_snapshots"].unsafe or (stats is not None and stats.unsafe):
+            if safe_run_id is not None:
+                reason = _checkpoint_blocked(scan.run_index.get(safe_run_id, {}))
+                if reason is not None:
+                    raise UsageError(reason)
+            if scan.categories["run_snapshots"].unsafe:
                 raise UsageError("Run 快照路径不安全")
-            if stats is None or not stats.checkpoints:
+            targets = [target for identifier, stats in scan.snapshot_stats.items()
+                       if (safe_run_id is None or identifier == safe_run_id)
+                       and _checkpoint_blocked(scan.run_index.get(identifier, {})) is None
+                       for target in stats.checkpoints]
+            if not targets:
                 raise UsageError("没有可清理断点")
-            for path, _ in stats.checkpoints:
+            for path, _ in targets:
                 path.unlink()
-        return {"affected_files": len(stats.checkpoints), "reclaimed_bytes": sum(size for _, size in stats.checkpoints)}
+        return {"affected_files": len(targets), "reclaimed_bytes": sum(size for _, size in targets)}
 
     def clear_output(
         self, project: Path, relative_path: str, *, confirm: object

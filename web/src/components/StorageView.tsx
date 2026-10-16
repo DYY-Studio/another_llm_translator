@@ -457,6 +457,7 @@ export function ProjectStorageDialog({ project: selectedProject, language, onClo
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const selectedSummary = detail?.project;
+  const clearableSnapshots = detail?.snapshot_runs.filter(run => run.can_clear) ?? [];
 
   useEffect(() => {
     const controller = new AbortController();
@@ -598,7 +599,13 @@ export function ProjectStorageDialog({ project: selectedProject, language, onClo
                     </div>
                   </section>
                   <section className="storage-detail-section">
-                    <div className="storage-section-heading"><div><h3>{translate("storage.runSnapshots", language)}</h3></div></div>
+                    <div className="storage-section-heading"><div><h3>{translate("storage.runSnapshots", language)}</h3></div>
+                      <button className="danger-button" type="button" disabled={busyAction !== null || !clearableSnapshots.length} onClick={() => void runCleanup(
+                        "all-checkpoints",
+                        translate("storage.confirmAllCheckpoints", language, { count: clearableSnapshots.length, size: formatSize(clearableSnapshots.reduce((total, run) => total + run.reclaimable_bytes, 0)) }),
+                        () => clearRunCheckpoints(selectedProject),
+                      )}>{translate("storage.clearAllCheckpoints", language)}</button>
+                    </div>
                     {detail.snapshot_runs.length === 0 ? <EmptyStorage language={language} /> : <div className="storage-run-list storage-detail-list">
                       {detail.snapshot_runs.map(run => <article className="storage-run-item" key={run.run_id}>
                         <div className="storage-section-heading">
