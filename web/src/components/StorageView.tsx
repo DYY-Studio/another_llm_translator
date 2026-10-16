@@ -599,7 +599,7 @@ export function ProjectStorageDialog({ project: selectedProject, language, onClo
                   </section>
                   <section className="storage-detail-section">
                     <div className="storage-section-heading"><div><h3>{translate("storage.runSnapshots", language)}</h3></div></div>
-                    {detail.snapshot_runs.length === 0 ? <EmptyStorage language={language} /> : <div className="storage-run-list">
+                    {detail.snapshot_runs.length === 0 ? <EmptyStorage language={language} /> : <div className="storage-run-list storage-detail-list">
                       {detail.snapshot_runs.map(run => <article className="storage-run-item" key={run.run_id}>
                         <div className="storage-section-heading">
                           <div><code>{run.run_id}</code><p>{stageLabel(run.stage, language)} · {statusLabel(run.status, language)}{run.started_at ? ` · ${formatScannedAt(run.started_at, language)}` : ""}</p></div>
