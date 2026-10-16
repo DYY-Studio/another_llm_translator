@@ -869,15 +869,12 @@ async def _localized_request_loop(
             list[dict[str, Any]],
             str | None,
             int,
-            list[dict[str, Any]],
         ]
-    ] = [(group, initial_parent_request_id, 0, group[:1])]
+    ] = [(group, initial_parent_request_id, 0)]
     while tasks:
-        items, parent_request_id, format_attempt, anchor = tasks.pop(0)
+        items, parent_request_id, format_attempt = tasks.pop(0)
         expected = [str(item["segment_id"]) for item in items]
-        payload = payload_builder(items or anchor)
-        if not items:
-            payload["segments"] = []
+        payload = payload_builder(items)
         if repair_candidates is not None:
             checks = sorted({
                 (str(finding["validator"]), str(finding["match_type"]))
@@ -936,7 +933,7 @@ async def _localized_request_loop(
         complete_id_mismatch = parsed.has_valid_end and not parsed.ids_complete
         retry_whole_chunk = (
             config["retry"]["unresolved_retry_scope"] == "chunk" and bool(unresolved)
-        )
+        ) or (not response_complete and not unresolved)
         if complete_id_mismatch or retry_whole_chunk:
             for item in items:
                 buffered.pop(str(item["segment_id"]), None)
@@ -973,9 +970,6 @@ async def _localized_request_loop(
         if format_attempt >= config["retry"]["format_max_attempts"]:
             exhausted.extend(unresolved)
             continue
-        if not unresolved:
-            tasks.append(([], request_id, format_attempt + 1, anchor))
-            continue
         unresolved_groups = [items] if retry_whole_chunk else contiguous_groups(
             (by_id[segment_id] for segment_id in unresolved),
             all_segments=segments,
@@ -987,7 +981,6 @@ async def _localized_request_loop(
                 unresolved_group,
                 request_id,
                 format_attempt + 1,
-                unresolved_group[:1],
             )
             for unresolved_group in unresolved_groups
         )

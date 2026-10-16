@@ -601,8 +601,11 @@ async def test_run_all_rejects_inconsistent_shared_limits_without_pool(
     ("translation", "unknown"),
     ("proofreading", "missing"),
     ("polishing", "missing"),
+    ("translation", "missing_end"),
+    ("proofreading", "missing_end"),
+    ("polishing", "missing_end"),
 ])
-async def test_complete_id_mismatch_retries_original_batch(
+async def test_invalid_complete_batch_retries_original_batch(
     tmp_path: Path, stage: str, mismatch: str,
 ) -> None:
     project = await create_project(tmp_path, "one\ntwo\nthree")
@@ -625,7 +628,7 @@ async def test_complete_id_mismatch_retries_original_batch(
                 ids = ids[:-1]
             elif mismatch == "duplicate":
                 ids = [ids[0], *ids]
-            else:
+            elif mismatch == "unknown":
                 ids = [*ids, "unknown"]
         records = [
             {"type": "segment", "id": segment_id, "translation": f"ok:{segment_id}"}
@@ -634,8 +637,11 @@ async def test_complete_id_mismatch_retries_original_batch(
              "suggested_text": None, "reason": None}
             for segment_id in ids
         ]
+        content = llm_jsonl(records)
+        if len(calls) == 1 and mismatch == "missing_end":
+            content = "\n".join(json.dumps(record) for record in records)
         return httpx.Response(
-            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+            200, json={"choices": [{"message": {"content": content}}]},
         )
 
     try:
@@ -673,7 +679,7 @@ async def test_complete_id_mismatch_retries_original_batch(
 @pytest.mark.parametrize(
     ("error", "max_attempts", "succeeds"),
     [("missing", 2, True), ("duplicate", 2, True), ("field", 2, True),
-     ("missing", 0, False), ("missing", 1, False)],
+     ("missing", 0, False), ("missing", 1, False), ("missing_end", 0, False)],
 )
 async def test_chunk_retry_discards_partial_results(
     tmp_path: Path, stage: str, error: str, max_attempts: int, succeeds: bool,
@@ -703,11 +709,11 @@ async def test_chunk_retry_discards_partial_results(
                 records.pop()
             elif error == "duplicate":
                 records.append(records[-1].copy())
-            elif stage == "translation":
+            elif error == "field" and stage == "translation":
                 records[-1]["translation"] = None
-            else:
+            elif error == "field":
                 records[-1]["status"] = "invalid"
-            # No end: existing behavior would persist the valid rows and retry a subset.
+            # Omit end to exercise format retries without a complete-ID mismatch.
             content = "\n".join(json.dumps(record) for record in records)
         else:
             content = llm_jsonl(records)
