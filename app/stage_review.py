@@ -234,6 +234,8 @@ async def run_review(
         term_normalization(config),
         int(config["terminology"]["max_terms_per_segment"]),
         segments=segments, warnings=warnings,
+        sourced_policy=config["terminology"]["sourced_description_injection"],
+        unsourced_policy=config["terminology"]["unsourced_description_injection"],
     )
 
     def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:

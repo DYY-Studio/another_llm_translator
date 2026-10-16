@@ -669,3 +669,22 @@ def test_load_config_rejects_mixed_translation_validator_formats(
 
     with pytest.raises(ConfigError, match="未知配置键"):
         load_config(path)
+
+
+@pytest.mark.parametrize(("section", "key", "default", "valid"), [
+    ("terminology", "sourced_description_injection", "all", "prefer_previous"),
+    ("terminology", "unsourced_description_injection", "all", "when_no_sourced"),
+    ("terminology_decision", "description_generation", "sourced", "summary_only"),
+])
+def test_entity_description_settings_defaults_and_validation(tmp_path, section, key, default, valid):
+    config = load_config(CONFIG_TEMPLATE)
+    assert config[section][key] == default
+    config[section][key] = valid
+    path = tmp_path / "config.toml"
+    path.write_text(dump_config(config))
+    assert load_config(path)[section][key] == valid
+    path.write_text(path.read_text().replace(f'{key} = "{valid}"\n', ""))
+    assert load_config(path)[section][key] == default
+    config[section][key] = "invalid"
+    with pytest.raises(ConfigError, match=key):
+        dump_config(config)

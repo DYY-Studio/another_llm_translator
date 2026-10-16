@@ -880,6 +880,9 @@ def stage_fingerprint(
         }
         if stage == "terminology":
             data["terminology"] = config["terminology"]
+        if stage in {"translation", "proofreading", "polishing"}:
+            data["description_injection"] = {key: config["terminology"][key] for key in (
+                "sourced_description_injection", "unsourced_description_injection")}
         if config.get("_draft_translation"):
             data["generation_origin"] = "terminology_draft"
         if stage == "translation":

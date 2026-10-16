@@ -387,10 +387,13 @@ class _TermMatchCache:
         spec: TermNormalization,
         limit: int,
         *, segments: list[dict[str, Any]], warnings: list[str] | None = None,
+        sourced_policy: str = "all", unsourced_policy: str = "all",
     ) -> None:
         self.matcher = _PreparedTermMatcher(library, spec) if library else None
         self.spec = spec
         self.limit = limit
+        self.sourced_policy = sourced_policy
+        self.unsourced_policy = unsourced_policy
         self.positions = {str(s["segment_id"]): i for i, s in enumerate(segments)}
         self.warnings = warnings if warnings is not None else []
         self._cache: dict[tuple[str, str], tuple[dict, ...]] = {}
@@ -465,11 +468,22 @@ class _TermMatchCache:
             relations.append((before, within, after))
         before_ranks = {position: rank for rank, position in enumerate(sorted({before for before, _, _ in relations if before is not None}), 1)}
         after_ranks = {position: rank for rank, position in enumerate(sorted({after for _, _, after in relations if after is not None}), 1)}
-        return [{"text": entry["text"], "unsourced": entry["unsourced"],
+        items = [{"text": entry["text"], "unsourced": entry["unsourced"],
                  "source_relation": [*([f"before {before_ranks[before]}"] if before is not None else []),
                                      *(["within"] if within else []),
                                      *([f"after {after_ranks[after]}"] if after is not None else [])]}
                 for entry, (before, within, after) in zip(prepared, relations, strict=True)]
+        sourced = [i for i, (before, within, after) in enumerate(relations)
+                   if before is not None or within or after is not None]
+        if self.sourced_policy == "none":
+            sourced = []
+        elif self.sourced_policy == "prefer_previous":
+            previous = [i for i in sourced if relations[i][0] is not None or relations[i][1]]
+            sourced = previous or [i for i in sourced if "after 1" in items[i]["source_relation"]]
+        selected = set(sourced)
+        if self.unsourced_policy == "all" or (self.unsourced_policy == "when_no_sourced" and not sourced):
+            selected.update(i for i, item in enumerate(items) if not item["source_relation"])
+        return [item for i, item in enumerate(items) if i in selected]
 
     def for_items(self, items: list[dict[str, Any]]) -> list[dict]:
         by_source: dict[str, dict] = {}
@@ -489,7 +503,7 @@ class _TermMatchCache:
                         entity = str(origin.get("entity_key") or origin.get("group_primary") or normalized)
                         entities.setdefault(entity, (current, origin))
                 current["aliases"].update(str(alias) for alias in term.get("aliases", []) if alias)
-        if entities:
+        if entities and (self.sourced_policy != "none" or self.unsourced_policy != "none"):
             bounds = []
             for item in items:
                 original_id = str(item.get("_original_segment_id") or item["segment_id"])
@@ -499,7 +513,9 @@ class _TermMatchCache:
                 bounds.append(((self.positions[original_id], start), (self.positions[original_id], start + len(str(item["source"])))))
             first, last = min(start for start, _ in bounds), max(end for _, end in bounds)
             for entity, (current, origin) in entities.items():
-                current["entity_knowledge"] = {"entity": entity, "items": self._relative_items(entity, origin, first, last)}
+                descriptions = self._relative_items(entity, origin, first, last)
+                if descriptions:
+                    current["entity_knowledge"] = {"entity": entity, "items": descriptions}
         for current in by_source.values():
             current["aliases"] = sorted(current["aliases"], key=lambda value: (normalize_term(value, self.spec), value))
         return list(by_source.values())

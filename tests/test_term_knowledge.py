@@ -782,3 +782,32 @@ def test_replacement_indexes_each_request_and_preserves_slice_boundaries(
     term_knowledge.publish_evidence(project, data, [replacement], spec)
     assert len(calls) == 1
     assert data['knowledge']['fragments'][f"{first['record_id']}:0"]['state'] == expected
+
+
+@pytest.mark.parametrize(("sourced", "unsourced", "position", "expected"), [
+    ("all", "all", 1, ["前文", "当前", "后文一", "后文并列", "后文二", "总结"]),
+    ("prefer_previous", "when_no_sourced", 1, ["前文", "当前"]),
+    ("prefer_previous", "all", 0, ["后文一", "后文并列", "总结"]),
+    ("none", "when_no_sourced", 1, ["总结"]),
+    ("all", "none", 1, ["前文", "当前", "后文一", "后文并列", "后文二"]),
+    ("none", "none", 1, []),
+])
+def test_entity_injection_policies(sourced, unsourced, position, expected):
+    from app.term_matching import _TermMatchCache
+    from app.term_library import TermNormalization
+    segments = [{"segment_id": str(i), "source": "Alpha"} for i in range(5)]
+    def entry(text, index):
+        return {"text": text, "sources": [None] if index is None else [[
+            {"segment_id": str(index), "file_id": "F", "part_id": "P", "start": 0, "end": 5}]]}
+    data = {"terms": [{"source": "Alpha", "normalized": "alpha", "aliases": [],
+        "preferred_translation": "阿尔法", "knowledge_status": "current", "description_items": [
+            entry("前文", 0 if position else 2), entry("当前", 1 if position else 3),
+            entry("后文一", 2 if position else 1), entry("后文并列", 2 if position else 1),
+            entry("后文二", 4), entry("总结", None)]}]}
+    cache = _TermMatchCache(data, TermNormalization("NFKC", True), 10, segments=segments,
+                           sourced_policy=sourced, unsourced_policy=unsourced)
+    terms = cache.for_items([segments[position]])
+    assert terms[0]["preferred_translation"] == "阿尔法"
+    assert [i["text"] for i in terms[0].get("entity_knowledge", {}).get("items", [])] == expected
+    if not expected:
+        assert "entity_knowledge" not in terms[0]
