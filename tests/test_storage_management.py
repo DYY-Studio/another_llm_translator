@@ -584,3 +584,73 @@ def test_storage_size_handles_only_disappearing_sqlite_sidecars(
             if item.is_file() and not item.is_symlink()
         )
         assert totals["sqlite_bytes"] == (project / "project.sqlite").stat().st_size
+
+
+@pytest.mark.parametrize("stage,state,can_clear", [
+    ("terminology_decision", "applied", True),
+    ("terminology_decision", "pending", False),
+    ("terminology_decision", "superseded", True),
+    ("repetition_consistency", "pending", True),
+    ("repetition_consistency", "applied", True),
+])
+def test_run_checkpoint_cleanup_preserves_draft_and_history(tmp_path, stage, state, can_clear):
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    state_key = "decision_status" if stage == "terminology_decision" else "draft_status"
+    run_id, run_dir = create_run(project, config=load_project_config(project, stage="translation"),
+        stage=stage, fingerprint="storage", prompt="prompt", selected_count=1, requested_count=1,
+        reused_count=0, details={state_key: state})
+    draft_name = "terminology_decision_draft.json" if stage == "terminology_decision" else "repetition_draft.json"
+    draft = run_dir / draft_name
+    draft.write_text('{"pending":"审核数据"}', encoding="utf-8")
+    checkpoint = run_dir / ("terminology_decision_checkpoint.json" if stage == "terminology_decision" else "repetition_checkpoints/1.json")
+    checkpoint.parent.mkdir(exist_ok=True)
+    checkpoint.write_text('{"progress":1}')
+    manager = _manager(app_root, projects_root, project)
+    with pytest.raises(UsageError, match="运行中的 Run"):
+        manager.clear_run_checkpoints(project, run_id, confirm=True)
+    finalize_run(project, run_dir, status="completed", completed=1, failed=0)
+    # Superseded drafts are deliberately removed during the state transition.
+    draft_exists = draft.exists()
+    manifest_before = (run_dir / "manifest.json").read_bytes()
+    item = manager.scan_project(project)["snapshot_runs"][0]
+    assert item["can_clear"] is can_clear
+    assert item["parts"]["checkpoint"] == checkpoint.stat().st_size
+    assert sum(item["parts"].values()) == item["bytes"]
+    assert (run_dir / "manifest.json").read_bytes() == manifest_before
+    with pytest.raises(UsageError, match="确认"):
+        manager.clear_run_checkpoints(project, run_id, confirm=False)
+    if not can_clear:
+        with pytest.raises(UsageError, match="保留"):
+            manager.clear_run_checkpoints(project, run_id, confirm=True)
+        assert checkpoint.exists()
+        return
+    result = manager.clear_run_checkpoints(project, run_id, confirm=True)
+    assert result["affected_files"] == 1 and result["reclaimed_bytes"] > 0
+    assert not checkpoint.exists()
+    assert draft.exists() is draft_exists
+    assert (run_dir / "config.toml").is_file()
+    assert (run_dir / "manifest.json").read_bytes() == manifest_before
+    assert read_json(project, run_dir / "manifest.json")["status"] == "completed"
+    assert manager.scan_project(project)["snapshot_runs"][0]["reclaimable_bytes"] == 0
+
+
+def test_run_checkpoint_cleanup_rejects_symlink_and_unknown_run(tmp_path):
+    app_root, projects_root, project = make_storage_project(tmp_path)
+    manager = _manager(app_root, projects_root, project)
+    with pytest.raises(UsageError):
+        manager.clear_run_checkpoints(project, "../outside", confirm=True)
+    with pytest.raises(UsageError, match="状态"):
+        manager.clear_run_checkpoints(project, "RUN-UNKNOWN", confirm=True)
+    run_id, run_dir = create_run(project, config=load_project_config(project, stage="translation"),
+        stage="repetition_consistency", fingerprint="test", prompt=None, selected_count=1,
+        requested_count=1, reused_count=0, details={"draft_status": "pending"})
+    finalize_run(project, run_dir, status="completed", completed=1, failed=0)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "1.json"
+    target.write_text('{"progress":1}')
+    (run_dir / "repetition_checkpoints").symlink_to(outside, target_is_directory=True)
+    assert not manager.scan_project(project)["snapshot_runs"][0]["can_clear"]
+    with pytest.raises(UsageError, match="不安全"):
+        manager.clear_run_checkpoints(project, run_id, confirm=True)
+    assert target.is_file()

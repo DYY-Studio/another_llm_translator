@@ -96,6 +96,10 @@ def register_storage_routes(
             project(name), payload.path, confirm=payload.confirm
         )
 
+    @app.post("/api/v1/projects/{name}/storage/runs/{run_id}/checkpoints/clear")
+    async def clear_run_checkpoints(name: str, run_id: str, payload: StorageConfirmPayload) -> dict[str, int]:
+        return await run_in_threadpool(storage_manager.clear_run_checkpoints, project(name), run_id, confirm=payload.confirm)
+
     @app.post("/api/v1/projects/{name}/storage/logs/clear")
     async def clear_project_logs(
         name: str, payload: StorageConfirmPayload

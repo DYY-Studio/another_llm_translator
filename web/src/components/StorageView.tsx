@@ -8,6 +8,7 @@ import { Modal } from "./Modal";
 import {
   cancelDataRootRelocation,
   clearDebugAttachments,
+  clearRunCheckpoints,
   clearGlobalLogs,
   clearOutputFile,
   clearProjectLogs,
@@ -79,6 +80,9 @@ function blockedLabel(reason: string | null, language: Language): string {
     "存在活动 Web 任务": "storage.globalTaskRunning",
     "Run 正在运行": "storage.runRunning",
     "该输出文件不可清理": "storage.outputProtected",
+    "没有可清理断点": "storage.noCheckpoints",
+    "断点仍需保留": "storage.checkpointsProtected",
+    "草稿仍待处理，保留断点": "storage.pendingDraftCheckpoints",
   };
   const key = knownReasons[reason];
   return key ? translate(key, language) : reason;
@@ -485,8 +489,6 @@ export function ProjectStorageDialog({ project: selectedProject, language, onClo
     setMessage("");
     try {
       const result = await operation();
-      await onChanged();
-      setDetailRevision((current) => current + 1);
       setMessage(translate("storage.cleanupDone", language, {
         files: result.affected_files,
         size: formatSize(result.reclaimed_bytes),
@@ -494,6 +496,13 @@ export function ProjectStorageDialog({ project: selectedProject, language, onClo
     } catch (reason) {
       setError(errorMessage(reason, language));
     } finally {
+      try {
+        await onChanged();
+      } catch (reason) {
+        const refreshError = translate("storage.refreshFailed", language, { message: errorMessage(reason, language) });
+        setError((current) => current ? `${current}\n${refreshError}` : refreshError);
+      }
+      setDetailRevision((current) => current + 1);
       setBusyAction(null);
     }
   }
@@ -587,6 +596,28 @@ export function ProjectStorageDialog({ project: selectedProject, language, onClo
                         {translate(busyAction === "database" ? "storage.databaseBusy" : "storage.databaseMaintain", language)}
                       </button>
                     </div>
+                  </section>
+                  <section className="storage-detail-section">
+                    <div className="storage-section-heading"><div><h3>{translate("storage.runSnapshots", language)}</h3></div></div>
+                    {detail.snapshot_runs.length === 0 ? <EmptyStorage language={language} /> : <div className="storage-run-list">
+                      {detail.snapshot_runs.map(run => <article className="storage-run-item" key={run.run_id}>
+                        <div className="storage-section-heading">
+                          <div><code>{run.run_id}</code><p>{stageLabel(run.stage, language)} · {statusLabel(run.status, language)}{run.started_at ? ` · ${formatScannedAt(run.started_at, language)}` : ""}</p></div>
+                          <strong>{formatSize(run.bytes)}</strong>
+                        </div>
+                        <details><summary>{translate("storage.snapshotBreakdown", language)}</summary><div className="storage-detail-categories">
+                          {(["config", "execution", "draft", "checkpoint"] as const).map(part => <div key={part}><span>{translate(`storage.snapshotPart.${part}`, language)}</span><strong>{formatSize(run.parts[part])}</strong></div>)}
+                        </div></details>
+                        <div className="storage-run-actions"><span>{translate("storage.reclaimable", language)} {formatSize(run.reclaimable_bytes)}</span>
+                          <button className="danger-button" type="button" disabled={busyAction !== null || !run.can_clear} onClick={() => void runCleanup(
+                            `checkpoints-${run.run_id}`,
+                            translate("storage.confirmCheckpoints", language, { run: run.run_id, size: formatSize(run.reclaimable_bytes) }),
+                            () => clearRunCheckpoints(selectedProject, run.run_id),
+                          )}>{translate("storage.clearCheckpoints", language)}</button>
+                          {!run.can_clear && <ItemStatus canClear={false} blockedReason={run.blocked_reason} language={language} />}
+                        </div>
+                      </article>)}
+                    </div>}
                   </section>
                   <StorageDebugSection language={language} runs={detail.debug_runs} busyAction={busyAction} onClear={clearDebugRun} />
                   <StorageOutputSection language={language} files={detail.output_files} busyAction={busyAction} onClear={clearOutput} />

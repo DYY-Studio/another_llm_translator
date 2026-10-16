@@ -12,6 +12,7 @@ import {
   fetchStorageProject,
   clearGlobalLogs,
   clearDebugAttachments,
+  clearRunCheckpoints,
   clearOutputFile,
   clearProjectLogs,
   fetchSummaries,
@@ -135,6 +136,7 @@ test("storage cleanup requests always send explicit confirmation", async () => {
   await clearDebugAttachments("project/a", "RUN/1", signal);
   await clearOutputFile("project/a", "output/result.txt", signal);
   await clearProjectLogs("project/a", signal);
+  await clearRunCheckpoints("project/a", "RUN/1");
 
   assert.equal(calls[0].input, "/api/v1/storage/logs/clear");
   assert.equal(calls[0].init.method, "POST");
@@ -146,6 +148,8 @@ test("storage cleanup requests always send explicit confirmation", async () => {
   assert.equal(calls[2].init.body, JSON.stringify({ path: "output/result.txt", confirm: true }));
   assert.equal(calls[3].input, "/api/v1/projects/project%2Fa/storage/logs/clear");
   assert.equal(calls[3].init.body, JSON.stringify({ confirm: true }));
+  assert.equal(calls[4].input, "/api/v1/projects/project%2Fa/storage/runs/RUN%2F1/checkpoints/clear");
+  assert.equal(calls[4].init.body, JSON.stringify({ confirm: true }));
 });
 
 test("historical run query keys include scope and pagination", () => {

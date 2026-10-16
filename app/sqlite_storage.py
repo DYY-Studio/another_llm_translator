@@ -2997,16 +2997,14 @@ def read_project_meta_read_only(project: Path) -> dict[str, Any]:
         connection.close()
 
 
-def read_run_states(project: Path) -> list[dict[str, Any]]:
+def read_run_states(project: Path, *, storage_details: bool = False) -> list[dict[str, Any]]:
     """Read Run identity and activity without decoding execution snapshots."""
     connection = _read_only_connection(project)
     try:
-        return [dict(row) for row in connection.execute("""
-            SELECT run_id, stage, status, started_at,
-                   json_extract(payload_json, '$.decision_status') AS decision_status,
-                   json_extract(payload_json, '$.draft_status') AS draft_status
-            FROM runs
-        """)]
+        columns = "run_id, stage, status"
+        if storage_details:
+            columns += ", started_at, json_extract(payload_json, '$.decision_status') AS decision_status, json_extract(payload_json, '$.draft_status') AS draft_status"
+        return [dict(row) for row in connection.execute(f"SELECT {columns} FROM runs")]
     except sqlite3.Error as exc:
         raise StorageError(f"无法只读查询 Run 状态：{project}: {exc}") from exc
     finally:

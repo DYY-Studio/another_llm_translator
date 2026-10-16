@@ -160,6 +160,13 @@ export function clearDebugAttachments(
   );
 }
 
+export function clearRunCheckpoints(project: string, runId: string): Promise<StorageCleanupResult> {
+  return api<StorageCleanupResult>(
+    `/api/v1/projects/${encodeURIComponent(project)}/storage/runs/${encodeURIComponent(runId)}/checkpoints/clear`,
+    { method: "POST", body: JSON.stringify({ confirm: true }) },
+  );
+}
+
 export function clearOutputFile(
   project: string,
   path: string,

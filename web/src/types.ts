@@ -274,6 +274,7 @@ export interface DatabaseMaintenanceResult {
 }
 
 export interface StorageProjectDetail {
+  snapshot_runs: StorageSnapshotRun[];
   database_maintenance: {
     obsolete_stage_records: number | null;
     deduplicatable_applied_records: number | null;
@@ -286,6 +287,18 @@ export interface StorageProjectDetail {
   output_files: StorageOutputFile[];
   logs: StorageLogGroup[];
   errors: string[];
+}
+
+export interface StorageSnapshotRun {
+  run_id: string;
+  stage: string | null;
+  status: string | null;
+  started_at: string | null;
+  bytes: number;
+  parts: Record<"config" | "execution" | "draft" | "checkpoint", number>;
+  reclaimable_bytes: number;
+  can_clear: boolean;
+  blocked_reason: string | null;
 }
 
 export interface StorageCleanupResult {

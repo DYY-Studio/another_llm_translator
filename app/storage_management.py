@@ -65,6 +65,38 @@ class _RunStats:
 
 
 @dataclass
+class _RunSnapshotStats:
+    bytes: int = 0
+    unsafe: bool = False
+    parts: dict[str, int] = field(default_factory=lambda: dict.fromkeys(("config", "execution", "draft", "checkpoint"), 0))
+    checkpoints: list[tuple[Path, int]] = field(default_factory=list)
+
+
+def _snapshot_kind(parts: tuple[str, ...]) -> str:
+    if parts == ("terminology_decision_checkpoint.json",) or (len(parts) == 2 and parts[0] == "repetition_checkpoints" and parts[1].endswith(".json")):
+        return "checkpoint"
+    if parts in {("terminology_decision_draft.json",), ("repetition_draft.json",)}:
+        return "draft"
+    if parts in {("manifest.json",), ("repetition_terms.json",), ("repetition_screening.json",)}:
+        return "execution"
+    return "config"
+
+
+def _checkpoint_blocked(record: dict[str, Any]) -> str | None:
+    if not record:
+        return "无法确认项目 Run 状态"
+    if record["status"] == "running":
+        return "Run 正在运行"
+    if record["stage"] == "terminology_decision" and record.get("decision_status") in {"applied", "rejected", "discarded", "superseded", "rolled_back"}:
+        return None
+    if record["stage"] == "terminology_decision" and record.get("decision_status") == "pending":
+        return "草稿仍待处理，保留断点"
+    if record["stage"] == "repetition_consistency" and record.get("draft_status") in {"pending", "applied", "rejected", "discarded", "replaced", "rolled_back"}:
+        return None
+    return "断点仍需保留"
+
+
+@dataclass
 class _OutputFile:
     path: str
     bytes: int
@@ -91,6 +123,7 @@ class _ProjectScan:
     run_index: dict[str, dict[str, Any]]
     run_index_available: bool
     metadata: dict[str, Any] | None
+    snapshot_stats: dict[str, _RunSnapshotStats] = field(default_factory=dict)
 
     @property
     def complete(self) -> bool:
@@ -167,7 +200,7 @@ def _read_run_index(project: Path) -> tuple[dict[str, dict[str, Any]], list[str]
     index: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
     try:
-        for row in read_run_states(project):
+        for row in read_run_states(project, storage_details=True):
             index[str(row["run_id"])] = row
     except AppError as exc:
         errors.append(str(exc))
@@ -227,6 +260,8 @@ def _walk_project_files(
                     scan.error_categories.add(category)
                     if category == "debug_attachments" and len(parts) >= 2:
                         scan.run_stats.setdefault(parts[1], _RunStats()).unsafe = True
+                    if category == "run_snapshots" and len(parts) >= 2:
+                        scan.snapshot_stats.setdefault(parts[1], _RunSnapshotStats()).unsafe = True
                     if category == "output":
                         scan.output_files.append(
                             _OutputFile(
@@ -258,7 +293,14 @@ def _walk_project_files(
                 scan.categories[category].add_file(
                     size, reclaimable=reclaimable
                 )
-                if category == "debug_attachments" and len(parts) >= 2:
+                if category == "run_snapshots" and len(parts) >= 3:
+                    snapshot = scan.snapshot_stats.setdefault(parts[1], _RunSnapshotStats())
+                    snapshot.bytes += size
+                    kind = _snapshot_kind(parts[2:])
+                    snapshot.parts[kind] += size
+                    if kind == "checkpoint":
+                        snapshot.checkpoints.append((path, size))
+                elif category == "debug_attachments" and len(parts) >= 2:
                     run_id = parts[1]
                     stats = scan.run_stats.setdefault(run_id, _RunStats())
                     stats.bytes += size
@@ -318,6 +360,10 @@ def _scan_project(project: Path, projects_root: Path) -> _ProjectScan:
         scan.error_categories.add("debug_attachments")
         scan.error_categories.add("sqlite")
     _walk_project_files(project, scan)
+    scan.categories["run_snapshots"].reclaimable_bytes = sum(
+        stats.parts["checkpoint"] for run_id, stats in scan.snapshot_stats.items()
+        if _checkpoint_blocked(scan.run_index.get(run_id, {})) is None
+    )
     return scan
 
 
@@ -673,7 +719,7 @@ class StorageManager:
             can_clear = False
             if not scan.complete:
                 blocked = _PROJECT_SCAN_BLOCKED_REASON
-            elif identifier in {"logs", "debug_attachments", "output"}:
+            elif identifier in {"logs", "debug_attachments", "output", "run_snapshots"}:
                 if identifier in scan.error_categories or stats.unsafe:
                     blocked = "扫描未完成或目标路径不安全"
                 elif busy_reason is not None:
@@ -744,6 +790,20 @@ class StorageManager:
         scan = _scan_project(root, self.projects_root)
         descriptor = self._project_summary(scan)
         busy_reason = self._busy_reason(root, scan)
+        snapshot_runs = []
+        for run_id, stats in sorted(scan.snapshot_stats.items(), key=lambda item: item[1].bytes, reverse=True):
+            record = scan.run_index.get(run_id, {})
+            checkpoint_reason = _checkpoint_blocked(record)
+            blocked = (_PROJECT_SCAN_BLOCKED_REASON if not scan.complete else
+                       "目标路径不安全" if stats.unsafe or scan.categories["run_snapshots"].unsafe else
+                       busy_reason or checkpoint_reason or
+                       ("没有可清理断点" if not stats.checkpoints else None))
+            snapshot_runs.append({
+                "run_id": run_id, "stage": record.get("stage"), "status": record.get("status"),
+                "started_at": record.get("started_at"), "bytes": stats.bytes, "parts": stats.parts,
+                "reclaimable_bytes": stats.parts["checkpoint"] if checkpoint_reason is None else 0,
+                "can_clear": blocked is None, "blocked_reason": blocked,
+            })
         debug_runs: list[dict[str, Any]] = []
         for run_id, stats in sorted(scan.run_stats.items()):
             record = scan.run_index.get(run_id, {})
@@ -825,6 +885,7 @@ class StorageManager:
             except (AppError, OSError, sqlite3.Error) as exc:
                 maintenance["blocked_reason"] = str(exc)
         return {
+            "snapshot_runs": snapshot_runs,
             "database_maintenance": maintenance,
             "complete": scan.complete,
             "project": descriptor,
@@ -907,6 +968,24 @@ class StorageManager:
                         (Path(current) / name).rmdir()
                 payloads.rmdir()
         return {"affected_files": affected, "reclaimed_bytes": reclaimed}
+
+    def clear_run_checkpoints(self, project: Path, run_id: str, *, confirm: object) -> dict[str, int]:
+        _require_confirm(confirm)
+        safe_run_id = _safe_run_id(run_id)
+        root = _safe_resolve(project)
+        with project_write_lock(root):
+            scan = self._assert_project_cleanable(root)
+            reason = _checkpoint_blocked(scan.run_index.get(safe_run_id, {}))
+            if reason is not None:
+                raise UsageError(reason)
+            stats = scan.snapshot_stats.get(safe_run_id)
+            if scan.categories["run_snapshots"].unsafe or (stats is not None and stats.unsafe):
+                raise UsageError("Run 快照路径不安全")
+            if stats is None or not stats.checkpoints:
+                raise UsageError("没有可清理断点")
+            for path, _ in stats.checkpoints:
+                path.unlink()
+        return {"affected_files": len(stats.checkpoints), "reclaimed_bytes": sum(size for _, size in stats.checkpoints)}
 
     def clear_output(
         self, project: Path, relative_path: str, *, confirm: object

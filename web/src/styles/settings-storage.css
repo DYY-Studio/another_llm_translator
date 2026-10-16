@@ -73,6 +73,17 @@
 .storage-action-cell .danger-button { min-height: 32px; padding-inline: 10px; font-size: 12px; }
 .storage-status { display: block; max-width: 230px; color: var(--muted); font-size: 11px; line-height: 1.4; white-space: normal; }
 .storage-status.ready { color: var(--success); }
+.storage-run-list { display: grid; gap: 10px; }
+.storage-run-item { min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 7px; }
+.storage-run-item code { overflow-wrap: anywhere; font-size: 12px; }
+.storage-run-item .storage-section-heading { align-items: start; }
+.storage-run-item .storage-section-heading > div { min-width: 0; }
+.storage-run-item .storage-section-heading > strong { flex: none; }
+.storage-run-item summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.storage-run-item .storage-detail-categories { margin-top: 10px; }
+.storage-run-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 12px; }
+.storage-run-actions > span { color: var(--muted); font-size: 12px; }
+.storage-run-actions button { min-height: 32px; padding-inline: 10px; font-size: 12px; }
 .storage-status.blocked { color: var(--warning-text); }
 .storage-empty { margin: 0; padding: 20px; font-size: 12px; }
 .storage-message { max-width: 1280px; margin: -4px auto 18px; }
