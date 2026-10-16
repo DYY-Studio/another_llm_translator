@@ -590,7 +590,7 @@ def test_term_warning_threshold_rejects_invalid_config(value):
 
 
 @pytest.mark.asyncio
-async def test_validation_retry_missing_end_sends_no_empty_feedback(tmp_path):
+async def test_validation_retry_missing_end_retries_original_repair_request(tmp_path):
     project = await create_project(tmp_path, "One.")
     config = load_config(project / "config.toml")
     config["validation"]["translation"]["validators"] = ["japanese_kana"]
@@ -611,8 +611,7 @@ async def test_validation_retry_missing_end_sends_no_empty_feedback(tmp_path):
     assert result["completed"] == 1
     assert len(requests) == 3
     assert requests[1]["validation_repair"] == "将日语假名译为目标语言"
-    assert requests[2]["segments"] == []
-    assert "validation_repair" not in requests[2]
+    assert requests[2] == requests[1]
     assert all("format_correction" not in request for request in requests)
 
 
