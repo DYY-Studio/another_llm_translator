@@ -188,6 +188,12 @@ async def test_cancelled_retry_preserves_checkpoint_and_resume_requests_only_unf
         run_id = next((project / "runs").glob("*/terminology_decision_checkpoint.json")).parent.name
         assert decision_resume_compatibility(project, run_id, source_terms_revision=1, knowledge_only=knowledge_only)[0]
         assert not decision_resume_compatibility(project, run_id, source_terms_revision=1, knowledge_only=not knowledge_only)[0]
+        if knowledge_only:
+            from app.web_tasks import task_options
+            current = task_options(project, "terminology_decision", knowledge_only=True)
+            assert current["running_run"]["resume_compatible"] is True
+            assert current["running_run"]["total_steps"] == 2
+            assert task_options(project, "terminology_decision")["running_run"]["resume_compatible"] is False
         resumed = True
         result = await run_terminology_decision(project, knowledge_only=knowledge_only, http_client=client, resume_run_id=run_id)
     assert calls == [["alpha", "beta"], ["alpha"], ["alpha"]]
@@ -351,6 +357,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     assert plan["knowledge_pending"] == 1
     assert set(plan["prompts"]) == {"knowledge"}
     calls = []
+    invalid_output = False
 
     async def handler(request):
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -359,7 +366,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
         entity = payload["entities"][0]
         return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
             {"type": "entity_knowledge", "entity": "alpha", "reason": "重新整理说明",
-             "items": [{"text": "更新说明", "refs": [entity["fragments"][0]["id"]]}]}])}}]})
+             "items": [{"text": "更新说明", "refs": ["unknown" if invalid_output else entity["fragments"][0]["id"]]}]}])}}]})
 
     from fastapi.testclient import TestClient
     from app.web import create_app
@@ -390,6 +397,14 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     assert draft["knowledge_only"] is True
     assert len(draft["proposals"]) == 1
     assert draft["proposals"][0]["kind"] == "entity_knowledge"
+    assert draft["proposals"][0]["evidence"] == {}
+    proposal_id = draft["proposals"][0]["proposal_id"]
+    rejected = api.put("/api/v1/projects/terms/terms/decision/rejections", json={"rejected_proposal_ids": [proposal_id]})
+    assert rejected.status_code == 200
+    assert rejected.json()["draft"]["proposals"][0]["knowledge_evidence"] == draft["proposals"][0]["knowledge_evidence"]
+    restored = api.put("/api/v1/projects/terms/terms/decision/rejections", json={"rejected_proposal_ids": []})
+    assert restored.status_code == 200
+    assert restored.json()["draft"]["rejected_proposal_ids"] == []
     apply_decision_draft(project, confirm_all=True)
     after = load_terms(project)
     assert after["terms"][0]["description"] == "更新说明"
@@ -401,3 +416,9 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     rollback_decision(project, confirm=True)
     assert load_terms(project)["terms"][0]["description"] == "原有说明"
     assert calls == ["knowledge"]
+    from app.errors import UsageError
+    invalid_output = True
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(UsageError, match="实体说明聚合失败"):
+            await run_terminology_decision(project, knowledge_only=True, http_client=client)
+    assert current_decision_draft(project) is None

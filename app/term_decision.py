@@ -135,9 +135,7 @@ def _prompt(
                             for phase in _phase_names(final_review) if phase != "knowledge"})
     return prompts
 
-def _prompt_snapshot(
-    prompts: dict[str, str], *, final_review: bool = False
-) -> str:
+def _prompt_snapshot(prompts: dict[str, str]) -> str:
     return "\n\n".join(
         f"===== terminology_decision/{phase} =====\n{prompts[phase]}"
         for phase in prompts
@@ -569,15 +567,16 @@ def decision_plan(
                        if knowledge_only or view["status"] != "current" or view["description_generation"] != generation]
     if not eligible and not knowledge_views:
         raise UsageError("已发布术语全部受到人工 override 保护")
-    evidence = ({key: {} for key in states} if knowledge_only else _batches.collect_term_evidence(
+    evidence = ({} if knowledge_only else _batches.collect_term_evidence(
         project, list(library.get("terms", [])), config
     ))
-    for key, item in evidence.items():
-        item["description"] = "\n\n".join(
-            f"[{fragment.get('source', fragment['original_owner'])}] {fragment['text']}"
-            for fragment in known_fragments.values()
-            if fragment["owner"] == key and fragment["state"] == "active" and fragment["valid"]
-        ) or None
+    if not knowledge_only:
+        for key, item in evidence.items():
+            item["description"] = "\n\n".join(
+                f"[{fragment.get('source', fragment['original_owner'])}] {fragment['text']}"
+                for fragment in known_fragments.values()
+                if fragment["owner"] == key and fragment["state"] == "active" and fragment["valid"]
+            ) or None
     language = _prompt_language(project, prompt_language)
     prompts = _prompt(project, language, final_review=final_review, knowledge_only=knowledge_only)
     spec = term_normalization(config)
@@ -693,7 +692,7 @@ async def run_terminology_decision(
         phase: "sha256:" + hashlib.sha256(prompts[phase].encode()).hexdigest()
         for phase in prompts
     }
-    prompt_snapshot = _prompt_snapshot(prompts, final_review=final_review)
+    prompt_snapshot = _prompt_snapshot(prompts)
     spec = plan["spec"]
     protected_states = plan["protected_states"]
     revision = int(library["terms_revision"])
@@ -713,6 +712,7 @@ async def run_terminology_decision(
         return {
             "stage": STAGE,
             "dry_run": True,
+            "knowledge_only": knowledge_only,
             "terms_revision": int(library["terms_revision"]),
             "eligible": len(eligible),
             "protected": len(protected_states),
@@ -832,8 +832,8 @@ async def run_terminology_decision(
             reviewed_components=containment_components,
             knowledge_updates=knowledge_updates,
             knowledge_errors=knowledge_errors,
+            knowledge_only=knowledge_only,
         )
-        draft["knowledge_only"] = knowledge_only
         atomic_write_json(_drafts._draft_path(project, run_id), draft, compact=True)
         manifest = read_json(project, run_dir / "manifest.json")
         manifest.update(
@@ -1443,6 +1443,7 @@ async def run_terminology_decision(
             "terms_revision": int(library["terms_revision"]),
             "eligible": len(eligible),
             "protected": len(protected_states),
+            "knowledge_only": knowledge_only,
             "proposals": len(draft["proposals"]),
             "needs_review": len(draft["needs_review"]),
             "completed": total,
@@ -1455,7 +1456,7 @@ async def run_terminology_decision(
         if active_llm is not None:
             usage = active_llm.usage_summary()
         record_resumable_interruption(usage, exc)
-        if knowledge_errors and isinstance(exc, AppError):
+        if knowledge_errors and completed and isinstance(exc, AppError):
             save_draft(exc)
         elif final_review and review_base is not None and isinstance(exc, AppError) and not isinstance(exc, StorageError):
             # Rebuild from completed dependency components, never partial relationship patches.

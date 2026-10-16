@@ -248,7 +248,7 @@ def task_options(
                 project,
                 str(running_run["run_id"]),
                 source_terms_revision=int(library["terms_revision"]),
-                knowledge_only=bool(running_run.get("knowledge_only", False)),
+                knowledge_only=knowledge_only,
                 final_review=(
                     bool(running_final_review)
                     if isinstance(running_final_review, bool)

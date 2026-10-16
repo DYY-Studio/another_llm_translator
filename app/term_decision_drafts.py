@@ -56,6 +56,7 @@ def _build_draft(
     reviewed_components: list[set[str]] | None = None,
     knowledge_updates: dict[str, Any] | None = None,
     knowledge_errors: dict[str, str] | None = None,
+    knowledge_only: bool = False,
 ) -> dict[str, Any]:
     knowledge_updates = knowledge_updates or {}
     knowledge_errors = knowledge_errors or {}
@@ -126,7 +127,7 @@ def _build_draft(
                 "knowledge_before": before_knowledge,
                 "knowledge_after": deepcopy(updates),
                 "knowledge_owner_moves": {old:new for root, update in knowledge_updates.items() if root in updates for old,new in update.get("owner_moves", {}).items()},
-                "evidence": {key: deepcopy(evidence[key]) for key in keys},
+                "evidence": {} if knowledge_only else {key: deepcopy(evidence[key]) for key in keys},
                 "conflicts": {key: deepcopy(conflicts[key]) for key in keys},
             }
         )
@@ -145,7 +146,7 @@ def _build_draft(
     for root, error in knowledge_errors.items():
         if root not in present:
             needs_review.append({"normalized": root, "source": original[root]["source"], "reason": error,
-                                 "evidence": deepcopy(evidence[root]), "conflicts": deepcopy(conflicts[root])})
+                                 "evidence": {} if knowledge_only else deepcopy(evidence[root]), "conflicts": deepcopy(conflicts[root])})
     return record_header(
         "terminology_decision_draft",
         project_id,
@@ -153,6 +154,7 @@ def _build_draft(
         run_id=run_id,
         status="pending",
         source_terms_revision=revision,
+        knowledge_only=knowledge_only,
         decision_rules_version=DECISION_RULES_VERSION,
         decision_fingerprint=fingerprint,
         model_fingerprint=model_fingerprint,
@@ -331,7 +333,7 @@ def _pending_manifest(project: Path, run_id: str) -> dict[str, Any]:
     return manifest
 
 def save_decision_rejections(project: Path, proposal_ids: list[str]) -> dict[str, Any]:
-    draft = _read_pending_draft(project)
+    draft = current_decision_draft(project)
     if draft is None:
         raise UsageError("没有待处理术语决策草案")
     library = load_terms(project)
