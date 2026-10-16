@@ -350,7 +350,9 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 ### 实体说明决策与接口
 
-名称与关系确定后，`phase: "knowledge"` 发送 `target_language`、`description_generation` 和 `entities` 数组；各实体包含 `entity`、`members`、`current_items` 和全部有效 `fragments`。片段包含整次请求内唯一的短 ID（如 `K1`）、原归属、当前归属、说明及来源范围。实体证据完整且不可拆分，按现有软目标、硬限制和安全系数装箱，批次共用现有并发调度与 KeyPool。超限实体单独失败。Prompt 使用独立资源 `terminology_knowledge` 的中段，不携带名称与关系决策中段；该资源不是独立执行阶段或模型设置。
+完整自动决策在名称与关系确定后，或仅实体说明模式直接运行时，`phase: "knowledge"` 发送 `target_language`、`description_generation` 和 `entities` 数组；各实体包含 `entity`、`members`、`current_items` 和全部有效 `fragments`。片段包含整次请求内唯一的短 ID（如 `K1`）、原归属、当前归属、说明及来源范围。实体证据完整且不可拆分，按现有软目标、硬限制和安全系数装箱，批次共用现有并发调度与 KeyPool。超限实体单独失败。Prompt 使用独立资源 `terminology_knowledge` 的中段，不携带名称与关系决策中段；该资源不是独立执行阶段或模型设置。
+
+Web 的任务启动与 task-options 接口在 `stage: "terminology_decision"` 下接受布尔 `knowledge_only`（默认 `false`）。`true` 只执行实体说明阶段，不能与 `final_review: true` 组合，Run、检查点及草案记录该标记。
 
 请求中的 `source_range` 将连续源文表示为区间，每项包含 `file_id`、`part_id`、`first: {position, start}` 和 `last: {position, end}`。`position` 是从 0 开始的 Segment 位置，偏移是首尾 Segment 内的字符位置，`end` 为不包含端点。跨文件、分部、位置间断或切片空缺分别保留。无来源片段为 `null`。持久化来源和引用校验仍使用完整 Segment 范围。
 

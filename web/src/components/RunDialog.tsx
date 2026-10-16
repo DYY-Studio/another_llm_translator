@@ -166,7 +166,7 @@ function StageRunDialog({
   const draftBlocked = draftEnabled && options.draft_prompt_preflight?.ok === false;
   const replacementNeeded = !resuming && resultPolicy === "force" && Boolean(options.knowledge_replacement_impacts?.length);
   const ready = (replacementNeeded && !knowledgeConfirmed) ? false : summaryConfigurationBlocked || draftBlocked || draftLoading ? false : decisionMode
-    ? !options.running_run || resuming || resultPolicy === "force"
+    ? options.selected > 0 && (!options.running_run || resuming || resultPolicy === "force")
     : resuming || resultPolicy !== null;
 
   async function changeDraft(enabled: boolean, summaries = false) {
@@ -196,19 +196,20 @@ function StageRunDialog({
   function submit() {
     if (!ready) return;
     onStart({
+      ...(decisionMode ? { knowledge_only: Boolean(options.knowledge_only) } : {}),
       force: !resuming && resultPolicy === "force",
       confirm_knowledge_replacement: replacementNeeded && knowledgeConfirmed,
       reuse_mixed_fingerprints: !resuming && resultPolicy === "reuse",
       run_action: options.running_run ? runAction : null,
-      final_review: decisionMode && finalReview,
+      final_review: decisionMode && !options.knowledge_only && finalReview,
       ...(options.stage === "terminology" ? { include_draft_translation: draftEnabled, include_summaries: hybridSummary } : {}),
     });
   }
 
   return (
     <RunDialogFrame
-      title={translate(decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(stageLabelKey(options.stage), language) })}
-      subtitle={decisionMode ? translate("terms.decisionHint", language) : translate("runDialog.subtitle", language)}
+      title={translate(options.knowledge_only ? "terms.knowledgeOnlyTitle" : decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(stageLabelKey(options.stage), language) })}
+      subtitle={decisionMode ? translate(options.knowledge_only ? "terms.knowledgeOnlyHint" : "terms.decisionHint", language) : translate("runDialog.subtitle", language)}
       onClose={onClose}>
         <div className="run-preset" aria-label={translate("runDialog.currentPreset", language)}>
           <span>{translate("runDialog.currentPreset", language)}</span>
@@ -235,13 +236,13 @@ function StageRunDialog({
           </section>
         )}
         {decisionMode && <div className="run-decision-info">
-          <span>{translate("terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
+          <span>{translate(options.knowledge_only ? "terms.knowledgeOnlyScope" : "terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
           <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests ?? 0, tokens: options.estimated_input_tokens ?? 0 })}</span>
-          {options.overflow_policy && <span>{translate("terms.decisionOverflowPolicy", language, {
+          {!options.knowledge_only && options.overflow_policy && <span>{translate("terms.decisionOverflowPolicy", language, {
             soft: translate(options.overflow_policy.allow_soft_target_overflow ? "terms.decisionSoftAllowed" : "terms.decisionSoftBlocked", language),
             mode: overflowModeLabel(options.overflow_policy.anchor_overflow_mode, language),
           })}</span>}
-          <label className="config-toggle">
+          {!options.knowledge_only && <label className="config-toggle">
             <span>
               <input
                 type="checkbox"
@@ -259,7 +260,7 @@ function StageRunDialog({
             {finalReview && (
               <small>{translate("terms.decisionFinalReviewEstimateHint", language)}</small>
             )}
-          </label>
+          </label>}
         </div>}
 
         {options.stage === "terminology" && onDraftTranslationChange && <div className="run-decision-info run-generation-options">

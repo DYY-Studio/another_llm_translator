@@ -214,6 +214,8 @@ Preset 可以显式关闭连续读取超时，但不会取消连接超时。
 
 术语自动决策草案会展示说明的前后变化，同一实体的名称、关系和说明一起接受或拒绝。
 
+在“自动决策”页面点击“仅实体说明”，可重新生成全部实体说明，再使用现有草案界面审阅、应用或撤销。该操作保留名称、译名、分组及原有人工待办。
+
 - “待更新”时仍使用当前说明，可重新聚合，或在拒绝更新后选择“保持当前说明”
 - “过期”时需重新聚合或人工修复，才能继续处理命中该实体的翻译、校对和润色
 - 强制重扫会替换相关说明片段，运行前需确认替换范围
@@ -563,6 +565,8 @@ python -m app.main terms-export novel glossary.csv
 python -m app.main terms-import novel glossary.json
 python -m app.main terms-publish-partial novel
 python -m app.main terms-decide novel --dry-run
+# 仅重新生成实体说明
+python -m app.main terms-decide novel --knowledge-only
 python -m app.main terms-decide novel
 python -m app.main terms-decide-show novel
 python -m app.main terms-decide-apply novel --all --reject TDP-EXAMPLE
