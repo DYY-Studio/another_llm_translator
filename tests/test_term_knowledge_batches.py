@@ -147,7 +147,8 @@ async def test_knowledge_run_uses_bounded_parallel_batches(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_cancelled_retry_preserves_checkpoint_and_resume_requests_only_unfinished(tmp_path, monkeypatch):
+@pytest.mark.parametrize("knowledge_only", [False, True])
+async def test_cancelled_retry_preserves_checkpoint_and_resume_requests_only_unfinished(tmp_path, monkeypatch, knowledge_only):
     import asyncio
     import httpx
     from app.sqlite_storage import read_json, write_json, record_header
@@ -183,19 +184,20 @@ async def test_cancelled_retry_preserves_checkpoint_and_resume_requests_only_unf
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(asyncio.CancelledError):
-            await run_terminology_decision(project, http_client=client)
+            await run_terminology_decision(project, knowledge_only=knowledge_only, http_client=client)
         run_id = next((project / "runs").glob("*/terminology_decision_checkpoint.json")).parent.name
-        assert decision_resume_compatibility(project, run_id, source_terms_revision=1)[0]
+        assert decision_resume_compatibility(project, run_id, source_terms_revision=1, knowledge_only=knowledge_only)[0]
+        assert not decision_resume_compatibility(project, run_id, source_terms_revision=1, knowledge_only=not knowledge_only)[0]
         resumed = True
-        result = await run_terminology_decision(project, http_client=client, resume_run_id=run_id)
+        result = await run_terminology_decision(project, knowledge_only=knowledge_only, http_client=client, resume_run_id=run_id)
     assert calls == [["alpha", "beta"], ["alpha"], ["alpha"]]
     assert result["proposals"] == 2
     # Independent policy changes participate in the existing resume fingerprint.
-    plan = decision_plan(project)
+    plan = decision_plan(project, knowledge_only=knowledge_only)
     before = _decision_fingerprint(plan["config"], plan["prompts"], plan["library"], final_review=False)
     path = project / "prompts/terminology_knowledge.zh-CN.middle.txt"
     path.write_text(path.read_text() + "\nchanged policy")
-    plan = decision_plan(project)
+    plan = decision_plan(project, knowledge_only=knowledge_only)
     after = _decision_fingerprint(plan["config"], plan["prompts"], plan["library"], final_review=False)
     assert before != after
 
@@ -322,3 +324,80 @@ def test_description_generation_rejects_invalid_model_output(mode, items, summar
     with pytest.raises(UsageError):
         _knowledge_result(view("alpha"), {"type": "entity_knowledge", "entity": "alpha", "reason": "整理",
                           "items": items, "summary": summary}, {"K1": ("alpha", "alpha-fragment")}, mode)
+
+
+@pytest.mark.asyncio
+async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_lifecycle(tmp_path, monkeypatch):
+    import httpx
+    from copy import deepcopy
+    from app.sqlite_storage import read_json, write_json, record_header
+    from app.term_knowledge import empty_knowledge, save_items, entity_view
+    from app.term_library import load_terms
+    from app.term_decision import run_terminology_decision, decision_plan
+    from app.term_decision_drafts import current_decision_draft, apply_decision_draft, rollback_decision
+
+    project = make_project(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    terms = [{"source": "Alpha", "normalized": "alpha", "category": "name", "preferred_translation": "阿尔法",
+              "aliases": ["Al"], "group_primary": None, "conflicts": {}}]
+    data = {"terms_revision": 1, "terms": terms, "knowledge": empty_knowledge()}
+    save_items(project, data, "alpha", [{"text": "原有说明", "fragment_ids": []}])
+    meta = read_json(project, project / "project.json")
+    write_json(project, project / "terminology/terms.json", record_header("terminology_library", meta["project_id"], **data))
+    before = deepcopy(load_terms(project))
+    assert entity_view(project, before, "alpha")["status"] == "current"
+    plan = decision_plan(project, knowledge_only=True)
+    assert plan["eligible"] == []
+    assert plan["knowledge_pending"] == 1
+    assert set(plan["prompts"]) == {"knowledge"}
+    calls = []
+
+    async def handler(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        calls.append(payload["phase"])
+        assert payload["phase"] == "knowledge"
+        entity = payload["entities"][0]
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+            {"type": "entity_knowledge", "entity": "alpha", "reason": "重新整理说明",
+             "items": [{"text": "更新说明", "refs": [entity["fragments"][0]["id"]]}]}])}}]})
+
+    from fastapi.testclient import TestClient
+    from app.web import create_app
+    from app.web_tasks import WebTaskManager
+    from app.execution import Scope
+    api = TestClient(create_app(projects_root=project.parent))
+    options = api.get("/api/v1/projects/terms/task-options/terminology_decision?knowledge_only=true")
+    assert options.status_code == 200
+    assert options.json()["selected"] == 1
+    assert options.json()["knowledge_only"] is True
+    assert api.get("/api/v1/projects/terms/task-options/translation?knowledge_only=true").status_code == 400
+    assert api.get("/api/v1/projects/terms/task-options/terminology_decision?knowledge_only=true&final_review=true").status_code == 400
+
+    async def execute(*args, **kwargs):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await run_terminology_decision(*args, http_client=client, **kwargs)
+
+    monkeypatch.setattr("app.web_tasks.run_terminology_decision", execute)
+    manager = WebTaskManager()
+    started = await manager.start(project, "terminology_decision", scope=Scope(),
+                                  reuse_mixed_fingerprints=False, run_action=None, knowledge_only=True)
+    await manager.tasks[started["task_id"]].asyncio_task
+    finished = manager.get(started["task_id"])
+    assert finished["status"] == "completed", finished.get("error")
+    assert finished["knowledge_only"] is True
+    result = finished["summary"]
+    draft = current_decision_draft(project)
+    assert draft["knowledge_only"] is True
+    assert len(draft["proposals"]) == 1
+    assert draft["proposals"][0]["kind"] == "entity_knowledge"
+    apply_decision_draft(project, confirm_all=True)
+    after = load_terms(project)
+    assert after["terms"][0]["description"] == "更新说明"
+    for field in ("source", "normalized", "category", "preferred_translation", "aliases", "group_primary"):
+        assert after["terms"][0][field] == before["terms"][0][field]
+    manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
+    assert manifest["knowledge_only"] is True
+    assert manifest["manual_review_replaces_previous"] is False
+    rollback_decision(project, confirm=True)
+    assert load_terms(project)["terms"][0]["description"] == "原有说明"
+    assert calls == ["knowledge"]

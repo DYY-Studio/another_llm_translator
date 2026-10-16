@@ -411,7 +411,7 @@ def apply_decision_draft(
             rejected_proposal_ids=sorted(rejected),
             applied_proposal_count=0,
             manual_review_resolved_normalized=[],
-            manual_review_replaces_previous=True,
+            manual_review_replaces_previous=not draft.get("knowledge_only", False),
             applied_at=utc_now(),
         )
         if "final_review_error" in manifest:
@@ -509,7 +509,7 @@ def apply_decision_draft(
         rejected_proposal_ids=sorted(rejected),
         applied_proposal_count=accepted,
         manual_review_resolved_normalized=[],
-        manual_review_replaces_previous=True,
+        manual_review_replaces_previous=not draft.get("knowledge_only", False),
         applied_terms_revision=revision,
         applied_at=utc_now(),
     )
