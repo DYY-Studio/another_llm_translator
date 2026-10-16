@@ -445,6 +445,7 @@ export interface DecisionActivity {
 }
 
 export interface DiagnosticsResponse {
+  request_usage: Record<"llm" | "decision", TaskUsage>;
   decision: {
     activities: DecisionActivity[];
     metrics: Pick<DecisionActivity, "total_requests" | "active_requests" | "http_errors" | "retry_count" | "rate_limit_waiting_requests" | "average_latency_ms" | "p95_latency_ms">;

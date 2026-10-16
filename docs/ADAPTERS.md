@@ -788,6 +788,8 @@ Decision 在 Preset 开启 JSON Schema 时按本次问题生成约束，固定�
 完整请求预算包含 Schema，概率取值、概率和及置信度仍由现有校验器检查。
 请求与格式错误共享 `retry.http_max_attempts` 发送预算；空响应沿用 LLM 的专用重试规则。
 
+HTTP Decision 用量读取响应 `usage.input_tokens`，仅接受非负整数，输出 Tokens 计为 0；LLM Decision 使用所选 Adapter 返回的输入、输出计量。各次已返回用量的尝试均计入用量，即使答案格式校验失败。两种模式均计入 Decision 请求用量，与生成 LLM 请求用量分开。
+
 `decision_llm` 使用普通 LLM 提示词资源机制：Prefix 按字段声明拼接输入结构及指令边界，
 中段定义判断策略和拒答条件，Suffix 定义输出结构及字段约束。中段按语言提供全局资源、
 项目覆盖、恢复继承、内置草稿及命名模板。运行冻结完整系统提示词、所选 LLM Preset 和 Adapter，

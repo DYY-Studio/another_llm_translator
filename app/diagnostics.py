@@ -68,6 +68,7 @@ class Diagnostics:
         self.requests: dict[str, dict[str, Any]] = {}
         self._retained_terminal_details: dict[str, deque[str]] = {"llm": deque(), "decision": deque()}
         self._decision_activities: dict[str, dict[str, Any]] = {}
+        self._request_usage: dict[str, dict[str, Any]] = {}
         self._request_session = uuid.uuid4().hex
         self._request_cursor = 0
         self.project: str | None = None
@@ -130,6 +131,7 @@ class Diagnostics:
         for retained in self._retained_terminal_details.values():
             retained.clear()
         self._decision_activities.clear()
+        self._request_usage.clear()
         self._request_session = uuid.uuid4().hex
         self._request_cursor = 0
         self._started_monotonic = None
@@ -477,6 +479,13 @@ class Diagnostics:
             request["usage"][key] += usage[key]
         request["_usage_samples"] += 1
         request["_usage_complete"] &= complete
+        usage_total = self._request_usage.setdefault(request["request_kind"], {
+            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "samples": 0, "complete": True,
+        })
+        for key in request["usage"]:
+            usage_total[key] += usage[key]
+        usage_total["samples"] += 1
+        usage_total["complete"] &= complete
         self._touch_request(request)
 
     def fail_request(self, request_id: str, error: str, *, interrupted: bool = False, detail: str | None = None) -> None:
@@ -667,6 +676,7 @@ class Diagnostics:
                 "throughput_tokens_per_second": throughput_total,
             },
             "decision": _decision_snapshot([self]),
+            "request_usage": _request_usage_snapshot([self]),
             "logs": logs,
             "requests": {
                 "session_id": self._request_session,
@@ -692,6 +702,24 @@ class Diagnostics:
                 "stages": sorted({item["stage"] for item in self.logs}),
             },
         }
+
+
+def _request_usage_snapshot(sessions: list[Diagnostics]) -> dict[str, Any]:
+    result = {}
+    for kind in ("llm", "decision"):
+        values = [session._request_usage.get(kind, {}) for session in sessions]
+        samples = sum(value.get("samples", 0) for value in values)
+        attempts = sum(
+            len(session._latency_samples_seconds) if kind == "llm" else
+            sum(activity["attempt_count"] for activity in session._decision_activities.values())
+            for session in sessions
+        )
+        available = bool(samples) and samples == attempts and all(value.get("complete", True) for value in values)
+        result[kind] = {
+            **{key: sum(value.get(key, 0) for value in values) for key in ("input_tokens", "output_tokens", "total_tokens")},
+            "available": available, "partial": bool(samples) and not available,
+        }
+    return result
 
 
 def _decision_snapshot(sessions: list[Diagnostics]) -> dict[str, Any]:
@@ -1103,6 +1131,7 @@ class DiagnosticsHub(Diagnostics):
                 "throughput_tokens_per_second": throughput_total,
             },
             "decision": _decision_snapshot(metric_sessions),
+            "request_usage": _request_usage_snapshot(metric_sessions),
             "logs": logs,
             "requests": {
                 "session_id": self._hub_request_session,

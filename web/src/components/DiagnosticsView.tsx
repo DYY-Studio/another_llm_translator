@@ -161,10 +161,11 @@ const RequestGroup = memo(function RequestGroup({
                   <span className="request-cell-model" title={item.model}>{item.model}</span>
                   <span className={`request-status status-${item.status}`}>{requestStatusLabel(item, language)}</span>
                   <span className="request-cell-number" data-label={translate("diagnostics.inputTokens", language)}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage.input_tokens, language)}` : "—"}</span>
-                  {item.request_kind === "decision" ? <span className="request-cell-number" data-label={translate("diagnostics.decisionQuestions", language)}>{number(item.question_count, language)}</span> : <>
-                    {(["output_tokens", "total_tokens"] as const).map((metric, index) => <span className="request-cell-number" data-label={translate(`diagnostics.${["outputTokens", "totalTokens"][index]}`, language)} key={metric}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage[metric], language)}` : "—"}</span>)}
-                    <span className="request-cell-number" data-label={translate("diagnostics.outputRate", language)}>{number(item.output_tokens_per_second, language, "", "—")}</span>
-                  </>}
+                  <span className="request-cell-number" data-label={translate("diagnostics.outputTokens", language)}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage.output_tokens, language)}` : "—"}</span>
+                  {item.request_kind === "decision"
+                    ? <span className="request-cell-number" data-label={translate("diagnostics.decisionQuestions", language)}>{number(item.question_count, language)}</span>
+                    : <span className="request-cell-number" data-label={translate("diagnostics.totalTokens", language)}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage.total_tokens, language)}` : "—"}</span>}
+                  <span className="request-cell-number" data-label={translate("diagnostics.outputRate", language)}>{number(item.output_tokens_per_second, language, "", "—")}</span>
                   <span className="request-cell-number" data-label={translate("diagnostics.tabAttempts", language)}>{item.attempt_count}</span>
                   <span className="request-cell-number" data-label={translate("diagnostics.requestDuration", language)}>{item.latency_ms === null ? "—" : `${(item.latency_ms / 1000).toFixed(2)} s`}</span>
                 </>}
@@ -362,6 +363,7 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
   const decisionPending = decisionActivities.reduce((total, item) => total + item.pending, 0);
   const decisionFailures = decisionActivities.reduce((total, item) => total + item.failed + item.interrupted, 0);
   const metrics = value ? { ...value.metrics, ...(requestKind === "decision" ? value.decision.metrics : {}) } : undefined;
+  const usage = value?.request_usage[requestKind];
   const liveDecisionRequests = Array.from(requestSummaries.values()).filter((item) => (
     item.request_kind === "decision" && selectedActivity !== null
     && (item.task_id ?? null) === selectedActivity.task_id && item.model === selectedActivity.model
@@ -403,13 +405,13 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
       <div className="diagnostics-metrics">
         <article><span>{translate("diagnostics.currentRequests", language)}</span><strong>{number(metrics?.active_requests ?? 0, language)}</strong><small>{translate("diagnostics.concurrency", language)}</small></article>
         <article><span>{translate("diagnostics.totalRequests", language)}</span><strong>{number(metrics?.total_requests ?? 0, language)}</strong><small>{translate("diagnostics.logicalRequests", language)}</small></article>
-        <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{metrics?.usage_available || metrics?.usage_partial ? number(metrics.input_tokens, language) : translate("diagnostics.unavailable", language)}</strong><small>{translate("diagnostics.combinedUsage", language)}</small></article>
-        <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{metrics?.usage_available || metrics?.usage_partial ? number(metrics.output_tokens, language) : translate("diagnostics.unavailable", language)}</strong><small>{translate("diagnostics.combinedUsage", language)}</small></article>
+        <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{usage?.available || usage?.partial ? `${usage.partial ? "≥ " : ""}${number(usage.input_tokens, language)}` : translate("diagnostics.unavailable", language)}</strong><small>{translate("diagnostics.requestUsage", language, { kind: requestKind === "decision" ? "Decision" : "LLM" })}</small></article>
+        <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{usage?.available || usage?.partial ? `${usage.partial ? "≥ " : ""}${number(usage.output_tokens, language)}` : translate("diagnostics.unavailable", language)}</strong><small>{translate("diagnostics.requestUsage", language, { kind: requestKind === "decision" ? "Decision" : "LLM" })}</small></article>
         <article><span>{translate(requestKind === "decision" ? "diagnostics.decisionRate" : "diagnostics.throughput", language)}</span><strong>{number(requestKind === "decision" ? decisionActivities.reduce((total, item) => total + (item.requests_per_second ?? 0), 0) : throughput, language)}</strong><small>{translate(requestKind === "decision" ? "diagnostics.requestsPerSecond" : "diagnostics.tokensPerSecond", language)}</small></article>
       </div>
 
       <div className="diagnostics-details" ref={detailsRef} aria-label={translate("diagnostics.requestSummary", language)}>
-        <span>Usage <strong>{metrics?.usage_available ? translate("diagnostics.usageComplete", language) : metrics?.usage_partial ? translate("diagnostics.usagePartial", language) : translate("diagnostics.unavailable", language)}</strong></span>
+        <span>Usage <strong>{usage?.available ? translate("diagnostics.usageComplete", language) : usage?.partial ? translate("diagnostics.usagePartial", language) : translate("diagnostics.unavailable", language)}</strong></span>
         <span>{translate("diagnostics.averageLatency", language)} <strong>{number(metrics?.average_latency_ms ?? null, language, " ms")}</strong></span>
         <span title={requestKind === "decision" ? translate("diagnostics.decisionP95Hint", language) : undefined}>{translate("diagnostics.p95Latency", language)} <strong>{number(metrics?.p95_latency_ms ?? null, language, " ms")}</strong></span>
         <span>{translate("diagnostics.httpErrors", language)} <strong>{number(metrics?.http_errors ?? 0, language)}</strong></span>
@@ -485,7 +487,7 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
           <div className={`request-groups ${requestTotal ? "has-requests" : ""} ${!requestGroups.active.length || !requestGroups.finished.length ? "single" : ""}`}>
             {requestsOnly && <div className="request-table-heading" aria-hidden="true">
               {(requestKind === "decision"
-                ? ["requestId", "model", "status", "inputTokens", "decisionQuestions", "tabAttempts", "requestDuration"]
+                ? ["requestId", "model", "status", "inputTokens", "outputTokens", "decisionQuestions", "outputRate", "tabAttempts", "requestDuration"]
                 : ["requestId", "model", "status", "inputTokens", "outputTokens", "totalTokens", "outputRate", "tabAttempts", "requestDuration"]
               ).map(key => <span key={key}>{translate(`diagnostics.${key}`, language)}</span>)}
             </div>}

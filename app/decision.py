@@ -264,12 +264,17 @@ class DecisionClient:
                     raise FatalExternalError(f"Decision 请求失败：HTTP {response.status_code}")
                 try:
                     data = response.json()
+                    usage = data.get("usage") if isinstance(data, dict) else None
+                    if isinstance(usage, dict) and type(usage.get("input_tokens")) is int and usage["input_tokens"] >= 0:
+                        record["usage"] = {"input_tokens": usage["input_tokens"], "output_tokens": 0, "total_tokens": usage["input_tokens"]}
+                        if diagnostics is not None:
+                            diagnostics.record_request_usage(request_id, record["usage"], complete=True)
                     answers = self._parse(data, questions)
                 except (ValueError, TypeError, KeyError):
                     outcome = "response_parse_error"
                     raise
                 overview["answers"] = {k: asdict(v) for k, v in answers.items()}
-                record.update(model=data["model"], answers={k: asdict(v) for k, v in answers.items()}, usage=data.get("usage"))
+                record.update(model=data["model"], answers={k: asdict(v) for k, v in answers.items()})
                 if diagnostics is not None:
                     diagnostics.complete_request(request_id, content=json.dumps(data, ensure_ascii=False, indent=2), reasoning_content=None, overview_answers=overview["answers"])
                 return answers

@@ -61,6 +61,7 @@ def test_request_usage_accumulates_only_its_attempts(tmp_path, samples, expected
                 diagnostics.record_request_usage("REQ-USAGE", {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}, complete=True)
         detail = diagnostics.request_detail("REQ-USAGE")
         assert detail["usage"] == expected_usage
+        assert diagnostics.snapshot()["request_usage"]["llm"] == expected_usage
         assert detail["latency_ms"] == 1000
         assert detail["output_tokens_per_second"] == expected_rate
 
