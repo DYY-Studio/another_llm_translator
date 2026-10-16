@@ -64,12 +64,16 @@
 .request-row-main > span { color: var(--muted); font-size: 11px; }
 .requests-only .diagnostics-grid { grid-template-columns: minmax(0, 1fr); }
 .requests-only .request-panel { overflow-x: auto; --request-columns: 140px minmax(170px, 1fr) 100px repeat(3, 75px) 90px 55px 85px; }
+.requests-only .request-panel-decision { --request-columns: minmax(300px, 1.3fr) minmax(200px, 1fr) 90px 75px 65px 55px 80px; }
 .requests-only .request-groups { min-width: 960px; }
 .request-table-heading, .requests-only .request-list article { display: grid; grid-template-columns: var(--request-columns); gap: 8px; padding: 12px 14px; align-items: center; }
 .request-table-heading { flex: none; padding-right: 29px; color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--border); }
 .request-table-heading > :nth-child(n+4), .request-cell-number { text-align: right; font-variant-numeric: tabular-nums; }
 .requests-only .request-list { scrollbar-gutter: stable; }
 .requests-only .request-row-main header { display: grid; gap: 4px; }
+.requests-only .request-panel-decision .request-row-main header { gap: 8px; }
+.requests-only .request-panel-decision .request-row-main code { min-width: 0; overflow-wrap: anywhere; line-height: 1.6; }
+.requests-only .request-panel-decision .request-row-main code span { white-space: normal; }
 .request-cell-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .requests-only .request-list article > span { font-size: 12px; }
 @media (max-width: 700px) {

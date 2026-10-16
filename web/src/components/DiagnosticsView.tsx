@@ -160,8 +160,11 @@ const RequestGroup = memo(function RequestGroup({
                 {tabular && <>
                   <span className="request-cell-model" title={item.model}>{item.model}</span>
                   <span className={`request-status status-${item.status}`}>{requestStatusLabel(item, language)}</span>
-                  {(["input_tokens", "output_tokens", "total_tokens"] as const).map((metric, index) => <span className="request-cell-number" data-label={translate(`diagnostics.${["inputTokens", "outputTokens", "totalTokens"][index]}`, language)} key={metric}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage[metric], language)}` : "—"}</span>)}
-                  <span className="request-cell-number" data-label={translate("diagnostics.outputRate", language)}>{number(item.output_tokens_per_second, language, "", "—")}</span>
+                  <span className="request-cell-number" data-label={translate("diagnostics.inputTokens", language)}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage.input_tokens, language)}` : "—"}</span>
+                  {item.request_kind === "decision" ? <span className="request-cell-number" data-label={translate("diagnostics.decisionQuestions", language)}>{number(item.question_count, language)}</span> : <>
+                    {(["output_tokens", "total_tokens"] as const).map((metric, index) => <span className="request-cell-number" data-label={translate(`diagnostics.${["outputTokens", "totalTokens"][index]}`, language)} key={metric}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage[metric], language)}` : "—"}</span>)}
+                    <span className="request-cell-number" data-label={translate("diagnostics.outputRate", language)}>{number(item.output_tokens_per_second, language, "", "—")}</span>
+                  </>}
                   <span className="request-cell-number" data-label={translate("diagnostics.tabAttempts", language)}>{item.attempt_count}</span>
                   <span className="request-cell-number" data-label={translate("diagnostics.requestDuration", language)}>{item.latency_ms === null ? "—" : `${(item.latency_ms / 1000).toFixed(2)} s`}</span>
                 </>}
@@ -454,7 +457,7 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
           </div>
         </section>}
 
-        <section className="diagnostics-panel request-panel">
+        <section className={`diagnostics-panel request-panel${requestKind === "decision" ? " request-panel-decision" : ""}`}>
           <div className="diagnostics-panel-heading">
             <nav className="diagnostics-subtabs" aria-label={translate("diagnostics.requestKind", language)}>
               <button className={requestKind === "llm" ? "active" : ""} aria-pressed={requestKind === "llm"} onClick={() => setRequestKind("llm")}>LLM</button>
@@ -481,7 +484,10 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
           </div> :
           <div className={`request-groups ${requestTotal ? "has-requests" : ""} ${!requestGroups.active.length || !requestGroups.finished.length ? "single" : ""}`}>
             {requestsOnly && <div className="request-table-heading" aria-hidden="true">
-              {["requestId", "model", "status", "inputTokens", "outputTokens", "totalTokens", "outputRate", "tabAttempts", "requestDuration"].map(key => <span key={key}>{translate(`diagnostics.${key}`, language)}</span>)}
+              {(requestKind === "decision"
+                ? ["requestId", "model", "status", "inputTokens", "decisionQuestions", "tabAttempts", "requestDuration"]
+                : ["requestId", "model", "status", "inputTokens", "outputTokens", "totalTokens", "outputRate", "tabAttempts", "requestDuration"]
+              ).map(key => <span key={key}>{translate(`diagnostics.${key}`, language)}</span>)}
             </div>}
             {requestGroups.active.length > 0 && (
               <RequestGroup
