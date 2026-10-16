@@ -239,7 +239,11 @@ def test_apply_undo_survives_history_maintenance(tmp_path, monkeypatch):
     assert result["changed"] == 1
     assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == "我会来接你"
     maintain_project_database(project)
+    from app.sqlite_storage import read_repetition_run
+    run_id = read_repetition_run(project, ("applied",))["run_id"]
+    assert (project / "runs" / run_id / "repetition_draft.json").is_file()
     rollback_draft(project, confirm=True)
+    assert not (project / "runs" / run_id / "repetition_draft.json").exists()
     restored = latest_stage_states(project, "translation", [sid])[sid]["completed"]
     assert restored["text"] == "我会去接你"
     assert restored["restored_origin"] == "web"

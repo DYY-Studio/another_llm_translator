@@ -2851,6 +2851,7 @@ async def test_final_review_failure_saves_draft_and_resumes_same_run(
     assert current["needs_review"][0]["normalized"] == "alice"
     failed_run_id = current["run_id"]
     assert read_json(project, project / "runs" / old_run_id / "manifest.json")["decision_status"] == "superseded"
+    assert not (project / "runs" / old_run_id / "terminology_decision_draft.json").exists()
     resumed = []
 
     async def finish_review(*_: object, **kwargs: object) -> dict[str, dict]:
@@ -3359,10 +3360,10 @@ async def test_decision_draft_write_error_resumes_without_model_requests(
     monkeypatch.setattr("app.term_decision_batches._request_batch", keep_batch)
     original_atomic_write = atomic_write_json
 
-    def fail_draft_write(path: Path, value: object) -> None:
+    def fail_draft_write(path: Path, value: object, *, compact: bool = False) -> None:
         if path.name == "terminology_decision_draft.json":
             raise StorageError("草案写入失败")
-        original_atomic_write(path, value)
+        original_atomic_write(path, value, compact=compact)
 
     monkeypatch.setattr("app.term_decision.atomic_write_json", fail_draft_write)
     async with httpx.AsyncClient() as client:
@@ -3446,10 +3447,10 @@ async def test_legacy_group_recovery_draft_failure_preserves_complete_run(
     )
     original_atomic_write = atomic_write_json
 
-    def fail_draft_write(path: Path, value: object) -> None:
+    def fail_draft_write(path: Path, value: object, *, compact: bool = False) -> None:
         if path.name == "terminology_decision_draft.json":
             raise StorageError("恢复草案写入失败")
-        original_atomic_write(path, value)
+        original_atomic_write(path, value, compact=compact)
 
     async def unexpected_request(*_: object, **__: object) -> dict[str, dict]:
         raise AssertionError("完整检查点恢复不得重新请求模型")
@@ -4064,6 +4065,7 @@ def test_rule_six_draft_can_be_reviewed_rejected_and_discarded_but_not_applied(
         "run_id": "RUN-RULE-6",
     }
     assert current_decision_draft(project) is None
+    assert not path.exists()
 
 
 def test_evidence_counts_source_alias_and_aozora_views(tmp_path: Path) -> None:

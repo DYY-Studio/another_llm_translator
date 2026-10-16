@@ -100,9 +100,9 @@ def record_header(
     }
 
 
-def atomic_write_json(path: Path, value: Any) -> None:
+def atomic_write_json(path: Path, value: Any, *, compact: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
+    payload = json.dumps(value, ensure_ascii=False, **({"separators": (",", ":")} if compact else {"indent": 2})) + "\n"
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temp_path = Path(temp_name)
     try:
@@ -129,6 +129,23 @@ def atomic_write_text(path: Path, value: str) -> None:
     finally:
         if temp_path.exists():
             temp_path.unlink()
+
+
+def _remove_terminated_run_draft(project: Path, manifest: dict[str, Any]) -> None:
+    filename = None
+    if manifest.get("stage") == "terminology_decision" and manifest.get("decision_status") in {"discarded", "superseded", "rolled_back"}:
+        filename = "terminology_decision_draft.json"
+    elif manifest.get("stage") == "repetition_consistency" and manifest.get("draft_status") in {"discarded", "replaced", "rolled_back"}:
+        filename = "repetition_draft.json"
+    if filename is None:
+        return
+    run_dir = project / "runs" / str(manifest["run_id"])
+    if not run_dir.resolve().is_relative_to(project.resolve()) or run_dir.is_symlink():
+        raise StorageError("Run 草稿路径不安全")
+    try:
+        (run_dir / filename).unlink(missing_ok=True)
+    except OSError as exc:
+        raise StorageError(f"Run 状态已保存，但终止草稿移除失败：{exc}") from exc
 
 
 def append_jsonl_file(path: Path, value: dict[str, Any]) -> None:
@@ -818,7 +835,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             manifest = project / "runs" / run_id / "manifest.json"
             if manifest.is_file():
                 row = connection.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
-                atomic_write_json(manifest, _hydrate_run(row, _project_id(connection)))
+                atomic_write_json(manifest, _hydrate_run(row, _project_id(connection)), compact=True)
         if version < 6:
             project_id = _project_id(connection)
             for row in connection.execute(
@@ -826,7 +843,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             ):
                 manifest = project / "runs" / str(row["run_id"]) / "manifest.json"
                 if manifest.is_file():
-                    atomic_write_json(manifest, _hydrate_run(row, project_id))
+                    atomic_write_json(manifest, _hydrate_run(row, project_id), compact=True)
         if version < 7:
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             connection.execute("VACUUM")
@@ -2569,9 +2586,10 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
         # SQLite row remains authoritative for indexing and activity checks.
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+            json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
+        _remove_terminated_run_draft(project, value)
 
 
 def clear_terminology_state(project: Path, overrides: dict[str, Any]) -> None:
@@ -2658,12 +2676,13 @@ def write_terminology_decision_state(
     try:
         atomic_write_json(
             project / "runs" / str(run_manifest["run_id"]) / "manifest.json",
-            run_manifest,
+            run_manifest, compact=True,
         )
     except OSError:
         # SQLite is authoritative; the human-readable Run mirror can be
         # reconstructed by a later manifest update.
         pass
+    _remove_terminated_run_draft(project, run_manifest)
 
 
 def _records(
@@ -2924,9 +2943,10 @@ def write_repetition_state(
     warnings = []
     for manifest in manifests:
         try:
-            atomic_write_json(project / "runs" / manifest["run_id"] / "manifest.json", manifest)
+            atomic_write_json(project / "runs" / manifest["run_id"] / "manifest.json", manifest, compact=True)
         except OSError as exc:
             warnings.append(f"数据库已保存，但 Run 文件镜像写入失败：{exc}")
+        _remove_terminated_run_draft(project, manifest)
     return warnings
 
 
@@ -2981,7 +3001,12 @@ def read_run_states(project: Path) -> list[dict[str, Any]]:
     """Read Run identity and activity without decoding execution snapshots."""
     connection = _read_only_connection(project)
     try:
-        return [dict(row) for row in connection.execute("SELECT run_id, stage, status FROM runs")]
+        return [dict(row) for row in connection.execute("""
+            SELECT run_id, stage, status, started_at,
+                   json_extract(payload_json, '$.decision_status') AS decision_status,
+                   json_extract(payload_json, '$.draft_status') AS draft_status
+            FROM runs
+        """)]
     except sqlite3.Error as exc:
         raise StorageError(f"无法只读查询 Run 状态：{project}: {exc}") from exc
     finally:
