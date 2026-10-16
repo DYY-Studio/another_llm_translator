@@ -131,21 +131,23 @@ def atomic_write_text(path: Path, value: str) -> None:
             temp_path.unlink()
 
 
-def _remove_terminated_run_draft(project: Path, manifest: dict[str, Any]) -> None:
+def _remove_terminated_run_draft(project: Path, manifest: dict[str, Any]) -> list[str]:
     filename = None
     if manifest.get("stage") == "terminology_decision" and manifest.get("decision_status") in {"discarded", "superseded", "rolled_back"}:
         filename = "terminology_decision_draft.json"
     elif manifest.get("stage") == "repetition_consistency" and manifest.get("draft_status") in {"discarded", "replaced", "rolled_back"}:
         filename = "repetition_draft.json"
     if filename is None:
-        return
-    run_dir = project / "runs" / str(manifest["run_id"])
-    if not run_dir.resolve().is_relative_to(project.resolve()) or run_dir.is_symlink():
-        raise StorageError("Run 草稿路径不安全")
+        return []
     try:
+        runs_root = project / "runs"
+        run_dir = runs_root / str(manifest["run_id"])
+        if runs_root.is_symlink() or run_dir.is_symlink() or run_dir.resolve().parent != runs_root.resolve():
+            raise StorageError("Run 草稿路径不安全")
         (run_dir / filename).unlink(missing_ok=True)
-    except OSError as exc:
-        raise StorageError(f"Run 状态已保存，但终止草稿移除失败：{exc}") from exc
+    except (OSError, RuntimeError, StorageError) as exc:
+        return [f"Run {manifest['run_id']} 状态已保存，但终止草稿移除失败：{exc}"]
+    return []
 
 
 def append_jsonl_file(path: Path, value: dict[str, Any]) -> None:
@@ -2523,7 +2525,8 @@ def read_json(project: Path, path: Path) -> dict[str, Any]:
     return _validate_record(value, str(path))
 
 
-def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
+def write_json(project: Path, path: Path, value: dict[str, Any]) -> list[str]:
+    """Persist a record and return warnings from retiring its draft."""
     ensure_supported(project)
     kind, key = _kind(path, project)
     connection = _with_db(project)
@@ -2589,7 +2592,8 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> None:
             json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
-        _remove_terminated_run_draft(project, value)
+        return _remove_terminated_run_draft(project, value)
+    return []
 
 
 def clear_terminology_state(project: Path, overrides: dict[str, Any]) -> None:
@@ -2639,7 +2643,7 @@ def write_terminology_decision_state(
     terms: dict[str, Any],
     overrides: dict[str, Any],
     run_manifest: dict[str, Any],
-) -> None:
+) -> list[str]:
     """Commit a terminology decision and its Run state in one transaction."""
     ensure_supported(project)
     connection = _with_db(project)
@@ -2682,7 +2686,7 @@ def write_terminology_decision_state(
         # SQLite is authoritative; the human-readable Run mirror can be
         # reconstructed by a later manifest update.
         pass
-    _remove_terminated_run_draft(project, run_manifest)
+    return _remove_terminated_run_draft(project, run_manifest)
 
 
 def _records(
@@ -2946,7 +2950,7 @@ def write_repetition_state(
             atomic_write_json(project / "runs" / manifest["run_id"] / "manifest.json", manifest, compact=True)
         except OSError as exc:
             warnings.append(f"数据库已保存，但 Run 文件镜像写入失败：{exc}")
-        _remove_terminated_run_draft(project, manifest)
+        warnings.extend(_remove_terminated_run_draft(project, manifest))
     return warnings
 
 

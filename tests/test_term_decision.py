@@ -4028,8 +4028,9 @@ def test_rule_six_decision_checkpoint_is_visible_but_cannot_resume(
     assert "强制新建" in resumed.json()["error"]
 
 
+@pytest.mark.parametrize("cleanup_fails", [False, True])
 def test_rule_six_draft_can_be_reviewed_rejected_and_discarded_but_not_applied(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch, cleanup_fails,
 ) -> None:
     project = create_decision_project(tmp_path)
     bob = next(
@@ -4060,12 +4061,17 @@ def test_rule_six_draft_can_be_reviewed_rejected_and_discarded_but_not_applied(
     with pytest.raises(UsageError, match="规则版本不兼容"):
         apply_decision_draft(project, confirm_all=True)
     assert path.is_file()
-    assert discard_decision_draft(project, confirm=True) == {
-        "discarded": True,
-        "run_id": "RUN-RULE-6",
-    }
+    original_unlink = Path.unlink
+    def remove(target, *args, **kwargs):
+        if cleanup_fails and target == path:
+            raise PermissionError("draft removal denied")
+        return original_unlink(target, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", remove)
+    result = discard_decision_draft(project, confirm=True)
+    assert result["discarded"] and result["run_id"] == "RUN-RULE-6"
+    assert bool(result["warnings"]) is cleanup_fails
     assert current_decision_draft(project) is None
-    assert not path.exists()
+    assert path.exists() is cleanup_fails
 
 
 def test_evidence_counts_source_alias_and_aozora_views(tmp_path: Path) -> None:
@@ -5469,3 +5475,28 @@ def test_naming_decisions_cannot_write_scalar_description() -> None:
             prompt_language="zh-CN", review_states=None, spec=None, phase="adjudication",
         )
         assert [error["code"] for error in errors] == ["invalid_patch"]
+
+
+@pytest.mark.asyncio
+async def test_replacement_cleanup_failure_preserves_completed_decision_and_warns(tmp_path, monkeypatch):
+    project = create_decision_project(tmp_path)
+    async def keep_batch(*args, **kwargs):
+        return {str(item["normalized"]): {"action": "keep", "reason": "保持"} for item in kwargs["focus"]}
+    monkeypatch.setattr("app.term_decision_batches._request_batch", keep_batch)
+    async with httpx.AsyncClient() as client:
+        first = await run_terminology_decision(project, http_client=client)
+        old_draft = project / "runs" / first["run_id"] / "terminology_decision_draft.json"
+        original_unlink = Path.unlink
+        def deny_old_draft(path, *args, **kwargs):
+            if path == old_draft:
+                raise PermissionError("draft removal denied")
+            return original_unlink(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "unlink", deny_old_draft)
+        result = await run_terminology_decision(project, replace_draft=True, http_client=client)
+    current = current_decision_draft(project)
+    assert current["run_id"] == result["run_id"] != first["run_id"]
+    assert old_draft.exists()
+    assert result["warnings"] == current["warnings"]
+    assert "draft removal denied" in current["warnings"][0]
+    manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
+    assert manifest["status"] == "completed" and manifest["decision_status"] == "pending"

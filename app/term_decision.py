@@ -778,6 +778,7 @@ async def run_terminology_decision(
     final_responses_complete = False
     knowledge_updates: dict[str, Any] = {}
     knowledge_errors: dict[str, str] = {}
+    cleanup_warnings: list[str] = []
 
     def save_draft(failure: AppError | None = None) -> dict[str, Any]:
         draft_conflicts = _merge_conflict_evidence(
@@ -829,7 +830,10 @@ async def run_terminology_decision(
             old_manifest.update(decision_status="superseded", superseded_by_run_id=run_id)
             if "final_review_error" in old_manifest:
                 old_manifest.update(status="completed", completed_at=utc_now())
-            write_json(project, old_path, old_manifest)
+            cleanup_warnings.extend(write_json(project, old_path, old_manifest))
+            if cleanup_warnings:
+                manifest["warnings"] = list(dict.fromkeys([*manifest.get("warnings", []), *cleanup_warnings]))
+                write_json(project, run_dir / "manifest.json", manifest)
         return draft
 
     def append_llm_warnings(manifest: dict[str, Any]) -> None:
@@ -1387,7 +1391,7 @@ async def run_terminology_decision(
             status="completed",
             completed=total,
             failed=0,
-            warnings=(active_llm.warnings if active_llm is not None else []),
+            warnings=[*(active_llm.warnings if active_llm is not None else []), *cleanup_warnings],
             usage=usage,
             usage_invoked=usage_invoked,
             key_audit=(
@@ -1408,6 +1412,7 @@ async def run_terminology_decision(
             "failed": 0,
             "pending": 0,
             "usage": usage or unavailable_usage(),
+            "warnings": cleanup_warnings,
         }
     except BaseException as exc:
         if active_llm is not None:
