@@ -7,6 +7,7 @@ import { useClassicSelection } from "../useClassicSelection";
 import { errorMessage, formatErrorPayload, translate, type Language } from "../i18n";
 import type { AdapterOptions, PendingInput } from "./ProjectInputs";
 import type { ProjectOverview, ProjectSummary } from "../types";
+import { ProjectStorageDialog } from "./StorageView";
 import { ProjectBar } from "./ProjectPicker";
 import { InputQueue, AddFilesDialog } from "./ProjectInputs";
 import { ReplacementDialog } from "./ReplacementDialog";
@@ -69,6 +70,7 @@ export function Overview({
   const [deleting, setDeleting] = useState(false);
   const [compacting, setCompacting] = useState(false);
   const [storageMessage, setStorageMessage] = useState("");
+  const [storageDetails, setStorageDetails] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [optimisticOrder, setOptimisticOrder] = useState<OptimisticFileOrder | null>(null);
@@ -380,7 +382,9 @@ export function Overview({
         <div className="overview-identity">
           <h1>{value.name}</h1>
           <p>{value.path}</p>
-          <dl className="overview-storage" aria-label={translate("overview.storage", language)}>
+          <dl className="overview-storage" role="button" tabIndex={0} aria-haspopup="dialog" aria-label={translate("overview.storage", language)} onClick={() => setStorageDetails(true)} onKeyDown={event => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setStorageDetails(true); }
+          }}>
             <div>
               <dt>{translate("overview.storageTotal", language)}</dt>
               <dd>{formatSize(value.storage.total_bytes)}</dd>
@@ -591,6 +595,7 @@ export function Overview({
           </div>
         </div>
       )}
+      {storageDetails && <ProjectStorageDialog project={project} language={language} onClose={() => setStorageDetails(false)} onChanged={onFilesChanged} />}
       {deleting && (
         <div className="modal-backdrop" onMouseDown={() => setDeleting(false)}>
           <div className="modal" role="dialog" aria-modal="true" aria-label={translate("overview.deleteTitle", language)} onMouseDown={(event) => event.stopPropagation()}>
