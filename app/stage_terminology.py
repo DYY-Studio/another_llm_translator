@@ -1107,7 +1107,7 @@ async def run_terminology(
             manifest["document_adapter_prompt_requirements"] = primary_requirements
         atomic_write_json(
             snapshot_dir / "document_adapter_prompt_requirements.json",
-            primary_requirements,
+            primary_requirements, compact=True,
         )
         write_json(project, run_dir / "manifest.json", manifest)
     write_lock = asyncio.Lock()

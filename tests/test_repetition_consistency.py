@@ -239,7 +239,11 @@ def test_apply_undo_survives_history_maintenance(tmp_path, monkeypatch):
     assert result["changed"] == 1
     assert latest_stage_states(project, "translation", [sid])[sid]["completed"]["text"] == "我会来接你"
     maintain_project_database(project)
+    from app.sqlite_storage import read_repetition_run
+    run_id = read_repetition_run(project, ("applied",))["run_id"]
+    assert (project / "runs" / run_id / "repetition_draft.json").is_file()
     rollback_draft(project, confirm=True)
+    assert not (project / "runs" / run_id / "repetition_draft.json").exists()
     restored = latest_stage_states(project, "translation", [sid])[sid]["completed"]
     assert restored["text"] == "我会去接你"
     assert restored["restored_origin"] == "web"
@@ -1502,3 +1506,28 @@ def test_part_indexes_keep_file_boundaries_distinct(tmp_path, monkeypatch):
     value = comparison_payload([group], plan["evidence"], plan["sources"], "zh-CN", plan["terms"])
     assert value["parts"] == {"1": "document", "2": "document", "3": "chapter.xhtml"}
     assert [(o["file"], o["part"]) for o in value["repetitions"][0]["occurrences"]] == [(1, 1), (2, 2), (1, 3)]
+
+
+def test_replacement_cleanup_failure_does_not_reopen_published_run(tmp_path, monkeypatch):
+    from app.repetition_consistency import current_draft, run_repetition
+    project = repetition_project(tmp_path, monkeypatch)
+    generate(project)
+    old_id = current_draft(project)["run_id"]
+    old_draft = project / "runs" / old_id / "repetition_draft.json"
+    original_unlink = Path.unlink
+    def deny_old_draft(path, *args, **kwargs):
+        if path == old_draft:
+            raise PermissionError("draft removal denied")
+        return original_unlink(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", deny_old_draft)
+    async def replace():
+        async with httpx.AsyncClient(transport=transport()) as client:
+            return await run_repetition(project, Scope(), http_client=client, screening_enabled=True, replace_draft=True)
+    result = asyncio.run(replace())
+    assert result["warnings"] and "draft removal denied" in result["warnings"][0]
+    current = current_draft(project)
+    assert current["run_id"] == result["run_id"] != old_id
+    assert old_draft.exists()
+    for run_id, state in [(old_id, "replaced"), (result["run_id"], "pending")]:
+        manifest = read_json(project, project / "runs" / run_id / "manifest.json")
+        assert manifest["status"] == "completed" and manifest["draft_status"] == state

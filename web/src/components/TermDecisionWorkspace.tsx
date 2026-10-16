@@ -311,7 +311,8 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
     setBusy(true);
     setMessage("");
     try {
-      const result = await api<{ terms?: TermsResponse }>(`/api/v1/projects/${project}/terms/decision/${path}`, { method: "POST", body: JSON.stringify({ confirm: true }) });
+      const result = await api<{ terms?: TermsResponse; warnings?: string[] }>(`/api/v1/projects/${project}/terms/decision/${path}`, { method: "POST", body: JSON.stringify({ confirm: true }) });
+      if (result.warnings?.length) await dialogs.alert(result.warnings.join("\n"));
       if (result.terms) await onTerms(result.terms);
       const next = await load();
       if (!next) return;
@@ -340,6 +341,7 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
       </header>
       {review?.draft && <div className="term-decision-warning"><strong>{translate("terms.decisionRevisionWarning", language)}</strong><span>{translate("terms.decisionRevisionWarningHint", language)}</span></div>}
       {message && <Feedback message={message} onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
+      {review?.draft?.warnings.length ? <Feedback message={review.draft.warnings.join("\n")} type="warning" /> : null}
       {loadError && <p className="inline-message error-text"><span>{loadError}</span><button className="quiet-button" type="button" onClick={retryLoad}>{translate("common.retry", language)}</button></p>}
       {reviewLoading ? <p className="diagnostics-empty">{translate("terms.decisionLoading", language)}</p> : <>
         {review?.draft?.final_review_error && <div className="warning-banner"><strong>{translate("terms.decisionFinalReviewFailed", language)}</strong><p>{errorMessage(review.draft.final_review_error, language)}</p></div>}

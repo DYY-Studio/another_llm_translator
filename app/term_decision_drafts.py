@@ -179,6 +179,7 @@ def _read_pending_draft(project: Path) -> dict[str, Any] | None:
         if not path.is_file():
             raise StorageError(f"术语决策 Run 缺少草案：{manifest['run_id']}")
         draft = json.loads(path.read_text(encoding="utf-8"))
+        draft["warnings"] = list(manifest.get("warnings", []))
         draft["rejected_proposal_ids"] = list(manifest.get("rejected_proposal_ids", []))
         if "final_review_error" in manifest:
             draft["final_review_error"] = deepcopy(manifest["final_review_error"])
@@ -367,8 +368,8 @@ def discard_decision_draft(project: Path, *, confirm: bool) -> dict[str, Any]:
     manifest.update(decision_status="discarded", discarded_at=utc_now())
     if "final_review_error" in manifest:
         manifest.update(status="completed", completed_at=utc_now())
-    write_json(project, path, manifest)
-    return {"discarded": True, "run_id": run_id}
+    warnings = write_json(project, path, manifest)
+    return {"discarded": True, "run_id": run_id, "warnings": warnings}
 
 def apply_decision_draft(
     project: Path,
@@ -573,7 +574,7 @@ def rollback_decision(project: Path, *, confirm: bool) -> dict[str, Any]:
         rollback_terms_revision=revision,
         rolled_back_at=utc_now(),
     )
-    write_terminology_decision_state(
+    warnings = write_terminology_decision_state(
         project,
         terms=source_library,
         overrides=source_overrides,
@@ -582,5 +583,6 @@ def rollback_decision(project: Path, *, confirm: bool) -> dict[str, Any]:
     return {
         "run_id": run_id,
         "rolled_back": True,
+        "warnings": warnings,
         "terms_revision": revision,
     }
