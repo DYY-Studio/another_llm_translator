@@ -97,12 +97,20 @@ def response_record_types(
         return ("segment",)
     return ("summary",)
 
-def normalize_llm_response(response: LLMResponse) -> LLMResponse:
+def normalize_llm_response(
+    response: LLMResponse, *, warnings: list[str] | None = None
+) -> LLMResponse:
     embedded = _extract_embedded_reasoning(response.content)
     if response.reasoning_content and embedded.reasoning_content:
         raise ExternalError("LLM 响应同时包含结构化和 content 内嵌思考正文")
+    body = extract_jsonl_content(embedded.content)
+    repaired = _normalize_jsonl_separators(body)
+    if repaired != body and warnings is not None:
+        warning = "已接受逗号分隔的 JSONL 响应"
+        if warning not in warnings:
+            warnings.append(warning)
     return LLMResponse(
-        content=embedded.content,
+        content=repaired if repaired != body else embedded.content,
         finish_reason=response.finish_reason,
         reasoning_content=(response.reasoning_content or embedded.reasoning_content),
     )
@@ -137,6 +145,41 @@ def extract_jsonl_content(content: str) -> str:
             return body
     return normalized.strip()
 
+def _normalize_jsonl_separators(body: str) -> str:
+    """Accept commas between complete JSONL objects without editing their content."""
+    if not re.search(r"}\s*,", body):
+        return body
+    decoder = json.JSONDecoder()
+    rows: list[str] = []
+    used_comma = False
+    position = 0
+    while position < len(body):
+        start = position
+        try:
+            value, position = decoder.raw_decode(body, position)
+        except json.JSONDecodeError:
+            return body
+        row = body[start:position]
+        if not isinstance(value, dict) or "\n" in row:
+            return body
+        rows.append(row)
+        end = position
+        while position < len(body) and body[position].isspace():
+            position += 1
+        if position == len(body):
+            break
+        if body[position] == ",":
+            used_comma = True
+            position += 1
+            while position < len(body) and body[position].isspace():
+                position += 1
+            if position == len(body):
+                return body
+        elif "\n" not in body[end:position]:
+            return body
+    return "\n".join(rows) if used_comma else body
+
+
 def parse_jsonl_document(
     content: str,
     *,
@@ -154,7 +197,7 @@ def parse_jsonl_document(
         raise ValueError("record_type 必须是非空字符串或字符串元组")
     if len(set(allowed_types)) != len(allowed_types):
         raise ValueError("record_type 不能含重复类型")
-    body = extract_jsonl_content(content)
+    body = _normalize_jsonl_separators(extract_jsonl_content(content))
     records: list[dict[str, Any]] = []
     records_by_type: dict[str, list[dict[str, Any]]] = {
         item: [] for item in allowed_types

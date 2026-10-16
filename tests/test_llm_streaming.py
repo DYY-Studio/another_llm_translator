@@ -160,6 +160,23 @@ async def run_client(
 
 
 @pytest.mark.asyncio
+async def test_stream_accepts_comma_separated_jsonl_and_records_warning(tmp_path: Path) -> None:
+    current = streaming_config(tmp_path)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return stream_response(
+            {"choices": [{"delta": {"content": '{"type":"segment","id":"S1","translation":"译文"},'}}]},
+            {"choices": [{"delta": {"content": '{"type":"end"}'}}]},
+            "[DONE]",
+        )
+
+    response, llm, client = await run_client(current, tmp_path, handler)
+    await client.aclose()
+    assert [json.loads(row)["type"] for row in response.content.splitlines()] == ["segment", "end"]
+    assert "已接受逗号分隔的 JSONL 响应" in llm.warnings
+
+
+@pytest.mark.asyncio
 async def test_stream_http_error_reuses_decoded_response_without_double_decompression(
     tmp_path: Path,
 ) -> None:

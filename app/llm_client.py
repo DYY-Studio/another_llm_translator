@@ -668,7 +668,8 @@ class LLMClient:
                         reasoning_content=(
                             "".join(reasoning_parts) if reasoning_parts else None
                         ),
-                    )
+                    ),
+                    warnings=self.warnings,
                 )
             except ExternalError as exc:
                 raise _StreamProtocolError(
@@ -1510,7 +1511,7 @@ class LLMClient:
                 try:
                     parsed = self.adapter.parse_response(response_data)
                     normalized = _apply_debug_content_injections(
-                        normalize_llm_response(parsed), self.config["debug"], self.send_count,
+                        normalize_llm_response(parsed, warnings=self.warnings), self.config["debug"], self.send_count,
                     )
                 except Exception:
                     if diagnostics is not None:
