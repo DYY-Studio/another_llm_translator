@@ -1837,7 +1837,8 @@ async def test_summary_format_retry_adds_no_guidance(
     assert calls == 2
     parent, child = diagnostics.snapshot()["requests"]["items"]
     assert parent["status"] == "failed"
-    assert parent["error"] == "format_error"
+    assert parent["error"] == "response_incomplete"
+    assert "缺少最终 end" in diagnostics.request_detail(parent["request_id"])["error_detail"]
     assert child["parent_request_id"] == parent["request_id"]
     summary_run = next(
         item for item in read_summary_runs(project) if item["run_id"] == result["run_id"]

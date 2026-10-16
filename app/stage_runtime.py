@@ -962,7 +962,7 @@ async def _localized_request_loop(
             continue
         diagnostics = current_diagnostics()
         if diagnostics is not None:
-            diagnostics.fail_request(request_id, "format_error")
+            diagnostics.fail_jsonl_request(request_id, response.content, record_type="segment", expected_ids=list(id_map), errors=parse_errors)
         logger.warning(
             "format correction request=%s attempt=%d unresolved=%d errors=%d",
             request_id,

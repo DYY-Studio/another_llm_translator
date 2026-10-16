@@ -1634,7 +1634,7 @@ async def run_terminology(
                 return len(unresolved), 0
             diagnostics = current_diagnostics()
             if diagnostics is not None:
-                diagnostics.fail_request(request_id, "format_error")
+                diagnostics.fail_jsonl_request(request_id, response.content, record_type=response_record_types(failed_class), errors=parsed.errors)
             if (
                 not envelope_ok
                 and response_mode is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY
@@ -1756,7 +1756,7 @@ async def run_terminology(
             if not response_complete:
                 diagnostics = current_diagnostics()
                 if diagnostics is not None:
-                    diagnostics.fail_request(request_id, "format_error")
+                    diagnostics.fail_jsonl_request(request_id, response.content, record_type="term", errors=parse_errors)
                 logger.warning(
                     "format correction request=%s attempt=%d errors=%d",
                     request_id,

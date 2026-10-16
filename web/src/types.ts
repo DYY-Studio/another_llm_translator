@@ -519,6 +519,7 @@ export interface DiagnosticsRequestDetail {
     truncated: boolean;
   }>;
   response_content: string | null;
+  error_detail?: string | null;
   response_content_truncated: boolean;
   reasoning_content: string | null;
   reasoning_content_truncated: boolean;

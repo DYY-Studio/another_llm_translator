@@ -19,6 +19,32 @@ from app.web import create_app
 from tests.test_execution import config
 
 
+@pytest.mark.parametrize("content,expected_ids,errors,category,detail", [
+    ('{broken}', ["1"], [], "json_format_error", "不是合法 JSON 对象"),
+    ('{"type":"segment","id":"1","translation":"译文"}', ["1"], [], "response_incomplete", "缺少最终 end"),
+    ('{"type":"segment","id":"1","translation":"译文"}\n{"type":"end"}', ["1", "2"], [], "response_id_mismatch", "缺失 ID：2"),
+    ('{"type":"segment","id":"1"}\n{"type":"segment","id":"1"}\n{"type":"end"}', ["1"], [], "response_id_mismatch", "重复 ID：1"),
+    ('{"type":"segment","id":"9"}\n{"type":"end"}', ["1"], [], "response_id_mismatch", "未知 ID：9"),
+    ('{"type":"segment","id":"1","translation":1}\n{"type":"end"}', ["1"], ["translation 字段必须是字符串：1"], "response_field_error", "translation 字段必须是字符串：1"),
+])
+def test_jsonl_failure_details_reach_request_list_and_detail(
+    tmp_path, content, expected_ids, errors, category, detail,
+):
+    diagnostics = DiagnosticsHub(tmp_path / "logs" / "app.log")
+    with diagnostics.activate("sample", "translation", task_id="validation"):
+        diagnostics.begin_request(request_id="REQ-VALIDATION", model="test", messages=[], max_attempts=1)
+        diagnostics.complete_request("REQ-VALIDATION", content=content, reasoning_content=None)
+        diagnostics.fail_jsonl_request("REQ-VALIDATION", content, record_type="segment", expected_ids=expected_ids, errors=errors)
+        summary = diagnostics.snapshot()["requests"]["items"][0]
+        request = diagnostics.request_detail("REQ-VALIDATION")
+        assert summary["status"] == "failed"
+        assert summary["error"] == category
+        assert "error_detail" not in summary
+        assert detail in request["error_detail"]
+        if category == "response_id_mismatch":
+            assert f"请求 {len(expected_ids)} 条，返回" in request["error_detail"]
+
+
 @pytest.mark.parametrize("samples,expected_usage,expected_rate", [
     (2, {"input_tokens": 20, "output_tokens": 4, "total_tokens": 24, "available": True, "partial": False}, 4.0),
     (1, {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "available": False, "partial": True}, None),
@@ -70,7 +96,8 @@ async def test_format_retry_reports_parent_result_and_direct_source(tmp_path: Pa
         assert len(requests) == 2
         parent, child = sorted(requests, key=lambda item: item["timestamp"])
         assert parent["status"] == "failed"
-        assert parent["error"] == "format_error"
+        assert parent["error"] == "json_format_error"
+        assert "不是合法 JSON 对象" in diagnostics.request_detail(parent["request_id"])["error_detail"]
         assert parent["parent_request_id"] is None
         assert child["parent_request_id"] == parent["request_id"]
         assert diagnostics.request_detail(child["request_id"])["parent_request_id"] == parent["request_id"]

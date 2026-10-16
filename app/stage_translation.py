@@ -80,8 +80,11 @@ def _parse_translation_items(
         if segment_id not in expected:
             errors.append(f"未知 ID：{segment_id}")
             continue
-        if counts[segment_id] != 1 or not isinstance(translation, str):
-            errors.append(f"重复或字段错误：{segment_id}")
+        if counts[segment_id] != 1:
+            errors.append(f"重复 ID：{segment_id}")
+            continue
+        if not isinstance(translation, str):
+            errors.append(f"translation 字段必须是字符串：{segment_id}")
             continue
         valid[segment_id] = translation
     unresolved = [segment_id for segment_id in expected_ids if segment_id not in valid]

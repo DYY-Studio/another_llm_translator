@@ -7,7 +7,7 @@ import json
 import math
 import time
 import uuid
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .request_overview import llm_overview
+from .llm_response import parse_jsonl_document
 
 from .logging_utils import (
     _HANDLER_MARKER,
@@ -242,6 +243,7 @@ class Diagnostics:
             "_usage_samples": 0,
             "_usage_complete": True,
             "error": None,
+            "error_detail": None,
             "detail_available": True,
             "_revision": 0,
         }
@@ -477,12 +479,40 @@ class Diagnostics:
         request["_usage_complete"] &= complete
         self._touch_request(request)
 
-    def fail_request(self, request_id: str, error: str, *, interrupted: bool = False) -> None:
+    def fail_request(self, request_id: str, error: str, *, interrupted: bool = False, detail: str | None = None) -> None:
         request = self._request(request_id)
         if request is not None:
+            request["error_detail"] = _bounded(detail, _MESSAGE_LIMIT)[0] if detail else None
             if request["attempts"] and request["request_kind"] == "llm":
                 request["attempts"][-1]["outcome"] = error
             self._finish_request(request, status="interrupted" if interrupted else "failed", error=error)
+
+    def fail_jsonl_request(
+        self, request_id: str, content: str, *, record_type: str | tuple[str, ...],
+        expected_ids: list[str] | None = None, errors: list[str] | tuple[str, ...] = (),
+    ) -> None:
+        document = parse_jsonl_document(content, record_type=record_type)
+        messages = list(dict.fromkeys([*document.errors, *errors]))
+        if set(document.error_codes) - {"missing_end"}:
+            category = "json_format_error"
+        elif not document.has_valid_end:
+            category = "response_incomplete"
+        else:
+            category = "response_field_error"
+            if expected_ids is not None:
+                counts = Counter(row["id"] for row in document.records if isinstance(row.get("id"), str))
+                if counts != Counter(expected_ids):
+                    category = "response_id_mismatch"
+                    messages.insert(0, f"请求 {len(expected_ids)} 条，返回 {len(document.records)} 条")
+                    for label, ids in (
+                        ("缺失 ID", [value for value in expected_ids if value not in counts]),
+                        ("重复 ID", [value for value, count in counts.items() if count > 1]),
+                        ("未知 ID", sorted(counts.keys() - set(expected_ids))),
+                    ):
+                        if ids:
+                            shown = ", ".join(ids[:12])
+                            messages.append(f"{label}：{shown}" + (f"（共 {len(ids)} 个）" if len(ids) > 12 else ""))
+        self.fail_request(request_id, category, detail="\n".join(messages))
 
     def request_detail(self, request_id: str) -> dict[str, Any]:
         request = self._request(request_id)
@@ -848,12 +878,12 @@ class DiagnosticsHub(Diagnostics):
             return
         super().record_request_usage(request_id, usage, complete=complete)
 
-    def fail_request(self, request_id: str, error: str, *, interrupted: bool = False) -> None:
+    def fail_request(self, request_id: str, error: str, *, interrupted: bool = False, detail: str | None = None) -> None:
         target = self._active_session()
         if target is not None:
-            target.fail_request(request_id, error, interrupted=interrupted)
+            target.fail_request(request_id, error, interrupted=interrupted, detail=detail)
             return
-        super().fail_request(request_id, error, interrupted=interrupted)
+        super().fail_request(request_id, error, interrupted=interrupted, detail=detail)
 
     @contextmanager
     def activate(

@@ -55,7 +55,7 @@ function clock(value: string, language: Language) {
 }
 
 function requestStatusLabel(request: Pick<DiagnosticsRequestSummary, "status" | "error">, language: Language) {
-  if (request.status === "failed" && ["format_error", "empty_response_unknown", "empty_response_truncated", "context_length_error"].includes(request.error ?? "")) {
+  if (request.status === "failed" && ["format_error", "json_format_error", "response_incomplete", "response_id_mismatch", "response_field_error", "empty_response_unknown", "empty_response_truncated", "context_length_error"].includes(request.error ?? "")) {
     return translate(`reqResult.${request.error}`, language);
   }
   return translate(`reqStatus.${request.status}`, language);
@@ -579,6 +579,7 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
                   {(["input_tokens", "output_tokens", "total_tokens"] as const).map((metric, index) => <span key={metric}>{translate(`diagnostics.${["inputTokens", "outputTokens", "totalTokens"][index]}`, language)} <strong>{detail.usage.available || detail.usage.partial ? `${detail.usage.partial ? "≥ " : ""}${number(detail.usage[metric], language)}` : "—"}</strong></span>)}
                   {detail.transport === "sse" && <span>{translate("diagnostics.streamProgress", language)} <strong>{detail.stream_event_count} events · {bytes(detail.stream_received_bytes, language)}{detail.stream_first_event_latency_ms === null ? "" : ` · ${detail.stream_first_event_latency_ms} ms first`}</strong></span>}
                 </div>
+                {detail.error_detail && <div className="warning-banner" style={{ whiteSpace: "pre-wrap" }}>{detail.error_detail}</div>}
                 {detailTab === "overview" && <RequestOverview snapshot={detail.overview} truncated={detail.overview_truncated || detail.response_content_truncated} language={language} />}
                 {detailTab === "request" && (
                   <div className="exchange-request-detail">
