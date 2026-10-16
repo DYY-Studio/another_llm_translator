@@ -453,6 +453,7 @@ export interface DiagnosticsResponse {
   metrics: {
     project: string | null;
     stage: string | null;
+    elapsed_seconds: number;
     active_requests: number;
     total_requests: number;
     http_errors: number;

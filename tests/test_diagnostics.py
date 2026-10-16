@@ -134,6 +134,7 @@ def test_throughput_uses_current_invocation_usage(
     assert metrics["throughput_input_tokens_per_second"] == 6
     assert metrics["throughput_output_tokens_per_second"] == 2.5
     assert metrics["throughput_tokens_per_second"] == 8.5
+    assert metrics["elapsed_seconds"] == 2
 
 
 def test_diagnostics_keeps_bounded_global_logs_and_filters(tmp_path: Path) -> None:

@@ -382,12 +382,12 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
     setSelectedActivity(null);
     setPausedDecisionRequests(null);
   }
-  const throughput = metrics
+  const throughput = metrics && metrics.elapsed_seconds > 0 && (usage?.available || usage?.partial)
     ? {
-        input: metrics.throughput_input_tokens_per_second,
-        output: metrics.throughput_output_tokens_per_second,
-        total: metrics.throughput_tokens_per_second,
-      }[throughputMetric]
+        input: usage.input_tokens,
+        output: usage.output_tokens,
+        total: usage.total_tokens,
+      }[throughputMetric] / metrics.elapsed_seconds
     : null;
 
   function changeThroughputMetric(metric: ThroughputMetric) {

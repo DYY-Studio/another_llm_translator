@@ -660,6 +660,7 @@ class Diagnostics:
             "metrics": {
                 "project": self.project,
                 "stage": self.stage,
+                "elapsed_seconds": elapsed,
                 "active_requests": self.active_requests,
                 "total_requests": self.total_requests,
                 "http_errors": self.http_errors,
@@ -1115,6 +1116,7 @@ class DiagnosticsHub(Diagnostics):
             "metrics": {
                 "project": metric_project,
                 "stage": metric_stage,
+                "elapsed_seconds": elapsed,
                 "active_requests": active_requests,
                 "total_requests": total_requests,
                 "http_errors": http_errors,
