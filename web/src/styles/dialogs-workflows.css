@@ -270,7 +270,9 @@
 .feedback-notice > span { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
 .feedback-notice > button { flex: none; min-height: 24px; padding: 0 6px; }
 .feedback-error { border-color: var(--danger); }
-.feedback-success { border-color: var(--success); }
+.feedback-success { position: relative; overflow: hidden; border-color: var(--success); }
+.feedback-countdown { position: absolute; bottom: 0; left: 0; width: 100%; height: 3px; background: var(--success); transform-origin: left; animation: feedback-countdown linear forwards; }
+@keyframes feedback-countdown { to { transform: scaleX(0); } }
 .feedback-warning { border-color: var(--warning-border); color: var(--warning-text); }
 .continuous-run-footer { flex: none; padding: 14px 24px 16px; border-top: 1px solid var(--border); background: var(--surface); }
 .continuous-run-footer .modal-actions { margin-top: 12px; }

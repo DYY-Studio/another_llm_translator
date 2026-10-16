@@ -4,6 +4,7 @@ import { detectLanguage, translate } from "../i18n";
 import { Modal } from "./Modal";
 
 type NoticeType = "success" | "error" | "warning";
+const SUCCESS_NOTICE_DURATION = 5000;
 type Notice = { id: number; text: string; type: NoticeType; onDismiss?: () => void };
 type Question = { text: string; kind: "confirm" | "prompt" | "alert"; resolve: (value: string | null) => void };
 const InteractionContext = createContext<{
@@ -36,12 +37,13 @@ export function Feedback({ message, type = "error", onDismiss }: { message: stri
 function NoticeItem({ notice, dismiss }: { notice: Notice; dismiss: (id: number) => void }) {
   useEffect(() => {
     if (notice.type !== "success") return;
-    const timer = window.setTimeout(() => { dismiss(notice.id); notice.onDismiss?.(); }, 5000);
+    const timer = window.setTimeout(() => { dismiss(notice.id); notice.onDismiss?.(); }, SUCCESS_NOTICE_DURATION);
     return () => window.clearTimeout(timer);
   }, [notice.id, notice.type, dismiss]);
   return <div className={`feedback-notice feedback-${notice.type}`} role={notice.type === "error" ? "alert" : "status"}>
     <span>{notice.text}</span>
     <button type="button" className="quiet-button" aria-label={translate("common.dismiss", detectLanguage())} onClick={() => { dismiss(notice.id); notice.onDismiss?.(); }}>×</button>
+    {notice.type === "success" && <div className="feedback-countdown" aria-hidden="true" style={{ animationDuration: `${SUCCESS_NOTICE_DURATION}ms` }} />}
   </div>;
 }
 
