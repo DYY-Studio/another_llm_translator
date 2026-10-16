@@ -1062,10 +1062,13 @@ export interface ProjectConfig {
     case_insensitive: boolean;
     max_terms_per_segment: number;
     alias_primary_collision: "conflict" | "merge";
+    sourced_description_injection: "none" | "prefer_previous" | "all";
+    unsourced_description_injection: "none" | "when_no_sourced" | "all";
   };
   terminology_decision: {
     allow_soft_target_overflow: boolean;
     anchor_overflow_mode: "error" | "trim" | "compact";
+    description_generation: "sourced" | "sourced_and_summary" | "summary_only";
   };
   validation: {
     translation: {

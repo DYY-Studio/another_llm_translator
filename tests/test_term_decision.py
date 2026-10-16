@@ -379,6 +379,7 @@ def test_decision_config_migrates_defaults_and_cli_contract(tmp_path: Path) -> N
     assert config["terminology_decision"] == {
         "allow_soft_target_overflow": True,
         "anchor_overflow_mode": "error",
+        "description_generation": "sourced",
     }
     config["terminology_decision"] = "invalid"
     with pytest.raises(ConfigError, match="配置节必须是表"):

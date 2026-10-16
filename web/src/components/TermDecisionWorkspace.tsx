@@ -104,6 +104,7 @@ function ProposalCard({ proposal, rejected, busy, running, language, onToggle, o
           <strong>{proposal.after.find((term) => term.normalized === root)?.source ?? root}</strong>
           {(aggregate?.items ?? []).map((item, index) => <div key={index}>
             <p>{item.text}</p>
+            {item.fragment_ids.length === 0 && <small>{translate("knowledge.noSource", language)}</small>}
             {item.fragment_ids.map((id) => {
               const fragment = proposal.knowledge_evidence[id];
               return <details key={id}><summary>{translate("knowledge.references", language)}: {fragment?.text ?? id}</summary>

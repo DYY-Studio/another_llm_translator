@@ -308,10 +308,31 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <ToggleField label={translate("settings.caseInsensitive", language)} checked={config.terminology.case_insensitive} help={translate("settings.casefoldHint", language)} onChange={(value) => update((draft) => { draft.terminology.case_insensitive = value; })} />
           <NumberField label={translate("settings.maxTermsPerSegment", language)} value={config.terminology.max_terms_per_segment} min={1} step={1} help={translate("settings.maxTermsPerSegmentHint", language)} onChange={(value) => update((draft) => { draft.terminology.max_terms_per_segment = value; })} />
           <Field label={translate("settings.aliasCollision", language)} help={translate("settings.aliasCollisionHint", language)}><select value={config.terminology.alias_primary_collision} onChange={(event) => update((draft) => { draft.terminology.alias_primary_collision = event.target.value as ProjectConfig["terminology"]["alias_primary_collision"]; })}><option value="conflict">{translate("settings.requireReview", language)}</option><option value="merge">{translate("settings.deterministicMerge", language)}</option></select></Field>
+          <Field label={translate("settings.sourcedDescriptionInjection", language)} help={translate("settings.sourcedDescriptionInjectionHint", language)}>
+            <select value={config.terminology.sourced_description_injection} onChange={(event) => update((draft) => { draft.terminology.sourced_description_injection = event.target.value as ProjectConfig["terminology"]["sourced_description_injection"]; })}>
+              <option value="none">{translate("settings.descriptionNone", language)}</option>
+              <option value="prefer_previous">{translate("settings.descriptionPreferPrevious", language)}</option>
+              <option value="all">{translate("settings.descriptionAll", language)}</option>
+            </select>
+          </Field>
+          <Field label={translate("settings.unsourcedDescriptionInjection", language)} help={translate("settings.unsourcedDescriptionInjectionHint", language)}>
+            <select value={config.terminology.unsourced_description_injection} onChange={(event) => update((draft) => { draft.terminology.unsourced_description_injection = event.target.value as ProjectConfig["terminology"]["unsourced_description_injection"]; })}>
+              <option value="none">{translate("settings.descriptionNone", language)}</option>
+              <option value="when_no_sourced">{translate("settings.descriptionWhenNoSourced", language)}</option>
+              <option value="all">{translate("settings.descriptionAll", language)}</option>
+            </select>
+          </Field>
         </ConfigSection>
         <ConfigSection title={translate("settings.terminologyDecision", language)} description={translate("settings.terminologyDecisionHint", language)}>
           <ToggleField label={translate("settings.allowSoftTargetOverflow", language)} checked={config.terminology_decision.allow_soft_target_overflow} help={translate("settings.allowSoftTargetOverflowHint", language)} onChange={(value) => update((draft) => { draft.terminology_decision.allow_soft_target_overflow = value; })} />
           <Field label={translate("settings.anchorOverflowMode", language)} help={translate("settings.anchorOverflowModeHint", language)}><select value={config.terminology_decision.anchor_overflow_mode} onChange={(event) => update((draft) => { draft.terminology_decision.anchor_overflow_mode = event.target.value as ProjectConfig["terminology_decision"]["anchor_overflow_mode"]; })}><option value="error">{translate("settings.anchorOverflowError", language)}</option><option value="trim">{translate("settings.anchorOverflowTrim", language)}</option><option value="compact">{translate("settings.anchorOverflowCompact", language)}</option></select></Field>
+          <Field label={translate("settings.descriptionGeneration", language)} help={translate("settings.descriptionGenerationHint", language)}>
+            <select value={config.terminology_decision.description_generation} onChange={(event) => update((draft) => { draft.terminology_decision.description_generation = event.target.value as ProjectConfig["terminology_decision"]["description_generation"]; })}>
+              <option value="sourced">{translate("settings.descriptionSourced", language)}</option>
+              <option value="sourced_and_summary">{translate("settings.descriptionSourcedAndSummary", language)}</option>
+              <option value="summary_only">{translate("settings.descriptionSummaryOnly", language)}</option>
+            </select>
+          </Field>
         </ConfigSection>
         <ConfigSection title={translate("settings.validation", language)} description={translate("settings.validationHint", language)}>
           {validatorPhases.filter((phase) => validatorRows.some((item) => item.phase === phase)).map((phase) => <div className="validator-settings-group" key={phase}>
