@@ -849,7 +849,7 @@ export function TermsView({
 
   return (
     <div className="terms-workspace">
-      <Feedback message={message} type={messageType} onDismiss={() => setMessage("")} />
+      <Feedback message={message} type={messageType} onDismiss={() => setMessageText((current) => current === message ? "" : current)} />
       <section className="terms-browser">
         <div className="term-toolbar">
           <div className="term-primary">

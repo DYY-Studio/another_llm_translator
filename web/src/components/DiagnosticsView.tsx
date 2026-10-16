@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, 
 import { api } from "../api";
 import { RequestOverview } from "./RequestOverview";
 import { HistoricalDiagnosticsView } from "./HistoricalDiagnosticsView";
+import { Modal } from "./Modal";
 import type {
   DecisionActivity,
   DiagnosticsRequestDetail,
@@ -322,18 +323,6 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
     }
   }, [autoScroll, value?.logs]);
 
-  useEffect(() => {
-    if (!selectedRequest && !selectedActivity) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        if (selectedRequest) setSelectedRequest(null);
-        else setSelectedActivity(null);
-      }
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [selectedRequest, selectedActivity]);
-
   const openDetail = useCallback((requestId: string) => {
     setSelectedRequest(requestId);
     setDetail(null);
@@ -523,8 +512,7 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
         </section>
       </div>
 
-      {selectedActivity && !selectedRequest && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeActivity(); }}>
-        <section className="modal exchange-dialog decision-dialog" role="dialog" aria-modal="true" aria-label={translate("diagnostics.decisionDetails", language)}>
+      {selectedActivity && !selectedRequest && <Modal className="exchange-dialog decision-dialog" ariaLabel={translate("diagnostics.decisionDetails", language)} onClose={closeActivity}>
           <header className="exchange-dialog-heading">
             <div><h2>{translate("diagnostics.decisionDetails", language)}</h2><code>{selectedActivity.project} · {selectedActivity.model}</code></div>
             <div className="button-group">
@@ -550,17 +538,10 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
             <span>{currentDecisionPage + 1} / {decisionPageCount}</span>
             <button className="quiet-button" disabled={currentDecisionPage + 1 >= decisionPageCount} onClick={() => setDecisionPage(currentDecisionPage + 1)}>{translate("diagnostics.history.next", language)}</button>
           </div>
-        </section>
-      </div>}
+      </Modal>}
 
       {selectedRequest && (
-        <div
-          className="modal-backdrop"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) closeDetail();
-          }}
-        >
-          <section className="modal exchange-dialog request-overview-dialog" role="dialog" aria-modal="true" aria-labelledby="exchange-dialog-title">
+        <Modal className="exchange-dialog request-overview-dialog" ariaLabel={translate("diagnostics.detailsTitle", language)} onClose={closeDetail}>
             <header className="exchange-dialog-heading">
               <div>
                 <h2 id="exchange-dialog-title">{translate("diagnostics.detailsTitle", language)}</h2>
@@ -655,8 +636,7 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
                 )}
               </div>
             )}
-          </section>
-        </div>
+        </Modal>
       )}
     </div>
   );
