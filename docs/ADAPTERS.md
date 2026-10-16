@@ -350,7 +350,7 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 ### 实体说明决策与接口
 
-名称与关系确定后，`phase: "knowledge"` 发送 `target_language` 和 `entities` 数组；各实体包含 `entity`、`members`、`current_items` 和全部有效 `fragments`。片段包含整次请求内唯一的短 ID（如 `K1`）、原归属、当前归属、说明及来源范围。实体证据完整且不可拆分，按现有软目标、硬限制和安全系数装箱，批次共用现有并发调度与 KeyPool。超限实体单独失败。Prompt 使用独立资源 `terminology_knowledge` 的中段，不携带名称与关系决策中段；该资源不是独立执行阶段或模型设置。
+名称与关系确定后，`phase: "knowledge"` 发送 `target_language`、`description_generation` 和 `entities` 数组；各实体包含 `entity`、`members`、`current_items` 和全部有效 `fragments`。片段包含整次请求内唯一的短 ID（如 `K1`）、原归属、当前归属、说明及来源范围。实体证据完整且不可拆分，按现有软目标、硬限制和安全系数装箱，批次共用现有并发调度与 KeyPool。超限实体单独失败。Prompt 使用独立资源 `terminology_knowledge` 的中段，不携带名称与关系决策中段；该资源不是独立执行阶段或模型设置。
 
 请求中的 `source_range` 将连续源文表示为区间，每项包含 `file_id`、`part_id`、`first: {position, start}` 和 `last: {position, end}`。`position` 是从 0 开始的 Segment 位置，偏移是首尾 Segment 内的字符位置，`end` 为不包含端点。跨文件、分部、位置间断或切片空缺分别保留。无来源片段为 `null`。持久化来源和引用校验仍使用完整 Segment 范围。
 
@@ -361,11 +361,13 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 {"type":"end"}
 ```
 
-字段严格校验，条目文字非空且引用非空。完整文档中的缺失或重复实体、非法条目、未知或跨实体引用仅使对应实体失败；成功实体立即保存检查点，只重试未完成实体，格式反馈纳入预算并重新分批。未知实体、损坏 JSONL 或缺少终止记录使整次响应无效。停用或失效证据不发送。宿主将短引用转换为持久化 `fragment_ids`；扫描片段以候选记录 ID 和条目序号标识，并关联原 Segment、实际输入切片范围及原文/模型输入摘要。
+`description_generation` 为 `sourced` 时使用上述格式；`sourced_and_summary` 额外要求一个非空字符串 `summary`，概括全部有效证据中的核心信息；`summary_only` 要求 `items` 为空且 `summary` 为一份非空精简总结。总结保存为 `fragment_ids: []` 的无来源条目，不加入原始证据集，宿主单独记录其证据依赖以保持过期检查。
+
+字段严格校验，`items` 中条目文字非空且引用非空。完整文档中的缺失或重复实体、非法条目、未知或跨实体引用仅使对应实体失败；成功实体立即保存检查点，只重试未完成实体，格式反馈纳入预算并重新分批。未知实体、损坏 JSONL 或缺少终止记录使整次响应无效。停用或失效证据不发送。宿主将短引用转换为持久化 `fragment_ids`；扫描片段以候选记录 ID 和条目序号标识，并关联原 Segment、实际输入切片范围及原文/模型输入摘要。
 
 术语查询附加 `entity_key`、`knowledge_status`（`current`、`pending`、`stale`）、`description_items`，保留只读 `description` 投影。条目只返回 `text` 和 `fragment_ids`。`GET /api/v1/projects/{name}/terms/knowledge?normalized=...` 返回条目、片段和导航所需的引用范围，不暴露来源摘要。
 
-翻译、校对、润色和联合粗翻的 `entity_knowledge.items` 提供 `text`、`source_relation` 和布尔 `unsourced`，每个命中实体只提供一次全部已应用条目。`source_relation` 最多包含三个指示，例如 `["before 1", "within", "after 2"]`；无来源说明使用空数组及 `unsourced: true`，混合引用同时保留相对关系和无来源标记。位置以本次待处理源文的首尾范围为准，使用原 Segment 位置和实际切片偏移，结束偏移不包含端点；范围内空缺归为 `within`，参考上下文不扩大范围。`before`、`after` 分别按同一实体各条目的最早相关证据位置升序编号，同位置同号，`within` 不编号。位置和编号表示证据先后，不表示事实生效范围或事件时间。生成请求不发送具体来源区间或当前位置数组；持久来源、实体详情和导航保留完整范围。
+翻译、校对、润色和联合粗翻的 `entity_knowledge.items` 提供 `text`、`source_relation` 和布尔 `unsourced`，每个命中实体只提供一次按注入策略筛选后的已应用条目，筛选语义见 [产品规格](MINIMAL.md#实体说明实验)。`source_relation` 最多包含三个指示，例如 `["before 1", "within", "after 2"]`；无来源说明使用空数组及 `unsourced: true`，混合引用同时保留相对关系和无来源标记。位置以本次待处理源文的首尾范围为准，使用原 Segment 位置和实际切片偏移，结束偏移不包含端点；范围内空缺归为 `within`，参考上下文不扩大范围。`before`、`after` 分别按同一实体各条目的最早相关证据位置升序编号，同位置同号，`within` 不编号。位置和编号表示证据先后，不表示事实生效范围或事件时间。生成请求不发送具体来源区间或当前位置数组；持久来源、实体详情和导航保留完整范围。
 
 `PUT` 同一路径使用现有写锁和事务，必须提供 `normalized`、`expected_revision`、`action`，操作字段分别为：
 

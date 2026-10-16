@@ -550,7 +550,11 @@ def decision_plan(
     ]
     from .term_knowledge import entity_members, entity_view, evidence as knowledge_evidence
     known_fragments = knowledge_evidence(project, library)
-    if not eligible and all(entity_view(project, library, key, all_evidence=known_fragments)["status"] == "current" for key in entity_members(library)):
+    generation = config["terminology_decision"]["description_generation"]
+    knowledge_views = [entity_view(project, library, root, all_evidence=known_fragments) for root in entity_members(library)]
+    knowledge_views = [view for view in knowledge_views
+                       if view["status"] != "current" or view["description_generation"] != generation]
+    if not eligible and not knowledge_views:
         raise UsageError("已发布术语全部受到人工 override 保护")
     evidence = _batches.collect_term_evidence(
         project, list(library.get("terms", [])), config
@@ -595,8 +599,6 @@ def decision_plan(
         conflicts=source_conflicts,
     )
     from .term_knowledge import pack_knowledge_batches
-    knowledge_views = [entity_view(project, library, root, all_evidence=known_fragments) for root in entity_members(library)]
-    knowledge_views = [view for view in knowledge_views if view["status"] != "current"]
     knowledge_batches, knowledge_tokens, _ = pack_knowledge_batches(knowledge_views, prompts["knowledge"], config)
     return {
         "library": library,
@@ -1330,7 +1332,10 @@ async def run_terminology_decision(
             known_fragments = knowledge_evidence(project, knowledge_library)
             views = [entity_view(project, knowledge_library, root, all_evidence=known_fragments) for root in entity_members(knowledge_library)]
             unresolved_names = {key for key, decision in decisions.items() if decision["action"] == "needs_review"}
-            targets = [view for view in views if view["status"] != "current" and not set(view["members"]) & unresolved_names]
+            generation = config["terminology_decision"]["description_generation"]
+            targets = [view for view in views
+                       if (view["status"] != "current" or view["description_generation"] != generation)
+                       and not set(view["members"]) & unresolved_names]
             total = len(eligible) * 2 + final_review_target_count + len(containment_focus) + len(targets)
             cached = checkpoint["phases"]["knowledge"]
             already_cached = set(cached)
@@ -1338,7 +1343,8 @@ async def run_terminology_decision(
             def accept_knowledge(view: dict[str, Any], result: dict[str, Any]) -> None:
                 nonlocal completed
                 root = view["entity_key"]
-                save_items(project, knowledge_library, root, result["items"], all_evidence=known_fragments)
+                save_items(project, knowledge_library, root, result["items"], all_evidence=known_fragments,
+                           description_generation=generation)
                 knowledge_updates[root] = {"aggregate": deepcopy(knowledge_library["knowledge"]["entities"][root]),
                                            "members": view["members"], "reason": result["reason"],
                                            "owner_moves": {old: new for old, new in owner_moves.items() if new in view["members"]}}

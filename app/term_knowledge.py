@@ -191,6 +191,7 @@ def _entity_view(
     saved = require_knowledge(library)["entities"].get(root)
     items = deepcopy(saved["items"]) if saved else []
     refs = {key for item in items for key in item["fragment_ids"]}
+    refs.update(saved.get("summary_fragment_ids", []) if saved else [])
     referenced = [known[key] for key in refs if key in known]
     active_order = _source_order([f for f in fragments if f["state"] == "active"])
     previous_ranges = {tuple(r) for r in saved["source_order"]} if saved else set()
@@ -206,10 +207,11 @@ def _entity_view(
     if require_current and stale:
         raise UsageError(f"实体说明已过期，请更新后再执行：{root}")
     for item in items:
-        item["sources"] = [known[key]["source_range"] for key in item["fragment_ids"] if key in known]
+        item["sources"] = [known[key]["source_range"] for key in item["fragment_ids"] if key in known] or [None]
     return {"entity_key": root, "members": members, "status": status, "items": items,
             "fragments": fragments, "input_version": version,
-            "source_order": active_order}
+            "source_order": active_order,
+            "description_generation": saved.get("description_generation", "sourced") if saved else "sourced"}
 
 
 def validate_items(view: dict[str, Any], items: Any, *, allow_manual: bool = False) -> list[dict[str, Any]]:
@@ -238,13 +240,14 @@ def add_unsourced(knowledge: dict[str, Any], owner: str, text: str, origin: str)
 
 
 def save_items(project: Path, library: dict[str, Any], normalized: str, items: Any, *,
-               all_evidence: dict[str, dict[str, Any]] | None = None) -> None:
+               all_evidence: dict[str, dict[str, Any]] | None = None,
+               description_generation: str | None = None) -> None:
     known = all_evidence if all_evidence is not None else evidence(project, library)
     view = entity_view(project, library, normalized, all_evidence=known)
     clean = validate_items(view, items, allow_manual=True)
     knowledge = require_knowledge(library)
     for item in clean:
-        if not item["fragment_ids"]:
+        if not item["fragment_ids"] and description_generation is None:
             key = add_unsourced(knowledge, view["entity_key"], item["text"], "manual")
             item["fragment_ids"] = [key]
             known[key] = {**knowledge["fragments"][key], "id": key, "source_range": None, "valid": True, "_positions": {}}
@@ -253,6 +256,11 @@ def save_items(project: Path, library: dict[str, Any], normalized: str, items: A
         "items": clean, "members": view["members"], "input_version": view["input_version"],
         "source_order": view["source_order"],
     }
+    if description_generation is not None:
+        knowledge["entities"][view["entity_key"]]["description_generation"] = description_generation
+        if description_generation != "sourced":
+            knowledge["entities"][view["entity_key"]]["summary_fragment_ids"] = [
+                f["id"] for f in view["fragments"] if f["state"] == "active" and f["valid"]]
 
 
 def confirm_keep(project: Path, library: dict[str, Any], normalized: str, *,
@@ -305,7 +313,7 @@ def compact_source_ranges(ranges: list[dict[str, Any]] | None, positions: dict[s
     return groups or None
 
 
-def knowledge_payload(views: list[dict[str, Any]], target_language: str) -> tuple[dict[str, Any], dict[str, tuple[str, str]]]:
+def knowledge_payload(views: list[dict[str, Any]], target_language: str, description_generation: str = "sourced") -> tuple[dict[str, Any], dict[str, tuple[str, str]]]:
     refs: dict[str, tuple[str, str]] = {}
     entities = []
     for view in views:
@@ -321,7 +329,8 @@ def knowledge_payload(views: list[dict[str, Any]], target_language: str) -> tupl
         entities.append({"entity": view["entity_key"], "members": view["members"],
                          "current_items": [{"text": item["text"]} for item in view["items"]],
                          "fragments": fragments})
-    return {"phase": "knowledge", "target_language": target_language, "entities": entities}, refs
+    return {"phase": "knowledge", "target_language": target_language,
+            "description_generation": description_generation, "entities": entities}, refs
 
 
 def pack_knowledge_batches(views: list[dict[str, Any]], prompt: str, config: dict[str, Any], *,
@@ -336,7 +345,7 @@ def pack_knowledge_batches(views: list[dict[str, Any]], prompt: str, config: dic
     total = 0
 
     def estimate(group: list[dict[str, Any]]) -> int:
-        payload, _ = knowledge_payload(group, config["project"]["target_language"])
+        payload, _ = knowledge_payload(group, config["project"]["target_language"], config["terminology_decision"]["description_generation"])
         if feedback:
             payload["validation_feedback"] = feedback
         return estimate_messages(render_messages(prompt, payload), float(config["execution"]["token_safety_factor"]))
@@ -369,8 +378,12 @@ def pack_knowledge_batches(views: list[dict[str, Any]], prompt: str, config: dic
     return batches, total, errors
 
 
-def _knowledge_result(view: dict[str, Any], record: dict[str, Any], refs: dict[str, tuple[str, str]]) -> dict[str, Any]:
-    if set(record) != {"type", "entity", "items", "reason"}:
+def _knowledge_result(view: dict[str, Any], record: dict[str, Any], refs: dict[str, tuple[str, str]],
+                      description_generation: str = "sourced") -> dict[str, Any]:
+    fields = {"type", "entity", "items", "reason"}
+    if description_generation != "sourced":
+        fields.add("summary")
+    if set(record) != fields:
         raise UsageError("实体说明响应字段错误")
     if not isinstance(record["reason"], str) or not record["reason"].strip():
         raise UsageError("实体说明响应缺少理由")
@@ -384,7 +397,15 @@ def _knowledge_result(view: dict[str, Any], record: dict[str, Any], refs: dict[s
                 or not all(isinstance(r, str) and r in refs for r in item["refs"])):
             raise UsageError("说明引用必须来自本次实体证据")
         items.append({"text": item["text"], "fragment_ids": [refs[r][1] for r in item["refs"]]})
-    return {"items": validate_items(view, items), "reason": record["reason"], "input_version": view["input_version"]}
+    items = validate_items(view, items)
+    if description_generation == "summary_only" and items:
+        raise UsageError("仅无来源总结模式的 items 必须为空")
+    if description_generation != "sourced":
+        summary = record["summary"]
+        if not isinstance(summary, str) or not summary.strip():
+            raise UsageError("实体总结必须是非空字符串")
+        items.append({"text": summary.strip(), "fragment_ids": []})
+    return {"items": items, "reason": record["reason"], "input_version": view["input_version"]}
 
 
 async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, config: dict[str, Any], *,
@@ -402,7 +423,7 @@ async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, co
         errors.update(oversized)
         retry = []
         for batch in batches:
-            payload, refs = knowledge_payload(batch, config["project"]["target_language"])
+            payload, refs = knowledge_payload(batch, config["project"]["target_language"], config["terminology_decision"]["description_generation"])
             if feedback:
                 payload["validation_feedback"] = feedback
             messages = render_messages(prompt, payload)
@@ -431,7 +452,7 @@ async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, co
                 try:
                     if len(records) != 1:
                         raise UsageError("每个实体必须恰好返回一条 entity_knowledge")
-                    result = _knowledge_result(view, records[0], refs)
+                    result = _knowledge_result(view, records[0], refs, config["terminology_decision"]["description_generation"])
                 except UsageError as exc:
                     errors[root] = str(exc)
                     retry.append(view)

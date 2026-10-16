@@ -494,7 +494,8 @@ def apply_decision_draft(
             view = entity_view(project, term_record, root, all_evidence=known)
             if view["input_version"] != aggregate["input_version"] or any(f["state"] == "active" and not f["valid"] for f in view["fragments"]):
                 raise UsageError("实体说明证据已变化，请重新生成草案")
-            save_items(project, term_record, root, aggregate["items"], all_evidence=known)
+            save_items(project, term_record, root, aggregate["items"], all_evidence=known,
+                       description_generation=aggregate.get("description_generation"))
     project_descriptions(project, term_record, all_evidence=known)
     override_record = record_header(
         "terminology_overrides",

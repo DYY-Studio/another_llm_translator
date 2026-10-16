@@ -245,3 +245,80 @@ async def test_request_failure_preserves_prior_success_and_fatal_errors_propagat
 
     with pytest.raises(FatalExternalError):
         await aggregate_batch(FatalModel(), [view("alpha")], "整理", config, on_result=lambda *_: None)
+
+
+@pytest.mark.asyncio
+async def test_description_generation_modes_apply_without_growing_evidence(tmp_path, monkeypatch):
+    import httpx
+    from app.config import dump_config, load_config
+    from app.sqlite_storage import read_json, write_json, record_header
+    from app.term_decision import run_terminology_decision
+    from app.term_decision_drafts import apply_decision_draft, current_decision_draft
+    from app.term_library import load_terms, term_normalization
+    from app.term_knowledge import empty_knowledge, publish_evidence, entity_view
+    from tests.test_term_knowledge import scan_record
+
+    project = make_project(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    config = load_config(project / "config.toml")
+    term = {"source": "Alpha", "normalized": "alpha", "category": "name", "preferred_translation": "阿尔法",
+            "aliases": [], "group_primary": None, "conflicts": {}}
+    data = {"terms_revision": 1, "terms": [term], "knowledge": empty_knowledge()}
+    publish_evidence(project, data, [scan_record(project, "Alpha is a captain")], term_normalization(config))
+    meta = read_json(project, project / "project.json")
+    write_json(project, project / "terminology/terms.json", record_header("terminology_library", meta["project_id"], **data))
+    overrides = read_json(project, project / "terminology/overrides.json")
+    overrides["overrides"] = [{"normalized": "alpha", "preferred_translation": "阿尔法"}]
+    write_json(project, project / "terminology/overrides.json", overrides)
+    requests = []
+
+    async def handler(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        mode = payload["description_generation"]
+        requests.append(mode)
+        entity = payload["entities"][0]
+        record = {"type": "entity_knowledge", "entity": "alpha", "reason": "整理", "items": []}
+        if mode != "summary_only":
+            record["items"] = [{"text": "详细身份说明", "refs": [entity["fragments"][0]["id"]]}]
+        if mode != "sourced":
+            record["summary"] = "船长"
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([record])}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for mode, expected in [("sourced", ["详细身份说明"]),
+                               ("sourced_and_summary", ["详细身份说明", "船长"]),
+                               ("summary_only", ["船长"])]:
+            config["terminology_decision"]["description_generation"] = mode
+            (project / "config.toml").write_text(dump_config(config))
+            result = await run_terminology_decision(project, http_client=client)
+            assert result["proposals"] == 1
+            proposed = current_decision_draft(project)["proposals"][0]["knowledge_after"]["alpha"]
+            assert [i["text"] for i in proposed["items"]] == expected
+            apply_decision_draft(project, confirm_all=True)
+            published = load_terms(project)
+            view = entity_view(project, published, "alpha")
+            assert view["status"] == "current"
+            assert [i["text"] for i in view["items"]] == expected
+            assert len(published["knowledge"]["fragments"]) == 1
+            if mode != "sourced":
+                assert view["items"][-1]["fragment_ids"] == []
+                assert view["items"][-1]["sources"] == [None]
+    assert requests == ["sourced", "sourced_and_summary", "summary_only"]
+    import sqlite3
+    from app.sqlite_storage import database_path
+    with sqlite3.connect(database_path(project)) as connection:
+        connection.execute("UPDATE segments SET source = 'changed'")
+    assert entity_view(project, published, "alpha")["status"] == "stale"
+
+
+@pytest.mark.parametrize(("mode", "items", "summary"), [
+    ("sourced_and_summary", [], ""),
+    ("summary_only", [{"text": "冗余详情", "refs": ["K1"]}], "总结"),
+    ("sourced_and_summary", [{"text": "无引用", "refs": []}], "总结"),
+])
+def test_description_generation_rejects_invalid_model_output(mode, items, summary):
+    from app.term_knowledge import _knowledge_result
+    from app.errors import UsageError
+    with pytest.raises(UsageError):
+        _knowledge_result(view("alpha"), {"type": "entity_knowledge", "entity": "alpha", "reason": "整理",
+                          "items": items, "summary": summary}, {"K1": ("alpha", "alpha-fragment")}, mode)

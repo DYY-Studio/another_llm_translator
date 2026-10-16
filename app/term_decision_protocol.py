@@ -113,8 +113,8 @@ _PHASE_PROTOCOL = {
 
 
 _KNOWLEDGE_PROTOCOL = {
-    "zh-CN": '为 entities 中每个实体恰好输出一条 {"type":"entity_knowledge","entity":"对应 entity","items":[{"text":"目标语说明","refs":["K1"]}],"reason":"更新理由"}。items 可以为空。允许实体结果乱序。每条说明必须引用对应实体 fragments 中至少一个 id，禁止跨实体引用，不得引用 current_items 或虚构引用。不修改名称、译名或分组。',
-    "en": 'Output exactly one record for each entity in entities: {"type":"entity_knowledge","entity":"input entity","items":[{"text":"target-language explanation","refs":["K1"]}],"reason":"reason"}. items may be empty. Entity records may be unordered. Each item must cite at least one id from its own fragments; cross-entity refs are forbidden; never cite current_items or invent refs. Do not change names, translations or groups.',
+    "zh-CN": '为 entities 中每个实体恰好输出一条 {"type":"entity_knowledge","entity":"对应 entity","items":[{"text":"目标语说明","refs":["K1"]}],"reason":"更新理由"}。items 可以为空。允许实体结果乱序。每条说明必须引用对应实体 fragments 中至少一个 id，禁止跨实体引用，不得引用 current_items 或虚构引用。description_generation 为 sourced 时保持上述格式；为 sourced_and_summary 时额外输出非空字符串 summary，概括该实体全部有效证据中的核心信息，不附来源引用；为 summary_only 时 items 必须为空，只在 summary 中输出一份精简总结。不修改名称、译名或分组。',
+    "en": 'Output exactly one record for each entity in entities: {"type":"entity_knowledge","entity":"input entity","items":[{"text":"target-language explanation","refs":["K1"]}],"reason":"reason"}. items may be empty. Entity records may be unordered. Each item must cite at least one id from its own fragments; cross-entity refs are forbidden; never cite current_items or invent refs. When description_generation is sourced, use the format above. For sourced_and_summary, also output a nonempty summary string condensing core information from all valid entity evidence without source refs. For summary_only, items must be empty and summary must contain one concise summary. Do not change names, translations or groups.',
 }
 
 
