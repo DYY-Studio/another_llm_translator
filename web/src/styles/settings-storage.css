@@ -44,6 +44,8 @@
 .storage-panel-heading > div, .storage-section-heading > div { min-width: 0; }
 .storage-panel-heading h2, .storage-section-heading h3 { margin: 0 0 5px; }
 .storage-panel-heading p, .storage-section-heading p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.storage-project-filter { padding: 0 20px 14px; }
+.storage-project-filter input { width: 100%; }
 .storage-global-list { border-top: 1px solid var(--row-border); }
 .storage-global-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 16px; padding: 13px 16px; border-bottom: 1px solid var(--row-border); }
 .storage-global-row:last-child { border-bottom: 0; }
@@ -76,7 +78,7 @@
 .storage-message { max-width: 1280px; margin: -4px auto 18px; }
 .storage-project-list { max-height: clamp(320px, calc(100vh - 350px), 560px); overflow: auto; }
 .storage-project-list .storage-table th { position: sticky; top: 0; z-index: 1; background: var(--surface); }
-.storage-detail-backdrop { padding: 16px; }
+.modal-backdrop:has(> .storage-detail-modal) { padding: 16px; }
 .modal.storage-detail-modal { width: min(1080px, calc(100vw - 32px)); height: min(820px, calc(100dvh - 32px)); max-height: calc(100dvh - 32px); display: flex; flex-direction: column; overflow: hidden; padding: 0; }
 .storage-detail-heading { flex: none; align-items: center; border-bottom: 1px solid var(--border); }
 .storage-detail-heading code { overflow-wrap: anywhere; }

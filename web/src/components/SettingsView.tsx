@@ -1,3 +1,4 @@
+import { useDialogs, Feedback } from "./InteractionProvider";
 import { Fragment, useLayoutEffect, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
@@ -99,6 +100,7 @@ export function SettingsView({ project, language, focusField, onFocusConsumed }:
 }
 
 function ConfigSettings({ project, scope, language, focusField, onFocusConsumed }: { project: string; scope: ConfigScope; language: Language; focusField: SettingsField | null; onFocusConsumed: () => void }) {
+  const dialogs = useDialogs();
   const [config, setConfig] = useState<ProjectConfig | null>(null);
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
   const [decisionPresets, setDecisionPresets] = useState<DecisionPresetSummary[]>([]);
@@ -197,7 +199,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
   }
 
   async function syncGlobal() {
-    if (!project || !window.confirm(translate("settings.syncConfirm", language))) return;
+    if (!project || !await dialogs.confirm(translate("settings.syncConfirm", language))) return;
     try {
       const result = await api<{ warnings: string[] }>(`/api/v1/projects/${project}/sync-templates`, {
         method: "POST",
@@ -261,8 +263,8 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <button className="primary-button" disabled={saving} onClick={save}>{saving ? translate("common.saving", language) : translate("common.validateSave", language)}</button>
         </div>
       </div>
-      {error != null ? <div className="error-banner" role="alert">{errorMessage(error, language)}</div> : null}
-      {message && <p className="success-text">{message}</p>}
+      {error != null ? <Feedback message={errorMessage(error, language)} onDismiss={() => setError((current: unknown) => current === error ? null : current)} /> : null}
+      {message && <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
       <div className="config-form">
         <ConfigSection title={translate("settings.projectInput", language)} description={translate("settings.projectInputHint", language)}>
           <Field label={translate("settings.targetLanguage", language)}><input ref={targetLanguageRef} value={config.project.target_language} onChange={(event) => update((draft) => { draft.project.target_language = event.target.value; })} /></Field>
@@ -529,8 +531,8 @@ function DecisionPresetSettings({ language }: { language: Language }) {
       </div>}
     </div>
     <section className="preset-editor-body" aria-busy={busy || switchingPreset}>
-      {error && <div className="error-banner">{error}</div>}
-      {message && <p className="success-text">{message}</p>}
+      {error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
+      {message && <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
       {!preset ? <p className="muted">{translate(loading ? "preset.loadingPreset" : "preset.selectHint", language)}</p> : <fieldset className="config-grid preset-fields" disabled={busy || switchingPreset}>
         <Field label={translate("decision.protocol", language)}><select value={preset.protocol} onChange={(event) => changeProtocol(event.target.value as DecisionPreset["protocol"])}><option value="typesafe">TypeSafe</option><option value="openai-decisions">OpenAI Decisions</option><option value="llm">LLM</option></select></Field>
         {preset.protocol === "llm" ? <>
@@ -707,11 +709,11 @@ function PresetSettings({ language }: { language: Language }) {
       </div>
       <section className="preset-editor-body" aria-busy={switchingPreset}>
         {!preset ? (
-          <>{error && <div className="error-banner">{error}</div>}<p className="muted">{presetLoading ? translate("preset.loadingPreset", language) : translate("preset.selectHint", language)}</p></>
+          <>{error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}<p className="muted">{presetLoading ? translate("preset.loadingPreset", language) : translate("preset.selectHint", language)}</p></>
         ) : (
           <>
-            {error && <div className="error-banner">{error}</div>}
-            {message && <p className="success-text">{message}</p>}
+            {error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
+            {message && <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
             <fieldset className="config-grid preset-fields" disabled={switchingPreset}>
               <Field label="Adapter" help={translate("preset.adapterHint", language)}><select value={preset.adapter_id} onChange={(event) => updateConnection((draft) => { draft.adapter_id = event.target.value;
                   const next = adapters.find((item) => item.adapter_id === draft.adapter_id)?.capabilities;
@@ -781,6 +783,7 @@ function PresetSettings({ language }: { language: Language }) {
 }
 
 function CredentialsSettings({ language }: { language: Language }) {
+  const dialogs = useDialogs();
   const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
   const [newId, setNewId] = useState("");
   const [newSecret, setNewSecret] = useState("");
@@ -821,7 +824,7 @@ function CredentialsSettings({ language }: { language: Language }) {
   }
 
   async function remove(item: CredentialSummary) {
-    if (!window.confirm(translate("credentials.deleteConfirm", language, { id: item.id }))) return;
+    if (!await dialogs.confirm(translate("credentials.deleteConfirm", language, { id: item.id }))) return;
     try {
       await api(`/api/v1/credentials/${item.id}`, { method: "DELETE" });
       setMessage(translate("credentials.deleted", language, { id: item.id }));
@@ -844,8 +847,8 @@ function CredentialsSettings({ language }: { language: Language }) {
       <div className="page-heading config-heading settings-action-heading">
         <div><h1>{translate("credentials.title", language)}</h1><p>{translate("credentials.subtitle", language)}</p></div>
       </div>
-      {error && <div className="error-banner">{error}</div>}
-      {message && <p className="success-text">{message}</p>}
+      {error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
+      {message && <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
       <div className="config-form">
         <section className="config-section">
           <h2>{translate("credentials.new", language)}</h2>
@@ -1046,12 +1049,13 @@ function PromptSettings({ project, scope, language }: { project: string; scope: 
     <optgroup label="LLM">{[["decision_llm", "decision.llmPrompt"], ["terminology", "stage.terminology"], ["terminology_decision", "stage.terminologyDecision"], ["terminology_knowledge", "stage.terminologyKnowledge"], ["content_summary", "stage.contentSummary"], ["fragment_summary", "stage.fragmentSummary"], ["translation", "stage.translation"], ["repetition_consistency", "repetition.comparisonPrompt"], ["proofreading", "stage.proofreading"], ["polishing", "stage.polishing"]].map(([id, label]) => <option key={id} value={id}>{translate(label, language)}</option>)}</optgroup>
     {decisionPrompts.length > 0 && <optgroup label="Decision">{decisionPrompts.map((prompt) => <option key={prompt.validator_id} value={`decision:${prompt.validator_id}`}>{prompt.validator_id === "preferred_term_usage" ? translate("settings.preferredTermUsage", language) : prompt.validator_id === "segment_alignment" ? translate("settings.segmentAlignment", language) : prompt.validator_id === "repetition_screening" ? translate("repetition.screeningPrompt", language) : prompt.label}</option>)}</optgroup>}
   </select></label>;
-  return <>{error && <div className="error-banner">{error}</div>}{stage.startsWith("decision:")
+  return <>{error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}{stage.startsWith("decision:")
     ? <DecisionPromptSettings key={`${scope}:${project}:${stage}`} project={project} scope={scope} language={language} validator={stage.slice(9)} stageControl={stageControl} />
     : <LLMPromptSettings key={`${scope}:${project}:${stage}`} project={project} scope={scope} language={language} stage={stage} stageControl={stageControl} />}</>;
 }
 
 function LLMPromptSettings({ project, scope, language, stage, stageControl }: { project: string; scope: ConfigScope; language: Language; stage: string; stageControl: ReactNode }) {
+  const dialogs = useDialogs();
   const [promptLanguage, setPromptLanguage] = useState("zh-CN");
   const [content, setContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
@@ -1148,7 +1152,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
   }
 
   async function loadBuiltinDraft() {
-    if (content !== savedContent && !window.confirm(translate("decision.promptDiscard", language))) return;
+    if (content !== savedContent && !await dialogs.confirm(translate("decision.promptDiscard", language))) return;
     try {
       const value = await api<PromptView>(`/api/v1/prompts/${stage}/default?language=${encodeURIComponent(promptLanguage)}`);
       setContent(value.content);
@@ -1159,7 +1163,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
   }
 
   async function loadGlobalDraft() {
-    if (content !== savedContent && !window.confirm(translate("settings.promptSyncDraftConfirm", language))) return;
+    if (content !== savedContent && !await dialogs.confirm(translate("settings.promptSyncDraftConfirm", language))) return;
     try {
       const value = await api<PromptView>(`/api/v1/global/prompts/${stage}?language=${encodeURIComponent(promptLanguage)}`);
       setContent(value.content);
@@ -1171,7 +1175,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
   }
 
   async function restoreInheritance() {
-    if (!window.confirm(translate("decision.promptRestoreConfirm", language))) return;
+    if (!await dialogs.confirm(translate("decision.promptRestoreConfirm", language))) return;
     setError("");
     try {
       await api(path, { method: "DELETE", body: JSON.stringify({ language: promptLanguage, confirm: true }) });
@@ -1181,7 +1185,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
   }
 
   async function loadLibraryEntry(promptId: string) {
-    if (!promptId || (content !== savedContent && !window.confirm(translate("settings.promptSyncDraftConfirm", language)))) return;
+    if (!promptId || (content !== savedContent && !await dialogs.confirm(translate("settings.promptSyncDraftConfirm", language)))) return;
     try {
       const value = await api<PromptView & { id: string }>(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}/${encodeURIComponent(promptId)}`);
       setContent(value.content);
@@ -1216,7 +1220,7 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
   }
 
   async function deleteLibraryEntry() {
-    if (!selectedLibraryEntry || !window.confirm(translate("settings.promptLibraryDeleteConfirm", language, { id: selectedLibraryEntry }))) return;
+    if (!selectedLibraryEntry || !await dialogs.confirm(translate("settings.promptLibraryDeleteConfirm", language, { id: selectedLibraryEntry }))) return;
     try {
       await api(`/api/v1/prompt-library/${stage}/${encodeURIComponent(promptLanguage)}/${encodeURIComponent(selectedLibraryEntry)}`, { method: "DELETE" });
       setLibraryEntries((current) => current.filter((item) => item.id !== selectedLibraryEntry));
@@ -1258,8 +1262,8 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
     <PromptLibraryControls language={language} entries={libraryEntries} selected={selectedLibraryEntry} loading={libraryLoading} saveOpen={librarySaveOpen} id={libraryIdDraft} overwrite={!!libraryOverwriteId}
       onId={(value) => { setLibraryIdDraft(value); setLibraryOverwriteId(""); }} onCancel={() => { setLibrarySaveOpen(false); setLibraryIdDraft(""); setLibraryOverwriteId(""); }}
       onSelect={(value) => void loadLibraryEntry(value)} onDelete={() => void deleteLibraryEntry()} onSave={() => void saveToLibrary()} />
-    {error && <div className="error-banner">{error}</div>}
-    {message && <span className="success-text">{message}</span>}
+    {error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
+    {message && <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
     <textarea className="settings-editor" spellCheck={false} value={content} onChange={(event) => { setContent(event.target.value); setLoadedGlobalDraft(false); setMessage(""); }} />
     <div className="prompt-preview">
       <h3>{translate("settings.promptAssembled", language)}</h3>

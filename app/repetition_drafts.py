@@ -34,6 +34,8 @@ def _pending(project: Path, run_id: str | None = None) -> tuple[dict[str, Any], 
 
 def _choices(draft: dict[str, Any], values: Any) -> dict[str, Any]:
     proposals = {p["id"]: p for g in draft["groups"] for p in g["proposals"]}
+    allowed_members = {p["id"]: set(p["members"]) | set(g["uncertain"])
+                       for g in draft["groups"] for p in g["proposals"]}
     if not isinstance(values, dict) or set(values) - proposals.keys():
         raise UsageError("草案审核选择含未知建议")
     for pid, value in values.items():
@@ -44,16 +46,27 @@ def _choices(draft: dict[str, Any], values: Any) -> dict[str, Any]:
         if "apply" in value and (not isinstance(value["apply"], list)
             or any(not isinstance(sid, str) for sid in value["apply"])
             or len(set(value["apply"])) != len(value["apply"])
-            or set(value["apply"]) - set(proposals[pid]["members"])):
+            or set(value["apply"]) - allowed_members[pid]):
             raise UsageError("草案应用成员无效")
+    for group in draft["groups"]:
+        applied: set[str] = set()
+        for proposal in group["proposals"]:
+            choice = values.get(proposal["id"], {})
+            if not choice.get("accepted", proposal.get("default_accepted", True)):
+                continue
+            members = set(choice.get("apply", proposal.get("apply", proposal["members"])))
+            if applied & members:
+                raise UsageError("同一处不能应用多个统一建议")
+            applied.update(members)
     return values
 
 
 def save_choices(project: Path, values: Any, *, run_id: str | None = None) -> dict[str, Any]:
     with project_write_lock(project):
         manifest, draft = _pending(project, run_id)
-        values = _choices(draft, values)
-        manifest["choices"] = {**manifest.get("choices", {}), **values}
+        if not isinstance(values, dict):
+            raise UsageError("草案审核选择含未知建议")
+        manifest["choices"] = _choices(draft, {**manifest.get("choices", {}), **values})
         warnings = write_repetition_state(project, records=[], manifests=[manifest])
         return {"choices": values, "warnings": warnings}
 

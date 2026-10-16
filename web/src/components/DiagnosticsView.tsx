@@ -1,12 +1,12 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { RequestOverview } from "./RequestOverview";
 import { HistoricalDiagnosticsView } from "./HistoricalDiagnosticsView";
+import { Modal } from "./Modal";
 import type {
   DecisionActivity,
   DiagnosticsRequestDetail,
-  DiagnosticsRequestStatus,
   DiagnosticsRequestSummary,
   DiagnosticsResponse,
 } from "../types";
@@ -54,6 +54,13 @@ function clock(value: string, language: Language) {
   });
 }
 
+function requestStatusLabel(request: Pick<DiagnosticsRequestSummary, "status" | "error">, language: Language) {
+  if (request.status === "failed" && ["format_error", "empty_response_unknown", "empty_response_truncated", "context_length_error"].includes(request.error ?? "")) {
+    return translate(`reqResult.${request.error}`, language);
+  }
+  return translate(`reqStatus.${request.status}`, language);
+}
+
 function layoutDetailsColumns(bar: HTMLDivElement) {
   const spans = Array.from(bar.querySelectorAll<HTMLElement>(":scope > span"));
   if (!spans.length) return;
@@ -82,19 +89,22 @@ const RequestGroup = memo(function RequestGroup({
   items,
   language,
   onOpen,
-  statusLabels,
   title,
+  tabular = false,
 }: {
+  tabular?: boolean;
   className: string;
   items: DiagnosticsRequestSummary[];
   language: Language;
   onOpen: (requestId: string) => void;
-  statusLabels: Record<DiagnosticsRequestStatus, string>;
   title: string;
 }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const listId = useId();
   const listRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
     count: items.length,
+    enabled: !collapsed,
     getScrollElement: () => listRef.current,
     getItemKey: (index) => items[index]?.request_id ?? index,
     estimateSize: () => 82,
@@ -102,12 +112,15 @@ const RequestGroup = memo(function RequestGroup({
   });
 
   return (
-    <section className={`request-group ${className}`}>
+    <section className={`request-group ${className}${collapsed ? " collapsed" : ""}`}>
       <header className="request-group-heading">
-        <h3>{title}</h3>
-        <span>{translate("diagnostics.requestsLabel", language, { count: items.length })}</span>
+        <h3><button type="button" className="request-group-toggle" aria-expanded={!collapsed} aria-controls={listId} onClick={() => setCollapsed((current) => !current)}>
+          <span aria-hidden="true">{collapsed ? "▸" : "▾"}</span>
+          {title}
+          <span className="request-group-count">{translate("diagnostics.requestsLabel", language, { count: items.length })}</span>
+        </button></h3>
       </header>
-      <div className="request-list" ref={listRef}>
+      <div className="request-list" id={listId} ref={listRef} hidden={collapsed}>
         <div className="request-list-content" style={{ height: virtualizer.getTotalSize() }}>
           {virtualizer.getVirtualItems().map((virtualRow) => {
             const item = items[virtualRow.index];
@@ -117,32 +130,42 @@ const RequestGroup = memo(function RequestGroup({
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
                 style={{ transform: `translateY(${virtualRow.start}px)` }}
-                onDoubleClick={() => {
+                role="button"
+                aria-label={`${item.request_id} ${requestStatusLabel(item, language)}`}
+                tabIndex={item.detail_available ? 0 : -1}
+                aria-disabled={!item.detail_available}
+                title={!item.detail_available ? translate("diagnostics.detailExpired", language) : undefined}
+                onClick={() => {
                   if (item.detail_available) onOpen(item.request_id);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    if (item.detail_available) onOpen(item.request_id);
+                  }
                 }}
               >
                 <div className="request-row-main">
-                  <header><code>{item.request_id}</code><time>{clock(item.timestamp, language)}</time></header>
-                  <strong>{item.model}</strong>
-                  <span>
-                    <i className={`request-status status-${item.status}`}>{statusLabels[item.status]}</i>
+                  <header><code>{item.parent_request_id && <><span>{item.parent_request_id}</span>{" → "}</>}<span>{item.request_id}</span></code><time>{clock(item.timestamp, language)}</time></header>
+                  {!tabular && <strong>{item.model}</strong>}
+                  {!tabular && <span>
+                    <i className={`request-status status-${item.status}`}>{requestStatusLabel(item, language)}</i>
                     {translate("diagnostics.attempts", language, { count: item.attempt_count })}
                     {item.last_http_status ? ` · HTTP ${item.last_http_status}` : ""}
                     {item.provider_error_status !== null ? ` · ${translate("diagnostics.providerErrorStatus", language, { status: item.provider_error_status })}` : ""}
                     {item.latest_latency_ms !== null ? ` · ${item.latest_latency_ms} ms` : ""}
                     {item.transport === "sse" ? ` · SSE ${item.stream_event_count} · ${bytes(item.stream_received_bytes, language)}${item.stream_first_event_latency_ms === null ? "" : ` · ${item.stream_first_event_latency_ms} ms first`}` : ""}
-                  </span>
+                  </span>}
                 </div>
-                <button
-                  className="quiet-button"
-                  disabled={!item.detail_available}
-                  title={!item.detail_available ? translate("diagnostics.detailExpired", language) : undefined}
-                  onClick={() => onOpen(item.request_id)}
-                >
-                  {item.detail_available
-                    ? translate("diagnostics.view", language)
-                    : translate("diagnostics.expired", language)}
-                </button>
+                {tabular && <>
+                  <span className="request-cell-model" title={item.model}>{item.model}</span>
+                  <span className={`request-status status-${item.status}`}>{requestStatusLabel(item, language)}</span>
+                  {(["input_tokens", "output_tokens", "total_tokens"] as const).map((metric, index) => <span className="request-cell-number" data-label={translate(`diagnostics.${["inputTokens", "outputTokens", "totalTokens"][index]}`, language)} key={metric}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage[metric], language)}` : "—"}</span>)}
+                  <span className="request-cell-number" data-label={translate("diagnostics.outputRate", language)}>{number(item.output_tokens_per_second, language, "", "—")}</span>
+                  <span className="request-cell-number" data-label={translate("diagnostics.tabAttempts", language)}>{item.attempt_count}</span>
+                  <span className="request-cell-number" data-label={translate("diagnostics.requestDuration", language)}>{item.latency_ms === null ? "—" : `${(item.latency_ms / 1000).toFixed(2)} s`}</span>
+                </>}
+                {!item.detail_available && <span className="muted">{translate("diagnostics.expired", language)}</span>}
               </article>
             );
           })}
@@ -152,11 +175,7 @@ const RequestGroup = memo(function RequestGroup({
   );
 });
 
-function RuntimeDiagnosticsView({ language }: { language: Language }) {
-  const statusLabels = useMemo(() => Object.fromEntries(
-    ["running", "retrying", "completed", "failed", "interrupted"]
-      .map((key) => [key, translate(`reqStatus.${key}`, language)]),
-  ) as Record<DiagnosticsRequestStatus, string>, [language]);
+function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: Language; requestsOnly?: boolean }) {
   const [value, setValue] = useState<DiagnosticsResponse | null>(null);
   const [requestSummaries, setRequestSummaries] = useState<Map<string, DiagnosticsRequestSummary>>(
     () => new Map(),
@@ -304,18 +323,6 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
     }
   }, [autoScroll, value?.logs]);
 
-  useEffect(() => {
-    if (!selectedRequest && !selectedActivity) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        if (selectedRequest) setSelectedRequest(null);
-        else setSelectedActivity(null);
-      }
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [selectedRequest, selectedActivity]);
-
   const openDetail = useCallback((requestId: string) => {
     setSelectedRequest(requestId);
     setDetail(null);
@@ -333,7 +340,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
     const active: DiagnosticsRequestSummary[] = [];
     const finished: DiagnosticsRequestSummary[] = [];
     for (const item of requestSummaries.values()) {
-      if (item.request_kind !== "llm") continue;
+      if (item.request_kind !== (requestsOnly ? requestKind : "llm")) continue;
       if (item.status === "running" || item.status === "retrying") {
         active.push(item);
       } else {
@@ -345,7 +352,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
       right.finished_at ?? right.timestamp
     ).localeCompare(left.finished_at ?? left.timestamp));
     return { active, finished };
-  }, [requestSummaries]);
+  }, [requestSummaries, requestsOnly, requestKind]);
 
   const requestTotal = requestGroups.active.length + requestGroups.finished.length;
   const decisionActivities = value?.decision.activities ?? [];
@@ -388,7 +395,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
   }
 
   return (
-    <div className="diagnostics-runtime">
+    <div className={`diagnostics-runtime${requestsOnly ? " requests-only" : ""}`}>
       {error && <div className="warning-banner">{error}</div>}
       <div className="diagnostics-metrics">
         <article><span>{translate("diagnostics.currentRequests", language)}</span><strong>{number(metrics?.active_requests ?? 0, language)}</strong><small>{translate("diagnostics.concurrency", language)}</small></article>
@@ -409,7 +416,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
       </div>
 
       <div className="diagnostics-grid">
-        <section className="diagnostics-panel log-panel">
+        {!requestsOnly && <section className="diagnostics-panel log-panel">
           <div className="diagnostics-panel-heading">
             <div><h2>{translate("diagnostics.globalLogs", language)}</h2><span>{value?.logs.length ?? 0} {translate("diagnostics.entries", language)}</span></div>
             <button
@@ -445,7 +452,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
               </div>
             )) : <div className="diagnostics-empty">{translate("diagnostics.noLogs", language)}</div>}
           </div>
-        </section>
+        </section>}
 
         <section className="diagnostics-panel request-panel">
           <div className="diagnostics-panel-heading">
@@ -457,7 +464,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
             </nav>
             <span>{translate(requestKind === "llm" ? "diagnostics.requestRetention" : "diagnostics.decisionCumulative", language, { count: requestTotal })}</span>
           </div>
-          {requestKind === "decision" ? <div className="request-list decision-activities">
+          {requestKind === "decision" && !requestsOnly ? <div className="request-list decision-activities">
             {decisionActivities.length ? decisionActivities.map((activity) => <article key={`${activity.task_id ?? ""}:${activity.model}`}>
               <div className="request-row-main">
                 <header><span>{activity.project} · {activity.stage}</span><code>{activity.task_id}</code></header>
@@ -473,23 +480,26 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
             </article>) : <div className="diagnostics-empty">{translate("diagnostics.decisionEmpty", language)}</div>}
           </div> :
           <div className={`request-groups ${requestTotal ? "has-requests" : ""} ${!requestGroups.active.length || !requestGroups.finished.length ? "single" : ""}`}>
+            {requestsOnly && <div className="request-table-heading" aria-hidden="true">
+              {["requestId", "model", "status", "inputTokens", "outputTokens", "totalTokens", "outputRate", "tabAttempts", "requestDuration"].map(key => <span key={key}>{translate(`diagnostics.${key}`, language)}</span>)}
+            </div>}
             {requestGroups.active.length > 0 && (
               <RequestGroup
+                tabular={requestsOnly}
                 className="request-group-active"
                 items={requestGroups.active}
                 language={language}
                 onOpen={openDetail}
-                statusLabels={statusLabels}
                 title={translate("diagnostics.activeRequests", language)}
               />
             )}
             {requestGroups.finished.length > 0 && (
               <RequestGroup
+                tabular={requestsOnly}
                 className="request-group-finished"
                 items={requestGroups.finished}
                 language={language}
                 onOpen={openDetail}
-                statusLabels={statusLabels}
                 title={translate("diagnostics.finishedRequests", language)}
               />
             )}
@@ -502,8 +512,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
         </section>
       </div>
 
-      {selectedActivity && !selectedRequest && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeActivity(); }}>
-        <section className="modal exchange-dialog decision-dialog" role="dialog" aria-modal="true" aria-label={translate("diagnostics.decisionDetails", language)}>
+      {selectedActivity && !selectedRequest && <Modal className="exchange-dialog decision-dialog" ariaLabel={translate("diagnostics.decisionDetails", language)} onClose={closeActivity}>
           <header className="exchange-dialog-heading">
             <div><h2>{translate("diagnostics.decisionDetails", language)}</h2><code>{selectedActivity.project} · {selectedActivity.model}</code></div>
             <div className="button-group">
@@ -520,7 +529,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
           </nav>
           <div className="exchange-detail">
             {decisionRequests.length ? <div className="decision-request-cards">{decisionRequests.slice(currentDecisionPage * 20, (currentDecisionPage + 1) * 20).map((item) => <article key={item.request_id}>
-              <header className="overview-request-heading"><code>{item.segment_id ?? "—"}</code><time>{clock(item.timestamp, language)}</time><span className={`request-status status-${item.status}`}>{statusLabels[item.status]}</span><span>{number(item.latest_latency_ms, language, " ms")} · {translate("diagnostics.tabAttempts", language)} {item.attempt_count}</span><button className="quiet-button" onClick={() => openDetail(item.request_id)}>{translate("diagnostics.view", language)}</button></header>
+              <header className="overview-request-heading"><code>{item.segment_id ?? "—"}</code><time>{clock(item.timestamp, language)}</time><span className={`request-status status-${item.status}`}>{requestStatusLabel(item, language)}</span><span>{number(item.latest_latency_ms, language, " ms")} · {translate("diagnostics.tabAttempts", language)} {item.attempt_count}</span><button className="quiet-button" onClick={() => openDetail(item.request_id)}>{translate("diagnostics.view", language)}</button></header>
               <RequestOverview snapshot={item.overview} truncated={item.overview_truncated} language={language} />
             </article>)}</div> : <div className="diagnostics-empty">{translate("diagnostics.decisionNoRecent", language)}</div>}
           </div>
@@ -529,21 +538,14 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
             <span>{currentDecisionPage + 1} / {decisionPageCount}</span>
             <button className="quiet-button" disabled={currentDecisionPage + 1 >= decisionPageCount} onClick={() => setDecisionPage(currentDecisionPage + 1)}>{translate("diagnostics.history.next", language)}</button>
           </div>
-        </section>
-      </div>}
+      </Modal>}
 
       {selectedRequest && (
-        <div
-          className="modal-backdrop"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) closeDetail();
-          }}
-        >
-          <section className="modal exchange-dialog request-overview-dialog" role="dialog" aria-modal="true" aria-labelledby="exchange-dialog-title">
+        <Modal className="exchange-dialog request-overview-dialog" ariaLabel={translate("diagnostics.detailsTitle", language)} onClose={closeDetail}>
             <header className="exchange-dialog-heading">
               <div>
                 <h2 id="exchange-dialog-title">{translate("diagnostics.detailsTitle", language)}</h2>
-                <code>{selectedRequest}</code>
+                <code>{detail?.parent_request_id && `${detail.parent_request_id} → `}{selectedRequest}</code>
               </div>
               <button className="quiet-button" onClick={closeDetail} aria-label={translate("diagnostics.closeDetails", language)}>{translate("diagnostics.close", language)}</button>
             </header>
@@ -573,7 +575,8 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
                 <div className="exchange-meta">
                   {detail.request_kind === "decision" && <span>Decision · {detail.segment_id} · {translate("diagnostics.decisionQuestions", language)} {detail.question_count}</span>}
                   <span>{translate("diagnostics.model", language)} <strong>{detail.model}</strong></span>
-                  <span>{translate("diagnostics.status", language)} <strong>{statusLabels[detail.status]}</strong></span>
+                  <span>{translate("diagnostics.status", language)} <strong>{requestStatusLabel(detail, language)}</strong></span>
+                  {(["input_tokens", "output_tokens", "total_tokens"] as const).map((metric, index) => <span key={metric}>{translate(`diagnostics.${["inputTokens", "outputTokens", "totalTokens"][index]}`, language)} <strong>{detail.usage.available || detail.usage.partial ? `${detail.usage.partial ? "≥ " : ""}${number(detail.usage[metric], language)}` : "—"}</strong></span>)}
                   {detail.transport === "sse" && <span>{translate("diagnostics.streamProgress", language)} <strong>{detail.stream_event_count} events · {bytes(detail.stream_received_bytes, language)}{detail.stream_first_event_latency_ms === null ? "" : ` · ${detail.stream_first_event_latency_ms} ms first`}</strong></span>}
                 </div>
                 {detailTab === "overview" && <RequestOverview snapshot={detail.overview} truncated={detail.overview_truncated || detail.response_content_truncated} language={language} />}
@@ -633,8 +636,7 @@ function RuntimeDiagnosticsView({ language }: { language: Language }) {
                 )}
               </div>
             )}
-          </section>
-        </div>
+        </Modal>
       )}
     </div>
   );
@@ -649,22 +651,23 @@ export function DiagnosticsView({
   project: string;
   projects: ProjectSummary[];
 }) {
-  const [tab, setTab] = useState<"runtime" | "history">("runtime");
+  const [tab, setTab] = useState<"runtime" | "requests" | "history">("runtime");
   return (
     <section className="diagnostics-page">
       <header className="diagnostics-heading diagnostics-shell-heading">
         <div>
           <h1>{translate("diagnostics.title", language)}</h1>
-          <p>{translate(tab === "runtime" ? "diagnostics.runtimeDescription" : "diagnostics.historyDescription", language)}</p>
+          <p>{translate(tab !== "history" ? "diagnostics.runtimeDescription" : "diagnostics.historyDescription", language)}</p>
         </div>
         <nav className="diagnostics-subtabs" role="tablist" aria-label={translate("diagnostics.subtabs", language)}>
           <button role="tab" aria-selected={tab === "runtime"} className={tab === "runtime" ? "active" : ""} onClick={() => setTab("runtime")}>{translate("diagnostics.runtimeTab", language)}</button>
+          <button role="tab" aria-selected={tab === "requests"} className={tab === "requests" ? "active" : ""} onClick={() => setTab("requests")}>{translate("diagnostics.requestsTab", language)}</button>
           <button role="tab" aria-selected={tab === "history"} className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>{translate("diagnostics.historyTab", language)}</button>
         </nav>
       </header>
       <div className="diagnostics-view-content">
-        {tab === "runtime"
-          ? <RuntimeDiagnosticsView language={language} />
+        {tab !== "history"
+          ? <RuntimeDiagnosticsView language={language} requestsOnly={tab === "requests"} />
           : <HistoricalDiagnosticsView language={language} currentProject={project} projects={projects} />}
       </div>
     </section>

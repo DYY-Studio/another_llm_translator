@@ -1,3 +1,4 @@
+import { useDialogs, Feedback } from "./InteractionProvider";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { compactKnowledgeRanges } from "../termKnowledge";
@@ -145,6 +146,7 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
   onFindSegment: (source: string, segmentId: string) => void;
   onNavigateToEditor: (item: TermDecisionManualReviewItem, tab: "edit" | "group") => void;
 }) {
+  const dialogs = useDialogs();
   const restored = restoreTermDecisionWorkspaceState(decisionWorkspaceCache, projectId, initialTab);
   const initial = initialTab === "manual" ? { ...restored, tab: "manual" as const } : restored;
   const [review, setReview] = useState<TermDecisionReviewState | null>(null);
@@ -273,10 +275,10 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
   }
   async function startDecision(decision: RunDecision) {
     const resuming = decision.run_action === "resume";
-    if (replaceDraft && !window.confirm(translate("terms.decisionReplaceConfirm", language))) return;
+    if (replaceDraft && !await dialogs.confirm(translate("terms.decisionReplaceConfirm", language))) return;
     const force = decision.force;
-    if (force && !window.confirm(translate("terms.decisionForceConfirm", language))) return;
-    if (!resuming && (review?.manual_review.remaining ?? 0) > 0 && !window.confirm(translate("terms.decisionManualReplaceConfirm", language, { remaining: review?.manual_review.remaining ?? 0, total: review?.manual_review.total ?? 0 }))) return;
+    if (force && !await dialogs.confirm(translate("terms.decisionForceConfirm", language))) return;
+    if (!resuming && (review?.manual_review.remaining ?? 0) > 0 && !await dialogs.confirm(translate("terms.decisionManualReplaceConfirm", language, { remaining: review?.manual_review.remaining ?? 0, total: review?.manual_review.total ?? 0 }))) return;
     setRunDialogOpen(false);
     setBusy(true);
     setMessage("");
@@ -305,7 +307,7 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
     } catch (error) { setMessage(errorMessage(error, language)); } finally { setBusy(false); }
   }
   async function mutate(path: "apply" | "discard" | "rollback", confirmation: string) {
-    if (!window.confirm(confirmation)) return;
+    if (!await dialogs.confirm(confirmation)) return;
     setBusy(true);
     setMessage("");
     try {
@@ -337,7 +339,7 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
         </div>
       </header>
       {review?.draft && <div className="term-decision-warning"><strong>{translate("terms.decisionRevisionWarning", language)}</strong><span>{translate("terms.decisionRevisionWarningHint", language)}</span></div>}
-      {message && !(review?.draft?.final_review_error && message === errorMessage(review.draft.final_review_error, language)) && <p className="inline-message error-text">{message}</p>}
+      {message && <Feedback message={message} onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
       {loadError && <p className="inline-message error-text"><span>{loadError}</span><button className="quiet-button" type="button" onClick={retryLoad}>{translate("common.retry", language)}</button></p>}
       {reviewLoading ? <p className="diagnostics-empty">{translate("terms.decisionLoading", language)}</p> : <>
         {review?.draft?.final_review_error && <div className="warning-banner"><strong>{translate("terms.decisionFinalReviewFailed", language)}</strong><p>{errorMessage(review.draft.final_review_error, language)}</p></div>}

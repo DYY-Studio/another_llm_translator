@@ -168,6 +168,7 @@ class Diagnostics:
         self,
         *,
         request_id: str,
+        parent_request_id: str | None = None,
         model: str,
         messages: list[dict[str, str]],
         max_attempts: int,
@@ -213,6 +214,7 @@ class Diagnostics:
             "project": self.project,
             "stage": self.stage,
             "request_id": request_id,
+            "parent_request_id": parent_request_id,
             "task_id": self.task_id,
             "model": model,
             "request_kind": request_kind,
@@ -236,6 +238,9 @@ class Diagnostics:
             "stream_first_event_latency_ms": None,
             "provider_error_status": None,
             "attempts": [],
+            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            "_usage_samples": 0,
+            "_usage_complete": True,
             "error": None,
             "detail_available": True,
             "_revision": 0,
@@ -462,6 +467,16 @@ class Diagnostics:
             request["has_reasoning"] = True
         self._finish_request(request, status="completed")
 
+    def record_request_usage(self, request_id: str, usage: dict[str, int], *, complete: bool) -> None:
+        request = self._request(request_id)
+        if request is None:
+            return
+        for key in request["usage"]:
+            request["usage"][key] += usage[key]
+        request["_usage_samples"] += 1
+        request["_usage_complete"] &= complete
+        self._touch_request(request)
+
     def fail_request(self, request_id: str, error: str, *, interrupted: bool = False) -> None:
         request = self._request(request_id)
         if request is not None:
@@ -479,20 +494,29 @@ class Diagnostics:
             {
                 key: value
                 for key, value in request.items()
-                if key not in {"_revision", "_hub_revision"}
+                if not key.startswith("_")
             }
         )
+        detail.update({key: value for key, value in self._request_summary(request).items()
+                       if key in {"usage", "latency_ms", "output_tokens_per_second"}})
         if self.task_id is None:
             detail.pop("task_id", None)
         return detail
 
     def _request_summary(self, request: dict[str, Any]) -> dict[str, Any]:
+        observed = request["_usage_samples"] > 0
+        available = observed and request["_usage_complete"] and request["_usage_samples"] == len(request["attempts"])
+        latency_ms = sum(attempt["latency_ms"] for attempt in request["attempts"])
         summary = {
+            "usage": {**request["usage"], "available": available, "partial": observed and not available},
+            "latency_ms": round(latency_ms, 1) if request["attempts"] else None,
+            "output_tokens_per_second": round(request["usage"]["output_tokens"] * 1000 / latency_ms, 2) if available and latency_ms > 0 else None,
             "timestamp": request["timestamp"],
             "finished_at": request["finished_at"],
             "project": request["project"],
             "stage": request["stage"],
             "request_id": request["request_id"],
+            "parent_request_id": request["parent_request_id"],
             "model": request["model"],
             "request_kind": request["request_kind"],
             "segment_id": request["segment_id"],
@@ -816,6 +840,13 @@ class DiagnosticsHub(Diagnostics):
         super().complete_request(
             request_id, content=content, reasoning_content=reasoning_content, overview_answers=overview_answers
         )
+
+    def record_request_usage(self, request_id: str, usage: dict[str, int], *, complete: bool) -> None:
+        target = self._active_session()
+        if target is not None:
+            target.record_request_usage(request_id, usage, complete=complete)
+            return
+        super().record_request_usage(request_id, usage, complete=complete)
 
     def fail_request(self, request_id: str, error: str, *, interrupted: bool = False) -> None:
         target = self._active_session()

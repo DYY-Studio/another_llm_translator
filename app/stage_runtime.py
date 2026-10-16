@@ -13,6 +13,7 @@ from typing import Any, NamedTuple
 import httpx
 
 from .decision import DecisionClient
+from .diagnostics import current_diagnostics
 from .config import load_project_config
 from .documents import (
     DocumentAdapter,
@@ -959,6 +960,9 @@ async def _localized_request_loop(
                 continue
         if response_complete and not unresolved:
             continue
+        diagnostics = current_diagnostics()
+        if diagnostics is not None:
+            diagnostics.fail_request(request_id, "format_error")
         logger.warning(
             "format correction request=%s attempt=%d unresolved=%d errors=%d",
             request_id,

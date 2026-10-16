@@ -19,6 +19,9 @@
 .summary-strip strong { font-size: 28px; }
 .summary-strip span { color: var(--muted); font-size: 13px; }
 .overview-storage { display: flex; align-items: center; gap: 14px; margin: 12px 0 0; }
+.overview-storage[role="button"] { cursor: pointer; }
+.overview-storage[role="button"]:hover dd { color: var(--accent-text); }
+.overview-storage[role="button"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 .overview-storage div { display: flex; align-items: baseline; gap: 6px; min-width: 0; padding: 0; }
 .overview-storage div + div { border-left: 1px solid var(--border); }
 .overview-storage div + div { padding-left: 14px; }
