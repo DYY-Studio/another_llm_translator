@@ -9,25 +9,41 @@ export function EntityKnowledgeEditor({ project, projectId, normalized, revision
   project: string; projectId: string; normalized: string; revision: number; language: Language;
   onChanged: (value: TermsResponse) => Promise<void>; onFindSegment: (source: string, segmentId: string) => void;
 }) {
+  const [explanationsExpanded, setExplanationsExpanded] = useState(false);
+  const [fragmentsExpanded, setFragmentsExpanded] = useState(false);
+  const expanded = explanationsExpanded || fragmentsExpanded;
   const query = useQuery({
     queryKey: ["entity-knowledge", projectId, normalized, revision],
     queryFn: ({ signal }) => api<EntityKnowledge>(`/api/v1/projects/${project}/terms/knowledge?normalized=${encodeURIComponent(normalized)}`, { signal }),
+    enabled: expanded,
+    staleTime: Infinity,
     retry: false,
   });
-  if (query.isPending) return <p>{translate("common.loading", language)}</p>;
-  if (query.error) return <p className="error-text">{errorMessage(query.error, language)}</p>;
-  return <KnowledgeForm key={`${query.data.entity_key}:${query.data.terms_revision}`} project={project} view={query.data} language={language} onChanged={onChanged} onFindSegment={onFindSegment} />;
+  if (query.data) return <KnowledgeForm key={`${query.data.entity_key}:${query.data.terms_revision}`} project={project} view={query.data} language={language} onChanged={onChanged} onFindSegment={onFindSegment} explanationsExpanded={explanationsExpanded} fragmentsExpanded={fragmentsExpanded} setExplanationsExpanded={setExplanationsExpanded} setFragmentsExpanded={setFragmentsExpanded} />;
+  const t = (key: string) => translate(`knowledge.${key}`, language);
+  const loading = query.isPending && expanded;
+  const error = query.error ? errorMessage(query.error, language) : "";
+  return <section className="entity-knowledge" aria-label={t("title")}>
+    <details open={explanationsExpanded} onToggle={(event) => setExplanationsExpanded(event.currentTarget.open)}>
+      <summary><strong>{t("title")}</strong></summary>
+      {explanationsExpanded && (loading ? <p>{translate("common.loading", language)}</p> : error ? <p className="error-text">{error}</p> : null)}
+    </details>
+    <details open={fragmentsExpanded} onToggle={(event) => setFragmentsExpanded(event.currentTarget.open)}>
+      <summary><strong>{t("fragments")}</strong></summary>
+      {fragmentsExpanded && (loading ? <p>{translate("common.loading", language)}</p> : error ? <p className="error-text">{error}</p> : null)}
+    </details>
+  </section>;
 }
 
-function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
+function KnowledgeForm({ project, view, language, onChanged, onFindSegment, explanationsExpanded, fragmentsExpanded, setExplanationsExpanded, setFragmentsExpanded }: {
   project: string; view: EntityKnowledge; language: Language;
   onChanged: (value: TermsResponse) => Promise<void>; onFindSegment: (source: string, segmentId: string) => void;
+  explanationsExpanded: boolean; fragmentsExpanded: boolean;
+  setExplanationsExpanded: (expanded: boolean) => void; setFragmentsExpanded: (expanded: boolean) => void;
 }) {
   const [items, setItems] = useState<KnowledgeItem[]>(() => view.items.map(({ text, fragment_ids }) => ({ text, fragment_ids: [...fragment_ids] })));
   const [expandedReferences, setExpandedReferences] = useState<Set<number>>(() => new Set());
   const fragments = useMemo(() => new Map(view.fragments.map((fragment) => [fragment.id, fragment])), [view.fragments]);
-  const [explanationsExpanded, setExplanationsExpanded] = useState(false);
-  const [fragmentsExpanded, setFragmentsExpanded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const t = (key: string) => translate(`knowledge.${key}`, language);
@@ -59,8 +75,10 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
   }
 
   return <section className="entity-knowledge" aria-label={t("title")}>
-    <details className="knowledge-explanations" onToggle={(event) => {
-      if (event.target === event.currentTarget) setExplanationsExpanded(event.currentTarget.open);
+    <details className="knowledge-explanations" open={explanationsExpanded} onToggle={(event) => {
+      if (event.target === event.currentTarget) {
+        setExplanationsExpanded(event.currentTarget.open);
+      }
     }}>
       <summary><strong>{t("title")} ({items.length})</strong><span className={view.status === "stale" ? "error-text" : "muted"}>{t(view.status)}</span></summary>
       {explanationsExpanded && <div className="knowledge-explanation-content">
@@ -99,7 +117,9 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment }: {
     </div>
       </div>}
     </details>
-    <details className="knowledge-fragments" onToggle={(event) => setFragmentsExpanded(event.currentTarget.open)}>
+    <details className="knowledge-fragments" open={fragmentsExpanded} onToggle={(event) => {
+      setFragmentsExpanded(event.currentTarget.open);
+    }}>
       <summary>{t("fragments")} ({view.fragments.length})</summary>
       {fragmentsExpanded && <div className="knowledge-fragment-list knowledge-scroll">
       {view.fragments.map((fragment) => <article key={fragment.id}>
