@@ -13,7 +13,7 @@ from .summary_provenance import digest
 
 
 def empty_knowledge() -> dict[str, Any]:
-    return {"version": 1, "fragments": {}, "entities": {}, "published_candidates": []}
+    return {"version": 2, "fragments": {}, "entities": {}, "published_candidates": []}
 
 
 def persistent_library(library: dict[str, Any]) -> dict[str, Any]:
@@ -34,7 +34,7 @@ def navigation_fragment(fragment: dict[str, Any]) -> dict[str, Any]:
 
 def require_knowledge(library: dict[str, Any]) -> dict[str, Any]:
     knowledge = library.get("knowledge")
-    if not isinstance(knowledge, dict) or knowledge.get("version") != 1:
+    if not isinstance(knowledge, dict) or knowledge.get("version") != 2:
         raise UsageError("术语库缺少有效的实体说明结构")
     return knowledge
 
@@ -55,7 +55,6 @@ def source_range(
             "source_digest": digest(str(original["source"])),
             "model_text_digest": digest(segment_model_source(original)),
             "slice_source_digest": digest(str(item["source"])),
-            "slice_model_text_digest": digest(segment_model_source(item)),
         })
     return values
 
@@ -83,7 +82,6 @@ def evidence(project: Path, library: dict[str, Any], *, fragment_ids: set[str] |
     source_ids = {r["segment_id"] for record in records.values() for r in record["source_range"]}
     segments = {s["segment_id"]: s for s in read_segments(project, source_ids)}
     positions = positions if positions is not None else read_segment_positions(project) if records else {}
-    segment_digests = {}
     record_sources = {}
     result = {}
     for key, fragment in fragments.items():
@@ -96,15 +94,9 @@ def evidence(project: Path, library: dict[str, Any], *, fragment_ids: set[str] |
             value["text"] = record["terms"][fragment["term_index"]]["description"]
             value["source_range"] = record["source_range"]
             if fragment["candidate_id"] not in record_sources:
-                for r in record["source_range"]:
-                    segment_id = r["segment_id"]
-                    if segment_id in segments and segment_id not in segment_digests:
-                        segment = segments[segment_id]
-                        segment_digests[segment_id] = (digest(str(segment["source"])), digest(segment_model_source(segment)))
                 record_sources[fragment["candidate_id"]] = (
                     {r["segment_id"]: positions.get(r["segment_id"], -1) for r in record["source_range"]},
-                    all(segment_digests.get(r["segment_id"]) == (r["source_digest"], r["model_text_digest"])
-                        for r in record["source_range"]),
+                    all(r["segment_id"] in segments for r in record["source_range"]),
                 )
             value["_positions"], value["valid"] = record_sources[fragment["candidate_id"]]
         result[key] = value
@@ -157,8 +149,8 @@ def entity_members(library: dict[str, Any]) -> dict[str, list[str]]:
 
 
 def _input_version(members: list[str], fragments: list[dict[str, Any]]) -> str:
-    return digest([members, [(f["id"], f["text"], f["source_range"])
-                             for f in fragments if f["state"] == "active"]])
+    active = sorted((f for f in fragments if f["state"] == "active"), key=lambda f: f["id"])
+    return digest([members, [(f["id"], f["text"], f["source_range"]) for f in active]])
 
 
 def _source_order(fragments: list[dict[str, Any]]) -> list[list[Any]]:
@@ -166,6 +158,74 @@ def _source_order(fragments: list[dict[str, Any]]) -> list[list[Any]]:
     ranges = {(r["segment_id"], r["start"], r["end"])
               for f in fragments for r in (f["source_range"] or [])}
     return [list(r) for r in sorted(ranges, key=lambda r: (order.get(r[0], -1), r[1], r[2]))]
+
+
+def _migrate_knowledge_to_v2(
+    library: dict[str, Any], candidates: dict[str, dict[str, Any]], positions: dict[str, int],
+) -> None:
+    """Canonicalize only saved hashes that the v1 snapshot can prove current."""
+    knowledge = library.get("knowledge")
+    if not isinstance(knowledge, dict) or knowledge.get("version") != 1:
+        raise UsageError("术语库缺少有效的旧版实体说明结构")
+    groups = entity_members(library)
+    fragments_by_owner: dict[str, list[dict[str, Any]]] = {}
+    for key, fragment in knowledge["fragments"].items():
+        record_id = fragment.get("candidate_id")
+        if record_id:
+            record = candidates.get(record_id)
+            if record is None or not isinstance(fragment.get("term_index"), int):
+                continue
+            index = fragment["term_index"]
+            if index < 0 or index >= len(record["terms"]):
+                continue
+            term = record["terms"][index]
+            source_range = record.get("source_range")
+            if not isinstance(source_range, list):
+                continue
+            fragment_positions = {r["segment_id"]: positions.get(r["segment_id"], -1) for r in source_range}
+            text = str(term.get("description") or "")
+        else:
+            source_range = None
+            fragment_positions = {}
+            text = str(fragment.get("text") or "")
+        fragments_by_owner.setdefault(str(fragment["owner"]), []).append(
+            {**fragment, "id": key, "text": text, "source_range": source_range,
+             "_positions": fragment_positions})
+
+    for root, saved in knowledge["entities"].items():
+        members = groups.get(root)
+        if members is None:
+            continue
+        entity_fragments = [f for member in members for f in fragments_by_owner.get(member, ())]
+        current_order = _source_order(entity_fragments)
+        current_rank = {tuple(r): index for index, r in enumerate(current_order)}
+
+        def ordered(rank: dict[tuple[Any, ...], int]) -> list[dict[str, Any]]:
+            return sorted(entity_fragments, key=lambda f: (
+                min((rank.get((r["segment_id"], r["start"], r["end"]), -1)
+                     for r in (f["source_range"] or [])), default=-1), f["id"]))
+
+        def old_version(values: list[dict[str, Any]]) -> str:
+            return digest([members, [(f["id"], f["text"], f["source_range"])
+                                     for f in values if f["state"] == "active"]])
+
+        old_hash = saved.get("input_version")
+        if old_hash != old_version(ordered(current_rank)):
+            old_order = saved.get("source_order")
+            if isinstance(old_order, list):
+                try:
+                    previous_rank = {tuple(value): index for index, value in enumerate(old_order)}
+                except TypeError:
+                    previous_rank = {}
+                active_ranges = {(r["segment_id"], r["start"], r["end"])
+                                 for f in entity_fragments if f["state"] == "active"
+                                 for r in (f["source_range"] or [])}
+                if set(previous_rank) != active_ranges or old_hash != old_version(ordered(previous_rank)):
+                    continue
+            else:
+                continue
+        saved["input_version"] = _input_version(members, entity_fragments)
+    knowledge["version"] = 2
 
 
 def entity_view(
@@ -207,13 +267,9 @@ def _entity_view(
     refs.update(saved.get("summary_fragment_ids", []) if saved else [])
     referenced = [known[key] for key in refs if key in known]
     active_order = _source_order([f for f in fragments if f["state"] == "active"])
-    previous_ranges = {tuple(r) for r in saved["source_order"]} if saved else set()
-    current_ranges = {tuple(r) for r in active_order}
     stale = bool(saved) and (
         saved["members"] != members or len(referenced) != len(refs)
         or any(f["owner"] not in member_names or f["state"] != "active" or not f["valid"] for f in referenced)
-        or [r for r in saved["source_order"] if tuple(r) in current_ranges]
-        != [r for r in active_order if tuple(r) in previous_ranges]
     )
     version = _input_version(members, fragments)
     status = "stale" if stale else "pending" if not saved or saved["input_version"] != version else "current"
@@ -267,7 +323,6 @@ def save_items(project: Path, library: dict[str, Any], normalized: str, items: A
     view = entity_view(project, library, normalized, all_evidence=known)
     knowledge["entities"][view["entity_key"]] = {
         "items": clean, "members": view["members"], "input_version": view["input_version"],
-        "source_order": view["source_order"],
     }
     if description_generation is not None:
         knowledge["entities"][view["entity_key"]]["description_generation"] = description_generation
@@ -283,7 +338,6 @@ def confirm_keep(project: Path, library: dict[str, Any], normalized: str, *,
     if saved is None:
         raise UsageError("尚无已应用说明，不能确认保持")
     saved["input_version"] = view["input_version"]
-    saved["source_order"] = view["source_order"]
 
 
 def applied_descriptions(library: dict[str, Any]) -> None:

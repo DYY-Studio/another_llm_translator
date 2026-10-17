@@ -201,6 +201,8 @@ def decision_resume_compatibility(
         )
     except StorageError:
         return False, "旧 Run 的 manifest 不可读"
+    if manifest.get("status") != "running":
+        return False, "旧 Run 已结束，不能续跑；请新建 Run"
     try:
         manifest_revision = int(manifest.get("source_terms_revision", -1))
     except (TypeError, ValueError):

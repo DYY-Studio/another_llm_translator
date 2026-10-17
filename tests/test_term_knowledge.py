@@ -77,11 +77,10 @@ def test_published_evidence_needs_application_and_source_changes_block_use(tmp_p
     assert entity_view(project, data, "alpha")["status"] == "pending"
     project_descriptions(project, data)
     assert data["terms"][0]["description"] == "船长"
-    # Actual persisted source mutation, not a test of implementation text.
-    from app.sqlite_storage import database_path
-    import sqlite3
-    with sqlite3.connect(database_path(project)) as connection:
-        connection.execute("UPDATE segments SET source = 'changed'")
+    from app.project import apply_file_replacement, prepare_file_replacement
+    revised = tmp_path / "revised.txt"
+    revised.write_text("Changed source", encoding="utf-8")
+    apply_file_replacement(project, prepare_file_replacement(project, "F0001", revised))
     assert entity_view(project, data, "alpha")["status"] == "stale"
     with pytest.raises(UsageError, match="过期"):
         entity_view(project, data, "alpha", require_current=True)
@@ -554,7 +553,7 @@ def test_clear_preserves_cited_candidates_in_rollback_and_increments_revision(tm
     assert evidence(project, data)[f'{first["record_id"]}:0']["text"] == "captain"
 
 
-def test_reordered_reviewed_evidence_is_stale_even_when_not_cited(tmp_path: Path) -> None:
+def test_reordered_reviewed_evidence_stays_current_even_when_not_cited(tmp_path: Path) -> None:
     from app.project import add_project_files
     from app.config import load_project_config
     from app.term_library import term_normalization
@@ -574,10 +573,134 @@ def test_reordered_reviewed_evidence_is_stale_even_when_not_cited(tmp_path: Path
         records.append(record)
     publish_evidence(project, data, records, term_normalization(load_project_config(project)))
     save_items(project, data, "alpha", [{"text": "first fact", "fragment_ids": [f'{records[0]["record_id"]}:0']}])
-    assert entity_view(project, data, "alpha")["status"] == "current"
+    before = entity_view(project, data, "alpha")
     from app.project import reorder_project_files
     reorder_project_files(project, ["F0002", "F0001"])
-    assert entity_view(project, data, "alpha")["status"] == "stale"
+    after = entity_view(project, data, "alpha")
+    assert after["status"] == "current"
+    assert after["input_version"] == before["input_version"]
+
+
+@pytest.mark.parametrize("complete_order", [True, False])
+@pytest.mark.parametrize("schema_version", [7, 8])
+def test_v9_migration_uses_only_complete_saved_order_to_rebuild_hash(
+    tmp_path: Path, complete_order: bool, schema_version: int,
+) -> None:
+    import sqlite3
+    from app.project import add_project_files, reorder_project_files
+    from app.sqlite_storage import database_path, ensure_supported, read_json, write_json
+    from app.term_knowledge import entity_view, publish_evidence, save_items, source_range
+    from app.config import load_project_config
+    from app.term_library import term_normalization
+    from app.summary_provenance import digest
+
+    project = make_project(tmp_path)
+    additional = tmp_path / "later.txt"
+    additional.write_text("Alpha returns", encoding="utf-8")
+    add_project_files(project, [str(additional)])
+    segments = read_segments(project)
+    data = library()
+    records = []
+    for index, segment in enumerate(segments):
+        record = record_header("terminology_candidates", "test", record_id="REC-Z" if index == 0 else "REC-A",
+                               active_task_id="scan",
+                               terms=[{"source": "Alpha", "description": f"fact-{index}"}],
+                               source_range=source_range([segment], {s["segment_id"]: s for s in segments}, {}))
+        append_jsonl(project, project / "terminology" / "candidates.jsonl", record)
+        records.append(record)
+    publish_evidence(project, data, records, term_normalization(load_project_config(project)))
+    save_items(project, data, "alpha", [{"text": "first fact", "fragment_ids": [f'{records[0]["record_id"]}:0']}])
+    view = entity_view(project, data, "alpha")
+    old_order_hash = digest([
+        view["members"], [(f["id"], f["text"], f["source_range"])
+                           for f in view["fragments"] if f["state"] == "active"]])
+    data["knowledge"]["version"] = 1
+    data["knowledge"]["entities"]["alpha"]["input_version"] = old_order_hash
+    data["knowledge"]["entities"]["alpha"]["source_order"] = (
+        view["source_order"] if complete_order else view["source_order"][:1])
+    meta = read_json(project, project / "project.json")
+    write_json(project, project / "terminology" / "terms.json",
+               record_header("terminology_library", meta["project_id"], **data))
+    reorder_project_files(project, ["F0002", "F0001"])
+    with sqlite3.connect(database_path(project)) as connection:
+        connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (str(schema_version),))
+    from app.sqlite_storage import _SUPPORTED_CACHE
+    _SUPPORTED_CACHE.discard(database_path(project))
+
+    backup = ensure_supported(project)
+    assert backup is not None and backup.is_file()
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(schema_version)
+    from app.term_library import load_terms
+    migrated = load_terms(project)
+    assert migrated["knowledge"]["version"] == 2
+    if complete_order:
+        assert entity_view(project, migrated, "alpha")["status"] == "current"
+        saved = migrated["knowledge"]["entities"]["alpha"]
+        save_items(project, migrated, "alpha", saved["items"])
+        assert "source_order" not in migrated["knowledge"]["entities"]["alpha"]
+    else:
+        assert migrated["knowledge"]["entities"]["alpha"]["input_version"] == old_order_hash
+        assert entity_view(project, migrated, "alpha")["status"] == "pending"
+
+
+def test_v9_migration_preserves_unmatched_pending_hash(tmp_path: Path) -> None:
+    import sqlite3
+    from app.sqlite_storage import database_path, ensure_supported, read_json, write_json
+    from app.term_knowledge import save_items, entity_view
+    from app.term_library import load_terms
+
+    project = make_project(tmp_path)
+    data = library()
+    save_items(project, data, "alpha", [{"text": "manual explanation", "fragment_ids": []}])
+    data["knowledge"]["version"] = 1
+    data["knowledge"]["entities"]["alpha"]["input_version"] = "sha256:historical-pending"
+    meta = read_json(project, project / "project.json")
+    write_json(project, project / "terminology" / "terms.json",
+               record_header("terminology_library", meta["project_id"], **data))
+    with sqlite3.connect(database_path(project)) as connection:
+        connection.execute("UPDATE schema_meta SET value = '8' WHERE key = 'schema_version'")
+    from app.sqlite_storage import _SUPPORTED_CACHE
+    _SUPPORTED_CACHE.discard(database_path(project))
+
+    ensure_supported(project)
+    migrated = load_terms(project)
+    saved = migrated["knowledge"]["entities"]["alpha"]
+    assert migrated["knowledge"]["version"] == 2
+    assert saved["input_version"] == "sha256:historical-pending"
+    assert entity_view(project, migrated, "alpha")["status"] == "pending"
+
+
+def test_v9_migration_failure_rolls_back_and_keeps_backup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sqlite3
+    from app.sqlite_storage import database_path, ensure_supported, read_json, write_json
+
+    project = make_project(tmp_path)
+    data = library()
+    data["knowledge"]["version"] = 1
+    meta = read_json(project, project / "project.json")
+    write_json(project, project / "terminology" / "terms.json",
+               record_header("terminology_library", meta["project_id"], **data))
+    with sqlite3.connect(database_path(project)) as connection:
+        connection.execute("UPDATE schema_meta SET value = '8' WHERE key = 'schema_version'")
+        before = connection.execute("SELECT payload_json FROM terms_state WHERE key='terms'").fetchone()[0]
+        before = connection.execute("SELECT payload_json FROM terms_state WHERE key='terms'").fetchone()[0]
+    from app import sqlite_storage
+    sqlite_storage._SUPPORTED_CACHE.discard(database_path(project))
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("migration failure")
+
+    monkeypatch.setattr("app.term_knowledge._migrate_knowledge_to_v2", fail)
+    with pytest.raises(RuntimeError, match="migration failure"):
+        ensure_supported(project)
+    backup, = (project / "snapshots" / "storage_migrations").glob("*.sqlite")
+    with sqlite3.connect(database_path(project)) as connection:
+        assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "8"
+        raw = connection.execute("SELECT payload_json FROM terms_state WHERE key='terms'").fetchone()[0]
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "8"
+    assert raw == before
 
 
 @pytest.mark.parametrize("fail", [False, True])
@@ -669,14 +792,18 @@ def test_storage_upgrade_preserves_current_knowledge_and_pending_tasks(tmp_path)
     write_json(project, project / "terminology/terms.json", value)
     write_json(project, project / "terminology/active_task.json", active)
     write_json(project, project / "runs/new-draft/manifest.json", run)
-    before = [read_json(project, project / path) for path in
-              ("terminology/terms.json", "terminology/active_task.json", "runs/new-draft/manifest.json")]
+    before_terms = read_json(project, project / "terminology/terms.json")
+    before_task = read_json(project, project / "terminology/active_task.json")
     with sqlite3.connect(database_path(project)) as db:
         db.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
     sqlite_storage._SUPPORTED_CACHE.discard(database_path(project))
     sqlite_storage.ensure_supported(project)
-    assert [read_json(project, project / path) for path in
-            ("terminology/terms.json", "terminology/active_task.json", "runs/new-draft/manifest.json")] == before
+    assert read_json(project, project / "terminology/terms.json") == before_terms
+    assert read_json(project, project / "terminology/active_task.json") == before_task
+    migrated_run = read_json(project, project / "runs/new-draft/manifest.json")
+    assert migrated_run["status"] == "interrupted"
+    assert migrated_run["decision_status"] == "discarded"
+    assert "新建 Run" in migrated_run["error_message"]
 
 
 

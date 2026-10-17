@@ -439,6 +439,178 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("schema_version", [7, 8])
+async def test_sidecar_migration_preserves_real_draft_apply_and_rollback(tmp_path, monkeypatch, schema_version):
+    import httpx
+    import sqlite3
+    from copy import deepcopy
+    from app.config import load_project_config
+    from app.project import add_project_files
+    from app.sqlite_storage import (
+        _SUPPORTED_CACHE, append_jsonl, atomic_write_json, database_path, ensure_supported,
+        read_json, read_segments, record_header, write_json,
+    )
+    from app.term_knowledge import empty_knowledge, publish_evidence, save_items, source_range, entity_view
+    from app.term_library import load_terms, term_normalization
+    from app.summary_provenance import digest
+    from app.term_decision import run_terminology_decision
+    from app.errors import UsageError
+    from app.term_decision_drafts import apply_decision_draft, current_decision_draft, rollback_decision
+
+    project = make_project(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    data = {"terms_revision": 1, "terms": [
+        {"source": "Alpha", "normalized": "alpha", "category": "name",
+         "preferred_translation": "阿尔法", "aliases": [], "group_primary": None, "conflicts": {}},
+        {"source": "Beta", "normalized": "beta", "category": "name",
+         "preferred_translation": "贝塔", "aliases": [], "group_primary": None, "conflicts": {}},
+    ], "knowledge": empty_knowledge()}
+    additional = tmp_path / "later.txt"
+    additional.write_text("Alpha returns", encoding="utf-8")
+    add_project_files(project, [str(additional)])
+    segments = read_segments(project)
+    originals = {segment["segment_id"]: segment for segment in segments}
+    records = []
+    for record_id, segment, source, description in zip(
+        ("REC-Z", "REC-A"), segments, ("Alpha", "Beta"), ("first fact", "second fact"), strict=True,
+    ):
+        record = record_header("terminology_candidates", "test", record_id=record_id,
+                               active_task_id="scan", terms=[{"source": source, "description": description}],
+                               source_range=source_range([segment], originals, {}))
+        append_jsonl(project, project / "terminology/candidates.jsonl", record)
+        records.append(record)
+    publish_evidence(project, data, records, term_normalization(load_project_config(project)))
+    save_items(project, data, "alpha", [{"text": "Alpha原有说明", "fragment_ids": ["REC-Z:0"]}])
+    save_items(project, data, "beta", [{"text": "Beta原有说明", "fragment_ids": ["REC-A:0"]}])
+    metadata = read_json(project, project / "project.json")
+    write_json(project, project / "terminology/terms.json",
+               record_header("terminology_library", metadata["project_id"], **data))
+
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if payload["phase"] in {"adjudication", "consistency"}:
+            records = []
+            for term in payload["terms"]:
+                if payload["phase"] == "consistency" and term["normalized"] == "beta":
+                    records.append({"type": "decision", "normalized": "beta", "action": "update",
+                                    "reason": "合并实体", "changes": {"group_primary": "alpha"}})
+                else:
+                    records.append({"type": "decision", "normalized": term["normalized"],
+                                    "action": "keep", "reason": "保持"})
+        else:
+            entity = payload["entities"][0]
+            records = [{"type": "entity_knowledge", "entity": "alpha", "reason": "整理",
+                        "items": [{"text": "合并说明", "refs": [f["id"] for f in entity["fragments"]]}]}]
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology_decision(project, http_client=client)
+    run_dir = project / "runs" / result["run_id"]
+    draft_path = run_dir / "terminology_decision_draft.json"
+    draft = json.loads(draft_path.read_text(encoding="utf-8"))
+    proposal = next(proposal for proposal in draft["proposals"] if "alpha" in proposal.get("knowledge_after", {}))
+    assert proposal["knowledge_after"]["alpha"]["members"] == ["alpha", "beta"]
+    source_library = draft["source_library"]
+    legacy_source = deepcopy(source_library)
+    final_terms = {term["normalized"]: term for term in legacy_source["terms"]}
+    for state in proposal["after"]:
+        final_terms[state["normalized"]].update(state)
+    legacy_source["terms"] = list(final_terms.values())
+    from app.term_knowledge import transfer_alias_evidence
+    transfer_alias_evidence(legacy_source, term_normalization(load_project_config(project)))
+    merged_view = entity_view(project, legacy_source, "alpha")
+    legacy_hash = digest([merged_view["members"], [(f["id"], f["text"], f["source_range"])
+                                                    for f in merged_view["fragments"] if f["state"] == "active"]])
+    assert legacy_hash != proposal["knowledge_after"]["alpha"]["input_version"]
+
+    def mark_legacy(library):
+        for root in ("alpha", "beta"):
+            view = entity_view(project, library, root)
+            saved = library["knowledge"]["entities"][root]
+            saved["input_version"] = digest([view["members"], [(f["id"], f["text"], f["source_range"])
+                                                                  for f in view["fragments"] if f["state"] == "active"]])
+            saved["source_order"] = view["source_order"]
+        library["knowledge"]["version"] = 1
+
+    mark_legacy(source_library)
+    proposal["knowledge_after"]["alpha"]["input_version"] = legacy_hash
+    draft["source_library"]["knowledge"]["version"] = 1
+    atomic_write_json(draft_path, draft, compact=True)
+
+    checkpoint_path = run_dir / "terminology_decision_checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    saved = checkpoint["phases"]["knowledge"]["alpha"]["decision"]
+    saved["input_version"] = legacy_hash
+    checkpoint_order = saved["source_order"]
+    atomic_write_json(checkpoint_path, checkpoint, compact=True)
+    manifest_path = project / "runs" / result["run_id"] / "manifest.json"
+    manifest = read_json(project, manifest_path)
+    manifest.update(status="running", decision_status="generating")
+    write_json(project, manifest_path, manifest)
+
+    legacy = read_json(project, project / "terminology/terms.json")
+    mark_legacy(legacy)
+    write_json(project, project / "terminology/terms.json", legacy)
+    with sqlite3.connect(database_path(project)) as connection:
+        connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (str(schema_version),))
+    _SUPPORTED_CACHE.discard(database_path(project))
+
+    original_draft = draft_path.read_bytes()
+    from app import sqlite_storage
+    migrate_main = sqlite_storage._migrate_term_knowledge_to_v9
+
+    def fail_after_sidecars(*args, **kwargs):
+        raise RuntimeError("injected migration failure")
+
+    monkeypatch.setattr(sqlite_storage, "_migrate_term_knowledge_to_v9", fail_after_sidecars)
+    with pytest.raises(RuntimeError, match="injected migration failure"):
+        ensure_supported(project)
+    assert draft_path.read_bytes() == original_draft
+    with sqlite3.connect(database_path(project)) as connection:
+        assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(schema_version)
+        assert connection.execute("SELECT status FROM runs WHERE run_id = ?", (result["run_id"],)).fetchone()[0] == "running"
+    monkeypatch.setattr(sqlite_storage, "_migrate_term_knowledge_to_v9", migrate_main)
+
+    assert ensure_supported(project) is not None
+    migrated = json.loads(draft_path.read_text(encoding="utf-8"))
+    assert migrated["source_library"]["knowledge"]["version"] == 2
+    migrated_hash = migrated["proposals"][0]["knowledge_after"]["alpha"]["input_version"]
+    assert migrated_hash != legacy_hash
+    migrated_checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    migrated_decision = migrated_checkpoint["phases"]["knowledge"]["alpha"]["decision"]
+    assert migrated_decision["input_version"] == legacy_hash
+    assert migrated_decision["source_order"] == checkpoint_order
+    manifest_path = run_dir / "manifest.json"
+    manifest = read_json(project, manifest_path)
+    assert manifest["status"] == "interrupted"
+    assert manifest["decision_status"] == "pending"
+    with pytest.raises(UsageError, match="旧 Run 已结束"):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await run_terminology_decision(
+                project, resume_run_id=result["run_id"], http_client=client,
+            )
+    assert calls == 3
+
+    assert current_decision_draft(project)["needs_review"] == []
+
+    apply_decision_draft(project, confirm_all=True)
+    applied = load_terms(project)
+    assert next(term for term in applied["terms"] if term["normalized"] == "beta")["group_primary"] == "alpha"
+    assert entity_view(project, applied, "alpha")["status"] == "current"
+    rollback_decision(project, confirm=True)
+    rolled_back = load_terms(project)
+    assert next(term for term in rolled_back["terms"] if term["normalized"] == "beta")["group_primary"] is None
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        next_run = await run_terminology_decision(project, replace_draft=True, http_client=client)
+    assert next_run["run_id"] != result["run_id"]
+    assert calls == 6
+
+
+@pytest.mark.asyncio
 async def test_knowledge_only_partial_failure_preserves_reviewable_success(tmp_path, monkeypatch):
     import httpx
     from app.errors import UsageError
