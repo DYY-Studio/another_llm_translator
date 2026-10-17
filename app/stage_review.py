@@ -159,16 +159,37 @@ async def run_review(
         terms_revision=terms_revision,
     )))
     selected_segments = (await run_blocking(lambda: select_scope(segments, files, scope)))
-    active_segment_ids = [
-        str(segment["segment_id"])
-        for segment in segments
-        if not segment["is_empty"]
-    ]
-    bases = (await run_blocking(lambda: _base_results(
+    selected_segment_ids = [str(segment["segment_id"]) for segment in selected_segments]
+    history_states = (await run_blocking(lambda: latest_stage_states(
         project,
         stage,
-        segment_ids=active_segment_ids,
+        selected_segment_ids,
     )))
+    selection = (await run_blocking(lambda: classify_stage_states(
+        selected_segments,
+        history_states,
+        force=scope.force,
+    )))
+    context_config = config["context"][stage]
+    context_index = (await run_blocking(lambda: PreviousContextIndex(segments)))
+
+    def load_review_bases() -> dict[str, dict[str, Any]]:
+        base_segment_ids = list(selected_segment_ids)
+        base_segment_id_set = set(selected_segment_ids)
+        if (
+            config["execution"]["scheduling_mode"] == "ordered_by_file"
+            and context_config["enabled"]
+        ):
+            for segment in selection.work:
+                for segment_id in context_index.previous_ids(
+                    segment, int(context_config["previous_segments"])
+                ):
+                    if segment_id not in base_segment_id_set:
+                        base_segment_id_set.add(segment_id)
+                        base_segment_ids.append(segment_id)
+        return _base_results(project, stage, segment_ids=base_segment_ids)
+
+    bases = await run_blocking(load_review_bases)
     missing_base = [
         str(segment["segment_id"])
         for segment in selected_segments
@@ -188,16 +209,6 @@ async def run_review(
                     "text": str(segment["source"]),
                 },
             )
-    history_states = (await run_blocking(lambda: latest_stage_states(
-        project,
-        stage,
-        active_segment_ids,
-    )))
-    selection = (await run_blocking(lambda: classify_stage_states(
-        selected_segments,
-        history_states,
-        force=scope.force,
-    )))
     logger.info(
         "stage preparation selection/history ready elapsed=%.3fs selected=%d requested=%d reusable=%d",
         time.perf_counter() - preparation_started_at,
@@ -229,8 +240,6 @@ async def run_review(
             else []
         ),
     )
-    context_config = config["context"][stage]
-    context_index = (await run_blocking(lambda: PreviousContextIndex(segments)))
     term_match_cache = (await run_blocking(lambda: _TermMatchCache(
         library,
         term_normalization(config),

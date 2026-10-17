@@ -831,7 +831,9 @@ def test_chunk_and_context_stop_at_document_part_boundary() -> None:
     ]
     context_index = PreviousContextIndex(source)
     assert context_index.previous(source[2], 3) == []
+    assert context_index.previous_ids(source[2], 3) == ()
     assert context_index.previous(source[3], 3) == [{"source": "第二章"}]
+    assert context_index.previous_ids(source[3], 3) == ("F0001-S000003",)
 
 
 def test_chunk_builder_can_cross_file_and_part_boundaries_when_enabled() -> None:
@@ -1180,6 +1182,7 @@ def test_previous_context_index_matches_sparse_and_probe_segments() -> None:
     ]
     index = PreviousContextIndex(source)
     probe = {**source[0], "segment_id": "S3-PROBE", "source": "probe"}
+    assert index.previous_ids(probe, 2) == ("S1",)
     resolver = lambda segment_id: f"translated:{segment_id}"
     assert index.previous(
         probe,

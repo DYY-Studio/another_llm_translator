@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_left
 
 import hashlib
 
@@ -992,10 +993,28 @@ class PreviousContextIndex:
         for item in all_segments:
             if not item["is_empty"]:
                 by_part[_segment_part_key(item)].append(item)
+        for values in by_part.values():
+            values.sort(key=lambda item: int(item["line_index"]))
         self._by_part = {
             key: tuple((int(item["line_index"]), item) for item in values)
             for key, values in by_part.items()
         }
+
+    def _previous_items(
+        self, first: dict[str, Any], count: int
+    ) -> tuple[dict[str, Any], ...]:
+        if count <= 0:
+            return ()
+        values = self._by_part.get(_segment_part_key(first), ())
+        first_line = int(first["line_index"])
+        stop = bisect_left(values, first_line, key=lambda entry: entry[0])
+        start = max(0, stop - count)
+        return tuple(item for _, item in values[start:stop])
+
+    def previous_ids(self, first: dict[str, Any], count: int) -> tuple[str, ...]:
+        return tuple(
+            str(item["segment_id"]) for item in self._previous_items(first, count)
+        )
 
     def previous(
         self,
@@ -1006,20 +1025,8 @@ class PreviousContextIndex:
         target_transform: Callable[[dict[str, Any], str], str] | None = None,
         source_key: str = "source",
     ) -> list[dict[str, str]]:
-        if count <= 0:
-            return []
-        key = _segment_part_key(first)
-        values = self._by_part.get(key, ())
-        first_line = int(first["line_index"])
-        candidates: list[dict[str, Any]] = []
-        for line_index, item in reversed(values):
-            if line_index < first_line:
-                candidates.append(item)
-                if len(candidates) >= count:
-                    break
-        candidates.reverse()
         result: list[dict[str, str]] = []
-        for item in candidates:
+        for item in self._previous_items(first, count):
             context = {
                 "source": (
                     segment_model_source(item)
