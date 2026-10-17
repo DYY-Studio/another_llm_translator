@@ -21,7 +21,7 @@ from typing import Any
 import httpx
 
 from .prompt_resources import ProjectPrompts
-from .config import load_project_config
+from .config import load_config, load_project_config
 
 
 from .errors import AppError, StorageError, UsageError, app_error_payload
@@ -223,6 +223,10 @@ def decision_resume_compatibility(
         return False, "旧 Run 的实体说明执行模式与当前运行不一致"
     if bool(checkpoint.get("final_review", False)) != final_review:
         return False, "旧 Run 的终审选项与当前运行不一致"
+    previous_generation = load_config(project / "runs" / run_id / "config.toml")["terminology_decision"]["description_generation"]
+    current_generation = load_config(project / "config.toml")["terminology_decision"]["description_generation"]
+    if previous_generation != current_generation:
+        return False, "旧 Run 的实体说明生成方式与当前设置不一致"
     return True, None
 
 def _read_checkpoint_file(path: Path) -> dict[str, Any]:

@@ -136,7 +136,7 @@ def _build_draft(
             "normalized": key,
             "source": original[key]["source"],
             "reason": decision["reason"],
-            "evidence": deepcopy(evidence[key]),
+            "evidence": {} if knowledge_only else deepcopy(evidence[key]),
             "conflicts": deepcopy(conflicts[key]),
         }
         for key, decision in sorted(decisions.items())
@@ -487,7 +487,8 @@ def apply_decision_draft(
         knowledge=deepcopy(library["knowledge"]),
     )
     from .term_knowledge import entity_view, save_items, project_descriptions, transfer_alias_evidence, evidence
-    transfer_alias_evidence(term_record, term_normalization(load_project_config(project)))
+    if not draft.get("knowledge_only", False):
+        transfer_alias_evidence(term_record, term_normalization(load_project_config(project)))
     known = evidence(project, term_record)
     for proposal in draft["proposals"]:
         if proposal["proposal_id"] in rejected:

@@ -190,10 +190,21 @@ async def test_cancelled_retry_preserves_checkpoint_and_resume_requests_only_unf
         assert not decision_resume_compatibility(project, run_id, source_terms_revision=1, knowledge_only=not knowledge_only)[0]
         if knowledge_only:
             from app.web_tasks import task_options
+            from app.config import dump_config, load_config
             current = task_options(project, "terminology_decision", knowledge_only=True)
             assert current["running_run"]["resume_compatible"] is True
             assert current["running_run"]["total_steps"] == 2
             assert task_options(project, "terminology_decision")["running_run"]["resume_compatible"] is False
+            config = load_config(project / "config.toml")
+            config["terminology_decision"]["description_generation"] = "summary_only"
+            (project / "config.toml").write_text(dump_config(config))
+            changed = task_options(project, "terminology_decision", knowledge_only=True)
+            assert changed["running_run"]["resume_compatible"] is False
+            from app.errors import UsageError
+            with pytest.raises(UsageError, match="生成方式"):
+                await run_terminology_decision(project, knowledge_only=True, http_client=client, resume_run_id=run_id)
+            config["terminology_decision"]["description_generation"] = "sourced"
+            (project / "config.toml").write_text(dump_config(config))
         resumed = True
         result = await run_terminology_decision(project, knowledge_only=knowledge_only, http_client=client, resume_run_id=run_id)
     assert calls == [["alpha", "beta"], ["alpha"], ["alpha"]]
@@ -337,7 +348,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     import httpx
     from copy import deepcopy
     from app.sqlite_storage import read_json, write_json, record_header
-    from app.term_knowledge import empty_knowledge, save_items, entity_view
+    from app.term_knowledge import add_unsourced, empty_knowledge, save_items, entity_view
     from app.term_library import load_terms
     from app.term_decision import run_terminology_decision, decision_plan
     from app.term_decision_drafts import current_decision_draft, apply_decision_draft, rollback_decision
@@ -347,6 +358,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     terms = [{"source": "Alpha", "normalized": "alpha", "category": "name", "preferred_translation": "阿尔法",
               "aliases": ["Al"], "group_primary": None, "conflicts": {}}]
     data = {"terms_revision": 1, "terms": terms, "knowledge": empty_knowledge()}
+    orphan = add_unsourced(data["knowledge"], "al", "别名原有证据", "manual")
     save_items(project, data, "alpha", [{"text": "原有说明", "fragment_ids": []}])
     meta = read_json(project, project / "project.json")
     write_json(project, project / "terminology/terms.json", record_header("terminology_library", meta["project_id"], **data))
@@ -407,6 +419,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     assert restored.json()["draft"]["rejected_proposal_ids"] == []
     apply_decision_draft(project, confirm_all=True)
     after = load_terms(project)
+    assert after["knowledge"]["fragments"][orphan]["owner"] == "al"
     assert after["terms"][0]["description"] == "更新说明"
     for field in ("source", "normalized", "category", "preferred_translation", "aliases", "group_primary"):
         assert after["terms"][0][field] == before["terms"][0][field]
@@ -422,3 +435,40 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
         with pytest.raises(UsageError, match="实体说明聚合失败"):
             await run_terminology_decision(project, knowledge_only=True, http_client=client)
     assert current_decision_draft(project) is None
+
+
+@pytest.mark.asyncio
+async def test_knowledge_only_partial_failure_preserves_reviewable_success(tmp_path, monkeypatch):
+    import httpx
+    from app.errors import UsageError
+    from app.sqlite_storage import read_json, write_json, record_header
+    from app.term_knowledge import add_unsourced, empty_knowledge
+    from app.term_decision import run_terminology_decision
+    from app.term_decision_drafts import current_decision_draft, apply_decision_draft, manual_review_state
+
+    project = make_project(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    terms = [{"source": k, "normalized": k, "category": "name", "preferred_translation": k,
+              "aliases": [], "group_primary": None, "conflicts": {}} for k in ("alpha", "beta")]
+    data = {"terms_revision": 1, "terms": terms, "knowledge": empty_knowledge()}
+    for term in terms:
+        add_unsourced(data["knowledge"], term["normalized"], "身份说明", "manual")
+    meta = read_json(project, project / "project.json")
+    write_json(project, project / "terminology/terms.json", record_header("terminology_library", meta["project_id"], **data))
+
+    async def handler(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = [{"type": "entity_knowledge", "entity": e["entity"], "reason": "整理",
+                    "items": [{"text": "更新说明", "refs": [e["fragments"][0]["id"] if e["entity"] == "alpha" else "unknown"]}]}
+                   for e in payload["entities"]]
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(UsageError, match="实体说明聚合失败"):
+            await run_terminology_decision(project, knowledge_only=True, http_client=client)
+    draft = current_decision_draft(project)
+    assert [p["normalized"] for p in draft["proposals"]] == [["alpha"]]
+    assert [item["normalized"] for item in draft["needs_review"]] == ["beta"]
+    assert draft["needs_review"][0]["evidence"] == {}
+    apply_decision_draft(project, confirm_all=True)
+    assert [item["normalized"] for item in manual_review_state(project)["items"]] == ["beta"]
