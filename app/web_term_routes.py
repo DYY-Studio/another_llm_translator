@@ -37,7 +37,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
     @app.get("/api/v1/projects/{name}/terms/knowledge")
     def get_knowledge(name: str, normalized: str) -> dict[str, Any]:
         from .sqlite_storage import read_json, record_exists
-        from .term_knowledge import entity_view, navigation_fragment
+        from .term_knowledge import entity_detail_fragment, entity_view
         root = project(name)
         path = root / "terminology" / "terms.json"
         if not record_exists(root, path):
@@ -46,7 +46,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
         view = entity_view(root, library, normalized)
         return {"entity_key": view["entity_key"], "members": view["members"], "status": view["status"],
                 "items": [{"text": item["text"], "fragment_ids": item["fragment_ids"]} for item in view["items"]],
-                "fragments": [navigation_fragment(f) for f in view["fragments"]],
+                "fragments": [entity_detail_fragment(f) for f in view["fragments"]],
                 "terms_revision": library["terms_revision"]}
 
     @app.put("/api/v1/projects/{name}/terms/knowledge")

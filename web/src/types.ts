@@ -857,9 +857,17 @@ export interface KnowledgeFragment {
   source_range: KnowledgeSourceRange[] | null;
   _positions: Record<string, number>;
 }
+export interface EntityKnowledgeRange {
+  segment_id: string; last_segment_id: string; start: number; end: number;
+}
+export interface EntityKnowledgeFragment {
+  id: string; owner: string; source?: string; text: string;
+  state: "active" | "disabled" | "superseded"; valid: boolean;
+  navigation_ranges: EntityKnowledgeRange[] | null;
+}
 export interface EntityKnowledge {
   entity_key: string; members: string[]; status: "current" | "pending" | "stale";
-  items: KnowledgeItem[]; fragments: KnowledgeFragment[]; terms_revision: number;
+  items: KnowledgeItem[]; fragments: EntityKnowledgeFragment[]; terms_revision: number;
 }
 
 export interface Term {

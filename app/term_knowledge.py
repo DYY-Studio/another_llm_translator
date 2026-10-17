@@ -32,6 +32,54 @@ def navigation_fragment(fragment: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def entity_detail_fragment(fragment: dict[str, Any]) -> dict[str, Any]:
+    value = {key: fragment[key] for key in ("id", "owner", "text", "state", "valid")}
+    if "source" in fragment:
+        value["source"] = fragment["source"]
+    source_ranges = fragment["source_range"]
+    compact = [] if source_ranges else None
+    positions = fragment["_positions"]
+    if compact is not None:
+        for item in source_ranges:
+            previous = compact[-1] if compact else None
+            position = positions.get(item["segment_id"], -1)
+            previous_position = (
+                positions.get(previous["last_segment_id"], -1)
+                if previous is not None
+                else -1
+            )
+            if (
+                previous is not None
+                and item["file_id"] == previous["file_id"]
+                and item["part_id"] == previous["part_id"]
+                and position >= 0
+                and previous_position >= 0
+                and position in {previous_position, previous_position + 1}
+            ):
+                previous["last_segment_id"] = item["segment_id"]
+                previous["end"] = item["end"]
+            else:
+                compact.append(
+                    {
+                        "segment_id": item["segment_id"],
+                        "last_segment_id": item["segment_id"],
+                        "start": item["start"],
+                        "end": item["end"],
+                        "file_id": item["file_id"],
+                        "part_id": item["part_id"],
+                    }
+                )
+    value["navigation_ranges"] = (
+        [
+            {key: item[key] for key in ("segment_id", "last_segment_id", "start", "end")}
+            for item in compact
+        ]
+        if compact is not None
+        else None
+    )
+    return value
+
+
 def require_knowledge(library: dict[str, Any]) -> dict[str, Any]:
     knowledge = library.get("knowledge")
     if not isinstance(knowledge, dict) or knowledge.get("version") != 2:

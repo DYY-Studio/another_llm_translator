@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import { compactKnowledgeRanges } from "../termKnowledge";
 import { errorMessage, translate, type Language } from "../i18n";
 import type { EntityKnowledge, KnowledgeItem, TermsResponse } from "../types";
 
@@ -89,7 +88,7 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment, expl
       <legend>{t("title")} {index + 1}</legend>
       <textarea aria-label={`${t("title")} ${index + 1}`} value={item.text} onChange={(event) => replace(index, { ...item, text: event.target.value })} />
       <div className="knowledge-item-actions">
-        {(item.fragment_ids.length === 0 || item.fragment_ids.every((id) => fragments.get(id)?.source_range === null)) && <small>{t("noSource")}</small>}
+        {(item.fragment_ids.length === 0 || item.fragment_ids.every((id) => fragments.get(id)?.navigation_ranges === null)) && <small>{t("noSource")}</small>}
         <button className="quiet-button" type="button" onClick={() => { replace(index, { ...item, fragment_ids: [] }); setExpandedReferences(new Set()); }}>{t("unsourced")}</button>
         <button className="danger-button" type="button" onClick={() => { setItems((previous) => previous.filter((_, i) => i !== index)); setExpandedReferences(new Set()); }}>{t("remove")}</button>
       </div>
@@ -127,9 +126,13 @@ function KnowledgeForm({ project, view, language, onChanged, onFindSegment, expl
           <p>{fragment.text}</p>
           {!fragment.valid && <p className="error-text">{t("expiredSource")}</p>}
           <small className="knowledge-fragment-sources">
-            {fragment.source_range ? compactKnowledgeRanges(fragment).map((range, index) => <span key={range.key}>
+            {fragment.navigation_ranges ? fragment.navigation_ranges.map((range, index) => <span key={`${range.segment_id}:${range.start}:${range.last_segment_id}:${range.end}`}>
               {index > 0 && <span aria-hidden="true"> · </span>}
-              <button type="button" disabled={!fragment.valid} onClick={() => onFindSegment(fragment.source ?? view.entity_key, range.segmentId)}>{range.label}</button>
+              <button type="button" disabled={!fragment.valid} onClick={() => onFindSegment(fragment.source ?? view.entity_key, range.segment_id)}>
+                {range.segment_id === range.last_segment_id
+                  ? `${range.segment_id} [${range.start}–${range.end}]`
+                  : `${range.segment_id} — ${range.last_segment_id}`}
+              </button>
             </span>) : t("noSource")}
           </small>
         </div>

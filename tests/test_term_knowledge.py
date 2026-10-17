@@ -56,6 +56,50 @@ def test_knowledge_payload_compacts_ranges_without_bridging_gaps_or_slices():
     assert fragment == before
 
 
+def test_entity_detail_fragment_returns_compact_navigation_without_persisted_ranges():
+    from app.term_knowledge import entity_detail_fragment
+
+    ranges = [
+        {"segment_id": "S1", "file_id": "F1", "part_id": "body", "start": 2, "end": 5},
+        {"segment_id": "S1", "file_id": "F1", "part_id": "body", "start": 5, "end": 8},
+        {"segment_id": "S2", "file_id": "F1", "part_id": "body", "start": 0, "end": 4},
+        {"segment_id": "S3", "file_id": "F1", "part_id": "body", "start": 1, "end": 3},
+        {"segment_id": "S3", "file_id": "F1", "part_id": "body", "start": 3, "end": 7},
+        {"segment_id": "S4", "file_id": "F1", "part_id": "body", "start": 0, "end": 2},
+        {"segment_id": "S5", "file_id": "F1", "part_id": "body", "start": 0, "end": 2},
+        {"segment_id": "S6", "file_id": "F2", "part_id": "body", "start": 0, "end": 2},
+        {"segment_id": "S7", "file_id": "F2", "part_id": "appendix", "start": 0, "end": 2},
+    ]
+    fragment = {
+        "id": "candidate:0",
+        "owner": "alpha",
+        "original_owner": "alpha",
+        "origin": "scan",
+        "source": "Alpha",
+        "text": "Captain",
+        "state": "active",
+        "valid": True,
+        "source_range": ranges,
+        "_positions": {"S1": 0, "S2": 1, "S3": 2, "S4": 4, "S6": 5, "S7": 6},
+    }
+
+    result = entity_detail_fragment(fragment)
+
+    assert result["navigation_ranges"] == [
+        {"segment_id": "S1", "last_segment_id": "S3", "start": 2, "end": 7},
+        {"segment_id": "S4", "last_segment_id": "S4", "start": 0, "end": 2},
+        {"segment_id": "S5", "last_segment_id": "S5", "start": 0, "end": 2},
+        {"segment_id": "S6", "last_segment_id": "S6", "start": 0, "end": 2},
+        {"segment_id": "S7", "last_segment_id": "S7", "start": 0, "end": 2},
+    ]
+    assert result["source"] == "Alpha"
+    assert result["text"] == "Captain"
+    assert result["state"] == "active" and result["valid"] is True
+    assert not {"source_range", "_positions", "original_owner", "origin"} & result.keys()
+    assert entity_detail_fragment({**fragment, "source_range": None})["navigation_ranges"] is None
+    assert entity_detail_fragment({**fragment, "source_range": []})["navigation_ranges"] is None
+
+
 def test_published_evidence_needs_application_and_source_changes_block_use(tmp_path: Path) -> None:
     from app.term_knowledge import publish_evidence, entity_view, save_items, project_descriptions
     from app.term_library import term_normalization
@@ -453,11 +497,18 @@ def test_knowledge_api_checks_revision_and_explicit_fragment_operations(tmp_path
     from fastapi.testclient import TestClient
     from app.web import create_app
     from app.sqlite_storage import read_json, write_json
-    from app.term_knowledge import save_items
+    from app.term_knowledge import publish_evidence, save_items
+    from app.term_library import term_normalization
+    from app.config import load_project_config
     project = make_project(tmp_path)
     data = library()
     data["terms"][0].update(aliases=[],category="name",preferred_translation="阿尔法",conflicts={})
-    save_items(project,data,"alpha",[{"text":"人工说明","fragment_ids":[]}])
+    record = scan_record(project, "Alpha is ready")
+    publish_evidence(
+        project, data, [record], term_normalization(load_project_config(project))
+    )
+    fragment_id = f'{record["record_id"]}:0'
+    save_items(project,data,"alpha",[{"text":"人工说明","fragment_ids":[fragment_id]}])
     meta = read_json(project,project / "project.json")
     write_json(project,project / "terminology" / "terms.json",record_header("terminology_library",meta["project_id"],**data))
     app = create_app(projects_root=project.parent,app_root=tmp_path / "terms")
@@ -467,6 +518,20 @@ def test_knowledge_api_checks_revision_and_explicit_fragment_operations(tmp_path
     assert response.status_code==200
     details=response.json()
     assert details["items"][0]["text"]=="人工说明"
+    assert details["entity_key"] == "alpha" and details["members"] == ["alpha"]
+    assert details["status"] == "current" and details["terms_revision"] == 1
+    navigation = details["fragments"][0]
+    assert navigation["id"] == fragment_id and navigation["source"] == "Alpha"
+    assert navigation["text"] == "Alpha is ready"
+    assert navigation["state"] == "active" and navigation["valid"] is True
+    original_range = record["source_range"][0]
+    assert navigation["navigation_ranges"] == [{
+        "segment_id": original_range["segment_id"],
+        "last_segment_id": original_range["segment_id"],
+        "start": original_range["start"],
+        "end": original_range["end"],
+    }]
+    assert not {"source_range", "_positions", "original_owner", "origin"} & navigation.keys()
     bad=client.put(url,json={"normalized":"alpha","expected_revision":0,"action":"save_items","items":[]})
     assert bad.status_code==400
     term_url = "/api/v1/projects/terms/terms"
