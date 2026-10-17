@@ -620,7 +620,7 @@ def register_task_routes(
         ).is_dir()
 
     @app.get("/api/v1/runs")
-    async def historical_runs(
+    def historical_runs(
         project_selector: str | None = Query(default=None, alias="project"),
         stage: str | None = None,
         status: str | None = None,
@@ -685,7 +685,7 @@ def register_task_routes(
         }
 
     @app.get("/api/v1/projects/{name}/runs/{run_id}")
-    async def historical_run_detail(name: str, run_id: str) -> dict[str, Any]:
+    def historical_run_detail(name: str, run_id: str) -> dict[str, Any]:
         root = project(name)
         safe_run_id = _safe_run_id(run_id)
         record = read_run_record(root, safe_run_id)
@@ -704,7 +704,7 @@ def register_task_routes(
         )
 
     @app.get("/api/v1/projects/{name}/runs/{run_id}/requests/{request_id}")
-    async def historical_request_detail(
+    def historical_request_detail(
         name: str, run_id: str, request_id: str, full: bool = False
     ) -> dict[str, Any]:
         root = project(name)
@@ -780,7 +780,7 @@ def register_task_routes(
         )
 
     @app.get("/api/v1/projects/{name}/task-options/{stage}")
-    async def get_task_options(
+    def get_task_options(
         request: Request,
         name: str,
         stage: str,
@@ -827,11 +827,11 @@ def register_task_routes(
         )
 
     @app.get("/api/v1/tasks/active")
-    async def active_tasks() -> dict[str, Any]:
+    def active_tasks() -> dict[str, Any]:
         return {"tasks": app.state.tasks.active_tasks()}
 
     @app.get("/api/v1/tasks/{task_id}")
-    async def task(task_id: str) -> dict[str, Any]:
+    def task(task_id: str) -> dict[str, Any]:
         return app.state.tasks.get(task_id)
 
     @app.post("/api/v1/tasks/{task_id}/cancel")
@@ -839,7 +839,7 @@ def register_task_routes(
         return await app.state.tasks.cancel(task_id)
 
     @app.post("/api/v1/diagnostics")
-    async def diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+    def diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
         values = {
             key: payload.get(key)
             for key in (
@@ -873,7 +873,7 @@ def register_task_routes(
             raise UsageError(str(exc)) from exc
 
     @app.get("/api/v1/diagnostics/requests/{request_id}")
-    async def diagnostic_request(request_id: str) -> dict[str, Any]:
+    def diagnostic_request(request_id: str) -> dict[str, Any]:
         try:
             return app.state.diagnostics.request_detail(request_id)
         except ValueError as exc:

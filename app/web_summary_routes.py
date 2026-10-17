@@ -137,7 +137,7 @@ def register_summary_routes(
         return await asyncio.to_thread(_summary_view, root)
 
     @app.put("/api/v1/projects/{name}/summaries/participation")
-    async def save_participation(
+    def save_participation(
         name: str, payload: SummaryParticipationPayload
     ) -> dict[str, Any]:
         values = _selection(payload.boundaries)
@@ -161,7 +161,7 @@ def register_summary_routes(
             return _summary_view(root)
 
     @app.post("/api/v1/projects/{name}/summaries/aggregation-preflight")
-    async def preflight(
+    def preflight(
         name: str, payload: SummarySelectionPayload
     ) -> dict[str, Any]:
         language = _prompt_language(payload.language)
@@ -193,7 +193,7 @@ def register_summary_routes(
         )
 
     @app.post("/api/v1/projects/{name}/summaries/export")
-    async def export(name: str, payload: SummaryExportPayload) -> dict[str, Any]:
+    def export(name: str, payload: SummaryExportPayload) -> dict[str, Any]:
         root = project(name)
         with project_write_lock(root):
             output = export_summary_markdown(

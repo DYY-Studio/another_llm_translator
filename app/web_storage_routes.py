@@ -28,7 +28,7 @@ def register_storage_routes(
     del projects_root, app_root
 
     @app.get("/api/v1/storage/data-root")
-    async def data_root_status() -> dict[str, object]:
+    def data_root_status() -> dict[str, object]:
         try:
             result = data_root.status()
         except (OSError, ValueError) as exc:
@@ -42,7 +42,7 @@ def register_storage_routes(
         }
 
     @app.post("/api/v1/storage/data-root/relocation")
-    async def request_data_root_relocation(
+    def request_data_root_relocation(
         payload: DataRootRelocationPayload,
     ) -> dict[str, str]:
         if not payload.confirm:
@@ -58,7 +58,7 @@ def register_storage_routes(
             raise UsageError(str(exc)) from exc
 
     @app.delete("/api/v1/storage/data-root/relocation")
-    async def cancel_data_root_relocation(
+    def cancel_data_root_relocation(
         payload: StorageConfirmPayload,
     ) -> dict[str, bool]:
         try:
@@ -67,7 +67,7 @@ def register_storage_routes(
             raise UsageError(str(exc)) from exc
 
     @app.get("/api/v1/storage")
-    async def storage_summary() -> dict[str, object]:
+    def storage_summary() -> dict[str, object]:
         return storage_manager.scan()
 
     @app.get("/api/v1/storage/projects/{selector}")
@@ -75,13 +75,13 @@ def register_storage_routes(
         return await run_in_threadpool(storage_manager.scan_project, project(selector))
 
     @app.post("/api/v1/storage/logs/clear")
-    async def clear_global_logs(payload: StorageConfirmPayload) -> dict[str, int]:
+    def clear_global_logs(payload: StorageConfirmPayload) -> dict[str, int]:
         return storage_manager.clear_global_logs(confirm=payload.confirm)
 
     @app.post(
         "/api/v1/projects/{name}/storage/runs/{run_id}/debug/clear"
     )
-    async def clear_debug(
+    def clear_debug(
         name: str, run_id: str, payload: StorageConfirmPayload
     ) -> dict[str, int]:
         return storage_manager.clear_debug(
@@ -89,7 +89,7 @@ def register_storage_routes(
         )
 
     @app.post("/api/v1/projects/{name}/storage/outputs/clear")
-    async def clear_output(
+    def clear_output(
         name: str, payload: StorageOutputClearPayload
     ) -> dict[str, int]:
         return storage_manager.clear_output(
@@ -105,7 +105,7 @@ def register_storage_routes(
         return await run_in_threadpool(storage_manager.clear_run_checkpoints, project(name), confirm=payload.confirm)
 
     @app.post("/api/v1/projects/{name}/storage/logs/clear")
-    async def clear_project_logs(
+    def clear_project_logs(
         name: str, payload: StorageConfirmPayload
     ) -> dict[str, int]:
         return storage_manager.clear_project_logs(

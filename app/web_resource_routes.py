@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import ctypes
 import hmac
@@ -372,16 +373,16 @@ def register_resource_routes(
         return effective_path(f"llm_presets/{preset_id}.json", builtin_root=app_root)
 
     @app.get("/api/v1/welcome")
-    async def welcome() -> dict[str, Any]:
+    def welcome() -> dict[str, Any]:
         return {"first": not welcome_seen()}
 
     @app.post("/api/v1/welcome/dismiss")
-    async def dismiss_welcome() -> dict[str, bool]:
+    def dismiss_welcome() -> dict[str, bool]:
         mark_welcome_seen()
         return {"ok": True}
 
     @app.post("/api/v1/directories")
-    async def list_directories(payload: dict[str, Any]) -> dict[str, Any]:
+    def list_directories(payload: dict[str, Any]) -> dict[str, Any]:
         path = payload.get("path", "")
         if not isinstance(path, str):
             raise UsageError("目录路径必须是字符串")
@@ -446,16 +447,16 @@ def register_resource_routes(
         }
 
     @app.get("/api/v1/document-adapters")
-    async def document_adapters() -> dict[str, Any]:
+    def document_adapters() -> dict[str, Any]:
         return {"adapters": document_adapter_summaries()}
 
     @app.get("/api/v1/translation-validators")
-    async def translation_validators() -> dict[str, Any]:
+    def translation_validators() -> dict[str, Any]:
         bindings = resolve_translation_validators()
         return {"validators": [summary for _, summary in bindings]}
 
     @app.get("/api/v1/global/config")
-    async def get_global_config() -> dict[str, Any]:
+    def get_global_config() -> dict[str, Any]:
         return {
             "config": load_config(
                 effective_path("config/config.toml", builtin_root=app_root)
@@ -463,7 +464,7 @@ def register_resource_routes(
         }
 
     @app.put("/api/v1/global/config")
-    async def put_global_config(payload: dict[str, Any]) -> dict[str, bool]:
+    def put_global_config(payload: dict[str, Any]) -> dict[str, bool]:
         config = payload.get("config")
         if not isinstance(config, dict):
             raise UsageError("config 必须是对象")
@@ -475,7 +476,7 @@ def register_resource_routes(
         return {"saved": True}
 
     @app.get("/api/v1/prompts/{stage}/default")
-    async def get_builtin_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
+    def get_builtin_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
         if stage not in PROMPT_RESOURCE_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         validate_language(language)
@@ -490,7 +491,7 @@ def register_resource_routes(
         )
 
     @app.get("/api/v1/global/prompts/{stage}")
-    async def get_global_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
+    def get_global_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
         if stage not in PROMPT_RESOURCE_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         validate_language(language)
@@ -508,7 +509,7 @@ def register_resource_routes(
         )
 
     @app.put("/api/v1/global/prompts/{stage}")
-    async def put_global_prompt(
+    def put_global_prompt(
         stage: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
         if stage not in PROMPT_RESOURCE_STAGES:
@@ -523,11 +524,11 @@ def register_resource_routes(
         return {"saved": True}
 
     @app.get("/api/v1/projects/{name}/config")
-    async def get_project_config(name: str) -> dict[str, Any]:
+    def get_project_config(name: str) -> dict[str, Any]:
         return {"config": load_config(project(name) / "config.toml")}
 
     @app.put("/api/v1/projects/{name}/config")
-    async def put_project_config(
+    def put_project_config(
         name: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
         config = payload.get("config")
@@ -543,7 +544,7 @@ def register_resource_routes(
         return {"saved": True}
 
     @app.get("/api/v1/projects/{name}/prompts/{stage}")
-    async def get_project_prompt(
+    def get_project_prompt(
         name: str, stage: str, language: str = "zh-CN", file_id: str | None = None
     ) -> dict[str, Any]:
         if stage not in PROMPT_RESOURCE_STAGES:
@@ -615,7 +616,7 @@ def register_resource_routes(
         return result
 
     @app.put("/api/v1/projects/{name}/prompts/{stage}")
-    async def put_project_prompt(
+    def put_project_prompt(
         name: str, stage: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
         if stage not in PROMPT_RESOURCE_STAGES:
@@ -630,7 +631,7 @@ def register_resource_routes(
         return {"saved": True}
 
     @app.delete("/api/v1/projects/{name}/prompts/{stage}")
-    async def restore_project_prompt(name: str, stage: str, payload: dict[str, Any]) -> dict[str, bool]:
+    def restore_project_prompt(name: str, stage: str, payload: dict[str, Any]) -> dict[str, bool]:
         if payload.get("confirm") is not True:
             raise UsageError("必须明确确认恢复 Prompt 继承")
         language = validate_language(payload.get("language", "zh-CN"))
@@ -640,7 +641,7 @@ def register_resource_routes(
         return {"saved": True}
 
     @app.get("/api/v1/prompt-library/{stage}/{language}")
-    async def get_prompt_library(stage: str, language: str) -> dict[str, Any]:
+    def get_prompt_library(stage: str, language: str) -> dict[str, Any]:
         return {
             "stage": stage,
             "language": language,
@@ -648,7 +649,7 @@ def register_resource_routes(
         }
 
     @app.get("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
-    async def get_prompt_library_entry(
+    def get_prompt_library_entry(
         stage: str, language: str, prompt_id: str
     ) -> dict[str, Any]:
         content, digest = read_prompt_library(stage, language, prompt_id)
@@ -750,7 +751,7 @@ def register_resource_routes(
         return result
 
     @app.put("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
-    async def put_prompt_library_entry(
+    def put_prompt_library_entry(
         stage: str, language: str, prompt_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         digest = save_prompt_library(
@@ -762,14 +763,14 @@ def register_resource_routes(
         return {"saved": True, "id": prompt_id, "digest": digest}
 
     @app.delete("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
-    async def delete_prompt_library_entry(
+    def delete_prompt_library_entry(
         stage: str, language: str, prompt_id: str
     ) -> dict[str, Any]:
         delete_prompt_library(stage, language, prompt_id)
         return {"deleted": True, "id": prompt_id}
 
     @app.get("/api/v1/global/decision-presets")
-    async def list_decision_presets() -> dict[str, Any]:
+    def list_decision_presets() -> dict[str, Any]:
         paths: dict[str, Path] = {}
         for root in (user_root(), app_root):
             for path in sorted((root / "decision_presets").glob("*.json")):
@@ -787,12 +788,12 @@ def register_resource_routes(
         return {"presets": values}
 
     @app.get("/api/v1/global/decision-presets/{preset_id}")
-    async def get_decision_preset(preset_id: str) -> dict[str, Any]:
+    def get_decision_preset(preset_id: str) -> dict[str, Any]:
         relative = str(decision_preset_path(Path(), preset_id))
         return load_decision_preset(effective_path(relative, builtin_root=app_root))
 
     @app.put("/api/v1/global/decision-presets/{preset_id}")
-    async def put_decision_preset(preset_id: str, payload: dict[str, Any]) -> dict[str, bool]:
+    def put_decision_preset(preset_id: str, payload: dict[str, Any]) -> dict[str, bool]:
         relative = str(decision_preset_path(Path(), preset_id))
         definition = validate_decision_preset(payload)
         if definition["preset_id"] != preset_id:
@@ -804,7 +805,7 @@ def register_resource_routes(
         return {"saved": True}
 
     @app.delete("/api/v1/global/decision-presets/{preset_id}")
-    async def delete_decision_preset(preset_id: str) -> dict[str, bool]:
+    def delete_decision_preset(preset_id: str) -> dict[str, bool]:
         relative = str(decision_preset_path(Path(), preset_id))
         configs = [effective_path("config/config.toml", builtin_root=app_root)]
         configs.extend(item / "config.toml" for item in (projects_root.iterdir() if projects_root.exists() else ())
@@ -823,7 +824,7 @@ def register_resource_routes(
         return {"deleted": True}
 
     @app.get("/api/v1/global/presets")
-    async def list_global_presets() -> dict[str, Any]:
+    def list_global_presets() -> dict[str, Any]:
         selected = str(
             load_config(
                 effective_path("config/config.toml", builtin_root=app_root)
@@ -862,11 +863,11 @@ def register_resource_routes(
         return {"presets": values}
 
     @app.get("/api/v1/global/presets/{preset_id}")
-    async def get_global_preset(preset_id: str) -> dict[str, Any]:
+    def get_global_preset(preset_id: str) -> dict[str, Any]:
         return load_llm_preset(preset_file(preset_id)).definition
 
     @app.put("/api/v1/global/presets/{preset_id}")
-    async def put_global_preset(
+    def put_global_preset(
         preset_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         preset = validate_preset_payload(preset_id, payload)
@@ -889,11 +890,11 @@ def register_resource_routes(
             project_config = load_config(item / "config.toml")
             if project_config["llm"].get("preset") == preset_id:
                 raise UsageError(f"不能删除项目 {item.name} 正在使用的 LLM Preset")
-        decisions = await list_decision_presets()
+        decisions = await run_blocking(list_decision_presets)
         for item in decisions["presets"]:
             if item.get("protocol") != "llm":
                 continue
-            definition = await get_decision_preset(item["preset_id"])
+            definition = await run_blocking(get_decision_preset, item["preset_id"])
             if definition["protocol"] == "llm" and definition["llm_preset"] == preset_id:
                 raise UsageError(f"不能删除 Decision Preset {item['preset_id']} 正在使用的 LLM Preset")
         user_file = user_root() / "llm_presets" / f"{preset_id}.json"
@@ -906,7 +907,7 @@ def register_resource_routes(
         raise UsageError(f"LLM Preset 不存在：{preset_id}")
 
     @app.get("/api/v1/global/presets/{preset_id}/preview")
-    async def preview_global_preset(preset_id: str) -> dict[str, Any]:
+    def preview_global_preset(preset_id: str) -> dict[str, Any]:
         preset = load_llm_preset(preset_file(preset_id))
         adapter = load_json_adapter(
             effective_path(
@@ -1006,11 +1007,11 @@ def register_resource_routes(
         return {"models": models, "count": len(models)}
 
     @app.get("/api/v1/credentials")
-    async def list_credentials() -> dict[str, Any]:
+    def list_credentials() -> dict[str, Any]:
         return {"credentials": credential_summaries()}
 
     @app.post("/api/v1/credentials")
-    async def create_credential(payload: dict[str, Any]) -> dict[str, bool]:
+    def create_credential(payload: dict[str, Any]) -> dict[str, bool]:
         credential_id = payload.get("id")
         secret = payload.get("secret")
         if not isinstance(credential_id, str) or not isinstance(secret, str):
@@ -1019,7 +1020,7 @@ def register_resource_routes(
         return {"saved": True}
 
     @app.put("/api/v1/credentials/{credential_id}")
-    async def update_credential(
+    def update_credential(
         credential_id: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
         secret = payload.get("secret")
@@ -1031,12 +1032,12 @@ def register_resource_routes(
         return {"saved": True}
 
     @app.delete("/api/v1/credentials/{credential_id}")
-    async def delete_credential_route(credential_id: str) -> dict[str, bool]:
+    def delete_credential_route(credential_id: str) -> dict[str, bool]:
         delete_credential(credential_id)
         return {"deleted": True}
 
     @app.post("/api/v1/credentials/{credential_id}/test")
-    async def test_credential_route(credential_id: str) -> dict[str, Any]:
+    def test_credential_route(credential_id: str) -> dict[str, Any]:
         secret = read_credential(credential_id)
         if secret is None:
             raise UsageError(f"凭据不存在：{credential_id}")
@@ -1047,7 +1048,7 @@ def register_resource_routes(
         return {"ok": True}
 
     @app.get("/api/v1/server/status")
-    async def server_status(request: Request) -> dict[str, Any]:
+    def server_status(request: Request) -> dict[str, Any]:
         config = app.state.server_config
         loopback = _is_loopback(request)
         return {
@@ -1066,7 +1067,7 @@ def register_resource_routes(
         }
 
     @app.get("/api/v1/server/interfaces")
-    async def server_interfaces() -> dict[str, Any]:
+    def server_interfaces() -> dict[str, Any]:
         return {"interfaces": lan_interfaces()}
 
     @app.put("/api/v1/server/config")
@@ -1135,7 +1136,7 @@ def register_resource_routes(
         return {"saved": True, "warning": warning}
 
     @app.post("/api/v1/auth/login")
-    async def auth_login(
+    def auth_login(
         request: Request, payload: dict[str, Any]
     ) -> dict[str, Any]:
         config = app.state.server_config
@@ -1164,14 +1165,14 @@ def register_resource_routes(
         return response
 
     @app.post("/api/v1/auth/logout")
-    async def auth_logout(request: Request) -> dict[str, bool]:
+    def auth_logout(request: Request) -> dict[str, bool]:
         token = request.cookies.get(SESSION_COOKIE)
         if token:
             app.state.sessions.pop(token, None)
         return {"logged_out": True}
 
     @app.get("/api/v1/global/adapters")
-    async def list_global_adapters() -> dict[str, Any]:
+    def list_global_adapters() -> dict[str, Any]:
         adapters = []
         paths: dict[str, Path] = {}
         for root in (user_root(), app_root):
@@ -1201,7 +1202,7 @@ def register_resource_routes(
         return {"adapters": adapters}
 
     @app.get("/api/v1/global/adapters/{adapter_id}")
-    async def get_global_adapter(adapter_id: str) -> dict[str, Any]:
+    def get_global_adapter(adapter_id: str) -> dict[str, Any]:
         adapter = load_json_adapter(
             effective_path(
                 f"llm_adapters/{adapter_id}.json", builtin_root=app_root
@@ -1210,7 +1211,7 @@ def register_resource_routes(
         return adapter.definition
 
     @app.put("/api/v1/global/adapters/{adapter_id}")
-    async def put_global_adapter(
+    def put_global_adapter(
         adapter_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         if payload.get("adapter_id") != adapter_id:
@@ -1236,7 +1237,7 @@ def register_resource_routes(
         return {"saved": True, "digest": adapter.digest}
 
     @app.get("/api/v1/global/adapters/{adapter_id}/preview")
-    async def adapter_preview(adapter_id: str) -> dict[str, Any]:
+    def adapter_preview(adapter_id: str) -> dict[str, Any]:
         adapter = load_json_adapter(
             effective_path(
                 f"llm_adapters/{adapter_id}.json", builtin_root=app_root

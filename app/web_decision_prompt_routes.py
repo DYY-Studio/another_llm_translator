@@ -42,33 +42,33 @@ def register_decision_prompt_routes(app: FastAPI, project: Callable[[str], Path]
         return {"saved": True}
 
     @app.get("/api/v1/decision-prompts")
-    async def list_prompts() -> dict:
+    def list_prompts() -> dict:
         summaries = {value["validator_id"]: value for _, value in resolve_translation_validators()}
         return {"prompts": [{"validator_id": key, "label": "重复译文初筛" if key == "repetition_screening" else summaries[key]["label"], "choice_ids": list(value.choice_ids)} for key, value in prompt_declarations().items()]}
 
     @app.get("/api/v1/decision-prompts/{validator_id}/default")
-    async def get_default(validator_id: str) -> dict:
+    def get_default(validator_id: str) -> dict:
         declaration = get_declaration(validator_id)
         return {"content": validate_content(declaration.default, declaration.choice_ids), "choice_ids": list(declaration.choice_ids)}
 
     @app.get("/api/v1/global/decision-prompts/{validator_id}")
-    async def get_global(validator_id: str) -> dict:
+    def get_global(validator_id: str) -> dict:
         return view(validator_id, None)
 
     @app.put("/api/v1/global/decision-prompts/{validator_id}")
-    async def save_global(validator_id: str, payload: dict) -> dict:
+    def save_global(validator_id: str, payload: dict) -> dict:
         return save(validator_id, payload, None)
 
     @app.get("/api/v1/projects/{name}/decision-prompts/{validator_id}")
-    async def get_project(name: str, validator_id: str) -> dict:
+    def get_project(name: str, validator_id: str) -> dict:
         return view(validator_id, project(name))
 
     @app.put("/api/v1/projects/{name}/decision-prompts/{validator_id}")
-    async def save_project(name: str, validator_id: str, payload: dict) -> dict:
+    def save_project(name: str, validator_id: str, payload: dict) -> dict:
         return save(validator_id, payload, project(name))
 
     @app.delete("/api/v1/projects/{name}/decision-prompts/{validator_id}")
-    async def restore_project(name: str, validator_id: str, payload: dict) -> dict:
+    def restore_project(name: str, validator_id: str, payload: dict) -> dict:
         if payload.get("confirm") is not True:
             raise UsageError("必须明确确认恢复 Prompt 继承")
         declaration = get_declaration(validator_id)
@@ -91,23 +91,23 @@ def register_decision_prompt_routes(app: FastAPI, project: Callable[[str], Path]
         return path
 
     @app.get("/api/v1/decision-prompt-library/{validator_id}")
-    async def list_library(validator_id: str) -> dict:
+    def list_library(validator_id: str) -> dict:
         directory = library_path(validator_id)
         entries = [{"id": path.stem, "digest": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()}
                    for path in sorted(directory.glob("*.json")) if path.is_file() and not path.is_symlink()]
         return {"entries": entries}
 
     @app.get("/api/v1/decision-prompt-library/{validator_id}/{prompt_id}")
-    async def get_library(validator_id: str, prompt_id: str) -> dict:
+    def get_library(validator_id: str, prompt_id: str) -> dict:
         return {"id": prompt_id, "content": read_content(library_path(validator_id, prompt_id), get_declaration(validator_id).choice_ids)}
 
     @app.put("/api/v1/decision-prompt-library/{validator_id}/{prompt_id}")
-    async def save_library(validator_id: str, prompt_id: str, payload: dict) -> dict:
+    def save_library(validator_id: str, prompt_id: str, payload: dict) -> dict:
         content = payload_content(validator_id, payload)
         atomic_write_json(library_path(validator_id, prompt_id), content)
         return {"saved": True}
 
     @app.delete("/api/v1/decision-prompt-library/{validator_id}/{prompt_id}")
-    async def delete_library(validator_id: str, prompt_id: str) -> dict:
+    def delete_library(validator_id: str, prompt_id: str) -> dict:
         library_path(validator_id, prompt_id).unlink(missing_ok=True)
         return {"deleted": True}
