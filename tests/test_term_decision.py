@@ -52,7 +52,7 @@ from app.term_decision_drafts import (
 from app.term_decision_protocol import DECISION_RULES_VERSION
 from app.web import create_app
 from app.web_store import WebStore
-from tests.helpers import llm_jsonl, write_term_library
+from tests.helpers import llm_jsonl, write_term_library, wait_for_web_task
 from tests.test_documents import make_epub
 from tests.test_foundation import make_app_root
 
@@ -2483,9 +2483,15 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
         "/api/v1/projects/decision-demo/terms/decision"
     )
     assert review.status_code == 200
-    api_sample = review.json()["draft"]["proposals"][0]["evidence"]["alice"][
-        "samples"
-    ][0]
+    public = review.json()["draft"]
+    assert "source_library" not in public and "source_overrides" not in public
+    proposal = public["proposals"][0]
+    assert proposal["evidence"] == {} and proposal["knowledge_evidence"] == {}
+    detail = TestClient(create_app(projects_root=project.parent)).get(
+        f"/api/v1/projects/decision-demo/terms/decision/{draft['run_id']}/proposals/{proposal['proposal_id']}"
+    )
+    assert detail.status_code == 200
+    api_sample = detail.json()["evidence"]["alice"]["samples"][0]
     assert api_sample["file_id"] == durable_sample["file_id"]
     assert api_sample["part_id"] == durable_sample["part_id"]
     assert api_sample["segment_id"] == durable_sample["segment_id"]
@@ -3700,10 +3706,11 @@ def test_web_decision_start_reuses_plan_and_saves_draft(
         assert started.json()["stage"] == "terminology_decision"
         assert started.json()["total_segments"] == 4
         task_id = started.json()["task_id"]
-        state = client.get(f"/api/v1/tasks/{task_id}").json()
+        state = wait_for_web_task(client, task_id)
         assert state["status"] == "completed"
         assert state["completed_segments"] == state["total_segments"] == 4
-    assert len(plans) == 2
+    assert len(plans) == 3
+    assert sum(plan["requests_prepared"] for plan in plans) == 1
     assert plans[-1]["eligible"]
     assert phases == ["adjudication", "consistency"]
     draft = current_decision_draft(project)
@@ -3724,44 +3731,44 @@ def test_web_resumes_complete_legacy_group_checkpoint_into_review(
         raise AssertionError("Web 恢复完整检查点不得重新请求模型")
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", unexpected_request)
-    client = TestClient(create_app(projects_root=project.parent))
-    options = client.get(
-        "/api/v1/projects/decision-demo/task-options/terminology_decision"
-    )
-    assert options.status_code == 200
-    assert options.json()["running_run"]["run_id"] == run_id
-    assert options.json()["running_run"]["completed_steps"] == 4
-    assert options.json()["running_run"]["total_steps"] == 4
+    with TestClient(create_app(projects_root=project.parent)) as client:
+        options = client.get(
+            "/api/v1/projects/decision-demo/task-options/terminology_decision"
+        )
+        assert options.status_code == 200
+        assert options.json()["running_run"]["run_id"] == run_id
+        assert options.json()["running_run"]["completed_steps"] == 4
+        assert options.json()["running_run"]["total_steps"] == 4
 
-    started = client.post(
-        "/api/v1/projects/decision-demo/tasks",
-        json={"stage": "terminology_decision", "run_action": "resume"},
-    )
-    assert started.status_code == 200
-    task_id = started.json()["task_id"]
-    for _ in range(20):
-        state = client.get(f"/api/v1/tasks/{task_id}").json()
-        if state["status"] in {"completed", "failed", "cancelled"}:
-            break
+        started = client.post(
+            "/api/v1/projects/decision-demo/tasks",
+            json={"stage": "terminology_decision", "run_action": "resume"},
+        )
+        assert started.status_code == 200
+        task_id = started.json()["task_id"]
+        for _ in range(20):
+            state = wait_for_web_task(client, task_id)
+            if state["status"] in {"completed", "failed", "cancelled"}:
+                break
 
-    assert state["status"] == "completed"
-    assert state["completed_segments"] == 4
-    assert state["failed_segments"] == 0
-    assert state["total_segments"] == 4
-    assert state["usage"] == observed_usage
-    assert state["summary"]["proposals"] == 1
-    assert state["summary"]["needs_review"] == 1
-    review = client.get("/api/v1/projects/decision-demo/terms/decision")
-    assert review.status_code == 200
-    assert review.json()["draft"]["run_id"] == run_id
-    assert review.json()["draft"]["needs_review"][0]["normalized"] == "alice"
-    assert (run_dir / CHECKPOINT_FILE).read_bytes() == checkpoint_before
+        assert state["status"] == "completed"
+        assert state["completed_segments"] == 4
+        assert state["failed_segments"] == 0
+        assert state["total_segments"] == 4
+        assert state["usage"] == observed_usage
+        assert state["summary"]["proposals"] == 1
+        assert state["summary"]["needs_review"] == 1
+        review = client.get("/api/v1/projects/decision-demo/terms/decision")
+        assert review.status_code == 200
+        assert review.json()["draft"]["run_id"] == run_id
+        assert review.json()["draft"]["needs_review"][0]["normalized"] == "alice"
+        assert (run_dir / CHECKPOINT_FILE).read_bytes() == checkpoint_before
 
-    refreshed = client.get(
-        "/api/v1/projects/decision-demo/task-options/terminology_decision"
-    ).json()
-    assert refreshed["running_run"] is None
-    assert refreshed["has_pending_draft"] is True
+        refreshed = client.get(
+            "/api/v1/projects/decision-demo/task-options/terminology_decision"
+        ).json()
+        assert refreshed["running_run"] is None
+        assert refreshed["has_pending_draft"] is True
 
 
 def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
@@ -3818,62 +3825,62 @@ def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
         return {"completed": 4, "failed": 0, "pending": 0}
 
     monkeypatch.setattr("app.web_tasks.run_terminology_decision", fake_decision)
-    client = TestClient(create_app(projects_root=project.parent))
-    options = client.get(
-        "/api/v1/projects/decision-demo/task-options/terminology_decision"
-    )
-    assert options.status_code == 200
-    assert options.json()["running_run"]["run_id"] == run_id
-    assert options.json()["running_run"]["completed_steps"] == 1
-    assert options.json()["running_run"]["total_steps"] == 4
-    assert options.json()["running_run"]["resume_compatible"] is True
-    assert options.json()["running_run"]["resume_incompatibility_reason"] is None
-    assert (
-        client.post(
+    with TestClient(create_app(projects_root=project.parent)) as client:
+        options = client.get(
+            "/api/v1/projects/decision-demo/task-options/terminology_decision"
+        )
+        assert options.status_code == 200
+        assert options.json()["running_run"]["run_id"] == run_id
+        assert options.json()["running_run"]["completed_steps"] == 1
+        assert options.json()["running_run"]["total_steps"] == 4
+        assert options.json()["running_run"]["resume_compatible"] is True
+        assert options.json()["running_run"]["resume_incompatibility_reason"] is None
+        assert (
+            client.post(
+                "/api/v1/projects/decision-demo/tasks",
+                json={"stage": "terminology_decision"},
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/api/v1/projects/decision-demo/tasks",
+                json={
+                    "stage": "terminology_decision",
+                    "run_action": "resume",
+                    "force": True,
+                },
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/api/v1/projects/decision-demo/tasks",
+                json={"stage": "terminology_decision", "run_action": "decline"},
+            ).status_code
+            == 400
+        )
+
+        resumed = client.post(
             "/api/v1/projects/decision-demo/tasks",
-            json={"stage": "terminology_decision"},
-        ).status_code
-        == 400
-    )
-    assert (
-        client.post(
+            json={"stage": "terminology_decision", "run_action": "resume"},
+        )
+        assert resumed.status_code == 200
+        wait_for_web_task(client, resumed.json()["task_id"])
+        assert received == [run_id]
+
+        forced = client.post(
             "/api/v1/projects/decision-demo/tasks",
             json={
                 "stage": "terminology_decision",
-                "run_action": "resume",
+                "run_action": "decline",
                 "force": True,
             },
-        ).status_code
-        == 400
-    )
-    assert (
-        client.post(
-            "/api/v1/projects/decision-demo/tasks",
-            json={"stage": "terminology_decision", "run_action": "decline"},
-        ).status_code
-        == 400
-    )
-
-    resumed = client.post(
-        "/api/v1/projects/decision-demo/tasks",
-        json={"stage": "terminology_decision", "run_action": "resume"},
-    )
-    assert resumed.status_code == 200
-    client.get(f"/api/v1/tasks/{resumed.json()['task_id']}")
-    assert received == [run_id]
-
-    forced = client.post(
-        "/api/v1/projects/decision-demo/tasks",
-        json={
-            "stage": "terminology_decision",
-            "run_action": "decline",
-            "force": True,
-        },
-    )
-    assert forced.status_code == 200
-    client.get(f"/api/v1/tasks/{forced.json()['task_id']}")
-    assert received == [run_id, None]
-    assert read_json(project, run_dir / "manifest.json")["status"] == "interrupted"
+        )
+        assert forced.status_code == 200
+        wait_for_web_task(client, forced.json()["task_id"])
+        assert received == [run_id, None]
+        assert read_json(project, run_dir / "manifest.json")["status"] == "interrupted"
 
 
 def test_web_rejects_decision_resume_after_terms_revision_changes(
@@ -3933,32 +3940,32 @@ def test_web_decision_failure_exposes_saved_run_for_resume(
         raise UsageError("模型协议错误")
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", fail_batch)
-    client = TestClient(create_app(projects_root=project.parent))
-    started = client.post(
-        "/api/v1/projects/decision-demo/tasks",
-        json={"stage": "terminology_decision"},
-    )
-    assert started.status_code == 200
-    task_id = started.json()["task_id"]
-    state = client.get(f"/api/v1/tasks/{task_id}").json()
-    assert state["status"] == "failed"
-    assert state["error"] == {
-        "error": "模型协议错误",
-        "code": "usage_error",
-        "params": {},
-    }
+    with TestClient(create_app(projects_root=project.parent)) as client:
+        started = client.post(
+            "/api/v1/projects/decision-demo/tasks",
+            json={"stage": "terminology_decision"},
+        )
+        assert started.status_code == 200
+        task_id = started.json()["task_id"]
+        state = wait_for_web_task(client, task_id)
+        assert state["status"] == "failed"
+        assert state["error"] == {
+            "error": "模型协议错误",
+            "code": "usage_error",
+            "params": {},
+        }
 
-    options = client.get(
-        "/api/v1/projects/decision-demo/task-options/terminology_decision"
-    )
-    assert options.status_code == 200
-    assert options.json()["running_run"]["completed_steps"] == 0
-    assert options.json()["running_run"]["total_steps"] == 4
-    interruption = options.json()["running_run"]["last_interruption"]
-    assert interruption["error_code"] == "usage_error"
-    assert interruption["reason"] == "unexpected_error"
-    assert interruption["completed_steps"] == 0
-    assert interruption["total_steps"] == 4
+        options = client.get(
+            "/api/v1/projects/decision-demo/task-options/terminology_decision"
+        )
+        assert options.status_code == 200
+        assert options.json()["running_run"]["completed_steps"] == 0
+        assert options.json()["running_run"]["total_steps"] == 4
+        interruption = options.json()["running_run"]["last_interruption"]
+        assert interruption["error_code"] == "usage_error"
+        assert interruption["reason"] == "unexpected_error"
+        assert interruption["completed_steps"] == 0
+        assert interruption["total_steps"] == 4
 
 
 @pytest.mark.asyncio

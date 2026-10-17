@@ -62,6 +62,12 @@ export interface SummaryArtifact {
   updated_at?: string;
 }
 
+export type SummaryArtifactHeader = Omit<SummaryArtifact, "text" | "refs" | "source_range" | "provenance" | "source_digest" | "input_digest" | "prompt_digest" | "record_type"> & {
+  has_text: boolean;
+  covered_segment_count: number;
+  origin: string | null;
+};
+
 export interface SummariesResponse {
   participation: Array<{
     file_id: string;
@@ -69,7 +75,7 @@ export interface SummariesResponse {
     selected: boolean;
   }>;
   boundaries: SummaryBoundary[];
-  artifacts: SummaryArtifact[];
+  artifacts: SummaryArtifactHeader[];
 }
 
 export type SettingsField =
@@ -711,8 +717,9 @@ export interface TaskOptions {
   mismatched_fingerprint_completed: number;
   protected?: number;
   has_pending_draft?: boolean;
-  estimated_requests?: number;
-  estimated_input_tokens?: number;
+  estimated_requests?: number | null;
+  estimated_input_tokens?: number | null;
+  estimate_error?: ErrorPayload | null;
   knowledge_replacement_impacts?: Array<{fragment_id: string; owner: string; text: string; source_range: KnowledgeSourceRange[]}>;
   summary_selected_boundaries?: number;
   summary_only_work?: boolean;
@@ -850,14 +857,22 @@ export interface KnowledgeFragment {
   source_range: KnowledgeSourceRange[] | null;
   _positions: Record<string, number>;
 }
+export interface EntityKnowledgeRange {
+  segment_id: string; last_segment_id: string; start: number; end: number;
+}
+export interface EntityKnowledgeFragment {
+  id: string; owner: string; source?: string; text: string;
+  state: "active" | "disabled" | "superseded"; valid: boolean;
+  navigation_ranges: EntityKnowledgeRange[] | null;
+}
 export interface EntityKnowledge {
   entity_key: string; members: string[]; status: "current" | "pending" | "stale";
-  items: KnowledgeItem[]; fragments: KnowledgeFragment[]; terms_revision: number;
+  items: KnowledgeItem[]; fragments: EntityKnowledgeFragment[]; terms_revision: number;
 }
 
 export interface Term {
   entity_key: string;
-  knowledge_status: "current" | "pending" | "stale";
+  knowledge_status: "current" | "pending" | "stale" | null;
   description_items: KnowledgeItem[];
   normalized: string;
   source: string;
@@ -1207,7 +1222,7 @@ export interface ServerStatus {
   auth: { required: boolean; username: string };
   authed: boolean;
   loopback: boolean;
-  tasks: { max_active_projects: number };
+  tasks: { max_active_projects: number; estimate_usage_before_run: boolean };
 }
 
 export interface InterfaceEntry {

@@ -453,9 +453,9 @@ export default function App() {
     if (!project || !taskStage) return;
     setRunOptionsLoading(true);
     try {
-      let options = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/${taskStage}?language=${encodeURIComponent(language)}`);
+      let options = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/${taskStage}?estimate_usage=true&language=${encodeURIComponent(language)}`);
       if (options.running_run?.include_draft_translation || options.running_run?.include_summaries) {
-        options = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/${taskStage}?include_draft_translation=${Boolean(options.running_run?.include_draft_translation)}&include_summaries=${Boolean(options.running_run?.include_summaries)}&language=${encodeURIComponent(language)}`);
+        options = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/${taskStage}?estimate_usage=true&include_draft_translation=${Boolean(options.running_run?.include_draft_translation)}&include_summaries=${Boolean(options.running_run?.include_summaries)}&language=${encodeURIComponent(language)}`);
       }
       setRunOptions(options);
     } catch (value) {
@@ -467,13 +467,13 @@ export default function App() {
 
   async function changeDraftTranslation(enabled: boolean) {
     if (!project || !runOptions) return;
-    const options = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/terminology?include_draft_translation=${enabled}&include_summaries=${Boolean(runOptions.include_summaries)}&language=${encodeURIComponent(language)}`);
+    const options = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/terminology?estimate_usage=true&include_draft_translation=${enabled}&include_summaries=${Boolean(runOptions.include_summaries)}&language=${encodeURIComponent(language)}`);
     setRunOptions(options);
   }
 
   async function changeSummaries(enabled: boolean) {
     if (!project || !runOptions) return;
-    const options = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/terminology?include_summaries=${enabled}&include_draft_translation=${Boolean(runOptions.include_draft_translation)}&language=${encodeURIComponent(language)}`);
+    const options = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/terminology?estimate_usage=true&include_summaries=${enabled}&include_draft_translation=${Boolean(runOptions.include_draft_translation)}&language=${encodeURIComponent(language)}`);
     setRunOptions(options);
   }
 
@@ -490,7 +490,7 @@ export default function App() {
       setError(value);
       try {
         setRunOptions(await api<TaskOptions>(
-          `/api/v1/projects/${project}/task-options/${runOptions.stage}?include_draft_translation=${Boolean(decision.include_draft_translation)}&include_summaries=${Boolean(decision.include_summaries)}&language=${encodeURIComponent(language)}`,
+          `/api/v1/projects/${project}/task-options/${runOptions.stage}?estimate_usage=true&include_draft_translation=${Boolean(decision.include_draft_translation)}&include_summaries=${Boolean(decision.include_summaries)}&language=${encodeURIComponent(language)}`,
         ));
       } catch {
         setRunOptions(null);

@@ -1,5 +1,6 @@
 """Host-managed HTTP Choice decisions."""
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import asyncio
 import hashlib
@@ -186,7 +187,7 @@ class DecisionClient:
         available = self.preset["context_window_tokens"] - self.preset["context_safety_margin_tokens"]
         while True:
             evidence = {**state, "reference_context": context} if reference_context is not None else state
-            body, estimated = self.request_plan(evidence, questions)
+            body, estimated = (await run_blocking(lambda: self.request_plan(evidence, questions)))
             if estimated <= available or not context:
                 break
             context = context[1:]
@@ -269,7 +270,7 @@ class DecisionClient:
                         record["usage"] = {"input_tokens": usage["input_tokens"], "output_tokens": 0, "total_tokens": usage["input_tokens"]}
                         if diagnostics is not None:
                             diagnostics.record_request_usage(request_id, record["usage"], complete=True)
-                    answers = self._parse(data, questions)
+                    answers = (await run_blocking(lambda: self._parse(data, questions)))
                 except (ValueError, TypeError, KeyError):
                     outcome = "response_parse_error"
                     raise
@@ -302,17 +303,17 @@ class DecisionClient:
                     base = f"{request_id}-A{attempt + 1:03d}"
                     directory = self.debug_directory / "payloads"
                     directory.mkdir(parents=True, exist_ok=True)
-                    atomic_write_json(directory / f"{base}.request.json", body)
-                    atomic_write_json(directory / f"{base}.overview.json", overview)
+                    (await run_blocking(lambda: atomic_write_json(directory / f"{base}.request.json", body)))
+                    (await run_blocking(lambda: atomic_write_json(directory / f"{base}.overview.json", overview)))
                     if data is not None:
-                        atomic_write_json(directory / f"{base}.response.json", data)
+                        (await run_blocking(lambda: atomic_write_json(directory / f"{base}.response.json", data)))
                     if outcome != "succeeded":
-                        atomic_write_json(directory / f"{base}.error.json", {"error": record.get("error", outcome)})
-                    append_jsonl_file(self.debug_directory / "attempts.jsonl", record_header(
+                        (await run_blocking(lambda: atomic_write_json(directory / f"{base}.error.json", {"error": record.get("error", outcome)})))
+                    (await run_blocking(lambda: append_jsonl_file(self.debug_directory / "attempts.jsonl", record_header(
                         "request_attempt", self.project_id, record_id=base, run_id=self.run_id,
                         request_id=request_id, stage=self.stage, attempt=attempt + 1,
                         http_status=record.get("http_status"), outcome=outcome,
-                        status="completed" if outcome == "succeeded" else "failed", error=record.get("error")))
+                        status="completed" if outcome == "succeeded" else "failed", error=record.get("error")))))
                 if diagnostics is not None:
                     diagnostics.request_finished(request_id=request_id, attempt=attempt + 1,
                         key_index=lease.key_index + 1, latency_seconds=record["elapsed_seconds"],

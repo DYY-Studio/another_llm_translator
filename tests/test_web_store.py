@@ -1741,3 +1741,28 @@ def test_detail_does_not_read_adapter_state(tmp_path: Path, monkeypatch) -> None
     assert calls == []
     store.segment_detail("F0001-S000001")
     assert calls == []
+
+
+def test_saving_term_fields_preserves_knowledge_without_rebuilding_evidence(tmp_path, monkeypatch):
+    project = create_web_store_project(tmp_path, "Alice\nBob")
+    store = WebStore(project)
+    store.save_term({
+        "source": "Alice", "preferred_translation": "爱丽丝", "category": "人名",
+        "aliases": [], "description_items": [{"text": "主角", "fragment_ids": []}],
+        "expected_revision": 0,
+    })
+    before = load_terms(project, resolve_knowledge=False)
+
+    def unexpected_evidence(*args, **kwargs):
+        raise AssertionError("ordinary term fields must not rebuild source evidence")
+
+    monkeypatch.setattr("app.term_knowledge.evidence", unexpected_evidence)
+    result = store.save_term({
+        "old_normalized": "alice", "source": "Alice", "preferred_translation": "艾丽丝",
+        "category": "人名", "aliases": ["Ally"],
+    })
+    after = load_terms(project, resolve_knowledge=False)
+    assert after["knowledge"] == before["knowledge"]
+    assert result["terms_revision"] == before["terms_revision"] + 1
+    assert result["terms"][0]["preferred_translation"] == "艾丽丝"
+    assert result["terms"][0]["description"] == "主角"

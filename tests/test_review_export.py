@@ -261,6 +261,185 @@ async def test_review_missing_upstream_creates_no_run(tmp_path: Path) -> None:
     assert list((project / "runs").iterdir()) == before
 
 
+@pytest.mark.parametrize(
+    ("scheduling_mode", "stage", "expected_base_ids", "expected_context"),
+    [
+        ("parallel", "proofreading", ["F0001-S000004"], ["two", "three"]),
+        (
+            "ordered_by_file",
+            "proofreading",
+            ["F0001-S000004", "F0001-S000002", "F0001-S000003"],
+            [
+                {"source": "two", "translation": "译文 two"},
+                {"source": "three", "translation": "译文 three"},
+            ],
+        ),
+        (
+            "ordered_by_file",
+            "polishing",
+            ["F0001-S000004", "F0001-S000002", "F0001-S000003"],
+            [
+                {"source": "two", "translation": "译文 two"},
+                {"source": "three", "translation": "润色上下文 three"},
+            ],
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_review_limits_upstream_reads_to_scope_and_ordered_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scheduling_mode: str,
+    stage: str,
+    expected_base_ids: list[str],
+    expected_context: list[dict[str, str]] | list[str],
+) -> None:
+    project = await create_project(tmp_path, "one\ntwo\nthree\nselected")
+    from app import stage_review
+    from app.sqlite_storage import append_stage_results, read_json, read_segments, record_header
+
+    config_path = project / "config.toml"
+    config_text = config_path.read_text(encoding="utf-8").replace(
+        'scheduling_mode = "ordered_by_file"',
+        f'scheduling_mode = "{scheduling_mode}"',
+    )
+    context_start = config_text.index(f"[context.{stage}]")
+    context_end = config_text.find("[", context_start + 1)
+    if context_end < 0:
+        context_end = len(config_text)
+    config_text = (
+        config_text[:context_start]
+        + config_text[context_start:context_end].replace(
+            "previous_segments = 3", "previous_segments = 2", 1
+        )
+        + config_text[context_end:]
+    )
+    config_path.write_text(config_text, encoding="utf-8")
+    segments = read_segments(project)
+    metadata = read_json(project, project / "project.json")
+    records = [
+        record_header(
+            "stage_result",
+            metadata["project_id"],
+            record_id=f"translation-{index}",
+            stage="translation",
+            segment_id=f"F0001-S{index:06d}",
+            status="completed",
+            text=f"译文 {segments[index - 1]['source']}",
+            validation_status="passed",
+            findings=[],
+            terms_revision=None,
+            stage_fingerprint="translation",
+            run_id="BASE",
+            request_id="BASE",
+        )
+        for index in (2, 3, 4)
+    ]
+    if stage == "polishing":
+        records.extend(
+            [
+                record_header(
+                    "stage_result",
+                    metadata["project_id"],
+                    record_id="review-2",
+                    stage="proofreading",
+                    segment_id="F0001-S000002",
+                    status="completed",
+                    review_status="accepted",
+                    suggested_text=None,
+                    reason=None,
+                    base_result_id="translation-2",
+                ),
+                record_header(
+                    "stage_result",
+                    metadata["project_id"],
+                    record_id="applied-2",
+                    stage="proofreading_applied",
+                    segment_id="F0001-S000002",
+                    status="completed",
+                    base_result_id="translation-2",
+                    suggestion_result_id="review-2",
+                ),
+                record_header(
+                    "stage_result",
+                    metadata["project_id"],
+                    record_id="review-3",
+                    stage="proofreading",
+                    segment_id="F0001-S000003",
+                    status="completed",
+                    review_status="suggested",
+                    suggested_text="润色上下文 three",
+                    reason="test",
+                    base_result_id="translation-3",
+                ),
+                record_header(
+                    "stage_result",
+                    metadata["project_id"],
+                    record_id="applied-3",
+                    stage="proofreading_applied",
+                    segment_id="F0001-S000003",
+                    status="completed",
+                    base_result_id="translation-3",
+                    suggestion_result_id="review-3",
+                ),
+            ]
+        )
+    append_stage_results(project, records)
+
+    base_queries: list[list[str]] = []
+    history_queries: list[list[str]] = []
+    stage_name = stage
+    original_base_results = stage_review._base_results
+    original_latest_states = stage_review.latest_stage_states
+
+    def capture_bases(project_arg, stage, *, segment_ids=None):
+        base_queries.append(list(segment_ids))
+        return original_base_results(project_arg, stage, segment_ids=segment_ids)
+
+    def capture_history(project_arg, stage, segment_ids):
+        if stage == stage_name:
+            history_queries.append(list(segment_ids))
+        return original_latest_states(project_arg, stage, segment_ids)
+
+    monkeypatch.setattr(stage_review, "_base_results", capture_bases)
+    monkeypatch.setattr(stage_review, "latest_stage_states", capture_history)
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        seen.append(payload)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "message": {
+                        "content": llm_jsonl([
+                            {"type": "segment", "id": item["id"], "status": "accepted"}
+                            for item in payload["segments"]
+                        ])
+                    }
+                }],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await run_review(
+            project,
+            stage,
+            Scope(only_segment="F0001-S000004"),
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert result["completed"] == 1
+    assert base_queries == [expected_base_ids]
+    assert history_queries == [["F0001-S000004"]]
+    assert seen[0]["reference_context"] == expected_context
+
+
 @pytest.mark.asyncio
 async def test_run_all_generates_suggestions_without_apply(tmp_path: Path) -> None:
     project = await create_project(tmp_path, "one\ntwo")

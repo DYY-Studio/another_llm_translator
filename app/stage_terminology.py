@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking, blocking_scope
 
 import asyncio
 import hashlib
@@ -276,6 +277,7 @@ def _terminology_scan_selection(
     return selected, selected_ids, completed_ids, fingerprints
 
 
+@blocking_scope
 async def run_terminology(
     project: Path,
     scope: Scope,
@@ -293,13 +295,13 @@ async def run_terminology(
 ) -> dict[str, Any]:
     from .term_knowledge import replacement_impacts
     from .sqlite_storage import read_segments
-    impacts = replacement_impacts(project, [s for s in read_segments(project) if not s["is_empty"]]) if scope.force else []
+    impacts = (await run_blocking(lambda: replacement_impacts(project, [s for s in read_segments(project) if not s["is_empty"]]))) if scope.force else []
     if impacts and not scope.dry_run and not scope.confirm_knowledge_replacement:
         raise UsageError(f"强制重扫会替换 {len(impacts)} 个相交说明片段，请先查看影响并明确确认（--confirm-knowledge-replacement）")
     if resume_run_id is not None:
-        manifest = read_json(
+        manifest = (await run_blocking(lambda: read_json(
             project, project / "runs" / resume_run_id / "manifest.json"
-        )
+        )))
         if (
             bool(manifest.get("include_draft_translation", False))
             != include_draft_translation
@@ -316,7 +318,7 @@ async def run_terminology(
             )
         ):
             raise UsageError("同时生成概括要求完整项目范围")
-        summary_config = load_project_config(project, stage="terminology")
+        summary_config = (await run_blocking(lambda: load_project_config(project, stage="terminology")))
         if "terminology" in summary_config["chunking"]["cross_boundary_batching"]:
             raise UsageError("同时生成概括要求关闭术语跨边界合并")
     if include_draft_translation:
@@ -339,7 +341,7 @@ async def run_terminology(
         return {**result, "knowledge_replacement_impacts": impacts}
     logger = get_logger("terminology")
     preparation_started_at = time.perf_counter()
-    scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
+    scope, resume_arguments_ignored = (await run_blocking(lambda: _resume_scope(project, scope, resume_run_id)))
     if include_summaries and any(
         value is not None
         for value in (
@@ -352,11 +354,11 @@ async def run_terminology(
         raise UsageError(
             "include_summaries 要求完整项目范围，不支持部分 Scope"
         )
-    run_options_snapshot = _frozen_run_options(project, resume_run_id)
+    run_options_snapshot = (await run_blocking(lambda: _frozen_run_options(project, resume_run_id)))
     context_kwargs: dict[str, object] = {"stage": "terminology"}
     if run_options_snapshot is not None:
         context_kwargs["frozen_run_options"] = run_options_snapshot
-    config, metadata, files, segments = _project_context(project, **context_kwargs)
+    config, metadata, files, segments = (await run_blocking(lambda: _project_context(project, **context_kwargs)))
     segment_order = {str(item["segment_id"]): index for index, item in enumerate(segments)}
     logger.info(
         "stage preparation context ready elapsed=%.3fs files=%d segments=%d",
@@ -624,9 +626,9 @@ async def run_terminology(
 
     active_path = project / "terminology" / "active_task.json"
     active = (
-        read_json(project, active_path) if record_exists(project, active_path) else None
+        (await run_blocking(lambda: read_json(project, active_path))) if record_exists(project, active_path) else None
     )
-    published = load_terms(project)
+    published = (await run_blocking(lambda: load_terms(project, resolve_knowledge=False)))
     partial_published = bool(
         active is not None and active.get("status") == "partial_published"
     )
@@ -638,7 +640,7 @@ async def run_terminology(
         )
 
     resume_manifest = (
-        read_json(project, project / "runs" / resume_run_id / "manifest.json")
+        (await run_blocking(lambda: read_json(project, project / "runs" / resume_run_id / "manifest.json")))
         if resume_run_id is not None
         else None
     )
@@ -682,7 +684,7 @@ async def run_terminology(
     if not create_task and (term_work or active and active.get("status") == "active"):
         _ordered_term_candidates(project, task_id)
     summary_selection = (
-        _summary_participation(project, selected) if include_summaries else set()
+        (await run_blocking(lambda: _summary_participation(project, selected))) if include_summaries else set()
     )
     if include_summaries and resume_manifest is not None:
         saved_selection = resume_manifest.get("summary_participation")
@@ -716,13 +718,13 @@ async def run_terminology(
     covered_summary_ids, reusable_summary_ids = (
         (set(), set())
         if scope.force
-        else _summary_reusable_fragments(
+        else (await run_blocking(lambda: _summary_reusable_fragments(
             project,
             summary_candidates,
             prompt_digests=summary_prompt_digests,
             model=str(config["llm"]["model"]),
             target_language=str(config["project"]["target_language"]),
-        )
+        )))
         if summary_candidates
         else (set(), set())
     )
@@ -778,7 +780,7 @@ async def run_terminology(
     if prompt_mode is None:
         prompt = ""
         fingerprint_prompt_digests = (
-            prompt_middle_digests(project, "terminology")
+            (await run_blocking(lambda: prompt_middle_digests(project, "terminology")))
             if not include_summaries
             else {}
         )
@@ -799,7 +801,7 @@ async def run_terminology(
                 )
         prompt = prompt_factory_for(prompt_mode)(primary_requirements)
         fingerprint_prompt_digests = (
-            prompt_middle_digests(project, "terminology")
+            (await run_blocking(lambda: prompt_middle_digests(project, "terminology")))
             if TerminologyResponseMode.TERMS_ONLY in required_prompt_modes
             or TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY
             in required_prompt_modes
@@ -809,11 +811,11 @@ async def run_terminology(
     run_config["_document_adapter_prompt_requirements"] = (
         prompt_requirements_for_mode(prompt_mode) if prompt_mode is not None else {}
     )
-    fingerprint = stage_fingerprint(
+    fingerprint = (await run_blocking(lambda: stage_fingerprint(
         run_config if prompt_mode is TerminologyResponseMode.SUMMARY_ONLY else config,
         "terminology",
         fingerprint_prompt_digests,
-    )
+    )))
 
     if create_task:
         active = record_header(
@@ -825,7 +827,7 @@ async def run_terminology(
             initial_stage_fingerprint=fingerprint,
         )
         if not scope.dry_run:
-            write_json(project, active_path, active)
+            (await run_blocking(lambda: write_json(project, active_path, active)))
 
     reopen_completed_task = (
         resume_run_id is None
@@ -864,7 +866,7 @@ async def run_terminology(
         extra=[],
     )
     context_config = config["context"]["terminology"]
-    context_index = PreviousContextIndex(segments)
+    context_index = (await run_blocking(lambda: PreviousContextIndex(segments)))
 
     def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:
         raw_context = (
@@ -900,7 +902,7 @@ async def run_terminology(
         }
         return payload
 
-    run_id, run_dir, continuation_index, fail_planning = _create_or_continue_run(
+    run_id, run_dir, continuation_index, fail_planning = (await run_blocking(lambda: _create_or_continue_run(
         project,
         "terminology",
         scope=scope,
@@ -940,19 +942,20 @@ async def run_terminology(
         prompt_variants=None,
         prompt_variant_requirements=None,
         primary_mode=prompt_mode.value if prompt_mode is not None else None,
-    )
+    )))
 
     if reopen_completed_task:
         active = {**active, "status": "active"}
-        write_json(project, active_path, active)
+        (await run_blocking(lambda: write_json(project, active_path, active)))
 
-    preflight = _split_oversized_preflight(
+    preflight = (await run_blocking(lambda: _split_oversized_preflight(
         work,
         config=config,
         prompt=prompt,
         payload_builder=payload_builder,
         prompt_builder=prompt_for_items,
         fail_planning=fail_planning,
+        lazy=not scope.dry_run,
         make_probe=lambda segment, part: _split_segment_source(
             segment, f"{segment['segment_id']}-PROBE", part
         ),
@@ -960,7 +963,7 @@ async def run_terminology(
         accept_part=lambda segment, part_id, part: _split_segment_source(
             segment, part_id, part
         ),
-    )
+    )))
     request_segments = preflight.request_segments
     part_original = preflight.part_original
     original_parts = preflight.original_parts
@@ -1005,11 +1008,12 @@ async def run_terminology(
         }
         refresh_boundaries = summary_selection & summary_request_boundaries
         if refresh_boundaries:
-            mark_content_summary_fragments_stale(
+            (await run_blocking(lambda: mark_content_summary_fragments_stale(
                 project, refresh_boundaries, exclude_ids=reusable_summary_ids
-            )
+            )))
 
     selected_by_id = {str(item["segment_id"]): item for item in selected}
+    preflight.by_id = selected_by_id
 
     def summary_slice_provenance(item: dict[str, Any]) -> dict[str, Any]:
         request_segment_id = str(item["segment_id"])
@@ -1040,7 +1044,7 @@ async def run_terminology(
     summary_prompt_modes_used: set[TerminologyResponseMode] = set()
 
     if scope.dry_run:
-        plans = build_chunk_plans(
+        plans = (await run_blocking(lambda: build_chunk_plans(
             request_segments,
             all_segments=segments,
             config=config,
@@ -1049,7 +1053,7 @@ async def run_terminology(
             payload_builder=payload_builder,
             prompt_builder=prompt_for_items,
             partition_key=prompt_partition_key,
-        )
+        )))
         logger.info(
             "stage plan selected=%d requested=%d reused=%d chunks=%d",
             len(selected),
@@ -1079,7 +1083,7 @@ async def run_terminology(
             if continuation_index
             else run_dir
         )
-        manifest = read_json(project, run_dir / "manifest.json")
+        manifest = (await run_blocking(lambda: read_json(project, run_dir / "manifest.json")))
         if continuation_index:
             continuations = manifest.get("continuations")
             if (
@@ -1105,11 +1109,11 @@ async def run_terminology(
             )
         if not continuation_index:
             manifest["document_adapter_prompt_requirements"] = primary_requirements
-        atomic_write_json(
+        (await run_blocking(lambda: atomic_write_json(
             snapshot_dir / "document_adapter_prompt_requirements.json",
             primary_requirements, compact=True,
-        )
-        write_json(project, run_dir / "manifest.json", manifest)
+        )))
+        (await run_blocking(lambda: write_json(project, run_dir / "manifest.json", manifest)))
     write_lock = asyncio.Lock()
 
     def prompt_variant_name(
@@ -1118,11 +1122,14 @@ async def run_terminology(
         suffix = f"__requirements-{_digest(requirements)[7:23]}" if requirements else ""
         return f"{mode.value}{suffix}"
 
+    actual_prompt_started = False
+
     async def record_prompt_variant(
         mode: TerminologyResponseMode,
         prompt_text: str,
         requirements: tuple[str, ...],
     ) -> None:
+        nonlocal prompt_mode, actual_prompt_started
         if not include_summaries:
             return
         snapshot_dir = (
@@ -1132,15 +1139,22 @@ async def run_terminology(
         )
         name = prompt_variant_name(mode, requirements)
         async with write_lock:
-            paths = _write_prompt_variants(
+            priority = {TerminologyResponseMode.SUMMARY_ONLY: 0,
+                        TerminologyResponseMode.TERMS_ONLY: 1,
+                        TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY: 2}
+            first_request = not actual_prompt_started or priority[mode] > priority[prompt_mode]
+            if first_request:
+                prompt_mode = mode
+                actual_prompt_started = True
+            paths = (await run_blocking(lambda: _write_prompt_variants(
                 snapshot_dir,
                 {name: prompt_text},
                 {name: requirements},
                 primary_mode=(
                     prompt_mode.value if prompt_mode is not None else None
                 ),
-            )
-            manifest = read_json(project, run_dir / "manifest.json")
+            )))
+            manifest = (await run_blocking(lambda: read_json(project, run_dir / "manifest.json")))
             if continuation_index:
                 continuations = manifest.get("continuations")
                 if (
@@ -1154,17 +1168,24 @@ async def run_terminology(
                 target = continuations[continuation_index - 1]
             else:
                 target = manifest
+            if first_request:
+                target["primary_mode"] = mode.value
+                target["prompt_language"] = prompt_language_for_mode(mode)
+                primary_requirements = prompt_requirements_for_mode(mode)
+                if not continuation_index:
+                    manifest["document_adapter_prompt_requirements"] = primary_requirements
+                (await run_blocking(lambda: atomic_write_json(snapshot_dir / "document_adapter_prompt_requirements.json", primary_requirements, compact=True)))
             variant_paths = target.setdefault("prompt_variants", {})
             languages = target.setdefault("prompt_languages", {})
             if not isinstance(variant_paths, dict) or not isinstance(languages, dict):
                 raise StorageError(f"Run Prompt 快照元数据无效：{run_id}")
             variant_paths.update(paths)
             languages[mode.value] = prompt_language_for_mode(mode)
-            write_json(project, run_dir / "manifest.json", manifest)
+            (await run_blocking(lambda: write_json(project, run_dir / "manifest.json", manifest)))
             if prompt_mode is mode:
-                (snapshot_dir / "prompt.txt").write_text(
+                (await run_blocking(lambda: (snapshot_dir / "prompt.txt").write_text(
                     prompt_text, encoding="utf-8"
-                )
+                )))
 
     part_success: dict[str, set[str]] = {}
     failed_originals: set[str] = set()
@@ -1214,8 +1235,8 @@ async def run_terminology(
                 mode="fragment",
                 status="running",
                 source_ranges=[],
-                input_digest=_digest([]),
-                prompt_digest=_digest([]),
+                input_digest=(await run_blocking(lambda: _digest([]))),
+                prompt_digest=(await run_blocking(lambda: _digest([]))),
                 model=str(config["llm"]["model"]),
                 target_language=str(config["project"]["target_language"]),
                 prompt_languages={},
@@ -1225,7 +1246,7 @@ async def run_terminology(
                     for file_id, part_id in requested_summary_boundaries
                 ],
             )
-            write_summary_run(project, summary_run_record)
+            (await run_blocking(lambda: write_summary_run(project, summary_run_record)))
 
     def persist_summary_run(status: str | None = None) -> None:
         nonlocal summary_run_record
@@ -1479,14 +1500,14 @@ async def run_terminology(
             for item in unresolved:
                 item[_SUMMARY_MODE_KEY] = failed_class.value
             if failed_class is not TerminologyResponseMode.TERMS_ONLY:
-                observe_summary_request(unresolved)
-            payload = payload_builder(unresolved)
-            actual_mode, requirements, prompt_text = prompt_details_for_items(
+                (await run_blocking(lambda: observe_summary_request(unresolved)))
+            payload = (await run_blocking(lambda: payload_builder(unresolved)))
+            actual_mode, requirements, prompt_text = (await run_blocking(lambda: prompt_details_for_items(
                 unresolved
-            )
-            messages = render_messages(prompt_text, payload)
+            )))
+            messages = (await run_blocking(lambda: render_messages(prompt_text, payload)))
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
-            estimated = _request_estimate(messages, config, request_id)
+            estimated = (await run_blocking(lambda: _request_estimate(messages, config, request_id)))
             await record_prompt_variant(actual_mode, prompt_text, requirements)
             try:
                 response, request_id = await state.llm.chat(
@@ -1497,11 +1518,11 @@ async def run_terminology(
                     parent_request_id=parent_request_id,
                 )
                 source_refs = tuple(str(index) for index, _ in enumerate(unresolved, 1))
-                parsed = parse_terminology_response(
+                parsed = (await run_blocking(lambda: parse_terminology_response(
                     response.content,
                     mode=failed_class,
                     source_refs=source_refs,
-                )
+                )))
             except FatalExternalError:
                 raise
             except ContextLengthError as exc:
@@ -1563,7 +1584,7 @@ async def run_terminology(
             )
             async with write_lock:
                 if term_ok and failed_class is not TerminologyResponseMode.SUMMARY_ONLY:
-                    append_jsonl(
+                    (await run_blocking(lambda: append_jsonl(
                         project,
                         project / "terminology" / "candidates.jsonl",
                         record_header(
@@ -1582,7 +1603,7 @@ async def run_terminology(
                             source_range=source_range(unresolved, selected_by_id, part_original),
                             terms=list(parsed.terms),
                         ),
-                    )
+                    )))
                 if summary_ok and parsed.summaries:
                     items_by_ref = {
                         str(index): item
@@ -1619,7 +1640,7 @@ async def run_terminology(
                         segment_id=owner, status="completed", run_id=run_id,
                         request_id=request_id, active_task_id=task_id, stage_fingerprint=fingerprint,
                     ) for owner in owners if owner not in term_scan_recorded]
-                    append_jsonl_records(project, project / "terminology" / "scans.jsonl", records)
+                    (await run_blocking(lambda: append_jsonl_records(project, project / "terminology" / "scans.jsonl", records)))
                     term_scan_recorded.update(record["segment_id"] for record in records)
                     for owner in owners:
                         maybe_complete(owner)
@@ -1666,13 +1687,13 @@ async def run_terminology(
         parent_request_id = initial_parent_request_id
         parse_errors: list[str] = []
         for format_attempt in range(config["retry"]["format_max_attempts"] + 1):
-            payload = payload_builder(unresolved)
-            actual_mode, requirements, prompt_text = prompt_details_for_items(
+            payload = (await run_blocking(lambda: payload_builder(unresolved)))
+            actual_mode, requirements, prompt_text = (await run_blocking(lambda: prompt_details_for_items(
                 unresolved
-            )
-            messages = render_messages(prompt_text, payload)
+            )))
+            messages = (await run_blocking(lambda: render_messages(prompt_text, payload)))
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
-            estimated = _request_estimate(messages, config, request_id)
+            estimated = (await run_blocking(lambda: _request_estimate(messages, config, request_id)))
             await record_prompt_variant(actual_mode, prompt_text, requirements)
             try:
                 response, request_id = await state.llm.chat(
@@ -1682,9 +1703,9 @@ async def run_terminology(
                     request_id=request_id,
                     parent_request_id=parent_request_id,
                 )
-                terms, parse_errors, response_complete = _validate_term_items(
+                terms, parse_errors, response_complete = (await run_blocking(lambda: _validate_term_items(
                     response.content
-                )
+                )))
             except FatalExternalError:
                 raise
             except ContextLengthError as exc:
@@ -1704,7 +1725,7 @@ async def run_terminology(
                         failed_originals.add(segment_id)
                         failure_counts["external_error"] += 1
                         report_progress()
-                        append_jsonl(
+                        (await run_blocking(lambda: append_jsonl(
                             project,
                             project / "terminology" / "scans.jsonl",
                             record_header(
@@ -1720,7 +1741,7 @@ async def run_terminology(
                                 error_class=("external_error"),
                                 error_message=str(exc),
                             ),
-                        )
+                        )))
                 return 0, len(
                     {
                         part_original.get(
@@ -1731,7 +1752,7 @@ async def run_terminology(
                 )
             async with write_lock:
                 if response_complete:
-                    append_jsonl(
+                    (await run_blocking(lambda: append_jsonl(
                         project,
                         project / "terminology" / "candidates.jsonl",
                         record_header(
@@ -1752,7 +1773,7 @@ async def run_terminology(
                             source_range=source_range(unresolved, selected_by_id, part_original),
                             terms=terms,
                         ),
-                    )
+                    )))
             if not response_complete:
                 diagnostics = current_diagnostics()
                 if diagnostics is not None:
@@ -1777,7 +1798,7 @@ async def run_terminology(
                         failed_originals.add(segment_id)
                         failure_counts["format_error"] += 1
                         report_progress()
-                        append_jsonl(
+                        (await run_blocking(lambda: append_jsonl(
                             project,
                             project / "terminology" / "scans.jsonl",
                             record_header(
@@ -1793,7 +1814,7 @@ async def run_terminology(
                                 error_class="format_error",
                                 error_message=str(exc),
                             ),
-                        )
+                        )))
                 return 0, len(
                     {
                         part_original.get(
@@ -1818,7 +1839,7 @@ async def run_terminology(
                     ):
                         completed_originals.append(original_id)
                 for segment_id in completed_originals:
-                    append_jsonl(
+                    (await run_blocking(lambda: append_jsonl(
                         project,
                         project / "terminology" / "scans.jsonl",
                         record_header(
@@ -1832,7 +1853,7 @@ async def run_terminology(
                             active_task_id=task_id,
                             stage_fingerprint=fingerprint,
                         ),
-                    )
+                    )))
                     completed_original_ids.add(segment_id)
                 report_progress()
             logger.info(
@@ -1878,7 +1899,7 @@ async def run_terminology(
                 failed_originals.add(segment_id)
                 failure_counts["context_error"] += 1
                 report_progress()
-                append_jsonl(
+                (await run_blocking(lambda: append_jsonl(
                     project,
                     project / "terminology" / "scans.jsonl",
                     record_header(
@@ -1894,7 +1915,7 @@ async def run_terminology(
                         error_class="context_error",
                         error_message=("单 Segment 超过模型限制且内部拆分已关闭"),
                     ),
-                )
+                )))
 
     async def record_context_failure(
         items: list[dict[str, Any]],
@@ -1940,7 +1961,7 @@ async def run_terminology(
                 failed_originals.add(original_id)
                 failure_counts[category] += 1
                 report_progress()
-                append_jsonl(
+                (await run_blocking(lambda: append_jsonl(
                     project,
                     project / "terminology" / "scans.jsonl",
                     record_header(
@@ -1956,7 +1977,7 @@ async def run_terminology(
                         error_class=category,
                         error_message=message,
                     ),
-                )
+                )))
 
     published_now = False
     task_completed_ids: set[str] = set()
@@ -1966,11 +1987,11 @@ async def run_terminology(
         all_nonempty = [segment for segment in segments if not segment["is_empty"]]
         task_scans = [
             record
-            for record in read_jsonl(
+            for record in (await run_blocking(lambda: read_jsonl(
                 project,
                 project / "terminology" / "scans.jsonl",
                 task_id=task_id,
-            )
+            )))
         ]
         task_completed_ids = {
             str(record["segment_id"])
@@ -1989,12 +2010,12 @@ async def run_terminology(
                 for segment in all_nonempty
             )
         ):
-            published = _merge_and_publish_terms(
+            published = (await run_blocking(lambda: _merge_and_publish_terms(
                 project,
                 task_id=task_id,
                 project_id=str(metadata["project_id"]),
                 published_run_id=run_id,
-            )
+            )))
             published_now = True
 
     def completed_count() -> int:
@@ -2013,6 +2034,7 @@ async def run_terminology(
             part_original=part_original,
             original_parts=original_parts,
             preflight_failed=preflight_failed,
+            prepare_segment=preflight.prepare_segment,
             limiter=limiter,
             payload_builder=payload_builder,
             prompt_builder=prompt_for_items,
@@ -2033,15 +2055,15 @@ async def run_terminology(
             runtime_split_observer=observe_summary_split,
         )
     except asyncio.CancelledError:
-        update_summary_run_status("interrupted")
+        (await run_blocking(lambda: update_summary_run_status("interrupted")))
         raise
     except Exception:
-        update_summary_run_status("failed")
+        (await run_blocking(lambda: update_summary_run_status("failed")))
         raise
     failed = len(failed_originals)
     all_nonempty = [segment for segment in segments if not segment["is_empty"]]
     if include_summaries:
-        update_summary_run_status("completed" if failed == 0 else "failed")
+        (await run_blocking(lambda: update_summary_run_status("completed" if failed == 0 else "failed")))
     pending_result = (
         len(work) - len(completed_original_ids) - failed
         if include_summaries

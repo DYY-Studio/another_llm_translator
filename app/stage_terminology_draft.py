@@ -1,6 +1,7 @@
 """Experimental terminology requests executed by the translation runner."""
 
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import json
 from collections import Counter
@@ -70,7 +71,7 @@ def draft_run_context(
         project, stage="terminology", frozen_run_options=frozen_run_options
     )
     translation_config, _, _, _ = _project_context(
-        project, stage="translation", frozen_run_options=frozen_run_options
+        project, stage="translation", frozen_run_options=frozen_run_options, prepared=(files, segments)
     )
     config["_draft_prompt_requirements"] = {
         "term": {
@@ -92,7 +93,7 @@ def draft_run_context(
             )
     if include_summaries:
         summary_config, _, _, _ = _project_context(
-            project, stage="fragment_summary", frozen_run_options=frozen_run_options
+            project, stage="fragment_summary", frozen_run_options=frozen_run_options, prepared=(files, segments)
         )
         config["_fragment_prompt_requirements"] = summary_config[
             "_document_adapter_prompt_requirements"
@@ -156,7 +157,7 @@ def draft_scan_options(
         selected,
         translation_done,
     )
-    library = load_terms(project)
+    library = load_terms(project, resolve_knowledge=False)
     fingerprint = draft_translation_fingerprint(
         project, config, int(library["terms_revision"]) if library else None
     )
@@ -337,7 +338,8 @@ class DraftTerminologyScan:
             term = str(item["segment_id"]) not in self.term_done
             translation = str(item["segment_id"]) not in self.translation_done
             summary = (
-                str(item["segment_id"]) in self.summary_selected - self.summary_done
+                str(item["segment_id"]) in self.summary_selected
+                and str(item["segment_id"]) not in self.summary_done
             )
             if term or translation or summary:
                 self.work.append(
@@ -729,24 +731,24 @@ class DraftTerminologyScan:
         while queue:
             pending, attempt, parent_request_id = queue.pop(0)
             mode = self.mode(pending)
-            payload = payload_builder(pending)
+            payload = (await run_blocking(lambda: payload_builder(pending)))
             if "segment" in response_record_types(mode):
-                payload, id_map = localize_request_ids(payload, pending)
+                payload, id_map = (await run_blocking(lambda: localize_request_ids(payload, pending)))
             else:
                 id_map = {
                     str(index): str(item["segment_id"])
                     for index, item in enumerate(pending, 1)
                 }
             generated_prompt = prompt_builder(pending)
-            messages = render_messages(generated_prompt, payload)
+            messages = (await run_blocking(lambda: render_messages(generated_prompt, payload)))
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             try:
                 response, request_id = await state.llm.chat(
                     messages=messages,
                     temperature=self.config["llm"]["temperature_terminology"],
-                    estimated_input_tokens=_request_estimate(
+                    estimated_input_tokens=(await run_blocking(lambda: _request_estimate(
                         messages, self.config, request_id
-                    ),
+                    ))),
                     request_id=request_id,
                     parent_request_id=parent_request_id,
                     segment_id_map=id_map,
@@ -811,14 +813,14 @@ class DraftTerminologyScan:
                         )
                 continue
             except ExternalError as exc:
-                self.fail_terms(
+                (await run_blocking(lambda: self.fail_terms(
                     pending,
                     state.run_id,
                     request_id,
                     "external_error",
                     str(exc),
                     part_original,
-                )
+                )))
                 for item in pending:
                     if item["_draft_translation"]:
                         await save_failed(
@@ -829,7 +831,7 @@ class DraftTerminologyScan:
                         )
                 summary_items = [item for item in pending if item.get("_draft_summary")]
                 if summary_items:
-                    self.record_summary(
+                    (await run_blocking(lambda: self.record_summary(
                         summary_items,
                         state=state,
                         request_id=request_id,
@@ -837,13 +839,13 @@ class DraftTerminologyScan:
                         original_parts=original_parts,
                         error=str(exc),
                         error_class="external_error",
-                    )
+                    )))
                 report_progress()
                 continue
-            document = parse_jsonl_document(
+            document = (await run_blocking(lambda: parse_jsonl_document(
                 response.content,
                 record_type=response_record_types(mode),
-            )
+            )))
             translation_end_received |= document.has_valid_end
             terms: list[dict[str, Any]] = []
             term_errors: list[str] = []
@@ -855,16 +857,16 @@ class DraftTerminologyScan:
             if "summary" in response_record_types(
                 mode
             ) and "term" in response_record_types(mode):
-                protocol = parse_terminology_response(
+                protocol = (await run_blocking(lambda: parse_terminology_response(
                     response.content, mode=mode, source_refs=tuple(id_map)
-                )
+                )))
                 if "invalid_order" in protocol.global_error_codes:
                     declaration_error = ("invalid_order", "概括记录必须在术语记录之前")
             if declaration_error:
                 term_errors.append(declaration_error[1])
             if "term" in response_record_types(mode):
                 for record in document.records_by_type["term"]:
-                    error, term = _validate_terminology_record(record)
+                    error, term = (await run_blocking(lambda: _validate_terminology_record(record)))
                     if error:
                         term_errors.append(error)
                     elif term is not None:
@@ -887,16 +889,16 @@ class DraftTerminologyScan:
                 )
                 if document.has_valid_end:
                     summary_content += '\n{"type":"end"}'
-                parsed_summary = parse_terminology_response(
+                parsed_summary = (await run_blocking(lambda: parse_terminology_response(
                     summary_content,
                     mode=TerminologyResponseMode.SUMMARY_ONLY,
                     source_refs=tuple(id_map),
-                )
+                )))
                 summary_errors.extend(parsed_summary.errors)
                 if document.complete and parsed_summary.summary_complete:
                     for row in parsed_summary.summaries:
                         refs = {id_map[ref] for ref in row["refs"]}
-                        self.record_summary(
+                        (await run_blocking(lambda: self.record_summary(
                             [
                                 item
                                 for item in pending
@@ -909,7 +911,7 @@ class DraftTerminologyScan:
                             text=row["text"],
                             generated_prompt=generated_prompt,
                             response_mode=mode.value,
-                        )
+                        )))
                     pending = [{**item, "_draft_summary": False} for item in pending]
             translation_unresolved: set[str] = set()
             if "segment" in response_record_types(mode) and not declaration_error:
@@ -919,7 +921,7 @@ class DraftTerminologyScan:
                 )
                 if document.has_valid_end:
                     content += '\n{"type":"end"}'
-                parsed = _map_local_translation_response(content, id_map)
+                parsed = (await run_blocking(lambda: _map_local_translation_response(content, id_map)))
                 valid = parsed.valid
                 translation_unresolved = set(parsed.unresolved)
                 if any(
@@ -938,7 +940,7 @@ class DraftTerminologyScan:
                     translation_unresolved.update(str(item["segment_id"]) for item in pending if item["_draft_translation"])
                 for segment_id, text in valid.items():
                     try:
-                        buffered_translations[segment_id] = (request_id, prepare_candidate(segment_id, text))
+                        buffered_translations[segment_id] = (request_id, (await run_blocking(lambda: prepare_candidate(segment_id, text))))
                     except IncompleteError as exc:
                         translation_unresolved.add(segment_id)
                         term_errors.append(str(exc))
@@ -966,14 +968,14 @@ class DraftTerminologyScan:
                     "; ".join([*document.errors, *term_errors, *summary_errors])
                     or "粗翻响应的 Segment ID 缺失、重复或字段错误"
                 )
-                self.fail_terms(
+                (await run_blocking(lambda: self.fail_terms(
                     pending,
                     state.run_id,
                     request_id,
                     "format_error",
                     message,
                     part_original,
-                )
+                )))
                 for item in pending:
                     if item["_draft_translation"]:
                         await save_failed(
@@ -981,14 +983,14 @@ class DraftTerminologyScan:
                         )
                 summary_items = [item for item in pending if item.get("_draft_summary")]
                 if summary_items:
-                    self.record_summary(
+                    (await run_blocking(lambda: self.record_summary(
                         summary_items,
                         state=state,
                         request_id=request_id,
                         part_original=part_original,
                         original_parts=original_parts,
                         error=message,
-                    )
+                    )))
                 report_progress()
                 continue
             groups: dict[tuple[bool, bool, bool], list[dict[str, Any]]] = {}

@@ -67,7 +67,7 @@ def register_export_routes(*, app: FastAPI, projects_root: Path, app_root: Path,
 
 
     @app.post("/api/v1/projects/{name}/export")
-    async def export(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def export(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         root = project(name)
         file_ids = payload.get("file_ids")
         if file_ids is not None and (
@@ -86,7 +86,7 @@ def register_export_routes(*, app: FastAPI, projects_root: Path, app_root: Path,
             )
 
     @app.get("/api/v1/projects/{name}/exports")
-    async def exports(name: str) -> dict[str, Any]:
+    def exports(name: str) -> dict[str, Any]:
         root = project(name)
         output_root = (root / "output").resolve()
         files: list[dict[str, Any]] = []
@@ -103,7 +103,7 @@ def register_export_routes(*, app: FastAPI, projects_root: Path, app_root: Path,
         return {"files": files}
 
     @app.post("/api/v1/projects/{name}/exports/download")
-    async def download_export(
+    def download_export(
         name: str, payload: dict[str, Any]
     ) -> Response:
         file = payload.get("file")
@@ -120,7 +120,7 @@ def register_export_routes(*, app: FastAPI, projects_root: Path, app_root: Path,
         )
 
     @app.get("/api/v1/projects/{name}/exports/download-all")
-    async def download_export_all(name: str) -> Response:
+    def download_export_all(name: str) -> Response:
         root = project(name)
         paths = _export_files(root)
         if not paths:
@@ -141,7 +141,7 @@ def register_export_routes(*, app: FastAPI, projects_root: Path, app_root: Path,
         )
 
     @app.post("/api/v1/projects/{name}/exports/remove")
-    async def remove_exports(
+    def remove_exports(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         files = payload.get("files")
@@ -159,7 +159,7 @@ def register_export_routes(*, app: FastAPI, projects_root: Path, app_root: Path,
         return {"removed": files}
 
     @app.post("/api/v1/projects/{name}/sync-templates")
-    async def sync_templates(
+    def sync_templates(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         root = project(name)

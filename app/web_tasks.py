@@ -1,4 +1,6 @@
 from __future__ import annotations
+from .async_utils import run_blocking
+from .errors import RequestSizeError, app_error_payload
 
 import asyncio
 import hashlib
@@ -121,7 +123,7 @@ def _document_adapter_run_option_summary(project: Path) -> list[dict[str, Any]]:
 
 
 def _require_decision_library(project: Path) -> dict[str, Any]:
-    library = load_terms(project)
+    library = load_terms(project, resolve_knowledge=False)
     if library is None or not library.get("terms"):
         raise UsageError("没有已发布术语库可供自动决策")
     return library
@@ -175,6 +177,8 @@ def task_options(
     project: Path,
     stage: str,
     *,
+    segments: list[dict[str, Any]] | None = None,
+    estimate_usage: bool = False,
     exclude_punctuation_only: bool = True,
     screening_enabled: bool = False,
     include_summaries: bool = False,
@@ -236,10 +240,16 @@ def task_options(
         )
         config = load_project_config(project, stage=stage)
         plan = (
-            decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only)
+            decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, prepare_requests=False, estimate_usage=False)
             if has_eligible or knowledge_only
             else None
         )
+        estimate_error = None
+        if estimate_usage and plan is not None:
+            try:
+                plan = decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only)
+            except RequestSizeError as exc:
+                estimate_error = app_error_payload(exc)
         selected = (plan["knowledge_pending"] if knowledge_only else len(plan["eligible"])) if plan else 0
         running_run = _running_run(project, stage, config)
         if running_run is not None:
@@ -290,9 +300,10 @@ def task_options(
             "running_run": running_run,
             "document_adapter_run_options": _document_adapter_run_option_summary(project),
             "has_pending_draft": current_decision_draft(project) is not None,
-            "estimated_requests": int(plan["estimated_requests"]) if plan else 0,
+            "estimated_requests": plan["estimated_requests"] if plan else (0 if estimate_usage else None),
+            "estimate_error": estimate_error,
             "estimated_input_tokens": (
-                int(plan["estimated_input_tokens"]) if plan else 0
+                plan["estimated_input_tokens"] if plan else (0 if estimate_usage else None)
             ),
         }
     if stage == "content_summary":
@@ -344,7 +355,7 @@ def task_options(
         }
     if stage not in LLM_STAGES:
         raise UsageError(f"未知 Web 阶段：{stage}")
-    segments = load_segments(project)
+    segments = load_segments(project) if segments is None else segments
     nonempty = [item for item in segments if not item["is_empty"]]
     if not nonempty:
         raise UsageError("项目没有可处理的非空 Segment；请先添加源文件")
@@ -358,7 +369,7 @@ def task_options(
             nonempty_count=len(nonempty),
         )
     else:
-        library = load_terms(project)
+        library = load_terms(project, resolve_knowledge=False)
         summary = _stage_summary(
             project,
             stage,
@@ -543,7 +554,7 @@ def _decision_input_snapshot(plan: dict[str, Any]) -> str:
             "eligible": plan["eligible"],
             "states": plan["states"],
             "source_conflicts": plan["source_conflicts"],
-            "evidence": plan["evidence"],
+            "knowledge": plan["library"].get("knowledge"),
             "language": plan["language"],
             "final_review": bool(plan.get("final_review", False)),
             "knowledge_only": bool(plan.get("knowledge_only", False)),
@@ -559,7 +570,7 @@ def _run_all_includes_terminology(
     *,
     force: bool,
 ) -> bool:
-    terms = load_terms(project)
+    terms = load_terms(project, resolve_knowledge=False)
     active_path = project / "terminology" / "active_task.json"
     active = (
         read_json(project, active_path)
@@ -1001,15 +1012,15 @@ class WebTaskManager:
             from .repetition_consistency import repetition_plan, repetition_resume
             if reuse_mixed_fingerprints:
                 raise UsageError("重复译文审查不支持跨 Run 复用结果")
-            plan = repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled)
-            running = repetition_resume(project, plan)
+            plan = repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, preview_only=not find_running_runs(project, stage), estimate_usage=False)
+            running = repetition_resume(project, plan, estimate_usage=False) if not plan.get("preview_only") else None
             if running and run_action is None:
                 raise UsageError("发现未完成 Run，必须选择续用或结束旧 Run 并新建")
             if run_action == "resume" and (not running or not running["resume_compatible"]):
                 raise UsageError(running["resume_incompatibility_reason"] if running else "没有可续作的重复译文 Run")
             return _StartDecision(selected_count=plan["selected"], running_run_id=running["run_id"] if running else None,
                 fingerprints=((stage, plan["fingerprint"]),), selection_snapshots=(), running_runs=_running_runs_snapshot(project, (stage,)),
-                plan=None if ensure_unique else plan)
+                plan=None if ensure_unique or plan.get("preview_only") else plan)
         selected_count = 0
         running_run_id: str | None = None
         decision_plan_snapshot: dict[str, Any] | None = None
@@ -1112,7 +1123,7 @@ class WebTaskManager:
         elif stage == TERMINOLOGY_DECISION_STAGE:
             decision_plan_snapshot = decision_plan(
                 project, prompt_language, final_review=final_review, knowledge_only=knowledge_only
-            )
+            , prepare_requests=False, estimate_usage=False)
             library = decision_plan_snapshot["library"]
             selected_count = int(
                 decision_plan_snapshot.get(
@@ -1152,16 +1163,18 @@ class WebTaskManager:
             elif run_action == "decline" and not force:
                 raise UsageError("结束自动决策 Run 时必须同时指定 force")
         elif stage != "run-all":
+            project_segments = load_segments(project)
             options = (
                 task_options(
                     project,
                     stage,
+                    segments=project_segments,
                     include_draft_translation=True,
                     include_summaries=include_summaries,
                     prompt_language=prompt_language,
                 )
                 if include_draft_translation
-                else task_options(project, stage)
+                else task_options(project, stage, segments=project_segments)
             )
             if (
                 include_draft_translation
@@ -1176,6 +1189,7 @@ class WebTaskManager:
                 project,
                 scope,
                 force_all=stage == "terminology" and scope.force,
+                segments=project_segments,
             )
             selected_count = len(selection)
             selection_snapshots = ((stage, selection),)
@@ -1301,7 +1315,7 @@ class WebTaskManager:
                 draft_config, _, _, _ = draft_run_context(
                     project, include_summaries=include_summaries
                 )
-                library = load_terms(project)
+                library = load_terms(project, resolve_knowledge=False)
                 fingerprints += (
                     (
                         "draft_translation",
@@ -1437,39 +1451,45 @@ class WebTaskManager:
                 )
             continuous_stages = tuple(continuous_stages)
             continuous_run_actions = dict(continuous_run_actions or {})
-            decision = self._validate_start(
-                project,
-                stage,
-                scope=scope,
-                reuse_mixed_fingerprints=reuse_mixed_fingerprints,
-                run_action=run_action,
-                acknowledge_manual_review=acknowledge_manual_review,
-                ensure_unique=True,
-                prompt_language=prompt_language,
-                exclude_punctuation_only=exclude_punctuation_only,
-                screening_enabled=screening_enabled,
-                include_summaries=include_summaries,
-                include_draft_translation=include_draft_translation,
-                aggregate_full_summaries=aggregate_full_summaries,
-                summary_selection=tuple(
-                    (str(item["file_id"]), str(item["part_id"]))
-                    for item in summary_selection
-                ),
-                final_review=final_review,
-                knowledge_only=knowledge_only,
-                continuous_stages=continuous_stages,
-                continuous_run_actions=continuous_run_actions,
-                apply_terminology_decision=apply_terminology_decision,
-                include_repetition_consistency=include_repetition_consistency,
-                apply_repetition_consistency=apply_repetition_consistency,
-            )
+        decision = (await run_blocking(lambda: self._validate_start(
+            project,
+            stage,
+            scope=scope,
+            reuse_mixed_fingerprints=reuse_mixed_fingerprints,
+            run_action=run_action,
+            acknowledge_manual_review=acknowledge_manual_review,
+            ensure_unique=True,
+            prompt_language=prompt_language,
+            exclude_punctuation_only=exclude_punctuation_only,
+            screening_enabled=screening_enabled,
+            include_summaries=include_summaries,
+            include_draft_translation=include_draft_translation,
+            aggregate_full_summaries=aggregate_full_summaries,
+            summary_selection=tuple(
+                (str(item["file_id"]), str(item["part_id"]))
+                for item in summary_selection
+            ),
+            final_review=final_review,
+            knowledge_only=knowledge_only,
+            continuous_stages=continuous_stages,
+            continuous_run_actions=continuous_run_actions,
+            apply_terminology_decision=apply_terminology_decision,
+            include_repetition_consistency=include_repetition_consistency,
+            apply_repetition_consistency=apply_repetition_consistency,
+        )))
+        metadata = await run_blocking(read_json, project, project / "project.json")
+        async with self.guard:
+            if self._shutting_down:
+                raise UsageError("任务管理器正在关闭")
+            if data_root.pending_path().exists():
+                raise UsageError("数据目录迁移待执行，不能启动新任务")
+            if self.is_project_running(project):
+                raise UsageError("项目已有后台任务")
             task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
             state = WebTask(
                 task_id=task_id,
                 project=project,
-                project_id=str(
-                    read_json(project, project / "project.json")["project_id"]
-                ),
+                project_id=str(metadata["project_id"]),
                 stage=stage,
                 total_segments=decision.selected_count,
             )
@@ -1613,7 +1633,7 @@ class WebTaskManager:
                 else nullcontext()
             )
             with diagnostics_context, project_write_lock(state.project):
-                decision = self._validate_start(
+                decision = (await run_blocking(lambda: self._validate_start(
                     state.project,
                     state.stage,
                     scope=scope,
@@ -1635,7 +1655,7 @@ class WebTaskManager:
                     apply_terminology_decision=apply_terminology_decision,
                     include_repetition_consistency=include_repetition_consistency,
                     apply_repetition_consistency=apply_repetition_consistency,
-                )
+                )))
                 if (
                     state._start_decision is not None
                     and decision != state._start_decision
@@ -1655,7 +1675,7 @@ class WebTaskManager:
                     limiter_stages = (state.stage,)
                 if state.stage in {CONTINUOUS_STAGE, "run-all"}:
                     for stage in limiter_stages:
-                        config = load_project_config(state.project, stage="translation" if stage == "repetition_consistency" else stage)
+                        config = (await run_blocking(lambda: load_project_config(state.project, stage="translation" if stage == "repetition_consistency" else stage)))
                         key = (
                             str(config["_llm_preset_id"]),
                             str(config["_llm_preset_hash"]),
@@ -1667,7 +1687,7 @@ class WebTaskManager:
                         shared_limiters[key] = limiter
                         limiter_releases.append(release)
                 else:
-                    config = load_project_config(state.project, stage="translation" if state.stage == "repetition_consistency" else state.stage)
+                    config = (await run_blocking(lambda: load_project_config(state.project, stage="translation" if state.stage == "repetition_consistency" else state.stage)))
                     limiter, release = self._acquire_limiter(config)
                     shared_limiters[
                         (
@@ -1687,13 +1707,13 @@ class WebTaskManager:
                     )
                     if resume_run_id is not None:
                         resuming = True
-                        manifest = read_json(
+                        manifest = (await run_blocking(lambda: read_json(
                             state.project,
                             state.project
                             / "runs"
                             / resume_run_id
                             / "manifest.json",
-                        )
+                        )))
                         if type(manifest.get("usage_invocation_count")) is int:
                             raw_usage = manifest.get("usage")
                             if isinstance(raw_usage, dict):
@@ -1765,6 +1785,7 @@ class WebTaskManager:
                 elif state.stage == "repetition_consistency":
                     from .repetition_consistency import run_repetition
                     summary = await run_repetition(state.project, scope, replace_draft=replace_draft, run_action=run_action,
+                        prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled,
                         on_progress=progress, on_usage=usage_changed,
                         limiter=next(iter(shared_limiters.values())), prepared_plan=decision.plan)
                 elif state.stage == "translation":

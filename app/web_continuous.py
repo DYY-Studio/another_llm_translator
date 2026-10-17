@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import asyncio
 import hashlib
@@ -113,7 +114,7 @@ def _stable_digest(value: Any) -> str:
 
 def stage_fingerprint_snapshot(project: Path, stage: str) -> str:
     config = load_project_config(project, stage=stage)
-    library = load_terms(project)
+    library = load_terms(project, resolve_knowledge=False)
     terms_revision = (
         int(library["terms_revision"])
         if stage != "terminology" and library is not None
@@ -132,9 +133,10 @@ def selection_snapshot(
     scope: Scope,
     *,
     force_all: bool = False,
+    segments: list[dict[str, object]] | None = None,
 ) -> tuple[tuple[str, str, int, int, str, str, str, str], ...]:
     files = load_source_files(project)
-    segments = load_segments(project)
+    segments = load_segments(project) if segments is None else segments
     selected = (
         [segment for segment in segments if not segment["is_empty"]]
         if force_all
@@ -312,7 +314,7 @@ def _decision_inputs_snapshot(plan: Mapping[str, Any]) -> dict[str, Any]:
         "eligible": plan["eligible"],
         "states": plan["states"],
         "source_conflicts": plan["source_conflicts"],
-        "evidence": plan["evidence"],
+        "knowledge": plan["library"].get("knowledge"),
         "language": plan["language"],
         "final_review": bool(plan.get("final_review", False)),
     }
@@ -389,7 +391,7 @@ def inspect_continuous(
         raise UsageError("项目没有可处理的非空 Segment；请先添加源文件")
     segments = tuple(item[0] for item in selection)
 
-    terms = load_terms(project)
+    terms = load_terms(project, resolve_knowledge=False)
     published_terms = (
         terms if terms is not None and bool(terms.get("terms")) else None
     )
@@ -413,7 +415,8 @@ def inspect_continuous(
         if _translation_complete(project, segments) and "translation" not in normalized and "terminology" not in normalized and "terminology_decision" not in normalized:
             repetition_current = repetition_plan(project, Scope(), prompt_language=prompt_language,
                 exclude_punctuation_only=repetition_runs[0]["exclude_punctuation_only"] if repetition_runs else exclude_punctuation_only,
-                screening_enabled=repetition_runs[0]["screening_enabled"] if repetition_runs else screening_enabled)
+                screening_enabled=repetition_runs[0]["screening_enabled"] if repetition_runs else screening_enabled,
+                preview_only=not repetition_runs, estimate_usage=False)
         else:
             repetition_config, repetition_prompt, repetition_screen, _, repetition_preset, _ = repetition_resources(project, prompt_language, screening_enabled)
 
@@ -450,7 +453,7 @@ def inspect_continuous(
                 run["resume_incompatibility_reason"] = run.get("resume_incompatibility_reason") or (None if compatible else "续用 Run 必须保持原有粗翻和概括选项")
         if stage == "repetition_consistency":
             if repetition_current is not None:
-                running = repetition_resume(project, repetition_current)
+                running = repetition_resume(project, repetition_current, estimate_usage=False)
                 runs = [running] if running else []
                 if running and running["scope"] != {"only_file": None}:
                     running.update(resume_compatible=False, resume_incompatibility_reason="连续运行只能续用整项目审查 Run")
@@ -727,7 +730,7 @@ def inspect_continuous(
                     project,
                     prompt_language,
                     final_review=decision_final_review,
-                )
+                prepare_requests=False, estimate_usage=False)
                 decision_plan_for_fingerprint = plan
                 decision_inputs = _decision_inputs_snapshot(plan)
         if (
@@ -898,7 +901,7 @@ def _decision_plan_or_skip(
     *,
     final_review: bool,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    library = load_terms(project)
+    library = load_terms(project, resolve_knowledge=False)
     if library is None or not library.get("terms"):
         return None, "no_published_terms"
     overrides_document = read_json(
@@ -916,7 +919,7 @@ def _decision_plan_or_skip(
     if not has_eligible:
         return None, "no_work"
     return (
-        decision_plan(project, prompt_language, final_review=final_review),
+        decision_plan(project, prompt_language, final_review=final_review, prepare_requests=False, estimate_usage=False),
         None,
     )
 
@@ -970,7 +973,7 @@ def _ensure_downstream_fingerprints_after_decision(
     reuse_mixed_fingerprints: bool,
 ) -> None:
     """Check downstream results against the revision that applying the draft will create."""
-    library = load_terms(project)
+    library = load_terms(project, resolve_knowledge=False)
     draft = current_decision_draft(project)
     if library is None or draft is None:
         return
@@ -1070,7 +1073,7 @@ async def run_continuous(
     for stage in normalized:
         if stage == "translation" and include_draft_translation:
             continue
-        config = load_project_config(project, stage="translation" if stage == "repetition_consistency" else stage)
+        config = (await run_blocking(lambda: load_project_config(project, stage="translation" if stage == "repetition_consistency" else stage)))
         identity = _limiter_identity(config)
         try:
             stage_limiters[stage] = limiters[identity]
@@ -1144,7 +1147,7 @@ async def run_continuous(
                     project / "runs" / resume_run_id / "manifest.json"
                 )
                 if record_exists(project, manifest_path):
-                    raw_usage = read_json(project, manifest_path).get("usage")
+                    raw_usage = (await run_blocking(lambda: read_json(project, manifest_path))).get("usage")
                     if isinstance(raw_usage, dict):
                         usage_base_by_stage[stage] = raw_usage
             if stage == "repetition_consistency":
@@ -1152,13 +1155,13 @@ async def run_continuous(
                 if prior and actions.get(stage) == "resume":
                     exclude_punctuation_only = prior[0]["exclude_punctuation_only"]
                     screening_enabled = prior[0]["screening_enabled"]
-                plan = repetition_plan(project, Scope(), prompt_language=prompt_language,
-                    exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled)
-                running = repetition_resume(project, plan)
+                plan = (await run_blocking(lambda: repetition_plan(project, Scope(), prompt_language=prompt_language,
+                    exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, estimate_usage=False)))
+                running = (await run_blocking(lambda: repetition_resume(project, plan, estimate_usage=False)))
                 if running and actions.get(stage) == "resume":
                     if running["scope"] != {"only_file": None}:
                         raise UsageError("连续运行只能续用整项目一致性审查 Run")
-                    raw = read_json(project, project / "runs" / running["run_id"] / "manifest.json").get("usage")
+                    raw = (await run_blocking(lambda: read_json(project, project / "runs" / running["run_id"] / "manifest.json"))).get("usage")
                     if isinstance(raw, dict):
                         usage_base_by_stage[stage] = raw
                 if not plan["groups"] and not running:
@@ -1168,7 +1171,7 @@ async def run_continuous(
                     summary = await run_repetition(project, Scope(), prepared_plan=plan, run_action=actions.get(stage),
                         limiter=stage_limiters[stage], on_progress=lambda completed, failed, total: report_progress(stage, completed, failed, total),
                         on_usage=lambda current: report_usage(stage, current))
-                    draft = read_draft(project, {"run_id": summary["run_id"]})
+                    draft = (await run_blocking(lambda: read_draft(project, {"run_id": summary["run_id"]})))
                     needs_review = sum(len(group["uncertain"]) for group in draft["groups"])
                     summary = {**summary, "needs_review": needs_review}
                     step.update(_continuous_step_summary(stage, summary, run_id=summary["run_id"]))
@@ -1182,11 +1185,11 @@ async def run_continuous(
                         summary = {**summary, "applied": applied}
                         step["summary"] = dict(summary)
             elif stage == "terminology_decision":
-                plan, skip_reason = _decision_plan_or_skip(
+                plan, skip_reason = (await run_blocking(lambda: _decision_plan_or_skip(
                     project,
                     prompt_language,
                     final_review=decision_final_review,
-                )
+                )))
                 if skip_reason is not None:
                     summary = {
                         "stage": stage,
@@ -1231,16 +1234,16 @@ async def run_continuous(
                             "自动术语决策仍有人工待办，无法自动应用"
                         )
                     if apply_terminology_decision:
-                        _ensure_downstream_fingerprints_after_decision(
+                        (await run_blocking(lambda: _ensure_downstream_fingerprints_after_decision(
                             project,
                             tuple(value for value in normalized if value != "content_summary" and not (value == "translation" and include_draft_translation)),
                             scope,
                             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
-                        )
-                        applied = apply_decision_draft(
+                        )))
+                        applied = (await run_blocking(lambda: apply_decision_draft(
                             project,
                             confirm_all=True,
-                        )
+                        )))
                         summary = {**summary, "applied": applied}
                     decision_run_id = str(summary.get("run_id", ""))
                     decision_total = summary.get("total_steps")
@@ -1255,13 +1258,13 @@ async def run_continuous(
                             / "manifest.json",
                         )
                     ):
-                        decision_total = read_json(
+                        decision_total = (await run_blocking(lambda: read_json(
                             project,
                             project
                             / "runs"
                             / decision_run_id
                             / "manifest.json",
-                        ).get("total_steps")
+                        ))).get("total_steps")
                     if isinstance(decision_total, int):
                         summary = {**summary, "total_steps": decision_total}
                     step.update(
@@ -1366,13 +1369,13 @@ async def run_continuous(
             ):
                 raise IncompleteError("连续运行阶段仍有 pending 或 failed")
             if stage == "proofreading" and "polishing" in normalized:
-                applied = run_apply(
+                applied = (await run_blocking(lambda: run_apply(
                     project,
                     "proofreading",
                     Scope(),
                     allow_outdated_base=False,
                     confirmed_all=True,
-                )
+                )))
                 summary = {**summary, "applied": applied}
                 summaries[stage] = dict(summary)
                 step["summary"] = dict(summary)

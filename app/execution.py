@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_left
 
 import hashlib
 
@@ -21,7 +22,7 @@ import uuid
 
 from collections import defaultdict
 
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Iterable, Mapping
 
 from copy import deepcopy
 
@@ -992,10 +993,28 @@ class PreviousContextIndex:
         for item in all_segments:
             if not item["is_empty"]:
                 by_part[_segment_part_key(item)].append(item)
+        for values in by_part.values():
+            values.sort(key=lambda item: int(item["line_index"]))
         self._by_part = {
             key: tuple((int(item["line_index"]), item) for item in values)
             for key, values in by_part.items()
         }
+
+    def _previous_items(
+        self, first: dict[str, Any], count: int
+    ) -> tuple[dict[str, Any], ...]:
+        if count <= 0:
+            return ()
+        values = self._by_part.get(_segment_part_key(first), ())
+        first_line = int(first["line_index"])
+        stop = bisect_left(values, first_line, key=lambda entry: entry[0])
+        start = max(0, stop - count)
+        return tuple(item for _, item in values[start:stop])
+
+    def previous_ids(self, first: dict[str, Any], count: int) -> tuple[str, ...]:
+        return tuple(
+            str(item["segment_id"]) for item in self._previous_items(first, count)
+        )
 
     def previous(
         self,
@@ -1006,20 +1025,8 @@ class PreviousContextIndex:
         target_transform: Callable[[dict[str, Any], str], str] | None = None,
         source_key: str = "source",
     ) -> list[dict[str, str]]:
-        if count <= 0:
-            return []
-        key = _segment_part_key(first)
-        values = self._by_part.get(key, ())
-        first_line = int(first["line_index"])
-        candidates: list[dict[str, Any]] = []
-        for line_index, item in reversed(values):
-            if line_index < first_line:
-                candidates.append(item)
-                if len(candidates) >= count:
-                    break
-        candidates.reverse()
         result: list[dict[str, str]] = []
-        for item in candidates:
+        for item in self._previous_items(first, count):
             context = {
                 "source": (
                     segment_model_source(item)
@@ -1184,6 +1191,7 @@ def iter_chunk_plans(
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
     prompt_builder: Callable[[list[dict[str, Any]]], str] | None = None,
     partition_key: Callable[[dict[str, Any]], object] | None = None,
+    on_oversized: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None,
 ) -> Iterable[ChunkPlan]:
     input_limit = (
         config["llm"]["context_window_tokens"]
@@ -1240,14 +1248,23 @@ def iter_chunk_plans(
                         render_messages(prompt_builder(current), payload), factor
                     )
                     started_new_chunk = True
-                _validate_request_estimate(
-                    segment,
-                    estimated,
-                    input_limit=input_limit,
-                    input_tokens_per_minute=(
-                        config["execution"]["input_tokens_per_minute"]
-                    ),
-                )
+                try:
+                    _validate_request_estimate(
+                        segment, estimated, input_limit=input_limit,
+                        input_tokens_per_minute=config["execution"]["input_tokens_per_minute"],
+                    )
+                except RequestSizeError as exc:
+                    if exc.reason != "context" or on_oversized is None:
+                        raise
+                    # The normal Chunk estimate already checked the singleton.
+                    # Only overflowing singletons need the splitting preflight.
+                    parts = on_oversized(segment)
+                    if parts:
+                        yield from plan_groups([parts])
+                    current = []
+                    current_payload = None
+                    current_estimate = 0
+                    continue
                 if not started_new_chunk:
                     current = candidate
                 current_payload = payload
@@ -1428,6 +1445,9 @@ def _write_prompt_variants(
         if primary_mode is not None:
             entry["primary_mode"] = primary_mode
         metadata[name] = entry
+    if primary_mode is not None:
+        for entry in metadata.values():
+            entry["primary_mode"] = primary_mode
     atomic_write_json(directory / "prompt_variants.json", metadata, compact=True)
     return paths
 
@@ -1842,10 +1862,19 @@ def save_debug_chunks(
 
 _Item = TypeVar("_Item")
 
+async def _async_items(items: Iterable[_Item] | AsyncIterable[_Item]) -> AsyncIterator[_Item]:
+    if isinstance(items, AsyncIterable):
+        async for item in items:
+            yield item
+    else:
+        for item in items:
+            yield item
+
+
 _Result = TypeVar("_Result")
 
 async def run_bounded(
-    items: Iterable[_Item],
+    items: Iterable[_Item] | AsyncIterable[_Item],
     worker: Callable[[_Item], Awaitable[_Result]],
     *,
     max_parallel: int,
@@ -1853,30 +1882,30 @@ async def run_bounded(
     """Run worker over items with at most max_parallel in-flight tasks."""
     if max_parallel < 1:
         raise ConfigError("max_parallel 必须是正整数")
-    iterator = iter(items)
+    iterator = _async_items(items).__aiter__()
     pending: dict[asyncio.Task[_Result], int] = {}
     results: dict[int, _Result] = {}
     next_index = 0
 
-    def fill() -> None:
+    async def fill() -> None:
         nonlocal next_index
         while len(pending) < max_parallel:
             try:
-                item = next(iterator)
-            except StopIteration:
+                item = await anext(iterator)
+            except StopAsyncIteration:
                 return
             task = asyncio.create_task(worker(item))
             pending[task] = next_index
             next_index += 1
 
-    fill()
     try:
+        await fill()
         while pending:
             done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 index = pending.pop(task)
                 results[index] = task.result()
-            fill()
+            await fill()
     except BaseException:
         for task in pending:
             task.cancel()
@@ -1886,7 +1915,7 @@ async def run_bounded(
     return [results[index] for index in range(next_index)]
 
 async def dispatch_chunks(
-    chunks: Iterable[ChunkPlan],
+    chunks: Iterable[ChunkPlan] | AsyncIterable[ChunkPlan],
     worker: Callable[[ChunkPlan], Awaitable[Any]],
     *,
     mode: str,
@@ -1895,7 +1924,7 @@ async def dispatch_chunks(
     if max_parallel < 1:
         raise ConfigError("max_parallel 必须是正整数")
     if mode == "ordered_by_file":
-        iterator = iter(chunks)
+        iterator = _async_items(chunks).__aiter__()
         pending: dict[asyncio.Task[Any], tuple[int, frozenset[str]]] = {}
         buffered: list[tuple[int, frozenset[str], ChunkPlan]] = []
         results: dict[int, Any] = {}
@@ -1928,7 +1957,7 @@ async def dispatch_chunks(
                 reserved.update(file_ids_for_chunk)
             return False
 
-        def fill() -> None:
+        async def fill() -> None:
             nonlocal next_index, source_exhausted
             while len(pending) < max_parallel:
                 while start_buffered():
@@ -1938,8 +1967,8 @@ async def dispatch_chunks(
                 if source_exhausted or len(buffered) >= max_parallel:
                     return
                 try:
-                    chunk = next(iterator)
-                except StopIteration:
+                    chunk = await anext(iterator)
+                except StopAsyncIteration:
                     source_exhausted = True
                     return
                 index = next_index
@@ -1955,8 +1984,8 @@ async def dispatch_chunks(
                     continue
                 buffered.append((index, file_ids_for_chunk, chunk))
 
-        fill()
         try:
+            await fill()
             while pending:
                 done, _ = await asyncio.wait(
                     pending, return_when=asyncio.FIRST_COMPLETED
@@ -1965,7 +1994,7 @@ async def dispatch_chunks(
                     index, file_ids_for_chunk = pending.pop(task)
                     active_files.difference_update(file_ids_for_chunk)
                     results[index] = task.result()
-                fill()
+                await fill()
         except BaseException:
             for task in pending:
                 task.cancel()

@@ -163,13 +163,13 @@ def test_summary_routes_expose_selection_preflight_and_export(tmp_path):
         {"file_id": "F0001", "part_id": "document", "segment_count": 2}
     ]
     stored = read_content_summaries(project)[0]
-    assert listing.json()["artifacts"][0]["source_range"] == {
-        **stored["source_range"],
-        "segments": [
-            {"segment_id": item["segment_id"], "original_segment_id": item["original_segment_id"]}
-            for item in stored["source_range"]["segments"]
-        ],
-    }
+    header = listing.json()["artifacts"][0]
+    assert "source_range" not in header and "refs" not in header and "text" not in header
+    assert header["has_text"] is True
+    assert header["covered_segment_count"] == 2
+    detail = client.get(f"/api/v1/projects/demo/summaries/{stored['record_id']}")
+    assert detail.status_code == 200
+    assert detail.json()["source_range"] == stored["source_range"]
     assert stored["source_range"]["segments"][0]["source"] == "Alice entered."
 
     selection = client.put(

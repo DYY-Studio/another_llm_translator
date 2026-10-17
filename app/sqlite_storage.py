@@ -17,7 +17,7 @@ from typing import Any, Iterable
 from .errors import ProjectError, StorageError, UsageError
 from .stage_result_retention import prune_stage_results
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 STAGES = frozenset(
     {
@@ -761,7 +761,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             (str(version),),
         )
         return None
-    elif version not in {3, 4, 5, 6, 7, SCHEMA_VERSION}:
+    elif version not in {3, 4, 5, 6, 7, 8, SCHEMA_VERSION}:
         raise ProjectError(
             f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
         )
@@ -771,6 +771,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
 
     if project is None:
         raise StorageError("SQLite schema 升级缺少项目路径，无法创建备份")
+    sidecar_backups: list[tuple[Path, Path]] = []
     try:
         # Reserve the database writer slot while taking the backup.  This
         # keeps a concurrent writer from changing the snapshot between the
@@ -822,7 +823,11 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
                 "UPDATE terminology_candidates SET payload_json = ? WHERE sequence = ?",
                 [(zlib.compress(row["payload_json"].encode("utf-8")), row["sequence"]) for row in rows],
             )
-        migrated_term_runs = _migrate_term_knowledge_to_v8(connection, project)
+        migrated_term_runs = _migrate_term_knowledge_to_v8(connection, project) if version < 8 else []
+        migrated_term_runs.extend(_end_term_decision_runs_to_v9(connection, project))
+        if version < 9:
+            sidecar_backups = _migrate_term_knowledge_sidecars_to_v9(connection, project, backup_path)
+        _migrate_term_knowledge_to_v9(connection)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -831,6 +836,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
         connection.commit()
     except Exception:
         connection.rollback()
+        _restore_migrated_sidecars(sidecar_backups)
         raise
     try:
         for run_id in migrated_term_runs:
@@ -1266,7 +1272,7 @@ def _migrate_term_knowledge_to_v8(connection: sqlite3.Connection, project: Path)
     """Convert scalar explanations in the schema upgrade transaction."""
     from .term_knowledge import (
         add_unsourced, empty_knowledge, entity_members, project_descriptions,
-        require_knowledge, save_items,
+        save_items,
     )
 
     project_id = _project_id(connection)
@@ -1276,7 +1282,8 @@ def _migrate_term_knowledge_to_v8(connection: sqlite3.Connection, project: Path)
                for row in connection.execute("SELECT key, payload_json FROM terms_state")}
     library = records.get("terms")
     if library is not None and "knowledge" in library:
-        require_knowledge(library)
+        if not isinstance(library["knowledge"], dict) or library["knowledge"].get("version") not in {1, 2}:
+            raise StorageError("术语库缺少有效的实体说明结构")
         connection.execute("UPDATE terms_state SET payload_json = ? WHERE key = 'terms'",
                            (_terms_payload(library),))
         return []
@@ -1331,6 +1338,222 @@ def _migrate_term_knowledge_to_v8(connection: sqlite3.Connection, project: Path)
          for key, value in (("terms", library), ("overrides", overrides))],
     )
     return changed_runs
+
+
+def _migrate_term_knowledge_to_v9(connection: sqlite3.Connection) -> None:
+    row = connection.execute("SELECT key, payload_json FROM terms_state WHERE key = 'terms'").fetchone()
+    if row is None:
+        return
+    library = _hydrate_terms(row, _project_id(connection))
+    knowledge = library.get("knowledge")
+    if not isinstance(knowledge, dict):
+        raise StorageError("术语库缺少有效的实体说明结构")
+    if knowledge.get("version") == 2:
+        return
+    candidate_ids = sorted({fragment.get("candidate_id") for fragment in knowledge.get("fragments", {}).values()
+                            if fragment.get("candidate_id")})
+    candidates = {}
+    for offset in range(0, len(candidate_ids), 500):
+        batch = candidate_ids[offset:offset + 500]
+        rows = connection.execute(
+            f"SELECT record_id, active_task_id, payload_json FROM terminology_candidates "
+            f"WHERE record_id IN ({','.join('?' for _ in batch)})", batch,
+        ).fetchall()
+        candidates.update({value["record_id"]: value for value in
+                           (_hydrate_candidate(candidate, _project_id(connection)) for candidate in rows)})
+    position_rows = connection.execute("""SELECT segments.segment_id
+        FROM files CROSS JOIN segments ON segments.file_id = files.file_id
+        ORDER BY files.file_order, segments.line_index""").fetchall()
+    positions = {str(value[0]): index for index, value in enumerate(position_rows)}
+    from .term_knowledge import _migrate_knowledge_to_v2
+    _migrate_knowledge_to_v2(library, candidates, positions)
+    connection.execute("UPDATE terms_state SET payload_json = ? WHERE key = 'terms'", (_terms_payload(library),))
+
+
+def _end_term_decision_runs_to_v9(connection: sqlite3.Connection, project: Path) -> list[str]:
+    changed = []
+    for row in connection.execute(
+        "SELECT * FROM runs WHERE stage = 'terminology_decision' AND status = 'running'"
+    ).fetchall():
+        run = _hydrate_run(row, _project_id(connection))
+        run.update(status="interrupted", completed_at=utc_now())
+        draft_path = project / "runs" / str(row["run_id"]) / "terminology_decision_draft.json"
+        has_pending_draft = False
+        if draft_path.is_file():
+            try:
+                draft = json.loads(draft_path.read_text(encoding="utf-8"))
+                has_pending_draft = isinstance(draft, dict) and draft.get("status") == "pending"
+            except (OSError, json.JSONDecodeError):
+                has_pending_draft = False
+        if run.get("decision_status") == "generating" and has_pending_draft:
+            run["decision_status"] = "pending"
+        elif run.get("decision_status") == "generating":
+            run.update(decision_status="discarded", discarded_at=utc_now())
+        run["error_message"] = "实体说明升级已结束旧 Run；可审阅已有草案，继续生成请新建 Run"
+        connection.execute(
+            "UPDATE runs SET status = ?, payload_json = ? WHERE run_id = ?",
+            (run["status"], _run_residual(run), row["run_id"]),
+        )
+        changed.append(str(row["run_id"]))
+    return changed
+
+
+def _restore_migrated_sidecars(backups: list[tuple[Path, Path]]) -> None:
+    for path, backup in reversed(backups):
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "wb") as target, backup.open("rb") as source:
+                shutil.copyfileobj(source, target)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+
+def _migrate_term_knowledge_sidecars_to_v9(
+    connection: sqlite3.Connection, project: Path, backup_path: Path,
+) -> list[tuple[Path, Path]]:
+    """Migrate supported decision sidecars before committing schema v9."""
+    runs_root = project / "runs"
+    if not runs_root.exists():
+        return []
+    if runs_root.is_symlink():
+        raise StorageError("Run 路径不安全，无法升级实体说明快照")
+    from .term_knowledge import _migrate_knowledge_to_v2
+
+    project_id = _project_id(connection)
+    positions = {str(row[0]): index for index, row in enumerate(connection.execute(
+        "SELECT segments.segment_id FROM files CROSS JOIN segments ON segments.file_id = files.file_id "
+        "ORDER BY files.file_order, segments.line_index"
+    ))}
+    def sidecar_paths():
+        for run_dir in runs_root.iterdir():
+            if run_dir.is_symlink() or not run_dir.is_dir() or run_dir.resolve().parent != runs_root.resolve():
+                continue
+            for filename in ("terminology_decision_checkpoint.json", "terminology_decision_draft.json"):
+                path = run_dir / filename
+                if path.is_file():
+                    if path.is_symlink():
+                        raise StorageError("Run 实体说明快照路径不安全")
+                    yield path
+
+    backup_root = backup_path.parent / f"{backup_path.stem}.sidecars"
+    changed: list[tuple[Path, Path]] = []
+    checkpoint_orders: dict[str, list[list[Any]]] = {}
+    current_run_dir: Path | None = None
+    try:
+        for path in sidecar_paths():
+            if current_run_dir != path.parent:
+                current_run_dir = path.parent
+                checkpoint_orders = {}
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise StorageError(f"无法读取实体说明 Run 快照：{path}: {exc}") from exc
+            if not isinstance(value, dict):
+                raise StorageError(f"实体说明 Run 快照必须是 JSON 对象：{path}")
+            modified = False
+            if path.name == "terminology_decision_checkpoint.json":
+                if value.get("record_type") == "terminology_decision_checkpoint" and isinstance(value.get("phases"), dict):
+                    knowledge_phase = value["phases"].get("knowledge")
+                    if isinstance(knowledge_phase, dict):
+                        for root, entry in knowledge_phase.items():
+                            if isinstance(entry, dict) and isinstance(entry.get("decision"), dict):
+                                source_order = entry["decision"].get("source_order")
+                                if isinstance(source_order, list):
+                                    checkpoint_orders[root] = source_order
+                continue
+            if path.name == "terminology_decision_draft.json":
+                if value.get("record_type") != "terminology_decision_draft" or not isinstance(value.get("source_library"), dict) or not isinstance(value.get("proposals"), list):
+                    raise StorageError(f"术语决策草案结构无效：{path}")
+                library = value["source_library"]
+                knowledge = library.get("knowledge")
+                if knowledge is None:
+                    continue
+                if not isinstance(knowledge, dict) or knowledge.get("version") not in {1, 2}:
+                    raise StorageError(f"术语决策草案缺少有效的实体说明结构：{path}")
+                if knowledge.get("version") == 2:
+                    continue
+                if knowledge.get("version") == 1:
+                    candidates = _knowledge_migration_candidates(connection, library, project_id)
+                    _migrate_knowledge_to_v2(library, candidates, positions)
+                for proposal in value["proposals"]:
+                    if not isinstance(proposal, dict):
+                        raise StorageError(f"术语决策草案建议结构无效：{path}")
+                    moves = proposal.get("knowledge_owner_moves", {})
+                    fragments = knowledge["fragments"]
+                    if moves:
+                        fragments = {key: ({**fragment, "owner": moves[fragment["owner"]]}
+                                           if fragment.get("owner") in moves else fragment)
+                                     for key, fragment in fragments.items()}
+                    for side in ("knowledge_before", "knowledge_after"):
+                        aggregates = proposal.get(side, {})
+                        if not isinstance(aggregates, dict):
+                            raise StorageError(f"术语决策草案实体说明结构无效：{path}")
+                        for root, aggregate in aggregates.items():
+                            if aggregate is None:
+                                continue
+                            if not isinstance(aggregate, dict) or not isinstance(aggregate.get("members"), list):
+                                raise StorageError(f"术语决策草案实体说明结构无效：{path}")
+                            if side == "knowledge_before" and root in knowledge["entities"]:
+                                saved = knowledge["entities"][root]
+                                if aggregate != saved:
+                                    aggregates[root] = deepcopy(saved)
+                                    modified = True
+                                continue
+                            if aggregate.get("input_version") is None:
+                                continue
+                            members = aggregate["members"]
+                            source_order = checkpoint_orders.get(root)
+                            if source_order is None:
+                                orders = [saved.get("source_order", []) for saved in knowledge["entities"].values()
+                                          if set(saved.get("members", [])) & set(members)]
+                                source_order = [list(item) for item in dict.fromkeys(
+                                    tuple(item) for order in orders for item in order)]
+                            synthetic = {
+                                "terms": [{"normalized": member, "group_primary": root} for member in members],
+                                "knowledge": {"version": 1, "fragments": fragments, "entities": {root: {
+                                    **deepcopy(aggregate), "source_order": source_order}}},
+                            }
+                            _migrate_knowledge_to_v2(synthetic, candidates, positions)
+                            migrated_hash = synthetic["knowledge"]["entities"][root]["input_version"]
+                            if aggregate["input_version"] != migrated_hash:
+                                aggregate["input_version"] = migrated_hash
+                                modified = True
+                modified = True  # The source library version changed from v1 to v2.
+                if value["source_library"]["knowledge"].get("version") != 2:
+                    raise StorageError(f"术语决策草案实体说明版本升级失败：{path}")
+            if not modified:
+                continue
+            backup = backup_root / path.relative_to(project)
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, backup)
+            changed.append((path, backup))
+            atomic_write_json(path, value, compact=True)
+    except Exception:
+        _restore_migrated_sidecars(changed)
+        raise
+    return changed
+
+
+def _knowledge_migration_candidates(
+    connection: sqlite3.Connection, library: dict[str, Any], project_id: str,
+) -> dict[str, dict[str, Any]]:
+    fragments = library.get("knowledge", {}).get("fragments", {})
+    candidate_ids = sorted({fragment.get("candidate_id") for fragment in fragments.values()
+                            if fragment.get("candidate_id")})
+    candidates = {}
+    for offset in range(0, len(candidate_ids), 500):
+        batch = candidate_ids[offset:offset + 500]
+        rows = connection.execute(
+            f"SELECT record_id, active_task_id, payload_json FROM terminology_candidates "
+            f"WHERE record_id IN ({','.join('?' for _ in batch)})", batch,
+        ).fetchall()
+        candidates.update({value["record_id"]: value for value in
+                           (_hydrate_candidate(candidate, project_id) for candidate in rows)})
+    return candidates
 
 
 def _migrate_summary_hashes_to_v7(connection: sqlite3.Connection, project: Path) -> None:
@@ -1875,6 +2098,7 @@ def read_content_summaries(
     part_id: str | None = None,
     kind: str | None = None,
     status: str | None = None,
+    summary_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if bool(file_id) != bool(part_id):
         raise ProjectError("file_id 与 part_id 必须同时提供")
@@ -1887,6 +2111,9 @@ def read_content_summaries(
         connection.execute("BEGIN")
         clauses = []
         params: list[Any] = []
+        if summary_id is not None:
+            clauses.append("summary_id = ?")
+            params.append(summary_id)
         if file_id:
             clauses.extend(["file_id = ?", "part_id = ?"])
             params.extend([file_id, part_id])
@@ -1915,6 +2142,24 @@ def read_content_summaries(
         return [_hydrate_summary(row, project_id, texts) for row in rows]
     except (sqlite3.Error, json.JSONDecodeError) as exc:
         raise StorageError(f"无法读取内容概括：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def read_summary_headers(project: Path) -> list[dict[str, Any]]:
+    connection = _with_db(project)
+    try:
+        rows = connection.execute("""SELECT summary_id AS record_id, kind, file_id, part_id,
+            status, text IS NOT NULL AS has_text, source_changed, model, run_id, created_at, updated_at,
+            json_extract(payload_json, '$.provenance.origin') AS origin,
+            json_extract(payload_json, '$.error_class') AS error_class,
+            json_extract(payload_json, '$.error_message') AS error_message,
+            (SELECT COUNT(DISTINCT COALESCE(json_extract(value, '$.original_segment_id'),
+                json_extract(value, '$.segment_id'))) FROM json_each(source_range_json, '$.segments')) AS covered_segment_count
+            FROM content_summaries ORDER BY file_id, part_id, kind, updated_at, summary_id""").fetchall()
+        return [{**dict(row), "has_text": bool(row["has_text"]), "source_changed": bool(row["source_changed"])} for row in rows]
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法读取内容概括列表：{project}: {exc}") from exc
     finally:
         connection.close()
 
@@ -2322,22 +2567,42 @@ def read_files(project: Path) -> list[dict[str, Any]]:
         connection.close()
 
 
-def read_segments(project: Path) -> list[dict[str, Any]]:
+def read_segments(project: Path, segment_ids: Iterable[str] | None = None) -> list[dict[str, Any]]:
+    ids = list(dict.fromkeys(segment_ids)) if segment_ids is not None else None
+    if ids == []:
+        return []
     connection = _with_db(project)
     try:
         project_id = _project_id(connection)
-        rows = connection.execute(
-            """
-            SELECT segments.segment_id, segments.file_id, segments.line_index,
+        query = """SELECT segments.segment_id, segments.file_id, segments.line_index,
                    segments.part_id, segments.source, segments.is_empty,
-                   segments.model_source, segments.created_at
-            FROM files CROSS JOIN segments ON segments.file_id = files.file_id
-            ORDER BY files.file_order, segments.line_index
-            """
-        ).fetchall()
+                   segments.model_source, segments.created_at, files.file_order
+            FROM files CROSS JOIN segments ON segments.file_id = files.file_id"""
+        if ids is None:
+            rows = connection.execute(query + " ORDER BY files.file_order, segments.line_index").fetchall()
+        else:
+            rows = []
+            for offset in range(0, len(ids), 500):
+                batch = ids[offset:offset + 500]
+                rows.extend(connection.execute(query + f" WHERE segments.segment_id IN ({','.join('?' for _ in batch)})", batch).fetchall())
+            rows.sort(key=lambda row: (row["file_order"], row["line_index"]))
         return [_hydrate_segment(row, project_id) for row in rows]
     except sqlite3.Error as exc:
         raise StorageError(f"无法读取项目 Segment：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def read_segment_positions(project: Path) -> dict[str, int]:
+    """Read source ordering without hydrating source bodies."""
+    connection = _with_db(project)
+    try:
+        rows = connection.execute("""SELECT segments.segment_id
+            FROM files CROSS JOIN segments ON segments.file_id = files.file_id
+            ORDER BY files.file_order, segments.line_index""").fetchall()
+        return {str(row[0]): index for index, row in enumerate(rows)}
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法读取项目 Segment 位置：{project}: {exc}") from exc
     finally:
         connection.close()
 

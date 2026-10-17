@@ -97,7 +97,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
     setExcludePunctuationOnly(exclude); setScreeningEnabled(screening); setOptions(null); setConfirm("generate");
     setBusy(true); setError(""); setMessage("");
     try {
-      const next = await api<RepetitionRunOptions>(`${base}/options?language=${language}&exclude_punctuation_only=${exclude}&screening_enabled=${screening}${action ? `&run_action=${action}` : ""}${onlyFile ? `&only_file=${encodeURIComponent(onlyFile)}` : ""}`);
+      const next = await api<RepetitionRunOptions>(`${base}/options?estimate_usage=true&language=${language}&exclude_punctuation_only=${exclude}&screening_enabled=${screening}${action ? `&run_action=${action}` : ""}${onlyFile ? `&only_file=${encodeURIComponent(onlyFile)}` : ""}`);
       setOptions(next); setExcludePunctuationOnly(next.exclude_punctuation_only); setScreeningEnabled(next.screening_enabled);
       setConfirm("generate");
     } catch (value) { setError(errorMessage(value, language)); }

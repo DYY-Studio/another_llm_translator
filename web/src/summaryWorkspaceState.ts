@@ -76,6 +76,8 @@ interface SummaryArtifactLike {
   kind?: string;
   status?: string;
   text?: string | null;
+  has_text?: boolean;
+  covered_segment_count?: number;
   expired?: boolean;
   expiry_reason?: string | null;
   source_changed?: boolean;
@@ -120,6 +122,7 @@ export function summaryArtifactSegmentIds(artifact: SummaryArtifactLike): string
 
 export function summaryArtifactHasCompleteCoverage(artifact: SummaryArtifactLike, segmentCount: number): boolean {
   if (artifact.kind !== "full" || artifact.status !== "completed" || artifact.source_changed) return false;
+  if (artifact.covered_segment_count !== undefined) return segmentCount > 0 && artifact.covered_segment_count === segmentCount;
   const ids = new Set(rangeSegments(artifact).map((segment) => String(segment.original_segment_id ?? segment.segment_id ?? "")).filter(Boolean));
   return segmentCount > 0 && ids.size === segmentCount;
 }
@@ -137,7 +140,7 @@ export function summaryArtifactExpiryReason(artifact: SummaryArtifactLike): stri
 }
 
 export function summaryArtifactHasUsableFull(artifact: SummaryArtifactLike, segmentCount: number): boolean {
-  if (artifact.kind !== "full" || artifact.text == null || artifact.status === "failed") return false;
+  if (artifact.kind !== "full" || (artifact.has_text !== undefined ? !artifact.has_text : artifact.text == null) || artifact.status === "failed") return false;
   return summaryArtifactIsExpired(artifact)
     || summaryArtifactHasCompleteCoverage(artifact, segmentCount);
 }

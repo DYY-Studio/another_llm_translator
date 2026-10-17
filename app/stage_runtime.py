@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import asyncio
 import hashlib
@@ -6,7 +7,7 @@ import sys
 import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -163,6 +164,7 @@ def _project_context(
     *,
     stage: str | None = None,
     frozen_run_options: dict[str, dict[str, str]] | None = None,
+    prepared: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
@@ -177,8 +179,7 @@ def _project_context(
         project, stage="terminology" if stage == "fragment_summary" else stage
     )
     metadata = read_json(project, project / "project.json")
-    files = load_source_files(project)
-    segments = load_segments(project)
+    files, segments = prepared if prepared is not None else (load_source_files(project), load_segments(project))
     adapter_options: dict[str, dict[str, str]] = {}
     adapters: dict[str, dict[str, str]] = {}
     adapter_prompt_requirements: dict[str, dict[str, str]] = {}
@@ -188,14 +189,16 @@ def _project_context(
             "adapter_id": str(file_record["document_adapter_id"]),
             "version": str(file_record["document_adapter_version"]),
         }
-        adapter, state, run_options = document_prompt_context(
-            project, file_record, frozen_run_options
-        )
+        if prepared is None:
+            adapter, state, run_options = document_prompt_context(project, file_record, frozen_run_options)
+            file_record["_prompt_context"] = (adapter, state, run_options)
+        else:
+            adapter, state, run_options = file_record["_prompt_context"]
         adapter_options[file_id] = run_options
         for segment in (item for item in segments if str(item["file_id"]) == file_id):
             segment["_adapter_state"] = state
             segment["_adapter_run_options"] = run_options
-            if stage is not None:
+            if stage is not None and prepared is None:
                 rendered_model_source = adapter.render_model_source(
                     segment=segment, opaque_state=state, run_options=run_options
                 )
@@ -227,19 +230,6 @@ def _project_context(
 def _require_nonempty_segments(segments: list[dict[str, Any]]) -> None:
     if not any(not segment["is_empty"] for segment in segments):
         raise UsageError("项目没有可处理的非空 Segment；请先添加源文件")
-
-
-def _segment_model_payload_value(segment: dict[str, Any], value: Any) -> Any:
-    if isinstance(value, str):
-        return segment_model_text(segment, value)
-    if isinstance(value, list):
-        return [_segment_model_payload_value(segment, item) for item in value]
-    if isinstance(value, dict):
-        return {
-            key: _segment_model_payload_value(segment, item)
-            for key, item in value.items()
-        }
-    return value
 
 
 def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
@@ -440,6 +430,8 @@ class _Preflight:
     preflight_failed: list[dict[str, Any]]
     fast_checked: int
     exact_checked: int
+    prepare_segment: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None
+    by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _split_oversized_preflight(
@@ -455,7 +447,26 @@ def _split_oversized_preflight(
     accept_part: Callable[[dict[str, Any], str, Any], dict[str, Any]],
     initial_part: Callable[[dict[str, Any]], Any] | None = None,
     cleanup_probe: Callable[[str], None] | None = None,
+    lazy: bool = False,
 ) -> _Preflight:
+    if lazy:
+        preflight = _Preflight(list(work), {}, {}, [], 0, 0)
+
+        def prepare(segment: dict[str, Any]) -> list[dict[str, Any]]:
+            result = _split_oversized_preflight(
+                [segment], config=config, prompt=prompt, payload_builder=payload_builder,
+                prompt_builder=prompt_builder, fail_planning=lambda _exc: None,
+                make_probe=make_probe, split_part=split_part, accept_part=accept_part,
+                initial_part=initial_part, cleanup_probe=cleanup_probe,
+            )
+            preflight.part_original.update(result.part_original)
+            preflight.original_parts.update(result.original_parts)
+            preflight.preflight_failed.extend(result.preflight_failed)
+            preflight.by_id.update((str(item["segment_id"]), item) for item in result.request_segments)
+            return result.request_segments
+
+        preflight.prepare_segment = prepare
+        return preflight
     request_segments: list[dict[str, Any]] = []
     part_original: dict[str, str] = {}
     original_parts: dict[str, list[str]] = {}
@@ -577,6 +588,7 @@ async def _execute_stage_run(
     part_original: dict[str, str],
     original_parts: dict[str, list[str]],
     preflight_failed: list[dict[str, Any]],
+    prepare_segment: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None,
     limiter: SlidingWindowLimiter | KeyPool | None,
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
     prompt_builder: Callable[[list[dict[str, Any]]], str],
@@ -606,6 +618,13 @@ async def _execute_stage_run(
 
     logger = get_logger(state.stage)
     logger.info("run start run=%s", state.run_id)
+    def prepare_oversized(segment: dict[str, Any]) -> list[dict[str, Any]]:
+        assert prepare_segment is not None
+        parts = prepare_segment(segment)
+        if parts and runtime_split_observer is not None:
+            runtime_split_observer([segment], [[part] for part in parts])
+        return parts
+
     planned = iter_chunk_plans(
         request_segments,
         all_segments=state.segments,
@@ -615,6 +634,7 @@ async def _execute_stage_run(
         payload_builder=payload_builder,
         prompt_builder=prompt_builder,
         partition_key=prompt_partition_key,
+        on_oversized=prepare_oversized if prepare_segment is not None else None,
     )
     chunks = materialize_chunk_stream(
         state.run_id,
@@ -749,10 +769,24 @@ async def _execute_stage_run(
             preparation_started_at=state.preparation_started_at,
         ) as llm:
             state.llm = llm
-            llm._prepare_keys()
-            await record_preflight_failure(preflight_failed)
+            await llm.prepare_keys()
+            async def async_chunks():
+                iterator = iter(chunks)
+                sentinel = object()
+                while True:
+                    try:
+                        chunk = (await run_blocking(next, iterator, sentinel))
+                    finally:
+                        if preflight_failed:
+                            failed = preflight_failed[:]
+                            preflight_failed.clear()
+                            await record_preflight_failure(failed)
+                    if chunk is sentinel:
+                        return
+                    yield chunk
+
             await dispatch_chunks(
-                chunks,
+                async_chunks(),
                 process,
                 mode=state.config["execution"]["scheduling_mode"],
                 max_parallel=state.config["execution"]["max_parallel"],
@@ -764,7 +798,7 @@ async def _execute_stage_run(
         if state.llm is not None:
             _extend_unique(state.warnings, state.llm.warnings)
         usage = usage_summary()
-        finalize_run(
+        (await run_blocking(lambda: finalize_run(
             state.project,
             state.run_dir,
             status="interrupted",
@@ -774,14 +808,14 @@ async def _execute_stage_run(
             usage=usage,
             failure_counts=dict(failure_counts),
             key_audit=key_audit(),
-        )
+        )))
         raise
     except (FatalExternalError, ConfigError) as exc:
         if state.llm is not None:
             _extend_unique(state.warnings, state.llm.warnings)
         if isinstance(exc, FatalExternalError) and state.llm is not None:
             usage = usage_summary()
-        finalize_run(
+        (await run_blocking(lambda: finalize_run(
             state.project,
             state.run_dir,
             status="failed",
@@ -791,7 +825,7 @@ async def _execute_stage_run(
             usage=usage,
             failure_counts=dict(failure_counts),
             key_audit=key_audit(),
-        )
+        )))
         logger.error(
             "run failed run=%s error_type=%s",
             state.run_id,
@@ -805,7 +839,7 @@ async def _execute_stage_run(
             usage_invoked = state.llm.send_count > 0
         else:
             usage_invoked = False
-        finalize_run(
+        (await run_blocking(lambda: finalize_run(
             state.project,
             state.run_dir,
             status="failed",
@@ -816,7 +850,7 @@ async def _execute_stage_run(
             failure_counts=dict(failure_counts),
             usage_invoked=usage_invoked,
             key_audit=key_audit(),
-        )
+        )))
         logger.error(
             "run failed run=%s error_type=%s error=%s",
             state.run_id,
@@ -824,7 +858,7 @@ async def _execute_stage_run(
             exc,
         )
         raise
-    return finalize_run(
+    return (await run_blocking(lambda: finalize_run(
         state.project,
         state.run_dir,
         status="completed" if failed_count() == 0 else "failed",
@@ -834,7 +868,7 @@ async def _execute_stage_run(
         usage=usage,
         failure_counts=dict(failure_counts),
         key_audit=key_audit(),
-    )
+    )))
 
 
 async def _localized_request_loop(
@@ -874,7 +908,7 @@ async def _localized_request_loop(
     while tasks:
         items, parent_request_id, format_attempt = tasks.pop(0)
         expected = [str(item["segment_id"]) for item in items]
-        payload = payload_builder(items)
+        payload = (await run_blocking(lambda: payload_builder(items)))
         if repair_candidates is not None:
             checks = sorted({
                 (str(finding["validator"]), str(finding["match_type"]))
@@ -900,10 +934,10 @@ async def _localized_request_loop(
             feedback = "\n".join(dict.fromkeys(instructions))
             if feedback:
                 payload["validation_repair"] = feedback
-        payload, id_map = localize_request_ids(payload, items)
-        messages = render_messages(prompt, payload)
+        payload, id_map = (await run_blocking(lambda: localize_request_ids(payload, items)))
+        messages = (await run_blocking(lambda: render_messages(prompt, payload)))
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
-        estimated = _request_estimate(messages, config, request_id)
+        estimated = (await run_blocking(lambda: _request_estimate(messages, config, request_id)))
         try:
             response, request_id = await llm.chat(
                 messages=messages,
@@ -913,7 +947,7 @@ async def _localized_request_loop(
                 parent_request_id=parent_request_id,
                 segment_id_map=id_map,
             )
-            parsed = parse(response.content, id_map)
+            parsed = (await run_blocking(lambda: parse(response.content, id_map)))
             valid = parsed.valid
             unresolved = parsed.unresolved
             parse_errors = parsed.errors
@@ -944,7 +978,7 @@ async def _localized_request_loop(
         for segment_id, value in valid.items():
             try:
                 if prepare_candidate is not None:
-                    value = prepare_candidate(segment_id, value)
+                    value = (await run_blocking(lambda: prepare_candidate(segment_id, value)))
                 if accept_response is not None:
                     buffered[segment_id] = (request_id, value)
                 else:

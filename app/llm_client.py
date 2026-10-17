@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking
 import asyncio
 import hashlib
 import json
@@ -307,6 +308,7 @@ class LLMClient:
         self.adapter = adapter
         self.chatgpt = ChatGPTConnection() if config["llm"]["credential"]["kind"] == "chatgpt" else None
         self.chatgpt_identity: tuple[str, str] | None = config.get("_chatgpt_identity")
+        self._key_prepare_lock = asyncio.Lock()
 
     def _prepare_keys(self) -> None:
         if self._api_keys is not None:
@@ -314,14 +316,33 @@ class LLMClient:
         if self._key_resolution_error is not None:
             raise self._key_resolution_error
         try:
-            if self.chatgpt is not None:
-                self.chatgpt_identity = self.chatgpt_identity or self.chatgpt.identity()
-                self._api_keys = ("chatgpt:" + self.chatgpt_identity[0],)
-            else:
-                self._api_keys = resolve_api_keys(self.config["llm"]["credential"])
+            self._api_keys, self.chatgpt_identity = self._resolve_keys()
         except ExternalError as exc:
             self._key_resolution_error = FatalExternalError(str(exc))
             raise self._key_resolution_error from exc
+        self._initialize_keys()
+
+    def _resolve_keys(self) -> tuple[tuple[str, ...], tuple[str, str] | None]:
+        if self.chatgpt is not None:
+            identity = self.chatgpt_identity or self.chatgpt.identity()
+            return ("chatgpt:" + identity[0],), identity
+        return resolve_api_keys(self.config["llm"]["credential"]), None
+
+    async def prepare_keys(self) -> None:
+        async with self._key_prepare_lock:
+            if self._api_keys is not None:
+                return
+            if self._key_resolution_error is not None:
+                raise self._key_resolution_error
+            try:
+                keys, identity = await run_blocking(self._resolve_keys)
+            except ExternalError as exc:
+                self._key_resolution_error = FatalExternalError(str(exc))
+                raise self._key_resolution_error from exc
+            self._api_keys, self.chatgpt_identity = keys, identity
+            self._initialize_keys()
+
+    def _initialize_keys(self) -> None:
         self._key_ids = tuple(
             hashlib.sha256(value.encode("utf-8")).hexdigest()
             for value in self._api_keys
@@ -718,7 +739,13 @@ class LLMClient:
         if self.owns_client and self.client is not None:
             await self.client.aclose()
 
-    async def _debug_attempt(
+    async def _debug_attempt(self, *args: Any, **kwargs: Any) -> None:
+        if not self.config["debug"]["enabled"]:
+            return
+        async with self.log_lock:
+            await run_blocking(self._write_debug_attempt, *args, **kwargs)
+
+    def _write_debug_attempt(
         self,
         request_id: str,
         attempt: int,
@@ -763,27 +790,26 @@ class LLMClient:
                     "stream_first_event_latency_ms": stream_first_event_latency_ms,
                 },
             )
-        async with self.log_lock:
-            append_jsonl_file(
-                self.run_dir / "attempts.jsonl",
-                record_header(
-                    "request_attempt",
-                    self.project_id,
-                    record_id=f"{base}",
-                    run_id=self.run_id,
-                    request_id=request_id,
-                    parent_request_id=parent_request_id,
-                    stage=self.stage,
-                    attempt=attempt,
-                    retry_round=retry_round,
-                    key_index=(key_index + 1 if key_index is not None else None),
-                    http_status=status,
-                    provider_error_status=provider_error_status,
-                    outcome=outcome,
-                    status="failed" if error is not None else "completed",
-                    error=error,
-                ),
-            )
+        append_jsonl_file(
+            self.run_dir / "attempts.jsonl",
+            record_header(
+                "request_attempt",
+                self.project_id,
+                record_id=f"{base}",
+                run_id=self.run_id,
+                request_id=request_id,
+                parent_request_id=parent_request_id,
+                stage=self.stage,
+                attempt=attempt,
+                retry_round=retry_round,
+                key_index=(key_index + 1 if key_index is not None else None),
+                http_status=status,
+                provider_error_status=provider_error_status,
+                outcome=outcome,
+                status="failed" if error is not None else "completed",
+                error=error,
+            ),
+        )
 
     async def finish_decision_debug(self, error: str | None = None) -> None:
         pending = self._decision_debug_attempt
@@ -884,7 +910,7 @@ class LLMClient:
         if self.client is None:
             raise RuntimeError("LLMClient must be used as an async context manager")
         json_schema = json_schema if self.config["llm"].get("json_schema_enabled", False) else None
-        self._prepare_keys()
+        await self.prepare_keys()
         api_keys = self._api_keys
         request_id = request_id or f"REQ-{uuid.uuid4().hex[:12].upper()}"
         configured_output = int(self.config["llm"]["max_output_tokens"])
