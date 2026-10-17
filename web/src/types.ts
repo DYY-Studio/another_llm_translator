@@ -347,6 +347,7 @@ export interface TaskState {
   current_stage?: string | null;
   steps?: TaskStep[];
   final_review?: boolean;
+  knowledge_only?: boolean;
   status: string;
   include_summaries?: boolean;
   include_draft_translation?: boolean;
@@ -697,6 +698,7 @@ export interface TaskOptions {
   draft_prompt_preflight?: { ok: boolean; language: string; missing: string[] };
   stage: RunStage;
   final_review?: boolean;
+  knowledge_only?: boolean;
   preset: {
     id: string;
     model: string;
@@ -760,6 +762,7 @@ export interface RunningRun {
   previous: { model: string; endpoint: string };
   current: { model: string; endpoint: string };
   final_review?: boolean | null;
+  knowledge_only?: boolean;
   final_review_target_count?: number;
   completed_steps?: number;
   total_steps?: number;
@@ -816,6 +819,7 @@ export interface RunDecision {
   reuse_mixed_fingerprints: boolean;
   run_action: "resume" | "decline" | null;
   final_review: boolean;
+  knowledge_only?: boolean;
 }
 
 export interface TermDecisionConflicts {
@@ -908,6 +912,7 @@ export interface TermDecisionProposal {
 }
 
 export interface TermDecisionDraft {
+  knowledge_only?: boolean;
   warnings: string[];
   final_review_error?: { error: string; code: string; params: Record<string, unknown> };
   run_id: string;
@@ -1062,10 +1067,13 @@ export interface ProjectConfig {
     case_insensitive: boolean;
     max_terms_per_segment: number;
     alias_primary_collision: "conflict" | "merge";
+    sourced_description_injection: "none" | "prefer_previous" | "all";
+    unsourced_description_injection: "none" | "when_no_sourced" | "all";
   };
   terminology_decision: {
     allow_soft_target_overflow: boolean;
     anchor_overflow_mode: "error" | "trim" | "compact";
+    description_generation: "sourced" | "sourced_and_summary" | "summary_only";
   };
   validation: {
     translation: {

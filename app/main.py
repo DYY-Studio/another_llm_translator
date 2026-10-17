@@ -233,6 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
     terms_decide.add_argument("project")
     terms_decide.add_argument("--dry-run", action="store_true")
     terms_decide.add_argument("--replace-draft", action="store_true")
+    terms_decide.add_argument("--knowledge-only", action="store_true", help="仅重新生成全部实体说明")
     terms_decide.add_argument("--force", action="store_true")
     terms_decide.add_argument(
         "--acknowledge-manual-review",
@@ -496,6 +497,7 @@ def run(argv: list[str] | None = None) -> int:
         if (
             not args.dry_run
             and not args.resume_run
+            and not args.knowledge_only
             and manual_review_state(project)["remaining"] > 0
             and not args.acknowledge_manual_review
         ):
@@ -509,6 +511,7 @@ def run(argv: list[str] | None = None) -> int:
                     project,
                     dry_run=args.dry_run,
                     replace_draft=args.replace_draft,
+                    knowledge_only=args.knowledge_only,
                     resume_run_id=resume_run_id,
                 )
             )

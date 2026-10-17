@@ -133,7 +133,10 @@ export function RequestOverview({ snapshot, language, truncated = false }: {snap
               {records(entity.result.items).map((item, index) => <article className="overview-term" key={index}>
                 <p>{text(item.text)}</p><small>{translate("knowledge.references", language)}: {Array.isArray(item.refs) ? item.refs.map(text).join(", ") : ""}</small>
               </article>)}
-              {!records(entity.result.items).length && <span className="muted">{translate("overview.emptyKnowledge", language)}</span>}
+              {text(entity.result.summary) && <article className="overview-term">
+                <p>{text(entity.result.summary)}</p><small>{translate("knowledge.noSource", language)}</small>
+              </article>}
+              {!records(entity.result.items).length && !text(entity.result.summary) && <span className="muted">{translate("overview.emptyKnowledge", language)}</span>}
               <p className="decision-reason">{text(entity.result.reason)}</p>
             </>}
           </section>

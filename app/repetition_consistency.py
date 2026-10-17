@@ -230,7 +230,9 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
     terms_revision = library["terms_revision"] if library else None
     warnings: list[str] = []
     term_cache = _TermMatchCache(library, term_normalization(config),
-        int(config["terminology"]["max_terms_per_segment"]), segments=segments, warnings=warnings) if candidates else None
+        int(config["terminology"]["max_terms_per_segment"]), segments=segments, warnings=warnings,
+        sourced_policy=config["terminology"]["sourced_description_injection"],
+        unsourced_policy=config["terminology"]["unsourced_description_injection"]) if candidates else None
     terms: dict[str, dict[str, Any]] = {}
     term_ids: dict[str, str] = {}
     evidence: dict[str, dict[str, Any]] = {}

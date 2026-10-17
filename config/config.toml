@@ -93,6 +93,10 @@ case_insensitive = true
 max_terms_per_segment = 100
 # alias 与另一主条目相同时：conflict 要求人工裁决；merge 尝试确定性组化。
 alias_primary_collision = "merge"
+# 有来源实体说明：none 不注入，prefer_previous 优先前文，all 全部。
+sourced_description_injection = "all"
+# 无来源实体说明：none 不注入，when_no_sourced 无有来源说明可注入时注入，all 全部。
+unsourced_description_injection = "all"
 
 [terminology_decision]
 # 自动术语决策中，单术语超过软目标但未超过模型硬限制时是否继续执行。
@@ -100,6 +104,8 @@ allow_soft_target_overflow = true
 # Anchors 使请求超过硬限制时的处理：error 直接停止，trim 从末尾移除，
 # compact 保留 Anchors 与命中计数但移除上下文样本。
 anchor_overflow_mode = "error"
+# 实体说明生成：sourced 有来源说明，sourced_and_summary 另附无来源总结，summary_only 仅无来源总结。
+description_generation = "sourced"
 
 [decision]
 preset = ""

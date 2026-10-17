@@ -56,6 +56,7 @@ def _build_draft(
     reviewed_components: list[set[str]] | None = None,
     knowledge_updates: dict[str, Any] | None = None,
     knowledge_errors: dict[str, str] | None = None,
+    knowledge_only: bool = False,
 ) -> dict[str, Any]:
     knowledge_updates = knowledge_updates or {}
     knowledge_errors = knowledge_errors or {}
@@ -126,7 +127,7 @@ def _build_draft(
                 "knowledge_before": before_knowledge,
                 "knowledge_after": deepcopy(updates),
                 "knowledge_owner_moves": {old:new for root, update in knowledge_updates.items() if root in updates for old,new in update.get("owner_moves", {}).items()},
-                "evidence": {key: deepcopy(evidence[key]) for key in keys},
+                "evidence": {} if knowledge_only else {key: deepcopy(evidence[key]) for key in keys},
                 "conflicts": {key: deepcopy(conflicts[key]) for key in keys},
             }
         )
@@ -135,7 +136,7 @@ def _build_draft(
             "normalized": key,
             "source": original[key]["source"],
             "reason": decision["reason"],
-            "evidence": deepcopy(evidence[key]),
+            "evidence": {} if knowledge_only else deepcopy(evidence[key]),
             "conflicts": deepcopy(conflicts[key]),
         }
         for key, decision in sorted(decisions.items())
@@ -145,7 +146,7 @@ def _build_draft(
     for root, error in knowledge_errors.items():
         if root not in present:
             needs_review.append({"normalized": root, "source": original[root]["source"], "reason": error,
-                                 "evidence": deepcopy(evidence[root]), "conflicts": deepcopy(conflicts[root])})
+                                 "evidence": {} if knowledge_only else deepcopy(evidence[root]), "conflicts": deepcopy(conflicts[root])})
     return record_header(
         "terminology_decision_draft",
         project_id,
@@ -153,6 +154,7 @@ def _build_draft(
         run_id=run_id,
         status="pending",
         source_terms_revision=revision,
+        knowledge_only=knowledge_only,
         decision_rules_version=DECISION_RULES_VERSION,
         decision_fingerprint=fingerprint,
         model_fingerprint=model_fingerprint,
@@ -331,7 +333,7 @@ def _pending_manifest(project: Path, run_id: str) -> dict[str, Any]:
     return manifest
 
 def save_decision_rejections(project: Path, proposal_ids: list[str]) -> dict[str, Any]:
-    draft = _read_pending_draft(project)
+    draft = current_decision_draft(project)
     if draft is None:
         raise UsageError("没有待处理术语决策草案")
     library = load_terms(project)
@@ -411,7 +413,7 @@ def apply_decision_draft(
             rejected_proposal_ids=sorted(rejected),
             applied_proposal_count=0,
             manual_review_resolved_normalized=[],
-            manual_review_replaces_previous=True,
+            manual_review_replaces_previous=not draft.get("knowledge_only", False),
             applied_at=utc_now(),
         )
         if "final_review_error" in manifest:
@@ -485,7 +487,8 @@ def apply_decision_draft(
         knowledge=deepcopy(library["knowledge"]),
     )
     from .term_knowledge import entity_view, save_items, project_descriptions, transfer_alias_evidence, evidence
-    transfer_alias_evidence(term_record, term_normalization(load_project_config(project)))
+    if not draft.get("knowledge_only", False):
+        transfer_alias_evidence(term_record, term_normalization(load_project_config(project)))
     known = evidence(project, term_record)
     for proposal in draft["proposals"]:
         if proposal["proposal_id"] in rejected:
@@ -494,7 +497,8 @@ def apply_decision_draft(
             view = entity_view(project, term_record, root, all_evidence=known)
             if view["input_version"] != aggregate["input_version"] or any(f["state"] == "active" and not f["valid"] for f in view["fragments"]):
                 raise UsageError("实体说明证据已变化，请重新生成草案")
-            save_items(project, term_record, root, aggregate["items"], all_evidence=known)
+            save_items(project, term_record, root, aggregate["items"], all_evidence=known,
+                       description_generation=aggregate.get("description_generation"))
     project_descriptions(project, term_record, all_evidence=known)
     override_record = record_header(
         "terminology_overrides",
@@ -508,7 +512,7 @@ def apply_decision_draft(
         rejected_proposal_ids=sorted(rejected),
         applied_proposal_count=accepted,
         manual_review_resolved_normalized=[],
-        manual_review_replaces_previous=True,
+        manual_review_replaces_previous=not draft.get("knowledge_only", False),
         applied_terms_revision=revision,
         applied_at=utc_now(),
     )

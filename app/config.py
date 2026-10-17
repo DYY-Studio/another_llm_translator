@@ -60,10 +60,13 @@ SCHEMA: dict[str, Any] = {
         "case_insensitive": None,
         "max_terms_per_segment": None,
         "alias_primary_collision": None,
+        "sourced_description_injection": None,
+        "unsourced_description_injection": None,
     },
     "terminology_decision": {
         "allow_soft_target_overflow": None,
         "anchor_overflow_mode": None,
+        "description_generation": None,
     },
     "validation": {
         "translation": {
@@ -366,6 +369,13 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError(
             "terminology.alias_primary_collision 必须是 conflict 或 merge"
         )
+    for section, key, choices in (
+        ("terminology", "sourced_description_injection", ("none", "prefer_previous", "all")),
+        ("terminology", "unsourced_description_injection", ("none", "when_no_sourced", "all")),
+        ("terminology_decision", "description_generation", ("sourced", "sourced_and_summary", "summary_only")),
+    ):
+        if config[section][key] not in choices:
+            raise ConfigError(f"{section}.{key} 必须是 {', '.join(choices)}")
     max_terms = config["terminology"]["max_terms_per_segment"]
     if (
         not isinstance(max_terms, int)
@@ -473,6 +483,8 @@ def load_config(path: Path) -> dict[str, Any]:
     terminology = config.get("terminology")
     if isinstance(terminology, dict):
         terminology.setdefault("alias_primary_collision", "merge")
+        terminology.setdefault("sourced_description_injection", "all")
+        terminology.setdefault("unsourced_description_injection", "all")
     terminology_decision = config.get("terminology_decision")
     if terminology_decision is None:
         terminology_decision = {}
@@ -480,6 +492,7 @@ def load_config(path: Path) -> dict[str, Any]:
     if isinstance(terminology_decision, dict):
         terminology_decision.setdefault("allow_soft_target_overflow", True)
         terminology_decision.setdefault("anchor_overflow_mode", "error")
+        terminology_decision.setdefault("description_generation", "sourced")
     llm = config.get("llm")
     if isinstance(llm, dict):
         llm.setdefault("preset_terminology_decision", "")
