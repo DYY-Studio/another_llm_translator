@@ -763,7 +763,7 @@ def test_web_resume_options_and_managed_start(tmp_path, monkeypatch):
     with TestClient(create_app(projects_root=project.parent)) as client:
         options = client.get(f"/api/v1/projects/{project.name}/repetition/options?language=en").json()
         assert options["run_action"] == "resume" and options["screening_enabled"] is False
-        assert options["running_run"]["resume_compatible"] and options["estimated_requests"] == 1
+        assert options["running_run"]["resume_compatible"] and options["estimated_requests"] is None
     original_client = httpx.AsyncClient
     requests = []
     monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: original_client(*args, **kwargs, transport=transport(requests=requests)))
@@ -1205,7 +1205,7 @@ def test_preflight_reports_execution_change_and_remaining_budget(tmp_path, monke
         value = client.get(f"/api/v1/projects/{project.name}/repetition/options").json()
     assert value["run_action"] == "resume"
     assert value["running_run"]["resume_compatible"] and value["running_run"]["execution_changed"]
-    assert value["estimated_requests"] == 1
+    assert value["estimated_requests"] is None
 
 
 def test_failed_publication_transition_does_not_double_count_usage(tmp_path, monkeypatch):
@@ -1383,7 +1383,7 @@ async def test_continuous_repetition_empty_or_apply_failure(tmp_path, monkeypatc
 def test_continuous_term_application_checks_only_downstream_segment_stages(tmp_path, monkeypatch):
     from app import web_continuous
     project = repetition_project(tmp_path, monkeypatch)
-    monkeypatch.setattr(web_continuous, "load_terms", lambda _: character_library(project))
+    monkeypatch.setattr(web_continuous, "load_terms", lambda _, **kwargs: character_library(project))
     monkeypatch.setattr(web_continuous, "current_decision_draft", lambda _: {"proposals": [{"proposal_id": "1"}]})
     web_continuous._ensure_downstream_fingerprints_after_decision(project,
         ("repetition_consistency", "proofreading"), Scope(), reuse_mixed_fingerprints=False)

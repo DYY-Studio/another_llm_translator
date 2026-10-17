@@ -174,7 +174,7 @@ class WebStore:
                 in resolve_stage_result_texts(self.project, result.values())}
 
     def _terms_revision(self) -> int | None:
-        library = load_terms(self.project)
+        library = load_terms(self.project, resolve_knowledge=False)
         return int(library["terms_revision"]) if library else None
 
     def _translation_validation_context(
@@ -831,7 +831,10 @@ class WebStore:
             }
 
     def terms(self) -> dict[str, Any]:
-        library = load_terms(self.project)
+        library = load_terms(self.project, resolve_knowledge=False)
+        if library is not None:
+            from .term_knowledge import applied_descriptions
+            applied_descriptions(library)
         current = {
             str(item["normalized"]): dict(item)
             for item in (library or {}).get("terms", [])
@@ -842,17 +845,13 @@ class WebStore:
             for item in overrides_document.get("overrides", [])
         }
         rows: list[dict[str, Any]] = []
-        archived_evidence = None
         for normalized in sorted(set(current) | set(overrides)):
             term = current.get(normalized, {})
             override = overrides.get(normalized, {})
             if not term and library and normalized in library["knowledge"]["entities"]:
-                from .term_knowledge import entity_view, evidence
-                if archived_evidence is None:
-                    archived_evidence = evidence(self.project, library)
-                view = entity_view(self.project, {**library, "terms": [*library["terms"], {"normalized": normalized, "group_primary": None}]}, normalized, all_evidence=archived_evidence)
-                term = {"description": "\n".join(item["text"] for item in view["items"]),
-                        "entity_key": view["entity_key"], "knowledge_status": view["status"], "description_items": view["items"]}
+                items = library["knowledge"]["entities"][normalized]["items"]
+                term = {"description": "\n".join(item["text"] for item in items),
+                        "entity_key": normalized, "knowledge_status": None, "description_items": items}
             raw_conflicts = term.get("conflicts", {})
             conflicts = {
                 "categories": list(raw_conflicts.get("categories", [])),

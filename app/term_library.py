@@ -505,13 +505,14 @@ def _add_term_candidate(
             candidate.get("_group_primary_locked", False)
         )
 
-def load_terms(project: Path) -> dict[str, Any] | None:
+def load_terms(project: Path, *, resolve_knowledge: bool = True) -> dict[str, Any] | None:
     path = project / "terminology" / "terms.json"
     if not record_exists(project, path):
         return None
     from .term_knowledge import project_descriptions
     library = read_json(project, path)
-    project_descriptions(project, library)
+    if resolve_knowledge:
+        project_descriptions(project, library)
     return library
 
 def term_normalization(config: dict[str, Any]) -> TermNormalization:

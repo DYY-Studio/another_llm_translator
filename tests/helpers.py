@@ -59,3 +59,15 @@ def scan_source_range(project: Path) -> list[dict[str, Any]]:
     from app.term_knowledge import source_range
     segments = read_segments(project)
     return source_range(segments, {s["segment_id"]: s for s in segments}, {})
+
+
+def wait_for_web_task(client, task_id: str) -> dict:
+    """Wait for actual completion, including background worker commits."""
+    import time
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        state = client.get(f"/api/v1/tasks/{task_id}").json()
+        if state["status"] in {"completed", "failed", "cancelled"}:
+            return state
+        time.sleep(0.01)
+    raise AssertionError(f"task did not finish: {state}")

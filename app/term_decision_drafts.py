@@ -308,7 +308,7 @@ def set_manual_review_resolved(
 def decision_review_state(project: Path) -> dict[str, Any]:
     draft = current_decision_draft(project)
     applied = _latest_applied_manifest(project)
-    library = load_terms(project)
+    library = load_terms(project, resolve_knowledge=False) if applied is not None else None
     rollback = None
     if (
         applied is not None

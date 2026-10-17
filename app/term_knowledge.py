@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from .errors import UsageError
 from .execution import segment_model_source
-from .sqlite_storage import new_record_id, read_segments, read_terminology_candidates
+from .sqlite_storage import new_record_id, read_segments, read_segment_positions, read_terminology_candidates
 from .summary_provenance import digest
 
 
@@ -73,12 +73,16 @@ def _overlap(left: list[dict[str, Any]], right: dict[str, list[dict[str, Any]]])
                for a in left for b in right.get(a["segment_id"], ()))
 
 
-def evidence(project: Path, library: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def evidence(project: Path, library: dict[str, Any], *, fragment_ids: set[str] | None = None,
+             positions: dict[str, int] | None = None) -> dict[str, dict[str, Any]]:
     fragments = require_knowledge(library)["fragments"]
+    if fragment_ids is not None:
+        fragments = {key: value for key, value in fragments.items() if key in fragment_ids}
     ids = {f["candidate_id"] for f in fragments.values() if f.get("candidate_id")}
     records = {r["record_id"]: r for r in read_terminology_candidates(project, ids)}
-    segments = {s["segment_id"]: s for s in read_segments(project)}
-    positions = {key: i for i, key in enumerate(segments)}
+    source_ids = {r["segment_id"] for record in records.values() for r in record["source_range"]}
+    segments = {s["segment_id"]: s for s in read_segments(project, source_ids)}
+    positions = positions if positions is not None else read_segment_positions(project) if records else {}
     segment_digests = {}
     record_sources = {}
     result = {}
@@ -167,14 +171,22 @@ def _source_order(fragments: list[dict[str, Any]]) -> list[list[Any]]:
 def entity_view(
     project: Path, library: dict[str, Any], normalized: str, *, require_current: bool = False,
     all_evidence: dict[str, dict[str, Any]] | None = None,
+    positions: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     groups = entity_members(library)
     root = next((key for key, members in groups.items() if normalized in members), None)
     if root is None:
         raise UsageError("实体术语不存在")
     members = groups[root]
-    known = all_evidence if all_evidence is not None else evidence(project, library)
     member_names = set(members)
+    if all_evidence is None:
+        saved = require_knowledge(library)["entities"].get(root)
+        refs = {key for item in saved["items"] for key in item["fragment_ids"]} if saved else set()
+        refs.update(saved.get("summary_fragment_ids", []) if saved else [])
+        refs.update(key for key, fragment in require_knowledge(library)["fragments"].items() if fragment["owner"] in member_names)
+        known = evidence(project, library, fragment_ids=refs, positions=positions)
+    else:
+        known = all_evidence
     fragments = [f for f in known.values() if f["owner"] in member_names]
     return _entity_view(library, root, members, known, fragments, require_current=require_current)
 
@@ -265,13 +277,24 @@ def save_items(project: Path, library: dict[str, Any], normalized: str, items: A
 
 
 def confirm_keep(project: Path, library: dict[str, Any], normalized: str, *,
-                 all_evidence: dict[str, dict[str, Any]] | None = None) -> None:
+                 all_evidence: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
     view = entity_view(project, library, normalized, require_current=True, all_evidence=all_evidence)
     saved = require_knowledge(library)["entities"].get(view["entity_key"])
     if saved is None:
         raise UsageError("尚无已应用说明，不能确认保持")
     saved["input_version"] = view["input_version"]
     saved["source_order"] = view["source_order"]
+
+
+def applied_descriptions(library: dict[str, Any]) -> None:
+    knowledge = require_knowledge(library)
+    for root, members in entity_members(library).items():
+        saved = knowledge["entities"].get(root)
+        items = saved["items"] if saved else []
+        for term in library["terms"]:
+            if term["normalized"] in members:
+                term.update(description="；".join(item["text"] for item in items),
+                    entity_key=root, knowledge_status=None, description_items=items)
 
 
 def project_descriptions(project: Path, library: dict[str, Any], *,
@@ -285,14 +308,18 @@ def project_descriptions(project: Path, library: dict[str, Any], *,
         root = roots.get(fragment["owner"])
         if root is not None:
             fragments[root].append(fragment)
+    views = {}
     for root, members in groups.items():
         view = _entity_view(library, root, members, known, fragments[root])
+        views[root] = view
         for member in members:
             term = terms[member]
             term["description"] = "；".join(item["text"] for item in view["items"])
             term["entity_key"] = root
             term["knowledge_status"] = view["status"]
             term["description_items"] = view["items"]
+
+    return views
 
 
 def compact_source_ranges(ranges: list[dict[str, Any]] | None, positions: dict[str, int]) -> list[dict[str, Any]] | None:
@@ -314,8 +341,9 @@ def compact_source_ranges(ranges: list[dict[str, Any]] | None, positions: dict[s
     return groups or None
 
 
-def knowledge_payload(views: list[dict[str, Any]], target_language: str, description_generation: str = "sourced") -> tuple[dict[str, Any], dict[str, tuple[str, str]]]:
+def knowledge_payload(views: list[dict[str, Any]], target_language: str, description_generation: str = "sourced", *, range_cache: dict | None = None) -> tuple[dict[str, Any], dict[str, tuple[str, str]]]:
     refs: dict[str, tuple[str, str]] = {}
+    range_cache = {} if range_cache is None else range_cache
     entities = []
     for view in views:
         fragments = []
@@ -324,9 +352,13 @@ def knowledge_payload(views: list[dict[str, Any]], target_language: str, descrip
                 continue
             key = f"K{len(refs) + 1}"
             refs[key] = (view["entity_key"], f["id"])
+            cache_key = (id(f["source_range"]), id(f["_positions"]))
+            if cache_key not in range_cache:
+                range_cache[cache_key] = (f["source_range"], f["_positions"], compact_source_ranges(f["source_range"], f["_positions"]))
+            compact_ranges = range_cache[cache_key][2]
             fragments.append({"id": key, "text": f["text"], "owner": f["owner"],
                               "original_source": f.get("source", f["original_owner"]),
-                              "origin": f["origin"], "source_range": compact_source_ranges(f["source_range"], f["_positions"])})
+                              "origin": f["origin"], "source_range": compact_ranges})
         entities.append({"entity": view["entity_key"], "members": view["members"],
                          "current_items": [{"text": item["text"]} for item in view["items"]],
                          "fragments": fragments})
@@ -344,9 +376,10 @@ def pack_knowledge_batches(views: list[dict[str, Any]], prompt: str, config: dic
     batches, errors = [], {}
     current: list[dict[str, Any]] = []
     total = 0
+    range_cache: dict = {}
 
     def estimate(group: list[dict[str, Any]]) -> int:
-        payload, _ = knowledge_payload(group, config["project"]["target_language"], config["terminology_decision"]["description_generation"])
+        payload, _ = knowledge_payload(group, config["project"]["target_language"], config["terminology_decision"]["description_generation"], range_cache=range_cache)
         if feedback:
             payload["validation_feedback"] = feedback
         return estimate_messages(render_messages(prompt, payload), float(config["execution"]["token_safety_factor"]))
@@ -420,14 +453,14 @@ async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, co
     feedback = ""
     parent_request_id = None
     for attempt in range(int(config["retry"]["format_max_attempts"]) + 1):
-        batches, _, oversized = await run_blocking(lambda: pack_knowledge_batches(pending, prompt, config, feedback=feedback))
+        batches, _, oversized = (await run_blocking(lambda: pack_knowledge_batches(pending, prompt, config, feedback=feedback)))
         errors.update(oversized)
         retry = []
         for batch in batches:
             payload, refs = knowledge_payload(batch, config["project"]["target_language"], config["terminology_decision"]["description_generation"])
             if feedback:
                 payload["validation_feedback"] = feedback
-            messages = await run_blocking(lambda: render_messages(prompt, payload))
+            messages = (await run_blocking(lambda: render_messages(prompt, payload)))
             estimate = estimate_messages(messages, float(config["execution"]["token_safety_factor"]))
             try:
                 response, request_id = await llm.chat(
@@ -440,7 +473,7 @@ async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, co
                 errors.update({v["entity_key"]: str(exc) for v in batch})
                 continue
             parent_request_id = request_id
-            document = await run_blocking(lambda: parse_jsonl_document(response.content, record_type="entity_knowledge"))
+            document = (await run_blocking(lambda: parse_jsonl_document(response.content, record_type="entity_knowledge")))
             requested = {v["entity_key"] for v in batch}
             if (document.errors or not document.complete
                     or any(not isinstance(r.get("entity"), str) or r["entity"] not in requested for r in document.records)):

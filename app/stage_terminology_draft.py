@@ -157,7 +157,7 @@ def draft_scan_options(
         selected,
         translation_done,
     )
-    library = load_terms(project)
+    library = load_terms(project, resolve_knowledge=False)
     fingerprint = draft_translation_fingerprint(
         project, config, int(library["terms_revision"]) if library else None
     )
@@ -731,24 +731,24 @@ class DraftTerminologyScan:
         while queue:
             pending, attempt, parent_request_id = queue.pop(0)
             mode = self.mode(pending)
-            payload = await run_blocking(lambda: payload_builder(pending))
+            payload = (await run_blocking(lambda: payload_builder(pending)))
             if "segment" in response_record_types(mode):
-                payload, id_map = await run_blocking(lambda: localize_request_ids(payload, pending))
+                payload, id_map = (await run_blocking(lambda: localize_request_ids(payload, pending)))
             else:
                 id_map = {
                     str(index): str(item["segment_id"])
                     for index, item in enumerate(pending, 1)
                 }
             generated_prompt = prompt_builder(pending)
-            messages = await run_blocking(lambda: render_messages(generated_prompt, payload))
+            messages = (await run_blocking(lambda: render_messages(generated_prompt, payload)))
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             try:
                 response, request_id = await state.llm.chat(
                     messages=messages,
                     temperature=self.config["llm"]["temperature_terminology"],
-                    estimated_input_tokens=await run_blocking(lambda: _request_estimate(
+                    estimated_input_tokens=(await run_blocking(lambda: _request_estimate(
                         messages, self.config, request_id
-                    )),
+                    ))),
                     request_id=request_id,
                     parent_request_id=parent_request_id,
                     segment_id_map=id_map,
@@ -842,10 +842,10 @@ class DraftTerminologyScan:
                     )
                 report_progress()
                 continue
-            document = await run_blocking(lambda: parse_jsonl_document(
+            document = (await run_blocking(lambda: parse_jsonl_document(
                 response.content,
                 record_type=response_record_types(mode),
-            ))
+            )))
             translation_end_received |= document.has_valid_end
             terms: list[dict[str, Any]] = []
             term_errors: list[str] = []
@@ -921,7 +921,7 @@ class DraftTerminologyScan:
                 )
                 if document.has_valid_end:
                     content += '\n{"type":"end"}'
-                parsed = await run_blocking(lambda: _map_local_translation_response(content, id_map))
+                parsed = (await run_blocking(lambda: _map_local_translation_response(content, id_map)))
                 valid = parsed.valid
                 translation_unresolved = set(parsed.unresolved)
                 if any(
@@ -940,7 +940,7 @@ class DraftTerminologyScan:
                     translation_unresolved.update(str(item["segment_id"]) for item in pending if item["_draft_translation"])
                 for segment_id, text in valid.items():
                     try:
-                        buffered_translations[segment_id] = (request_id, await run_blocking(lambda: prepare_candidate(segment_id, text)))
+                        buffered_translations[segment_id] = (request_id, (await run_blocking(lambda: prepare_candidate(segment_id, text))))
                     except IncompleteError as exc:
                         translation_unresolved.add(segment_id)
                         term_errors.append(str(exc))

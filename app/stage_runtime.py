@@ -780,7 +780,7 @@ async def _execute_stage_run(
                 sentinel = object()
                 while True:
                     try:
-                        chunk = await run_blocking(next, iterator, sentinel)
+                        chunk = (await run_blocking(next, iterator, sentinel))
                     finally:
                         if preflight_failed:
                             failed = preflight_failed[:]
@@ -803,7 +803,7 @@ async def _execute_stage_run(
         if state.llm is not None:
             _extend_unique(state.warnings, state.llm.warnings)
         usage = usage_summary()
-        await run_blocking(lambda: finalize_run(
+        (await run_blocking(lambda: finalize_run(
             state.project,
             state.run_dir,
             status="interrupted",
@@ -813,14 +813,14 @@ async def _execute_stage_run(
             usage=usage,
             failure_counts=dict(failure_counts),
             key_audit=key_audit(),
-        ))
+        )))
         raise
     except (FatalExternalError, ConfigError) as exc:
         if state.llm is not None:
             _extend_unique(state.warnings, state.llm.warnings)
         if isinstance(exc, FatalExternalError) and state.llm is not None:
             usage = usage_summary()
-        await run_blocking(lambda: finalize_run(
+        (await run_blocking(lambda: finalize_run(
             state.project,
             state.run_dir,
             status="failed",
@@ -830,7 +830,7 @@ async def _execute_stage_run(
             usage=usage,
             failure_counts=dict(failure_counts),
             key_audit=key_audit(),
-        ))
+        )))
         logger.error(
             "run failed run=%s error_type=%s",
             state.run_id,
@@ -844,7 +844,7 @@ async def _execute_stage_run(
             usage_invoked = state.llm.send_count > 0
         else:
             usage_invoked = False
-        await run_blocking(lambda: finalize_run(
+        (await run_blocking(lambda: finalize_run(
             state.project,
             state.run_dir,
             status="failed",
@@ -855,7 +855,7 @@ async def _execute_stage_run(
             failure_counts=dict(failure_counts),
             usage_invoked=usage_invoked,
             key_audit=key_audit(),
-        ))
+        )))
         logger.error(
             "run failed run=%s error_type=%s error=%s",
             state.run_id,
@@ -863,7 +863,7 @@ async def _execute_stage_run(
             exc,
         )
         raise
-    return await run_blocking(lambda: finalize_run(
+    return (await run_blocking(lambda: finalize_run(
         state.project,
         state.run_dir,
         status="completed" if failed_count() == 0 else "failed",
@@ -873,7 +873,7 @@ async def _execute_stage_run(
         usage=usage,
         failure_counts=dict(failure_counts),
         key_audit=key_audit(),
-    ))
+    )))
 
 
 async def _localized_request_loop(
@@ -913,7 +913,7 @@ async def _localized_request_loop(
     while tasks:
         items, parent_request_id, format_attempt = tasks.pop(0)
         expected = [str(item["segment_id"]) for item in items]
-        payload = await run_blocking(lambda: payload_builder(items))
+        payload = (await run_blocking(lambda: payload_builder(items)))
         if repair_candidates is not None:
             checks = sorted({
                 (str(finding["validator"]), str(finding["match_type"]))
@@ -939,10 +939,10 @@ async def _localized_request_loop(
             feedback = "\n".join(dict.fromkeys(instructions))
             if feedback:
                 payload["validation_repair"] = feedback
-        payload, id_map = await run_blocking(lambda: localize_request_ids(payload, items))
-        messages = await run_blocking(lambda: render_messages(prompt, payload))
+        payload, id_map = (await run_blocking(lambda: localize_request_ids(payload, items)))
+        messages = (await run_blocking(lambda: render_messages(prompt, payload)))
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
-        estimated = await run_blocking(lambda: _request_estimate(messages, config, request_id))
+        estimated = (await run_blocking(lambda: _request_estimate(messages, config, request_id)))
         try:
             response, request_id = await llm.chat(
                 messages=messages,
@@ -952,7 +952,7 @@ async def _localized_request_loop(
                 parent_request_id=parent_request_id,
                 segment_id_map=id_map,
             )
-            parsed = await run_blocking(lambda: parse(response.content, id_map))
+            parsed = (await run_blocking(lambda: parse(response.content, id_map)))
             valid = parsed.valid
             unresolved = parsed.unresolved
             parse_errors = parsed.errors
@@ -983,7 +983,7 @@ async def _localized_request_loop(
         for segment_id, value in valid.items():
             try:
                 if prepare_candidate is not None:
-                    value = await run_blocking(lambda: prepare_candidate(segment_id, value))
+                    value = (await run_blocking(lambda: prepare_candidate(segment_id, value)))
                 if accept_response is not None:
                     buffered[segment_id] = (request_id, value)
                 else:

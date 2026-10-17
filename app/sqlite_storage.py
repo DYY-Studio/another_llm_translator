@@ -2322,22 +2322,42 @@ def read_files(project: Path) -> list[dict[str, Any]]:
         connection.close()
 
 
-def read_segments(project: Path) -> list[dict[str, Any]]:
+def read_segments(project: Path, segment_ids: Iterable[str] | None = None) -> list[dict[str, Any]]:
+    ids = list(dict.fromkeys(segment_ids)) if segment_ids is not None else None
+    if ids == []:
+        return []
     connection = _with_db(project)
     try:
         project_id = _project_id(connection)
-        rows = connection.execute(
-            """
-            SELECT segments.segment_id, segments.file_id, segments.line_index,
+        query = """SELECT segments.segment_id, segments.file_id, segments.line_index,
                    segments.part_id, segments.source, segments.is_empty,
-                   segments.model_source, segments.created_at
-            FROM files CROSS JOIN segments ON segments.file_id = files.file_id
-            ORDER BY files.file_order, segments.line_index
-            """
-        ).fetchall()
+                   segments.model_source, segments.created_at, files.file_order
+            FROM files CROSS JOIN segments ON segments.file_id = files.file_id"""
+        if ids is None:
+            rows = connection.execute(query + " ORDER BY files.file_order, segments.line_index").fetchall()
+        else:
+            rows = []
+            for offset in range(0, len(ids), 500):
+                batch = ids[offset:offset + 500]
+                rows.extend(connection.execute(query + f" WHERE segments.segment_id IN ({','.join('?' for _ in batch)})", batch).fetchall())
+            rows.sort(key=lambda row: (row["file_order"], row["line_index"]))
         return [_hydrate_segment(row, project_id) for row in rows]
     except sqlite3.Error as exc:
         raise StorageError(f"无法读取项目 Segment：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def read_segment_positions(project: Path) -> dict[str, int]:
+    """Read source ordering without hydrating source bodies."""
+    connection = _with_db(project)
+    try:
+        rows = connection.execute("""SELECT segments.segment_id
+            FROM files CROSS JOIN segments ON segments.file_id = files.file_id
+            ORDER BY files.file_order, segments.line_index""").fetchall()
+        return {str(row[0]): index for index, row in enumerate(rows)}
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法读取项目 Segment 位置：{project}: {exc}") from exc
     finally:
         connection.close()
 

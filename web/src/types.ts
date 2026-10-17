@@ -711,8 +711,9 @@ export interface TaskOptions {
   mismatched_fingerprint_completed: number;
   protected?: number;
   has_pending_draft?: boolean;
-  estimated_requests?: number;
-  estimated_input_tokens?: number;
+  estimated_requests?: number | null;
+  estimated_input_tokens?: number | null;
+  estimate_error?: ErrorPayload | null;
   knowledge_replacement_impacts?: Array<{fragment_id: string; owner: string; text: string; source_range: KnowledgeSourceRange[]}>;
   summary_selected_boundaries?: number;
   summary_only_work?: boolean;
@@ -857,7 +858,7 @@ export interface EntityKnowledge {
 
 export interface Term {
   entity_key: string;
-  knowledge_status: "current" | "pending" | "stale";
+  knowledge_status: "current" | "pending" | "stale" | null;
   description_items: KnowledgeItem[];
   normalized: string;
   source: string;
@@ -1207,7 +1208,7 @@ export interface ServerStatus {
   auth: { required: boolean; username: string };
   authed: boolean;
   loopback: boolean;
-  tasks: { max_active_projects: number };
+  tasks: { max_active_projects: number; estimate_usage_before_run: boolean };
 }
 
 export interface InterfaceEntry {

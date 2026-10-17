@@ -784,6 +784,7 @@ def register_task_routes(
         request: Request,
         name: str,
         stage: str,
+        estimate_usage: bool = False,
         include_summaries: bool = False,
         include_draft_translation: bool = False,
         aggregate_full_summaries: bool = False,
@@ -810,6 +811,7 @@ def register_task_routes(
         return task_options(
             project(name),
             stage,
+            estimate_usage=estimate_usage and app.state.server_config.get("tasks", {}).get("estimate_usage_before_run", False),
             include_summaries=include_summaries,
             include_draft_translation=include_draft_translation,
             aggregate_full_summaries=aggregate_full_summaries,

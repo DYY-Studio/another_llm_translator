@@ -387,9 +387,12 @@ class _TermMatchCache:
         spec: TermNormalization,
         limit: int,
         *, segments: list[dict[str, Any]], warnings: list[str] | None = None,
-        sourced_policy: str = "all", unsourced_policy: str = "all",
+        sourced_policy: str = "all", unsourced_policy: str = "all", project=None,
     ) -> None:
         self.matcher = _PreparedTermMatcher(library, spec) if library else None
+        self.project = project
+        self.library = library
+        self._resolved_entities: set[str] = set()
         self.spec = spec
         self.limit = limit
         self.sourced_policy = sourced_policy
@@ -407,6 +410,19 @@ class _TermMatchCache:
                 names = self.matcher._candidate_names_for_source(str(item["source"]))
                 for index in {i for name in names for i in self.matcher._name_terms.get(name, ())}:
                     term = self.matcher.terms[index]
+                    if self.project is not None and "knowledge_status" not in term:
+                        from .term_knowledge import entity_view
+                        view = entity_view(self.project, self.library, str(term["normalized"]), positions=self.positions)
+                        root = view["entity_key"]
+                        if root not in self._resolved_entities:
+                            origin = {"description_items": view["items"]}
+                            self._entity_sources[root] = self._prepare_entity(origin)
+                            for member in view["members"]:
+                                target = self.matcher.by_normalized.get(member)
+                                if target is not None:
+                                    target.update(entity_key=root, knowledge_status=view["status"],
+                                        description="；".join(item["text"] for item in view["items"]))
+                            self._resolved_entities.add(root)
                     if term.get("knowledge_status") == "stale":
                         raise UsageError(f"实体说明已过期，请更新后再执行：{term['source']}")
                     if term.get("knowledge_status") == "pending":

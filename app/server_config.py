@@ -13,7 +13,7 @@ def default_server_config() -> dict[str, Any]:
     return {
         "lan": {"enabled": False, "bind_address": ""},
         "auth": {"required": False, "username": ""},
-        "tasks": {"max_active_projects": 2},
+        "tasks": {"max_active_projects": 2, "estimate_usage_before_run": False},
     }
 
 
@@ -39,14 +39,15 @@ def load_server_config() -> dict[str, Any]:
     for key in ("required", "username"):
         if key in auth:
             config["auth"][key] = auth[key]
-    if "max_active_projects" in tasks:
-        config["tasks"]["max_active_projects"] = tasks["max_active_projects"]
+    for key in ("max_active_projects", "estimate_usage_before_run"):
+        if key in tasks:
+            config["tasks"][key] = tasks[key]
     _validate(config)
     return config
 
 
 def _validate(config: dict[str, Any]) -> None:
-    for key in ("lan.enabled", "auth.required"):
+    for key in ("lan.enabled", "auth.required", "tasks.estimate_usage_before_run"):
         section, name = key.split(".")
         if not isinstance(config[section][name], bool):
             raise ConfigError(f"server.toml {key} 必须是布尔值")
@@ -86,6 +87,7 @@ def save_server_config(config: dict[str, Any]) -> None:
         "",
         "[tasks]",
         f"max_active_projects = {tasks['max_active_projects']}",
+        f"estimate_usage_before_run = {json.dumps(tasks['estimate_usage_before_run'])}",
         "",
     ]
     path = server_config_path()

@@ -578,7 +578,7 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
     try {
       const options = await api<TaskOptions>(
         kind === "fragment"
-          ? `/api/v1/projects/${project}/task-options/terminology?include_summaries=true&language=${encodeURIComponent(language)}`
+          ? `/api/v1/projects/${project}/task-options/terminology?estimate_usage=true&include_summaries=true&language=${encodeURIComponent(language)}`
           : `/api/v1/projects/${project}/task-options/content_summary?language=${encodeURIComponent(language)}`,
       );
       if (kind === "full") {

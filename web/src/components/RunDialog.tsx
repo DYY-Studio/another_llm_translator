@@ -1,6 +1,6 @@
 import { Modal } from "./Modal";
 import { useEffect, useState, type ReactNode } from "react";
-import { translate, type Language } from "../i18n";
+import { errorMessage, translate, type Language } from "../i18n";
 import type { RunDecision, RunningRun, TaskOptions } from "../types";
 
 type ResultPolicy = "pending" | "reuse" | "force";
@@ -17,7 +17,7 @@ export interface RepetitionRunOptions {
   excluded_punctuation_groups: number; candidate_groups: number; selected: number; over_budget_groups: number;
   running_run: RunningRun | null; run_action: "resume" | "decline" | null; only_file: string | null; completed: number;
   screening_enabled: boolean; exclude_punctuation_only: boolean; preset: {id: string; model: string};
-  estimated_requests: number; estimated_input_tokens: number; decision_model: string | null; model: string;
+  estimated_requests: number | null; estimated_input_tokens: number | null; estimate_error?: import("../types").ErrorPayload | null; decision_model: string | null; model: string;
 }
 
 function RunDialogFrame({ title, subtitle, onClose, children }: {
@@ -106,7 +106,8 @@ export function RunDialog(props: StageRunDialogProps | {
     {options.running_run && <UnfinishedRunChoice run={options.running_run} action={options.run_action} onChange={onRunAction} selected={options.selected} language={language} busy={busy} />}
     {resuming && options.running_run && <p className="muted">{t("resumeSteps", {completed: options.running_run.completed_steps ?? 0, total: options.running_run.total_steps ?? 0})}</p>}
     <div className="run-decision-info"><span>{options.decision_model ? t("models", { decision: options.decision_model, model: options.model }) : t("comparisonModel", {model: options.model})}</span>
-      <span>{t("estimate", { groups: options.candidate_groups, count: options.selected, requests: options.estimated_requests, tokens: options.estimated_input_tokens })}</span>
+      <span>{options.estimated_requests != null && options.estimated_input_tokens != null ? t("estimate", { groups: options.candidate_groups, count: options.selected, requests: options.estimated_requests, tokens: options.estimated_input_tokens }) : t("groupCount", { groups: options.candidate_groups, count: options.selected })}</span>
+      {options.estimate_error && <span className="warning-banner">{translate("runDialog.estimateFailed", language, { error: errorMessage(options.estimate_error, language) })}</span>}
       <span>{t("punctuationExcluded", { count: options.excluded_punctuation_groups })}</span>
       {!!options.over_budget_groups && <span>{t("overBudget", { count: options.over_budget_groups })}</span>}
     </div>
@@ -237,7 +238,8 @@ function StageRunDialog({
         )}
         {decisionMode && <div className="run-decision-info">
           <span>{translate(options.knowledge_only ? "terms.knowledgeOnlyScope" : "terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
-          <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests ?? 0, tokens: options.estimated_input_tokens ?? 0 })}</span>
+          {options.estimated_requests != null && options.estimated_input_tokens != null && <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests, tokens: options.estimated_input_tokens })}</span>}
+          {options.estimate_error && <span className="warning-banner">{translate("runDialog.estimateFailed", language, { error: errorMessage(options.estimate_error, language) })}</span>}
           {!options.knowledge_only && options.overflow_policy && <span>{translate("terms.decisionOverflowPolicy", language, {
             soft: translate(options.overflow_policy.allow_soft_target_overflow ? "terms.decisionSoftAllowed" : "terms.decisionSoftBlocked", language),
             mode: overflowModeLabel(options.overflow_policy.anchor_overflow_mode, language),

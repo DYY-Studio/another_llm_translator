@@ -890,11 +890,11 @@ def register_resource_routes(
             project_config = load_config(item / "config.toml")
             if project_config["llm"].get("preset") == preset_id:
                 raise UsageError(f"不能删除项目 {item.name} 正在使用的 LLM Preset")
-        decisions = await run_blocking(list_decision_presets)
+        decisions = (await run_blocking(list_decision_presets))
         for item in decisions["presets"]:
             if item.get("protocol") != "llm":
                 continue
-            definition = await run_blocking(get_decision_preset, item["preset_id"])
+            definition = (await run_blocking(get_decision_preset, item["preset_id"]))
             if definition["protocol"] == "llm" and definition["llm_preset"] == preset_id:
                 raise UsageError(f"不能删除 Decision Preset {item['preset_id']} 正在使用的 LLM Preset")
         user_file = user_root() / "llm_presets" / f"{preset_id}.json"
@@ -1059,6 +1059,7 @@ def register_resource_routes(
             },
             "tasks": {
                 "max_active_projects": app.state.tasks.max_active_projects,
+                "estimate_usage_before_run": config.get("tasks", {}).get("estimate_usage_before_run", False),
             },
             "authed": loopback
             or not config["auth"]["required"]
@@ -1080,6 +1081,9 @@ def register_resource_routes(
         tasks = payload.get("tasks")
         if not isinstance(tasks, dict):
             raise UsageError("tasks 必须是对象")
+        estimate_usage = tasks.get("estimate_usage_before_run", False)
+        if not isinstance(estimate_usage, bool):
+            raise UsageError("tasks.estimate_usage_before_run 必须是布尔值")
         max_active_projects = tasks.get("max_active_projects")
         if (
             not isinstance(max_active_projects, int)
@@ -1125,9 +1129,10 @@ def register_resource_routes(
             "tasks": {
                 **config.get("tasks", {}),
                 "max_active_projects": max_active_projects,
+                "estimate_usage_before_run": estimate_usage,
             },
         }
-        save_server_config(next_config)
+        (await run_blocking(save_server_config, next_config))
         app.state.server_config = next_config
         await app.state.tasks.set_max_active_projects(max_active_projects)
         warning = (

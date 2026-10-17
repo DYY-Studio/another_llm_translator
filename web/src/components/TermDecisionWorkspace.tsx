@@ -273,7 +273,7 @@ export function TermDecisionWorkspace({ project, projectId, language, task, onTa
     setBusy(true);
     setMessage("");
     try {
-      const next = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/terminology_decision?knowledge_only=${knowledgeOnly}`);
+      const next = await api<TaskOptions>(`/api/v1/projects/${project}/task-options/terminology_decision?estimate_usage=true&knowledge_only=${knowledgeOnly}`);
       if (activeProjectRef.current !== targetProject) return;
       setRunOptions(next);
       setReplaceDraft(replace);
