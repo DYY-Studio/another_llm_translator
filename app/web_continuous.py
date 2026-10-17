@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import asyncio
 import hashlib
@@ -1070,7 +1071,7 @@ async def run_continuous(
     for stage in normalized:
         if stage == "translation" and include_draft_translation:
             continue
-        config = load_project_config(project, stage="translation" if stage == "repetition_consistency" else stage)
+        config = await run_blocking(lambda: load_project_config(project, stage="translation" if stage == "repetition_consistency" else stage))
         identity = _limiter_identity(config)
         try:
             stage_limiters[stage] = limiters[identity]
@@ -1144,7 +1145,7 @@ async def run_continuous(
                     project / "runs" / resume_run_id / "manifest.json"
                 )
                 if record_exists(project, manifest_path):
-                    raw_usage = read_json(project, manifest_path).get("usage")
+                    raw_usage = await run_blocking(lambda: read_json(project, manifest_path)).get("usage")
                     if isinstance(raw_usage, dict):
                         usage_base_by_stage[stage] = raw_usage
             if stage == "repetition_consistency":
@@ -1152,13 +1153,13 @@ async def run_continuous(
                 if prior and actions.get(stage) == "resume":
                     exclude_punctuation_only = prior[0]["exclude_punctuation_only"]
                     screening_enabled = prior[0]["screening_enabled"]
-                plan = repetition_plan(project, Scope(), prompt_language=prompt_language,
-                    exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled)
-                running = repetition_resume(project, plan)
+                plan = await run_blocking(lambda: repetition_plan(project, Scope(), prompt_language=prompt_language,
+                    exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled))
+                running = await run_blocking(lambda: repetition_resume(project, plan))
                 if running and actions.get(stage) == "resume":
                     if running["scope"] != {"only_file": None}:
                         raise UsageError("连续运行只能续用整项目一致性审查 Run")
-                    raw = read_json(project, project / "runs" / running["run_id"] / "manifest.json").get("usage")
+                    raw = await run_blocking(lambda: read_json(project, project / "runs" / running["run_id"] / "manifest.json")).get("usage")
                     if isinstance(raw, dict):
                         usage_base_by_stage[stage] = raw
                 if not plan["groups"] and not running:
@@ -1255,13 +1256,13 @@ async def run_continuous(
                             / "manifest.json",
                         )
                     ):
-                        decision_total = read_json(
+                        decision_total = await run_blocking(lambda: read_json(
                             project,
                             project
                             / "runs"
                             / decision_run_id
                             / "manifest.json",
-                        ).get("total_steps")
+                        )).get("total_steps")
                     if isinstance(decision_total, int):
                         summary = {**summary, "total_steps": decision_total}
                     step.update(

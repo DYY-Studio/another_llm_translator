@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import asyncio
 import hashlib
@@ -1437,7 +1438,7 @@ class WebTaskManager:
                 )
             continuous_stages = tuple(continuous_stages)
             continuous_run_actions = dict(continuous_run_actions or {})
-            decision = self._validate_start(
+            decision = await run_blocking(lambda: self._validate_start(
                 project,
                 stage,
                 scope=scope,
@@ -1462,13 +1463,13 @@ class WebTaskManager:
                 apply_terminology_decision=apply_terminology_decision,
                 include_repetition_consistency=include_repetition_consistency,
                 apply_repetition_consistency=apply_repetition_consistency,
-            )
+            ))
             task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
             state = WebTask(
                 task_id=task_id,
                 project=project,
                 project_id=str(
-                    read_json(project, project / "project.json")["project_id"]
+                    await run_blocking(lambda: read_json(project, project / "project.json"))["project_id"]
                 ),
                 stage=stage,
                 total_segments=decision.selected_count,
@@ -1613,7 +1614,7 @@ class WebTaskManager:
                 else nullcontext()
             )
             with diagnostics_context, project_write_lock(state.project):
-                decision = self._validate_start(
+                decision = await run_blocking(lambda: self._validate_start(
                     state.project,
                     state.stage,
                     scope=scope,
@@ -1635,7 +1636,7 @@ class WebTaskManager:
                     apply_terminology_decision=apply_terminology_decision,
                     include_repetition_consistency=include_repetition_consistency,
                     apply_repetition_consistency=apply_repetition_consistency,
-                )
+                ))
                 if (
                     state._start_decision is not None
                     and decision != state._start_decision
@@ -1655,7 +1656,7 @@ class WebTaskManager:
                     limiter_stages = (state.stage,)
                 if state.stage in {CONTINUOUS_STAGE, "run-all"}:
                     for stage in limiter_stages:
-                        config = load_project_config(state.project, stage="translation" if stage == "repetition_consistency" else stage)
+                        config = await run_blocking(lambda: load_project_config(state.project, stage="translation" if stage == "repetition_consistency" else stage))
                         key = (
                             str(config["_llm_preset_id"]),
                             str(config["_llm_preset_hash"]),
@@ -1667,7 +1668,7 @@ class WebTaskManager:
                         shared_limiters[key] = limiter
                         limiter_releases.append(release)
                 else:
-                    config = load_project_config(state.project, stage="translation" if state.stage == "repetition_consistency" else state.stage)
+                    config = await run_blocking(lambda: load_project_config(state.project, stage="translation" if state.stage == "repetition_consistency" else state.stage))
                     limiter, release = self._acquire_limiter(config)
                     shared_limiters[
                         (
@@ -1687,13 +1688,13 @@ class WebTaskManager:
                     )
                     if resume_run_id is not None:
                         resuming = True
-                        manifest = read_json(
+                        manifest = await run_blocking(lambda: read_json(
                             state.project,
                             state.project
                             / "runs"
                             / resume_run_id
                             / "manifest.json",
-                        )
+                        ))
                         if type(manifest.get("usage_invocation_count")) is int:
                             raw_usage = manifest.get("usage")
                             if isinstance(raw_usage, dict):

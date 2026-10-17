@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking, blocking_scope
 import asyncio
 import time
 from collections import Counter
@@ -111,6 +112,7 @@ def _map_local_review_response(
         result.ids_complete,
     )
 
+@blocking_scope
 async def run_review(
     project: Path,
     stage: str,
@@ -128,12 +130,12 @@ async def run_review(
         raise ValueError(f"unsupported review stage: {stage}")
     logger = get_logger(stage)
     preparation_started_at = time.perf_counter()
-    scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
+    scope, resume_arguments_ignored = await run_blocking(lambda: _resume_scope(project, scope, resume_run_id))
     context_kwargs: dict[str, object] = {"stage": stage}
-    frozen_run_options = _frozen_run_options(project, resume_run_id)
+    frozen_run_options = await run_blocking(lambda: _frozen_run_options(project, resume_run_id))
     if frozen_run_options is not None:
         context_kwargs["frozen_run_options"] = frozen_run_options
-    config, metadata, files, segments = _project_context(project, **context_kwargs)
+    config, metadata, files, segments = await run_blocking(lambda: _project_context(project, **context_kwargs))
     logger.info(
         "stage preparation context ready elapsed=%.3fs files=%d segments=%d",
         time.perf_counter() - preparation_started_at,
@@ -148,25 +150,25 @@ async def run_review(
         _document_prompt_requirement_helpers(config, language)
     )
     prompt_for_items = lambda items: prompt_factory(requirements_for_items(items))
-    library = load_terms(project)
+    library = await run_blocking(lambda: load_terms(project))
     terms_revision = int(library["terms_revision"]) if library else None
-    fingerprint = stage_fingerprint(
+    fingerprint = await run_blocking(lambda: stage_fingerprint(
         config,
         stage,
         prompt_middle_digests(project, stage),
         terms_revision=terms_revision,
-    )
-    selected_segments = select_scope(segments, files, scope)
+    ))
+    selected_segments = await run_blocking(lambda: select_scope(segments, files, scope))
     active_segment_ids = [
         str(segment["segment_id"])
         for segment in segments
         if not segment["is_empty"]
     ]
-    bases = _base_results(
+    bases = await run_blocking(lambda: _base_results(
         project,
         stage,
         segment_ids=active_segment_ids,
-    )
+    ))
     missing_base = [
         str(segment["segment_id"])
         for segment in selected_segments
@@ -186,16 +188,16 @@ async def run_review(
                     "text": str(segment["source"]),
                 },
             )
-    history_states = latest_stage_states(
+    history_states = await run_blocking(lambda: latest_stage_states(
         project,
         stage,
         active_segment_ids,
-    )
-    selection = classify_stage_states(
+    ))
+    selection = await run_blocking(lambda: classify_stage_states(
         selected_segments,
         history_states,
         force=scope.force,
-    )
+    ))
     logger.info(
         "stage preparation selection/history ready elapsed=%.3fs selected=%d requested=%d reusable=%d",
         time.perf_counter() - preparation_started_at,
@@ -228,15 +230,15 @@ async def run_review(
         ),
     )
     context_config = config["context"][stage]
-    context_index = PreviousContextIndex(segments)
-    term_match_cache = _TermMatchCache(
+    context_index = await run_blocking(lambda: PreviousContextIndex(segments))
+    term_match_cache = await run_blocking(lambda: _TermMatchCache(
         library,
         term_normalization(config),
         int(config["terminology"]["max_terms_per_segment"]),
         segments=segments, warnings=warnings,
         sourced_policy=config["terminology"]["sourced_description_injection"],
         unsourced_policy=config["terminology"]["unsourced_description_injection"],
-    )
+    ))
 
     def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:
         resolver = None
@@ -275,7 +277,7 @@ async def run_review(
             ],
         }
 
-    run_id, run_dir, continuation_index, fail_planning = _create_or_continue_run(
+    run_id, run_dir, continuation_index, fail_planning = await run_blocking(lambda: _create_or_continue_run(
         project,
         stage,
         scope=scope,
@@ -292,7 +294,7 @@ async def run_review(
             "prompt_language": language,
         },
         warnings=warnings,
-    )
+    ))
 
     def make_probe(segment: dict[str, Any], part: tuple[str, str]) -> dict[str, Any]:
         probe_id = f"{segment['segment_id']}-PROBE"
@@ -325,19 +327,20 @@ async def run_review(
         }
         return _split_segment_source(segment, part_id, part[0])
 
-    preflight = _split_oversized_preflight(
+    preflight = await run_blocking(lambda: _split_oversized_preflight(
         selection.work,
         config=config,
         prompt=prompt,
         payload_builder=payload_builder,
         prompt_builder=prompt_for_items,
         fail_planning=fail_planning,
+        lazy=not scope.dry_run,
         make_probe=make_probe,
         split_part=split_part,
         accept_part=accept_part,
         initial_part=initial_part,
         cleanup_probe=lambda probe_id: bases.pop(probe_id, None),
-    )
+    ))
     request_segments = preflight.request_segments
     part_original = preflight.part_original
     original_parts = preflight.original_parts
@@ -352,7 +355,7 @@ async def run_review(
     )
 
     if scope.dry_run:
-        plans = build_chunk_plans(
+        plans = await run_blocking(lambda: build_chunk_plans(
             request_segments,
             all_segments=segments,
             config=config,
@@ -361,7 +364,7 @@ async def run_review(
             payload_builder=payload_builder,
             prompt_builder=prompt_for_items,
             partition_key=prompt_partition_key,
-        )
+        ))
         logger.info(
             "stage plan selected=%d requested=%d reused=%d chunks=%d",
             len(selection.selected),
@@ -392,6 +395,7 @@ async def run_review(
     by_id.update(
         {str(item["segment_id"]): item for item in request_segments}
     )
+    preflight.by_id = by_id
     part_results: dict[str, dict[str, tuple[dict[str, Any], str]]] = {}
     state = StageRunState(
         project=project,
@@ -445,7 +449,7 @@ async def run_review(
                         str(by_id[segment_id]["source"]),
                         suggested_text,
                     )
-                append_jsonl(
+                await run_blocking(lambda: append_jsonl(
                     project,
                     result_path,
                     record_header(
@@ -463,12 +467,12 @@ async def run_review(
                         run_id=run_id,
                         request_id=request_id,
                     ),
-                )
+                ))
                 completed_ids.add(segment_id)
                 report_progress()
             else:
                 failure_counts["stage_error"] += 1
-                append_jsonl(
+                await run_blocking(lambda: append_jsonl(
                     project,
                     result_path,
                     record_header(
@@ -485,7 +489,7 @@ async def run_review(
                         run_id=run_id,
                         request_id=request_id,
                     ),
-                )
+                ))
                 failed_ids.add(segment_id)
                 report_progress()
                 logger.warning(
@@ -544,7 +548,7 @@ async def run_review(
         exhausted = await _localized_request_loop(
             list(chunk.segments),
             payload_builder=payload_builder,
-            prompt=prompt_for_items(list(chunk.segments)),
+            prompt=await run_blocking(lambda: prompt_for_items(list(chunk.segments))),
             prompt_language=language,
             config=config,
             llm=state.llm,
@@ -606,6 +610,7 @@ async def run_review(
         part_original=part_original,
         original_parts=original_parts,
         preflight_failed=preflight_failed,
+        prepare_segment=preflight.prepare_segment,
         limiter=limiter,
         payload_builder=payload_builder,
         prompt_builder=prompt_for_items,

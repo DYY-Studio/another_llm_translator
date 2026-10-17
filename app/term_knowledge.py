@@ -1,5 +1,6 @@
 """Source-backed entity explanations; scan candidates remain the evidence owner."""
 from __future__ import annotations
+from .async_utils import run_blocking
 
 from copy import deepcopy
 from pathlib import Path
@@ -419,14 +420,14 @@ async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, co
     feedback = ""
     parent_request_id = None
     for attempt in range(int(config["retry"]["format_max_attempts"]) + 1):
-        batches, _, oversized = pack_knowledge_batches(pending, prompt, config, feedback=feedback)
+        batches, _, oversized = await run_blocking(lambda: pack_knowledge_batches(pending, prompt, config, feedback=feedback))
         errors.update(oversized)
         retry = []
         for batch in batches:
             payload, refs = knowledge_payload(batch, config["project"]["target_language"], config["terminology_decision"]["description_generation"])
             if feedback:
                 payload["validation_feedback"] = feedback
-            messages = render_messages(prompt, payload)
+            messages = await run_blocking(lambda: render_messages(prompt, payload))
             estimate = estimate_messages(messages, float(config["execution"]["token_safety_factor"]))
             try:
                 response, request_id = await llm.chat(
@@ -439,7 +440,7 @@ async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, co
                 errors.update({v["entity_key"]: str(exc) for v in batch})
                 continue
             parent_request_id = request_id
-            document = parse_jsonl_document(response.content, record_type="entity_knowledge")
+            document = await run_blocking(lambda: parse_jsonl_document(response.content, record_type="entity_knowledge"))
             requested = {v["entity_key"] for v in batch}
             if (document.errors or not document.complete
                     or any(not isinstance(r.get("entity"), str) or r["entity"] not in requested for r in document.records)):

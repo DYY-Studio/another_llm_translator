@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking, blocking_scope
 
 import asyncio
 import hashlib
@@ -334,6 +335,7 @@ def _make_artifact(
     return record
 
 
+@blocking_scope
 async def aggregate_summaries(
     project: Path,
     selected: Iterable[dict[str, Any]],
@@ -354,10 +356,10 @@ async def aggregate_summaries(
         fragments = _validate_fragments(project, boundary, current)
         checked.append((boundary, current, fragments))
 
-    config = load_project_config(project, stage="content_summary")
-    context_config, metadata, _, _ = _project_context(
+    config = await run_blocking(lambda: load_project_config(project, stage="content_summary"))
+    context_config, metadata, _, _ = await run_blocking(lambda: _project_context(
         project, stage="content_summary"
-    )
+    ))
     for key in (
         "_document_adapter_options",
         "_document_adapters",
@@ -373,7 +375,7 @@ async def aggregate_summaries(
     for boundary, current, _ in checked:
         requirements = requirements_for_items(current)
         prompt = prompt_factory(requirements)
-        prompt_details[boundary] = (requirements, prompt, _digest(prompt))
+        prompt_details[boundary] = (requirements, prompt, await run_blocking(lambda: _digest(prompt)))
     summary_prompt_digest = prompt_details[checked[0][0]][2]
     source_ranges = [
         _merge_source_range(boundary, fragments, current)
@@ -399,12 +401,12 @@ async def aggregate_summaries(
             variant_name = f"content-summary-{prompt_digest[7:23]}"
             prompt_variants[variant_name] = prompt
             prompt_variant_requirements[variant_name] = requirements
-        fingerprint = stage_fingerprint(
+        fingerprint = await run_blocking(lambda: stage_fingerprint(
             config,
             "content_summary",
             prompt_middle_digests(project, "content_summary"),
-        )
-        run_id, run_dir = create_run(
+        ))
+        run_id, run_dir = await run_blocking(lambda: create_run(
             project,
             config=config,
             stage="content_summary",
@@ -418,8 +420,8 @@ async def aggregate_summaries(
             ]},
             prompt_variants=prompt_variants,
             prompt_variant_requirements=prompt_variant_requirements,
-        )
-        write_summary_run(
+        ))
+        await run_blocking(lambda: write_summary_run(
             project,
             record_header(
                 "summary_run",
@@ -434,7 +436,7 @@ async def aggregate_summaries(
                 model=str(config["llm"]["model"]),
                 started_at=utc_now(),
             ),
-        )
+        ))
 
     if on_progress is not None:
         on_progress(0, 0, len(checked))
@@ -500,7 +502,7 @@ async def aggregate_summaries(
                     "target_language": config["project"]["target_language"],
                     "summaries": aggregation_summaries(children),
                 }
-                messages = render_messages(prompt, payload)
+                messages = await run_blocking(lambda: render_messages(prompt, payload))
                 estimated = estimate_messages(
                     messages, config["execution"]["token_safety_factor"]
                 )
@@ -565,7 +567,7 @@ async def aggregate_summaries(
                     origin="llm",
                 )
                 if kind == "reduction":
-                    write_content_summary(project, artifact)
+                    await run_blocking(lambda: write_content_summary(project, artifact))
                 return artifact
 
             async def reduce_boundary(
@@ -685,10 +687,10 @@ async def aggregate_summaries(
                             _child_from_artifact(right),
                         ]
                         after_estimate = estimate(reduced)
-                        before_digest = _digest(
+                        before_digest = await run_blocking(lambda: _digest(
                             [str(item["text"]) for item in children]
-                        )
-                        after_digest = _digest([str(item["text"]) for item in reduced])
+                        ))
+                        after_digest = await run_blocking(lambda: _digest([str(item["text"]) for item in reduced]))
                         if (
                             after_estimate >= before_estimate
                             or after_digest == before_digest
@@ -748,7 +750,7 @@ async def aggregate_summaries(
         usage = active_llm.usage_summary() if active_llm is not None else None
         warnings = [*ordered_boundary_warnings(), "任务已由用户取消"]
         if run_id is not None:
-            write_summary_run(
+            await run_blocking(lambda: write_summary_run(
                 project,
                 record_header(
                     "summary_run",
@@ -763,9 +765,9 @@ async def aggregate_summaries(
                     model=str(config["llm"]["model"]),
                     warnings=warnings,
                 ),
-            )
+            ))
             if run_dir is not None:
-                finalize_run(
+                await run_blocking(lambda: finalize_run(
                     project,
                     run_dir,
                     status="interrupted",
@@ -773,13 +775,13 @@ async def aggregate_summaries(
                     failed=failed,
                     warnings=warnings,
                     usage=usage,
-                )
+                ))
         raise
     except Exception as exc:
         usage = active_llm.usage_summary() if active_llm is not None else None
         warnings = [*ordered_boundary_warnings(), str(exc)]
         if run_id is not None:
-            write_summary_run(
+            await run_blocking(lambda: write_summary_run(
                 project,
                 record_header(
                     "summary_run",
@@ -795,9 +797,9 @@ async def aggregate_summaries(
                     error=str(exc),
                     warnings=warnings,
                 ),
-            )
+            ))
             if run_dir is not None:
-                finalize_run(
+                await run_blocking(lambda: finalize_run(
                     project,
                     run_dir,
                     status="failed",
@@ -805,7 +807,7 @@ async def aggregate_summaries(
                     failed=len(checked) - completed,
                     warnings=warnings,
                     usage=usage,
-                )
+                ))
         if isinstance(exc, UsageError):
             raise
         if isinstance(exc, ContextLengthError):
@@ -817,7 +819,7 @@ async def aggregate_summaries(
     warnings = ordered_boundary_warnings()
     status = "failed" if failed else "completed"
     if run_id is not None:
-        write_summary_run(
+        await run_blocking(lambda: write_summary_run(
             project,
             record_header(
                 "summary_run",
@@ -832,9 +834,9 @@ async def aggregate_summaries(
                 model=str(config["llm"]["model"]),
                 warnings=warnings,
             ),
-        )
+        ))
         if run_dir is not None:
-            finalize_run(
+            await run_blocking(lambda: finalize_run(
                 project,
                 run_dir,
                 status=status,
@@ -842,7 +844,7 @@ async def aggregate_summaries(
                 failed=failed,
                 warnings=warnings,
                 usage=usage,
-            )
+            ))
     return {
         "run_id": run_id,
         "selected": len(checked),

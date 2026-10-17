@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking, blocking_scope
 
 import asyncio
 
@@ -641,6 +642,7 @@ def decision_plan(
         "knowledge_pending": len(knowledge_views),
     }
 
+@blocking_scope
 async def run_terminology_decision(
     project: Path,
     *,
@@ -656,18 +658,18 @@ async def run_terminology_decision(
     final_review: bool = False,
     knowledge_only: bool = False,
 ) -> dict[str, Any]:
-    existing = _drafts._read_pending_draft(project)
+    existing = await run_blocking(lambda: _drafts._read_pending_draft(project))
     if existing is not None and existing["run_id"] != resume_run_id and not replace_draft:
         raise UsageError("已有待处理术语决策草案；必须明确替换")
     if plan is None:
-        plan = decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only)
+        plan = await run_blocking(lambda: decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only))
     elif bool(plan.get("final_review", False)) != final_review:
         raise UsageError("术语决策计划的终审选项与当前运行不一致")
     if bool(plan.get("knowledge_only", False)) != knowledge_only:
         raise UsageError("术语决策计划的实体说明执行模式与当前运行不一致")
     library = plan["library"]
     config = plan["config"]
-    metadata = read_json(project, project / "project.json")
+    metadata = await run_blocking(lambda: read_json(project, project / "project.json"))
     overrides_document = plan["overrides_document"]
     protected = plan["protected"]
     states = plan["states"]
@@ -727,7 +729,7 @@ async def run_terminology_decision(
         }
     continuation_index = 0
     if resume_run_id is None:
-        run_id, run_dir = create_run(
+        run_id, run_dir = await run_blocking(lambda: create_run(
             project,
             config=config,
             stage=STAGE,
@@ -744,9 +746,9 @@ async def run_terminology_decision(
                 "final_review": final_review,
                 "knowledge_only": knowledge_only,
             },
-        )
+        ))
     else:
-        run_id, run_dir, continuation_index = continue_run(
+        run_id, run_dir, continuation_index = await run_blocking(lambda: continue_run(
             project,
             resume_run_id,
             config=config,
@@ -757,7 +759,7 @@ async def run_terminology_decision(
             selected_count=plan["knowledge_pending"] if knowledge_only else len(eligible),
             requested_count=plan["knowledge_pending"] if knowledge_only else len(eligible),
             reused_count=0,
-        )
+        ))
     if limiter is None:
         execution = config["execution"]
         limiter = KeyPool(
@@ -771,7 +773,7 @@ async def run_terminology_decision(
             ),
         )
     eligible_terms = {str(item["normalized"]) for item in eligible}
-    checkpoint = _load_checkpoint(
+    checkpoint = await run_blocking(lambda: _load_checkpoint(
         project,
         run_id,
         project_id=str(metadata["project_id"]),
@@ -780,7 +782,7 @@ async def run_terminology_decision(
         knowledge_terms=set(states),
         final_review=final_review,
         knowledge_only=knowledge_only,
-    )
+    ))
     tentative = deepcopy(states)
     decisions = _checkpoint_decisions(checkpoint, "adjudication")
     _apply_tentative(tentative, decisions)
@@ -955,7 +957,7 @@ async def run_terminology_decision(
                 remaining_phase_one = [
                     item for item in eligible if str(item["normalized"]) not in decisions
                 ]
-                phase_one, _ = _batches._pack_batches(
+                phase_one, _ = await run_blocking(lambda: _batches._pack_batches(
                     remaining_phase_one,
                     phase="adjudication",
                     target_language=str(config["project"]["target_language"]),
@@ -965,7 +967,7 @@ async def run_terminology_decision(
                     config=config,
                     spec=spec,
                     conflicts=source_conflicts,
-                )
+                ))
 
                 async def adjudicate(
                     batch: tuple[list[dict[str, Any]], list[dict[str, Any]]],
@@ -996,7 +998,7 @@ async def run_terminology_decision(
                             "model_fingerprint": model_fingerprint,
                             "prompt_fingerprint": prompt_fingerprints["adjudication"],
                         }
-                    atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True)
+                    await run_blocking(lambda: atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True))
                     completed += len(focus)
                     if on_progress:
                         on_progress(completed, 0, total)
@@ -1008,9 +1010,9 @@ async def run_terminology_decision(
                 )
                 tentative = deepcopy(states)
                 _apply_tentative(tentative, decisions)
-                phase_two_state = _consistency_states(
+                phase_two_state = await run_blocking(lambda: _consistency_states(
                     states, tentative, consistency_decisions
-                )
+                ))
                 unresolved_phase_two_conflicts = _effective_conflicts(
                     project, phase_two_state, source_conflicts
                 )
@@ -1044,7 +1046,7 @@ async def run_terminology_decision(
                     for item in phase_two_focus
                     if str(item["normalized"]) not in consistency_decisions
                 ]
-                phase_two, _ = _batches._pack_batches(
+                phase_two, _ = await run_blocking(lambda: _batches._pack_batches(
                     remaining_phase_two,
                     phase="consistency",
                     target_language=str(config["project"]["target_language"]),
@@ -1054,7 +1056,7 @@ async def run_terminology_decision(
                     config=config,
                     spec=spec,
                     conflicts=phase_two_conflicts,
-                )
+                ))
 
                 async def review_consistency(
                     batch: tuple[list[dict[str, Any]], list[dict[str, Any]]],
@@ -1085,7 +1087,7 @@ async def run_terminology_decision(
                             "model_fingerprint": model_fingerprint,
                             "prompt_fingerprint": prompt_fingerprints["consistency"],
                         }
-                    atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True)
+                    await run_blocking(lambda: atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True))
                     completed += len(focus)
                     if on_progress:
                         on_progress(completed, 0, total)
@@ -1095,11 +1097,11 @@ async def run_terminology_decision(
                     review_consistency,
                     max_parallel=int(config["execution"]["max_parallel"]),
                 )
-                phase_two_final = _consistency_states(
+                phase_two_final = await run_blocking(lambda: _consistency_states(
                     states, tentative, consistency_decisions
-                )
+                ))
                 final = (
-                    _final_review_base_states(tentative, consistency_decisions)
+                    await run_blocking(lambda: _final_review_base_states(tentative, consistency_decisions))
                     if final_review
                     else phase_two_final
                 )
@@ -1135,14 +1137,14 @@ async def run_terminology_decision(
                         project, final, source_conflicts
                     )
                     review_base = deepcopy(final)
-                    review_focus = _final_review_targets(
+                    review_focus = await run_blocking(lambda: _final_review_targets(
                         eligible=eligible,
                         protected=protected,
                         original=states,
                         final=final,
                         decisions=decisions,
                         spec=spec,
-                    )
+                    ))
                     review_target_ids = {
                         str(item["normalized"]) for item in review_focus
                     }
@@ -1161,12 +1163,12 @@ async def run_terminology_decision(
                             evidence[key].update(item)
                     total = len(eligible) * 2 + final_review_target_count + len(containment_decisions)
                     usage_invoked = completed < total
-                    manifest = read_json(project, run_dir / "manifest.json")
+                    manifest = await run_blocking(lambda: read_json(project, run_dir / "manifest.json"))
                     manifest.update(
                         final_review_target_count=final_review_target_count,
                         total_steps=total,
                     )
-                    write_json(project, run_dir / "manifest.json", manifest)
+                    await run_blocking(lambda: write_json(project, run_dir / "manifest.json", manifest))
                     if final_review_target_count and on_progress:
                         on_progress(completed, 0, total)
                     remaining_review = [
@@ -1175,7 +1177,7 @@ async def run_terminology_decision(
                         if str(item["normalized"]) not in review_decisions
                     ]
                     phase_three = (
-                        _batches._pack_batches(
+                        await run_blocking(lambda: _batches._pack_batches(
                             remaining_review,
                             phase=_FINAL_REVIEW_PHASE,
                             target_language=str(config["project"]["target_language"]),
@@ -1185,7 +1187,7 @@ async def run_terminology_decision(
                             config=config,
                             spec=spec,
                             conflicts=review_conflicts,
-                        )
+                        ))
                         if remaining_review
                         else ([], 0)
                     )[0]
@@ -1223,7 +1225,7 @@ async def run_terminology_decision(
                                     _FINAL_REVIEW_PHASE
                                 ],
                             }
-                        atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True)
+                        await run_blocking(lambda: atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True))
                         completed += len(focus)
                         if on_progress:
                             on_progress(completed, 0, total)
@@ -1259,19 +1261,19 @@ async def run_terminology_decision(
                 usage_invoked = usage_invoked or completed < total
                 remaining = [item for item in containment_focus if item["normalized"] not in containment_decisions]
                 if containment_focus:
-                    manifest = read_json(project, run_dir / "manifest.json")
+                    manifest = await run_blocking(lambda: read_json(project, run_dir / "manifest.json"))
                     manifest.update(containment_target_count=len(containment_focus), total_steps=total)
-                    write_json(project, run_dir / "manifest.json", manifest)
+                    await run_blocking(lambda: write_json(project, run_dir / "manifest.json", manifest))
                     if on_progress:
                         on_progress(completed, 0, total)
                 containment_anchors = [state for key, state in containment_base.items()
                                        if key not in target_ids and not state.get("disabled")]
                 containment_conflicts = _effective_conflicts(project, containment_base, source_conflicts)
-                batches = _batches._pack_batches(
+                batches = await run_blocking(lambda: _batches._pack_batches(
                     remaining, phase="containment", target_language=str(config["project"]["target_language"]),
                     anchors=containment_anchors, evidence=evidence, prompt=prompts["containment"],
                     config=config, spec=spec, conflicts=containment_conflicts,
-                )[0] if remaining else []
+                ))[0] if remaining else []
 
                 async def review_containment(batch: tuple[list[dict[str, Any]], list[dict[str, Any]]]) -> None:
                     focus, anchors = batch
@@ -1289,7 +1291,7 @@ async def run_terminology_decision(
                             "model_fingerprint": model_fingerprint,
                             "prompt_fingerprint": prompt_fingerprints["containment"],
                         }
-                    atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True)
+                    await run_blocking(lambda: atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True))
                     completed += len(focus)
                     if on_progress:
                         on_progress(completed, 0, total)
@@ -1364,8 +1366,8 @@ async def run_terminology_decision(
             knowledge_library = deepcopy(library)
             knowledge_library["terms"] = [deepcopy(state) for state in final.values() if not state.get("disabled")]
             owner_moves = {} if knowledge_only else transfer_alias_evidence(knowledge_library, spec)
-            known_fragments = knowledge_evidence(project, knowledge_library)
-            views = [entity_view(project, knowledge_library, root, all_evidence=known_fragments) for root in entity_members(knowledge_library)]
+            known_fragments = await run_blocking(lambda: knowledge_evidence(project, knowledge_library))
+            views = [await run_blocking(lambda: entity_view(project, knowledge_library, root, all_evidence=known_fragments)) for root in entity_members(knowledge_library)]
             unresolved_names = {key for key, decision in decisions.items() if decision["action"] == "needs_review"}
             generation = config["terminology_decision"]["description_generation"]
             targets = [view for view in views
@@ -1407,7 +1409,7 @@ async def run_terminology_decision(
                     accept_knowledge(view, {"items": [], "reason": "没有说明证据", "input_version": view["input_version"]})
                 else:
                     remaining_views.append(view)
-            knowledge_batches, _, packing_errors = pack_knowledge_batches(remaining_views, prompts["knowledge"], config)
+            knowledge_batches, _, packing_errors = await run_blocking(lambda: pack_knowledge_batches(remaining_views, prompts["knowledge"], config))
             knowledge_errors.update(packing_errors)
             usage_invoked = usage_invoked or bool(knowledge_batches)
 
@@ -1422,11 +1424,11 @@ async def run_terminology_decision(
                 raise UsageError("实体说明聚合失败：" + "；".join(f"{root}: {error}" for root, error in knowledge_errors.items()))
             usage = llm.usage_summary()
         draft = save_draft()
-        manifest = read_json(project, run_dir / "manifest.json")
+        manifest = await run_blocking(lambda: read_json(project, run_dir / "manifest.json"))
         manifest.pop("last_interruption", None)
         append_llm_warnings(manifest)
-        write_json(project, run_dir / "manifest.json", manifest)
-        usage = finalize_run(
+        await run_blocking(lambda: write_json(project, run_dir / "manifest.json", manifest))
+        usage = await run_blocking(lambda: finalize_run(
             project,
             run_dir,
             status="completed",
@@ -1440,7 +1442,7 @@ async def run_terminology_decision(
                 if active_llm is not None and active_llm._api_keys is not None
                 else None
             ),
-        )
+        ))
         return {
             "stage": STAGE,
             "run_id": run_id,
