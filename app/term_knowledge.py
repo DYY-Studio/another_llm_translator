@@ -631,7 +631,7 @@ def transfer_alias_evidence(library: dict[str, Any], spec: Any) -> dict[str, str
 
 def replacement_impacts(project: Path, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     from .term_library import load_terms
-    library = load_terms(project)
+    library = load_terms(project, resolve_knowledge=False)
     if library is None:
         return []
     coverage = _range_index(source_range(segments, {s["segment_id"]: s for s in segments}, {}))
