@@ -4294,13 +4294,15 @@ async def test_web_task_manager_revalidates_queued_start(
     original_options = web_tasks_module.task_options
     second_calls = 0
 
-    def changed_options(project: Path, stage: str) -> dict[str, object]:
+    def changed_options(
+        project: Path, stage: str, **kwargs: object
+    ) -> dict[str, object]:
         nonlocal second_calls
         if project == second_project:
             second_calls += 1
         if project == second_project and second_calls == 2:
             raise UsageError("排队期间项目设置已变化")
-        return original_options(project, stage)
+        return original_options(project, stage, **kwargs)
 
     monkeypatch.setattr("app.web_tasks.task_options", changed_options)
     manager = WebTaskManager(max_active_projects=1)
@@ -4347,9 +4349,11 @@ async def test_web_task_manager_rejects_changed_selection_before_promotion(
     original_options = web_tasks_module.task_options
     second_calls = 0
 
-    def changed_options(project: Path, stage: str) -> dict[str, object]:
+    def changed_options(
+        project: Path, stage: str, **kwargs: object
+    ) -> dict[str, object]:
         nonlocal second_calls
-        options = original_options(project, stage)
+        options = original_options(project, stage, **kwargs)
         if project == second_project:
             second_calls += 1
             if second_calls == 1:
@@ -4945,13 +4949,15 @@ async def test_web_task_manager_promotion_failure_releases_slot_for_next_task(
     original_options = web_tasks_module.task_options
     second_calls = 0
 
-    def fail_second_promotion(project: Path, stage: str) -> dict[str, object]:
+    def fail_second_promotion(
+        project: Path, stage: str, **kwargs: object
+    ) -> dict[str, object]:
         nonlocal second_calls
         if project == second_project:
             second_calls += 1
             if second_calls == 2:
                 raise UsageError("promotion validation failed")
-        return original_options(project, stage)
+        return original_options(project, stage, **kwargs)
 
     monkeypatch.setattr("app.web_tasks.task_options", fail_second_promotion)
     manager = WebTaskManager(max_active_projects=1)

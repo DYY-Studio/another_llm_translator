@@ -133,9 +133,10 @@ def selection_snapshot(
     scope: Scope,
     *,
     force_all: bool = False,
+    segments: list[dict[str, object]] | None = None,
 ) -> tuple[tuple[str, str, int, int, str, str, str, str], ...]:
     files = load_source_files(project)
-    segments = load_segments(project)
+    segments = load_segments(project) if segments is None else segments
     selected = (
         [segment for segment in segments if not segment["is_empty"]]
         if force_all

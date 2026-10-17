@@ -177,6 +177,7 @@ def task_options(
     project: Path,
     stage: str,
     *,
+    segments: list[dict[str, Any]] | None = None,
     estimate_usage: bool = False,
     exclude_punctuation_only: bool = True,
     screening_enabled: bool = False,
@@ -354,7 +355,7 @@ def task_options(
         }
     if stage not in LLM_STAGES:
         raise UsageError(f"未知 Web 阶段：{stage}")
-    segments = load_segments(project)
+    segments = load_segments(project) if segments is None else segments
     nonempty = [item for item in segments if not item["is_empty"]]
     if not nonempty:
         raise UsageError("项目没有可处理的非空 Segment；请先添加源文件")
@@ -1162,16 +1163,18 @@ class WebTaskManager:
             elif run_action == "decline" and not force:
                 raise UsageError("结束自动决策 Run 时必须同时指定 force")
         elif stage != "run-all":
+            project_segments = load_segments(project)
             options = (
                 task_options(
                     project,
                     stage,
+                    segments=project_segments,
                     include_draft_translation=True,
                     include_summaries=include_summaries,
                     prompt_language=prompt_language,
                 )
                 if include_draft_translation
-                else task_options(project, stage)
+                else task_options(project, stage, segments=project_segments)
             )
             if (
                 include_draft_translation
@@ -1186,6 +1189,7 @@ class WebTaskManager:
                 project,
                 scope,
                 force_all=stage == "terminology" and scope.force,
+                segments=project_segments,
             )
             selected_count = len(selection)
             selection_snapshots = ((stage, selection),)
