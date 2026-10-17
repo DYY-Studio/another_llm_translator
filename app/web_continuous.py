@@ -1170,7 +1170,7 @@ async def run_continuous(
                     summary = await run_repetition(project, Scope(), prepared_plan=plan, run_action=actions.get(stage),
                         limiter=stage_limiters[stage], on_progress=lambda completed, failed, total: report_progress(stage, completed, failed, total),
                         on_usage=lambda current: report_usage(stage, current))
-                    draft = read_draft(project, {"run_id": summary["run_id"]})
+                    draft = (await run_blocking(lambda: read_draft(project, {"run_id": summary["run_id"]})))
                     needs_review = sum(len(group["uncertain"]) for group in draft["groups"])
                     summary = {**summary, "needs_review": needs_review}
                     step.update(_continuous_step_summary(stage, summary, run_id=summary["run_id"]))
@@ -1184,11 +1184,11 @@ async def run_continuous(
                         summary = {**summary, "applied": applied}
                         step["summary"] = dict(summary)
             elif stage == "terminology_decision":
-                plan, skip_reason = _decision_plan_or_skip(
+                plan, skip_reason = (await run_blocking(lambda: _decision_plan_or_skip(
                     project,
                     prompt_language,
                     final_review=decision_final_review,
-                )
+                )))
                 if skip_reason is not None:
                     summary = {
                         "stage": stage,
@@ -1233,16 +1233,16 @@ async def run_continuous(
                             "自动术语决策仍有人工待办，无法自动应用"
                         )
                     if apply_terminology_decision:
-                        _ensure_downstream_fingerprints_after_decision(
+                        (await run_blocking(lambda: _ensure_downstream_fingerprints_after_decision(
                             project,
                             tuple(value for value in normalized if value != "content_summary" and not (value == "translation" and include_draft_translation)),
                             scope,
                             reuse_mixed_fingerprints=reuse_mixed_fingerprints,
-                        )
-                        applied = apply_decision_draft(
+                        )))
+                        applied = (await run_blocking(lambda: apply_decision_draft(
                             project,
                             confirm_all=True,
-                        )
+                        )))
                         summary = {**summary, "applied": applied}
                     decision_run_id = str(summary.get("run_id", ""))
                     decision_total = summary.get("total_steps")
@@ -1368,13 +1368,13 @@ async def run_continuous(
             ):
                 raise IncompleteError("连续运行阶段仍有 pending 或 failed")
             if stage == "proofreading" and "polishing" in normalized:
-                applied = run_apply(
+                applied = (await run_blocking(lambda: run_apply(
                     project,
                     "proofreading",
                     Scope(),
                     allow_outdated_base=False,
                     confirmed_all=True,
-                )
+                )))
                 summary = {**summary, "applied": applied}
                 summaries[stage] = dict(summary)
                 step["summary"] = dict(summary)

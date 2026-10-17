@@ -205,6 +205,11 @@ def _public_proposal(proposal: dict[str, Any], *, detail: bool = False) -> dict[
     return result
 
 
+def _public_draft(draft: dict[str, Any]) -> dict[str, Any]:
+    return {**{key: value for key, value in draft.items() if key not in {"source_library", "source_overrides", "proposals"}},
+            "proposals": [_public_proposal(value) for value in draft["proposals"]]}
+
+
 def _review_draft(project: Path, run_id: str) -> dict[str, Any]:
     draft = _read_pending_draft(project)
     if draft is None or draft["run_id"] != run_id:
@@ -349,8 +354,7 @@ def decision_review_state(project: Path) -> dict[str, Any]:
             "applied_terms_revision": int(applied["applied_terms_revision"]),
         }
     if draft is not None:
-        draft = {**{key: value for key, value in draft.items() if key not in {"source_library", "source_overrides", "proposals"}},
-                 "proposals": [_public_proposal(value) for value in draft["proposals"]]}
+        draft = _public_draft(draft)
     return {
         "draft": draft,
         "rollback": rollback,
@@ -367,7 +371,7 @@ def save_decision_rejections(project: Path, proposal_ids: list[str]) -> dict[str
     draft = current_decision_draft(project)
     if draft is None:
         raise UsageError("没有待处理术语决策草案")
-    library = load_terms(project)
+    library = load_terms(project, resolve_knowledge=False)
     if library is None or int(library["terms_revision"]) != int(
         draft["source_terms_revision"]
     ):
@@ -387,7 +391,7 @@ def save_decision_rejections(project: Path, proposal_ids: list[str]) -> dict[str
     manifest["rejected_proposal_ids"] = rejected
     write_json(project, path, manifest)
     draft["rejected_proposal_ids"] = rejected
-    return draft
+    return _public_draft(draft)
 
 def discard_decision_draft(project: Path, *, confirm: bool) -> dict[str, Any]:
     if confirm is not True:

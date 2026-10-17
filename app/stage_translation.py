@@ -384,7 +384,7 @@ async def run_translation(
     draft_scan = None
     translation_selection = selection
     if _draft_terminology:
-        draft_scan = DraftTerminologyScan(
+        draft_scan = (await run_blocking(lambda: DraftTerminologyScan(
             project,
             metadata,
             config,
@@ -395,7 +395,7 @@ async def run_translation(
             {str(item["segment_id"]) for item in selection.reusable}
             if not scope.force
             else set(),
-        )
+        )))
         work_ids = {str(item["segment_id"]) for item in draft_scan.work}
         selection = replace(
             selection,
@@ -477,7 +477,7 @@ async def run_translation(
         context_config.get("previous_summaries", False)
         and "translation" not in config["chunking"]["cross_boundary_batching"]
     ):
-        summary_context_index = _translation_summary_context(project, segments)
+        summary_context_index = (await run_blocking(lambda: _translation_summary_context(project, segments)))
     term_match_cache = (await run_blocking(lambda: _TermMatchCache(
         library,
         term_normalization(config),
@@ -571,7 +571,7 @@ async def run_translation(
     )))
 
     if draft_scan is not None and not scope.dry_run:
-        draft_scan.start(run_id)
+        (await run_blocking(lambda: draft_scan.start(run_id)))
 
     preflight = (await run_blocking(lambda: _split_oversized_preflight(
         selection.work,
@@ -1058,18 +1058,18 @@ async def run_translation(
         failed: list[dict[str, Any]],
     ) -> None:
         if draft_scan is not None:
-            draft_scan.fail_terms(
+            (await run_blocking(lambda: draft_scan.fail_terms(
                 failed,
                 run_id,
                 "PRECHECK",
                 "context_error",
                 "单 Segment 超过模型限制且内部拆分已关闭",
                 part_original,
-            )
+            )))
         if draft_scan is not None:
             summary_items = [item for item in failed if item.get("_draft_summary")]
             for item in summary_items:
-                draft_scan.record_summary(
+                (await run_blocking(lambda: draft_scan.record_summary(
                     [item],
                     state=state,
                     request_id="PRECHECK",
@@ -1077,7 +1077,7 @@ async def run_translation(
                     original_parts=original_parts,
                     error="单 Segment 超过模型限制且内部拆分已关闭",
                     error_class="context_error",
-                )
+                )))
         for segment in failed:
             if draft_scan is not None and not segment.get("_draft_translation"):
                 continue
@@ -1103,16 +1103,16 @@ async def run_translation(
             else "context_error"
         )
         if draft_scan is not None:
-            draft_scan.fail_terms(
+            (await run_blocking(lambda: draft_scan.fail_terms(
                 items,
                 run_id,
                 "CONTEXT",
                 category,
                 message,
                 part_original,
-            )
+            )))
         if draft_scan is not None and items[0].get("_draft_summary"):
-            draft_scan.record_summary(
+            (await run_blocking(lambda: draft_scan.record_summary(
                 items,
                 state=state,
                 request_id="REQ-NONE",
@@ -1120,7 +1120,7 @@ async def run_translation(
                 original_parts=original_parts,
                 error=message,
                 error_class=category,
-            )
+            )))
         if draft_scan is not None and not items[0].get("_draft_translation"):
             report_progress()
             return
@@ -1279,7 +1279,7 @@ async def run_translation(
     async def before_finalize() -> None:
         await fail_incomplete_responses()
         if draft_scan is not None:
-            draft_scan.publish(run_id, segments)
+            (await run_blocking(lambda: draft_scan.publish(run_id, segments)))
             report_progress()
 
     def completed_count() -> int:

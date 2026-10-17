@@ -457,11 +457,11 @@ async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, co
         errors.update(oversized)
         retry = []
         for batch in batches:
-            payload, refs = knowledge_payload(batch, config["project"]["target_language"], config["terminology_decision"]["description_generation"])
+            payload, refs = (await run_blocking(lambda: knowledge_payload(batch, config["project"]["target_language"], config["terminology_decision"]["description_generation"])))
             if feedback:
                 payload["validation_feedback"] = feedback
             messages = (await run_blocking(lambda: render_messages(prompt, payload)))
-            estimate = estimate_messages(messages, float(config["execution"]["token_safety_factor"]))
+            estimate = (await run_blocking(lambda: estimate_messages(messages, float(config["execution"]["token_safety_factor"]))))
             try:
                 response, request_id = await llm.chat(
                     messages=messages, temperature=float(config["llm"]["temperature_terminology_decision"]),
@@ -486,12 +486,12 @@ async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, co
                 try:
                     if len(records) != 1:
                         raise UsageError("每个实体必须恰好返回一条 entity_knowledge")
-                    result = _knowledge_result(view, records[0], refs, config["terminology_decision"]["description_generation"])
+                    result = (await run_blocking(lambda: _knowledge_result(view, records[0], refs, config["terminology_decision"]["description_generation"])))
                 except UsageError as exc:
                     errors[root] = str(exc)
                     retry.append(view)
                     continue
-                on_result(view, result)
+                await run_blocking(on_result, view, result)
                 errors.pop(root, None)
         if not retry:
             break

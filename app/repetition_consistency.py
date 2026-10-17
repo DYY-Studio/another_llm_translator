@@ -465,10 +465,10 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
         run_id, run_dir = (await run_blocking(lambda: create_run(project, config=config, stage=STAGE, fingerprint=plan["fingerprint"],
             prompt=prompt, selected_count=total, requested_count=total, reused_count=0,
             details={"screening_enabled": plan["screening_enabled"], "exclude_punctuation_only": plan["exclude_punctuation_only"], "excluded_punctuation_groups": plan["excluded_punctuation_groups"], "prompt_language": plan["language"], "terms_revision": plan["terms_revision"], "repetition_checkpoint": 2, "repetition_protocol": PROTOCOL_VERSION, "repetition_input_fingerprint": plan["input_fingerprint"], "usage_invocation_count": 0, "draft_status": "generating", "scope": {"only_file": scope.only_file}, "choices": {}})))
-        atomic_write_text(run_dir / "repetition_terms.json", json.dumps({
+        (await run_blocking(lambda: atomic_write_text(run_dir / "repetition_terms.json", json.dumps({
             "terms_revision": plan["terms_revision"], "terms": plan["terms"],
             "groups": {g["id"]: {o["id"]: o["terms"] for o in g["occurrences"]} for g in plan["groups"]},
-        }, ensure_ascii=False, separators=(",", ":")) + "\n")
+        }, ensure_ascii=False, separators=(",", ":")) + "\n")))
     active_llm: LLMClient | None = None
     usage_recorded = False
     completed = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
@@ -542,7 +542,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                     for attempt in range(config["retry"]["format_max_attempts"] + 1):
                         messages = (await run_blocking(lambda: comparison_messages(pending, plan)))
                         if attempt:
-                            estimated = estimate_messages(messages, config["execution"]["token_safety_factor"])
+                            estimated = (await run_blocking(lambda: estimate_messages(messages, config["execution"]["token_safety_factor"])))
                         try:
                             response, request_id = await llm.chat(messages=messages, temperature=config["llm"]["temperature_translation"],
                                 estimated_input_tokens=estimated, parent_request_id=parent_request_id)
@@ -556,7 +556,8 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                                 diagnostics.retried(exc.request_id)
                             midpoint = len(pending) // 2
                             for child in (pending[:midpoint], pending[midpoint:]):
-                                child_estimate = estimate_messages((await run_blocking(lambda: comparison_messages(child, plan))), config["execution"]["token_safety_factor"])
+                                child_messages = await run_blocking(comparison_messages, child, plan)
+                                child_estimate = await run_blocking(estimate_messages, child_messages, config["execution"]["token_safety_factor"])
                                 with empty_response_split_scope(exc):
                                     await compare_batch((child, child_estimate), exc.request_id)
                             return
@@ -589,7 +590,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
             for occurrence in group["occurrences"]:
                 occurrence.pop("terms")
         draft = {"run_id": run_id, "groups": groups, "evidence": plan["evidence"], "sources": plan["sources"], "scope": {"only_file": scope.only_file}, "created_at": utc_now()}
-        atomic_write_text(draft_path(project, run_id), json.dumps(draft, ensure_ascii=False, separators=(",", ":")) + "\n")
+        (await run_blocking(lambda: atomic_write_text(draft_path(project, run_id), json.dumps(draft, ensure_ascii=False, separators=(",", ":")) + "\n")))
         usage, warnings = finalize_execution("completed")
         manifest = (await run_blocking(lambda: read_json(project, run_dir / "manifest.json")))
         manifest.pop("last_interruption", None)

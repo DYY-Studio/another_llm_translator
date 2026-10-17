@@ -684,7 +684,7 @@ async def run_terminology(
     if not create_task and (term_work or active and active.get("status") == "active"):
         _ordered_term_candidates(project, task_id)
     summary_selection = (
-        _summary_participation(project, selected) if include_summaries else set()
+        (await run_blocking(lambda: _summary_participation(project, selected))) if include_summaries else set()
     )
     if include_summaries and resume_manifest is not None:
         saved_selection = resume_manifest.get("summary_participation")
@@ -718,13 +718,13 @@ async def run_terminology(
     covered_summary_ids, reusable_summary_ids = (
         (set(), set())
         if scope.force
-        else _summary_reusable_fragments(
+        else (await run_blocking(lambda: _summary_reusable_fragments(
             project,
             summary_candidates,
             prompt_digests=summary_prompt_digests,
             model=str(config["llm"]["model"]),
             target_language=str(config["project"]["target_language"]),
-        )
+        )))
         if summary_candidates
         else (set(), set())
     )
@@ -1183,9 +1183,9 @@ async def run_terminology(
             languages[mode.value] = prompt_language_for_mode(mode)
             (await run_blocking(lambda: write_json(project, run_dir / "manifest.json", manifest)))
             if prompt_mode is mode:
-                (snapshot_dir / "prompt.txt").write_text(
+                (await run_blocking(lambda: (snapshot_dir / "prompt.txt").write_text(
                     prompt_text, encoding="utf-8"
-                )
+                )))
 
     part_success: dict[str, set[str]] = {}
     failed_originals: set[str] = set()
@@ -1500,7 +1500,7 @@ async def run_terminology(
             for item in unresolved:
                 item[_SUMMARY_MODE_KEY] = failed_class.value
             if failed_class is not TerminologyResponseMode.TERMS_ONLY:
-                observe_summary_request(unresolved)
+                (await run_blocking(lambda: observe_summary_request(unresolved)))
             payload = (await run_blocking(lambda: payload_builder(unresolved)))
             actual_mode, requirements, prompt_text = (await run_blocking(lambda: prompt_details_for_items(
                 unresolved
@@ -1518,11 +1518,11 @@ async def run_terminology(
                     parent_request_id=parent_request_id,
                 )
                 source_refs = tuple(str(index) for index, _ in enumerate(unresolved, 1))
-                parsed = parse_terminology_response(
+                parsed = (await run_blocking(lambda: parse_terminology_response(
                     response.content,
                     mode=failed_class,
                     source_refs=source_refs,
-                )
+                )))
             except FatalExternalError:
                 raise
             except ContextLengthError as exc:
@@ -2055,15 +2055,15 @@ async def run_terminology(
             runtime_split_observer=observe_summary_split,
         )
     except asyncio.CancelledError:
-        update_summary_run_status("interrupted")
+        (await run_blocking(lambda: update_summary_run_status("interrupted")))
         raise
     except Exception:
-        update_summary_run_status("failed")
+        (await run_blocking(lambda: update_summary_run_status("failed")))
         raise
     failed = len(failed_originals)
     all_nonempty = [segment for segment in segments if not segment["is_empty"]]
     if include_summaries:
-        update_summary_run_status("completed" if failed == 0 else "failed")
+        (await run_blocking(lambda: update_summary_run_status("completed" if failed == 0 else "failed")))
     pending_result = (
         len(work) - len(completed_original_ids) - failed
         if include_summaries

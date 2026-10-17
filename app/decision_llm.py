@@ -1,5 +1,6 @@
 """LLM-backed Choice decisions using the shared LLM transport and prompt resources."""
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import asyncio
 import hashlib
@@ -123,7 +124,7 @@ async def request_decision(client: DecisionClient, body: dict[str, Any], estimat
                     estimated_input_tokens=estimated, request_id=current_id, json_schema=body["json_schema"])
                 try:
                     data = {**json.loads(response.content), "model": client.preset["model"]}
-                    answers = client._parse(data, questions)
+                    answers = (await run_blocking(lambda: client._parse(data, questions)))
                 except (ValueError, TypeError, KeyError) as exc:
                     record["error"] = "response_parse_error"
                     await llm.finish_decision_debug("response_parse_error")

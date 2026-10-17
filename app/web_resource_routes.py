@@ -966,9 +966,10 @@ def register_resource_routes(
             from .web_chatgpt_routes import require_plan_session
             require_plan_session(request)
             connection = ChatGPTConnection()
-            api_keys = (await connection.access_token(connection.identity()),)
+            identity = await run_blocking(connection.identity)
+            api_keys = (await connection.access_token(identity),)
         else:
-            api_keys = resolve_api_keys(preset.definition["credential"])
+            api_keys = await run_blocking(resolve_api_keys, preset.definition["credential"])
         if key_index > len(api_keys):
             raise UsageError("key_index 超出 API Key 范围")
         api_key = api_keys[key_index - 1]
@@ -1108,10 +1109,10 @@ def register_resource_routes(
         password = auth.get("password")
         if password is not None and not isinstance(password, str):
             raise UsageError("auth.password 必须是字符串")
-        if required and not password and read_lan_password() is None:
+        if required and not password and (await run_blocking(read_lan_password)) is None:
             raise UsageError("开启认证时必须设置密码")
         if password:
-            save_lan_password(password)
+            await run_blocking(save_lan_password, password)
         if not enabled:
             app.state.sessions.clear()
         next_config = {

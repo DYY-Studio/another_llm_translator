@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import re
 import uuid
@@ -783,23 +784,23 @@ async def _request_batch(
                 for normalized in sorted(accepted)
             ]
             request_anchors = [*anchors, *accepted_anchors]
-            payload = _make_payload(
+            payload = (await run_blocking(lambda: _make_payload(
                 phase=phase,
                 target_language=str(config["project"]["target_language"]),
                 focus=request_focus,
                 anchors=request_anchors,
                 evidence=_compact_anchor_evidence(evidence, request_anchors),
                 conflicts=conflicts,
-            )
-            feedback = validation_feedback(previous_errors, target_ids, language=prompt_language)
+            )))
+            feedback = (await run_blocking(lambda: validation_feedback(previous_errors, target_ids, language=prompt_language)))
             if feedback:
                 payload["validation_repair"] = feedback
             messages = render_messages(prompt, payload)
             request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
             last_request_id = request_id
-            estimate = estimate_messages(
+            estimate = (await run_blocking(lambda: estimate_messages(
                 messages, float(config["execution"]["token_safety_factor"])
-            )
+            )))
             _, hard_limit, context_limit, itpm_limit = _request_limits(config)
             if estimate > hard_limit:
                 raise RequestSizeError(
@@ -820,7 +821,7 @@ async def _request_batch(
                 normalized_redundant,
                 errors,
                 batch_error,
-            ) = _analyze_decisions(
+            ) = (await run_blocking(lambda: _analyze_decisions(
                 response.content,
                 request_focus,
                 visible_states=[*request_focus, *request_anchors],
@@ -838,7 +839,7 @@ async def _request_batch(
                 phase=phase,
                 conflicts=conflicts,
                 descriptions={item["normalized"]: item["description"] for item in payload["terms"]},
-            )
+            )))
             if ignored_read_only:
                 llm.logger.warning(
                     "ignored read-only terminology decisions request=%s count=%d normalized=%s",

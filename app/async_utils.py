@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from functools import partial
-from typing import Any, TypeVar
+from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
+from functools import partial, wraps
+from typing import Any, ParamSpec, TypeVar
 
 T = TypeVar("T")
 
@@ -30,15 +31,15 @@ async def _run_blocking(function: Callable[..., T], /, *args: Any, **kwargs: Any
 
 # Planning and response commits belonging to one stage share mutable per-Run
 # indexes. Serialize their worker jobs; independent projects remain concurrent.
-from contextvars import ContextVar
-from functools import wraps
-
 _worker_lock: ContextVar[asyncio.Lock | None] = ContextVar("stage_worker_lock", default=None)
 
 
-def blocking_scope(function):
+P = ParamSpec("P")
+
+
+def blocking_scope(function: Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[T]]:
     @wraps(function)
-    async def wrapped(*args, **kwargs):
+    async def wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
         if _worker_lock.get() is not None:
             return await function(*args, **kwargs)
         token = _worker_lock.set(asyncio.Lock())

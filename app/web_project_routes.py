@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import asyncio
 import json
@@ -181,7 +182,8 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
                 raise UsageError(f"不支持的输入文件：{name}") from None
             target = upload_root.joinpath(*PurePosixPath(name).parts)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(await upload.read())
+            content = await upload.read()
+            await run_blocking(target.write_bytes, content)
             inputs.append(str(target))
             original_names.append(name)
         for relative, source in server_entries:

@@ -413,7 +413,8 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     proposal_id = draft["proposals"][0]["proposal_id"]
     rejected = api.put("/api/v1/projects/terms/terms/decision/rejections", json={"rejected_proposal_ids": [proposal_id]})
     assert rejected.status_code == 200
-    assert rejected.json()["draft"]["proposals"][0]["knowledge_evidence"] == draft["proposals"][0]["knowledge_evidence"]
+    assert rejected.json()["draft"]["proposals"][0]["knowledge_evidence"] == {}
+    assert "knowledge_evidence" not in draft["proposals"][0]
     restored = api.put("/api/v1/projects/terms/terms/decision/rejections", json={"rejected_proposal_ids": []})
     assert restored.status_code == 200
     assert restored.json()["draft"]["rejected_proposal_ids"] == []

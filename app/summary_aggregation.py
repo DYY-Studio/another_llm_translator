@@ -347,13 +347,13 @@ async def aggregate_summaries(
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     boundaries = _boundaries(selected)
-    grouped = _current_segments(project)
+    grouped = (await run_blocking(lambda: _current_segments(project)))
     checked: list[tuple[tuple[str, str], list[dict[str, Any]], list[dict[str, Any]]]] = []
     for boundary in boundaries:
         current = grouped.get(boundary)
         if not current:
             raise UsageError(f"未知或空内容边界：{boundary[0]}/{boundary[1]}")
-        fragments = _validate_fragments(project, boundary, current)
+        fragments = (await run_blocking(lambda: _validate_fragments(project, boundary, current)))
         checked.append((boundary, current, fragments))
 
     config = (await run_blocking(lambda: load_project_config(project, stage="content_summary")))
@@ -503,9 +503,9 @@ async def aggregate_summaries(
                     "summaries": aggregation_summaries(children),
                 }
                 messages = (await run_blocking(lambda: render_messages(prompt, payload)))
-                estimated = estimate_messages(
+                estimated = (await run_blocking(lambda: estimate_messages(
                     messages, config["execution"]["token_safety_factor"]
-                )
+                )))
                 limit = (
                     config["llm"]["context_window_tokens"]
                     - config["llm"]["context_safety_margin_tokens"]
@@ -528,11 +528,11 @@ async def aggregate_summaries(
                         },
                     )
                 calls += 1
-                parsed = parse_terminology_response(
+                parsed = (await run_blocking(lambda: parse_terminology_response(
                     response.content,
                     mode=TerminologyResponseMode.SUMMARY_ONLY,
                     source_refs=tuple(str(index + 1) for index in range(len(children))),
-                )
+                )))
                 if not parsed.complete or not parsed.summaries:
                     raise UsageError(
                         "聚合失败：LLM 响应缺少有效 summary 或 end"
