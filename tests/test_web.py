@@ -4138,47 +4138,53 @@ async def test_web_task_manager_queues_projects_fifo_until_slot_is_free(
     _, third_project = make_project(tmp_path / "third")
     entered: list[Path] = []
     release = asyncio.Event()
+    both_entered = asyncio.Event()
 
     async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
         entered.append(project)
+        if len(entered) == 2:
+            both_entered.set()
         await release.wait()
         return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
 
     monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
     manager = WebTaskManager(max_active_projects=2)
-    first = await manager.start(
-        first_project,
-        "translation",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-    second = await manager.start(
-        second_project,
-        "translation",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-    third = await manager.start(
-        third_project,
-        "translation",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-    await asyncio.sleep(0)
-    assert entered == [first_project, second_project]
-    assert manager.get(third["task_id"])["status"] == "queued"
+    started = []
 
-    release.set()
-    await asyncio.gather(
-        manager.tasks[first["task_id"]].asyncio_task,
-        manager.tasks[second["task_id"]].asyncio_task,
-    )
-    assert manager.tasks[third["task_id"]].asyncio_task is not None
-    await manager.tasks[third["task_id"]].asyncio_task
-    assert entered == [first_project, second_project, third_project]
+    async def drain_tasks() -> None:
+        while True:
+            tasks = [
+                manager.tasks[item["task_id"]].asyncio_task
+                for item in started
+                if manager.tasks[item["task_id"]].asyncio_task is not None
+                and not manager.tasks[item["task_id"]].asyncio_task.done()
+            ]
+            if not tasks:
+                return
+            await asyncio.gather(*tasks)
+
+    try:
+        for project in (first_project, second_project, third_project):
+            started.append(await manager.start(
+                project,
+                "translation",
+                scope=Scope(),
+                reuse_mixed_fingerprints=False,
+                run_action=None,
+            ))
+        third = started[2]
+        await asyncio.wait_for(both_entered.wait(), timeout=5)
+        assert entered == [first_project, second_project]
+        assert manager.get(third["task_id"])["status"] == "queued"
+
+        release.set()
+        await drain_tasks()
+        assert manager.tasks[third["task_id"]].asyncio_task is not None
+        assert entered == [first_project, second_project, third_project]
+        assert manager.get(third["task_id"])["status"] == "completed"
+    finally:
+        release.set()
+        await drain_tasks()
 
 
 @pytest.mark.asyncio
