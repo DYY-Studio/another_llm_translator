@@ -255,8 +255,8 @@ def add_unsourced(knowledge: dict[str, Any], owner: str, text: str, origin: str)
 def save_items(project: Path, library: dict[str, Any], normalized: str, items: Any, *,
                all_evidence: dict[str, dict[str, Any]] | None = None,
                description_generation: str | None = None) -> None:
-    known = all_evidence if all_evidence is not None else evidence(project, library)
-    view = entity_view(project, library, normalized, all_evidence=known)
+    view = entity_view(project, library, normalized, all_evidence=all_evidence)
+    known = all_evidence if all_evidence is not None else {fragment["id"]: fragment for fragment in view["fragments"]}
     clean = validate_items(view, items, allow_manual=True)
     knowledge = require_knowledge(library)
     for item in clean:
@@ -288,17 +288,17 @@ def confirm_keep(project: Path, library: dict[str, Any], normalized: str, *,
 
 def applied_descriptions(library: dict[str, Any]) -> None:
     knowledge = require_knowledge(library)
+    terms = {term["normalized"]: term for term in library["terms"]}
     for root, members in entity_members(library).items():
         saved = knowledge["entities"].get(root)
         items = saved["items"] if saved else []
-        for term in library["terms"]:
-            if term["normalized"] in members:
-                term.update(description="；".join(item["text"] for item in items),
+        for member in members:
+            terms[member].update(description="；".join(item["text"] for item in items),
                     entity_key=root, knowledge_status=None, description_items=items)
 
 
 def project_descriptions(project: Path, library: dict[str, Any], *,
-                         all_evidence: dict[str, dict[str, Any]] | None = None) -> None:
+                         all_evidence: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
     known = all_evidence if all_evidence is not None else evidence(project, library)
     terms = {term["normalized"]: term for term in library["terms"]}
     groups = entity_members(library)
@@ -505,7 +505,7 @@ def update_entity(project: Path, payload: dict[str, Any]) -> dict[str, Any]:
     from .term_library import load_terms
     from .sqlite_storage import read_json, write_terminology_publication
     with project_write_lock(project):
-        library = load_terms(project)
+        library = load_terms(project, resolve_knowledge=False)
         if library is None:
             raise UsageError("没有已发布术语库")
         if type(payload.get("expected_revision")) is not int or payload["expected_revision"] != library["terms_revision"]:
@@ -513,8 +513,8 @@ def update_entity(project: Path, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = payload.get("normalized")
         if not isinstance(normalized, str):
             raise UsageError("实体术语标识必须是字符串")
-        known = evidence(project, library)
-        view = entity_view(project, library, normalized, all_evidence=known)
+        view = entity_view(project, library, normalized)
+        known = {fragment["id"]: fragment for fragment in view["fragments"]}
         action = payload.get("action")
         fields = {"save_items": {"items"}, "confirm_keep": set(), "set_fragment_enabled": {"fragment_id", "enabled"}}
         if not isinstance(action, str) or action not in fields:
@@ -540,7 +540,7 @@ def update_entity(project: Path, payload: dict[str, Any]) -> dict[str, Any]:
             raise UsageError("不支持的实体说明操作")
         library["terms_revision"] += 1
         library["record_id"] = f'TERMS-{library["terms_revision"]}'
-        project_descriptions(project, library, all_evidence=known)
+        applied_descriptions(library)
         overrides = read_json(project, project / "terminology" / "overrides.json")
         write_terminology_publication(project, terms=library, overrides=overrides)
         return library

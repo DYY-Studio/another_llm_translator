@@ -1187,7 +1187,7 @@ class WebStore:
                     related_normalized=related_normalized,
                 )
             component = selected_component | related_component
-            library = load_terms(self.project)
+            library = load_terms(self.project, resolve_knowledge=False)
             current = {
                 str(item["normalized"]): dict(item)
                 for item in (library or {}).get("terms", [])
@@ -1321,7 +1321,7 @@ class WebStore:
                     )
                 seen.add(normalized_value)
                 additions.append(str(value))
-            library = load_terms(self.project)
+            library = load_terms(self.project, resolve_knowledge=False)
             current = {
                 str(item["normalized"]): dict(item)
                 for item in (library or {}).get("terms", [])
@@ -1457,7 +1457,7 @@ class WebStore:
             overrides=[overrides[key] for key in sorted(overrides)],
             origin=origin,
         )
-        from .term_knowledge import empty_knowledge, remap_owner, transfer_alias_evidence, save_items, project_descriptions, evidence
+        from .term_knowledge import empty_knowledge, remap_owner, transfer_alias_evidence, save_items, applied_descriptions
         term_record = record_header(
             "terminology_library",
             self.project_id,
@@ -1476,15 +1476,14 @@ class WebStore:
         if owner_move is not None:
             remap_owner(term_record, *owner_move)
         transfer_alias_evidence(term_record, term_normalization(self.config))
-        known = evidence(self.project, term_record)
         if description_items is not None:
             assert knowledge_target is not None
             if knowledge_target not in {item["normalized"] for item in terms}:
                 archived = {**term_record, "terms": [*terms, {"normalized": knowledge_target, "group_primary": None}]}
-                save_items(self.project, archived, knowledge_target, description_items, all_evidence=known)
+                save_items(self.project, archived, knowledge_target, description_items)
             else:
-                save_items(self.project, term_record, knowledge_target, description_items, all_evidence=known)
-        project_descriptions(self.project, term_record, all_evidence=known)
+                save_items(self.project, term_record, knowledge_target, description_items)
+        applied_descriptions(term_record)
         from .sqlite_storage import write_terminology_publication
         write_terminology_publication(self.project, terms=term_record, overrides=override_record)
         return self.terms()
@@ -1505,7 +1504,7 @@ class WebStore:
         ):
             raise UsageError("normalized 必须是非空字符串数组")
         values = tuple(dict.fromkeys(raw_values))
-        library = load_terms(self.project)
+        library = load_terms(self.project, resolve_knowledge=False)
         current = {
             str(item["normalized"]): dict(item)
             for item in (library or {}).get("terms", [])
@@ -1646,7 +1645,7 @@ class WebStore:
                             group_primary=target_primary,
                         )
 
-            library = load_terms(self.project)
+            library = load_terms(self.project, resolve_knowledge=False)
             current = {
                 str(item["normalized"]): dict(item)
                 for item in (library or {}).get("terms", [])
@@ -1734,7 +1733,7 @@ class WebStore:
             normalized = payload.get("normalized")
             if not isinstance(normalized, str) or not normalized:
                 raise UsageError("normalized 必须是非空字符串")
-            library = load_terms(self.project)
+            library = load_terms(self.project, resolve_knowledge=False)
             current = {
                 str(item["normalized"]): dict(item)
                 for item in (library or {}).get("terms", [])
@@ -1789,7 +1788,7 @@ class WebStore:
         if not isinstance(normalized, str) or not normalized:
             raise UsageError("normalized 必须是非空字符串")
         with project_write_lock(self.project):
-            library = load_terms(self.project)
+            library = load_terms(self.project, resolve_knowledge=False)
             current = {
                 str(item["normalized"]): dict(item)
                 for item in (library or {}).get("terms", [])
@@ -1862,7 +1861,7 @@ class WebStore:
         preferred = self._term_value(payload, "preferred_translation")
         disabled = bool(payload.get("disabled", False))
 
-        library = load_terms(self.project)
+        library = load_terms(self.project, resolve_knowledge=False)
         if description_items is not None and (
             type(payload.get("expected_revision")) is not int
             or payload["expected_revision"] != int((library or {}).get("terms_revision", 0))
