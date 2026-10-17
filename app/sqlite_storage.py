@@ -1875,6 +1875,7 @@ def read_content_summaries(
     part_id: str | None = None,
     kind: str | None = None,
     status: str | None = None,
+    summary_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if bool(file_id) != bool(part_id):
         raise ProjectError("file_id 与 part_id 必须同时提供")
@@ -1887,6 +1888,9 @@ def read_content_summaries(
         connection.execute("BEGIN")
         clauses = []
         params: list[Any] = []
+        if summary_id is not None:
+            clauses.append("summary_id = ?")
+            params.append(summary_id)
         if file_id:
             clauses.extend(["file_id = ?", "part_id = ?"])
             params.extend([file_id, part_id])
@@ -1915,6 +1919,24 @@ def read_content_summaries(
         return [_hydrate_summary(row, project_id, texts) for row in rows]
     except (sqlite3.Error, json.JSONDecodeError) as exc:
         raise StorageError(f"无法读取内容概括：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def read_summary_headers(project: Path) -> list[dict[str, Any]]:
+    connection = _with_db(project)
+    try:
+        rows = connection.execute("""SELECT summary_id AS record_id, kind, file_id, part_id,
+            status, text IS NOT NULL AS has_text, source_changed, model, run_id, created_at, updated_at,
+            json_extract(payload_json, '$.provenance.origin') AS origin,
+            json_extract(payload_json, '$.error_class') AS error_class,
+            json_extract(payload_json, '$.error_message') AS error_message,
+            (SELECT COUNT(DISTINCT COALESCE(json_extract(value, '$.original_segment_id'),
+                json_extract(value, '$.segment_id'))) FROM json_each(source_range_json, '$.segments')) AS covered_segment_count
+            FROM content_summaries ORDER BY file_id, part_id, kind, updated_at, summary_id""").fetchall()
+        return [{**dict(row), "has_text": bool(row["has_text"]), "source_changed": bool(row["source_changed"])} for row in rows]
+    except sqlite3.Error as exc:
+        raise StorageError(f"无法读取内容概括列表：{project}: {exc}") from exc
     finally:
         connection.close()
 

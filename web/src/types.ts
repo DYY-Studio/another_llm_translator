@@ -62,6 +62,12 @@ export interface SummaryArtifact {
   updated_at?: string;
 }
 
+export type SummaryArtifactHeader = Omit<SummaryArtifact, "text" | "refs" | "source_range" | "provenance" | "source_digest" | "input_digest" | "prompt_digest" | "record_type"> & {
+  has_text: boolean;
+  covered_segment_count: number;
+  origin: string | null;
+};
+
 export interface SummariesResponse {
   participation: Array<{
     file_id: string;
@@ -69,7 +75,7 @@ export interface SummariesResponse {
     selected: boolean;
   }>;
   boundaries: SummaryBoundary[];
-  artifacts: SummaryArtifact[];
+  artifacts: SummaryArtifactHeader[];
 }
 
 export type SettingsField =

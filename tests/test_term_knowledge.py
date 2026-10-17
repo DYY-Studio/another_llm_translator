@@ -292,8 +292,10 @@ async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(
     for proposal in current_decision_draft(project)["proposals"]:
         refs = {key for aggregate in proposal["knowledge_after"].values()
                 for item in aggregate["items"] for key in item["fragment_ids"]}
-        assert set(proposal["knowledge_evidence"]) == refs
-        for fragment in proposal["knowledge_evidence"].values():
+        from app.term_decision_drafts import decision_fragment_detail
+        assert "knowledge_evidence" not in proposal
+        for fragment_id in refs:
+            fragment = decision_fragment_detail(project, run_id, fragment_id)
             assert all(set(r) == {"segment_id", "file_id", "part_id", "start", "end"}
                        for r in fragment["source_range"])
     from collections import Counter

@@ -2483,9 +2483,15 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
         "/api/v1/projects/decision-demo/terms/decision"
     )
     assert review.status_code == 200
-    api_sample = review.json()["draft"]["proposals"][0]["evidence"]["alice"][
-        "samples"
-    ][0]
+    public = review.json()["draft"]
+    assert "source_library" not in public and "source_overrides" not in public
+    proposal = public["proposals"][0]
+    assert proposal["evidence"] == {} and proposal["knowledge_evidence"] == {}
+    detail = TestClient(create_app(projects_root=project.parent)).get(
+        f"/api/v1/projects/decision-demo/terms/decision/{draft['run_id']}/proposals/{proposal['proposal_id']}"
+    )
+    assert detail.status_code == 200
+    api_sample = detail.json()["evidence"]["alice"]["samples"][0]
     assert api_sample["file_id"] == durable_sample["file_id"]
     assert api_sample["part_id"] == durable_sample["part_id"]
     assert api_sample["segment_id"] == durable_sample["segment_id"]

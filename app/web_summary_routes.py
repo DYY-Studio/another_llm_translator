@@ -16,6 +16,7 @@ from .project import load_segments
 from .sqlite_storage import (
     clear_content_summaries,
     read_content_summaries,
+    read_summary_headers,
     read_summary_participation,
     write_summary_participation,
 )
@@ -68,39 +69,24 @@ def _summary_view(root: Path) -> dict[str, Any]:
         key = (str(segment["file_id"]), str(segment["part_id"]))
         boundaries[key] = boundaries.get(key, 0) + 1
         current_by_boundary.setdefault(key, []).append(segment)
-    artifacts = read_content_summaries(root)
-    artifacts_by_boundary: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for artifact in artifacts:
-        boundary = (str(artifact["file_id"]), str(artifact["part_id"]))
-        artifacts_by_boundary.setdefault(boundary, []).append(artifact)
-    visible_artifacts = []
-    for artifact in artifacts:
-        boundary = (str(artifact["file_id"]), str(artifact["part_id"]))
-        assessment = (
-            assess_full_summary(
-                artifact,
-                current_by_boundary.get(boundary, []),
-                artifacts_by_boundary.get(boundary, []),
-            )
-            if artifact.get("kind") == "full"
-            else None
-        )
-        visible_artifacts.append(
-            {
-                **artifact,
-                "source_range": {
-                    **artifact["source_range"],
-                    "segments": [
-                        {key: item[key] for key in ("segment_id", "original_segment_id") if key in item}
-                        for item in artifact["source_range"].get("segments", [])
-                    ],
-                },
-                "expired": assessment.expired if assessment is not None else False,
-                "expiry_reason": (
-                    assessment.expiry_reason if assessment is not None else None
-                ),
-            }
-        )
+    headers = read_summary_headers(root)
+    # Assess one boundary at a time so the list never retains the book's
+    # hydrated source ranges and dependency graph together.
+    by_boundary: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for header in headers:
+        by_boundary.setdefault((header["file_id"], header["part_id"]), []).append(header)
+    for boundary, values in by_boundary.items():
+        fulls = [value for value in values if value["kind"] == "full"]
+        if fulls:
+            artifacts = read_content_summaries(root, file_id=boundary[0], part_id=boundary[1])
+            by_id = {artifact["record_id"]: artifact for artifact in artifacts}
+            for header in fulls:
+                assessment = assess_full_summary(by_id[header["record_id"]], current_by_boundary.get(boundary, []), artifacts)
+                header.update(expired=assessment.expired, expiry_reason=assessment.expiry_reason)
+        for header in values:
+            header.setdefault("expired", False)
+            header.setdefault("expiry_reason", None)
+    visible_artifacts = headers
     return {
         "participation": [
             {
@@ -132,9 +118,25 @@ def register_summary_routes(
     del projects_root, app_root
 
     @app.get("/api/v1/projects/{name}/summaries")
-    async def summaries(name: str) -> dict[str, Any]:
+    def summaries(name: str):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(_summary_view(project(name)))
+
+    @app.get("/api/v1/projects/{name}/summaries/{summary_id}")
+    def summary_detail(name: str, summary_id: str) -> dict[str, Any]:
         root = project(name)
-        return await asyncio.to_thread(_summary_view, root)
+        matches = read_content_summaries(root, summary_id=summary_id)
+        if not matches:
+            raise UsageError("内容概括不存在")
+        artifact = matches[0]
+        siblings = read_content_summaries(root, file_id=artifact["file_id"], part_id=artifact["part_id"])
+        if artifact["kind"] == "full":
+            current = [item for item in load_segments(root) if item["file_id"] == artifact["file_id"] and item["part_id"] == artifact["part_id"]]
+            assessment = assess_full_summary(artifact, current, siblings)
+            artifact.update(expired=assessment.expired, expiry_reason=assessment.expiry_reason)
+        else:
+            artifact.update(expired=False, expiry_reason=None)
+        return artifact
 
     @app.put("/api/v1/projects/{name}/summaries/participation")
     def save_participation(

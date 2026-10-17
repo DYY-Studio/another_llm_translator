@@ -135,8 +135,19 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
         return WebStore(project(name)).delete_terms(payload)
 
     @app.get("/api/v1/projects/{name}/terms/decision")
-    def get_term_decision(name: str) -> dict[str, Any]:
-        return decision_review_state(project(name))
+    def get_term_decision(name: str):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(decision_review_state(project(name)))
+
+    @app.get("/api/v1/projects/{name}/terms/decision/{run_id}/proposals/{proposal_id}")
+    def get_decision_proposal(name: str, run_id: str, proposal_id: str) -> dict[str, Any]:
+        from .term_decision_drafts import decision_proposal_detail
+        return decision_proposal_detail(project(name), run_id, proposal_id)
+
+    @app.get("/api/v1/projects/{name}/terms/decision/{run_id}/fragments/{fragment_id}")
+    def get_decision_fragment(name: str, run_id: str, fragment_id: str) -> dict[str, Any]:
+        from .term_decision_drafts import decision_fragment_detail
+        return decision_fragment_detail(project(name), run_id, fragment_id)
 
     @app.put("/api/v1/projects/{name}/terms/decision/rejections")
     def put_term_decision_rejections(

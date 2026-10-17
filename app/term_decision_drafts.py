@@ -189,23 +189,51 @@ def _read_pending_draft(project: Path) -> dict[str, Any] | None:
     return None
 
 def current_decision_draft(project: Path) -> dict[str, Any] | None:
+    return _read_pending_draft(project)
+
+
+def _public_proposal(proposal: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
+    result = {key: value for key, value in proposal.items() if key not in {
+        "knowledge_before", "knowledge_after", "knowledge_evidence", "evidence", "knowledge_owner_moves"}}
+    result["before"] = [{key: value for key, value in state.items() if key != "description_items"} for state in proposal["before"]]
+    result["after"] = [{key: value for key, value in state.items() if key != "description_items"} for state in proposal["after"]]
+    for side in ("knowledge_before", "knowledge_after"):
+        result[side] = {root: {"items": aggregate["items"]} if aggregate else None
+                        for root, aggregate in proposal.get(side, {}).items()} if detail else {}
+    result["evidence"] = proposal.get("evidence", {}) if detail else {}
+    result["knowledge_evidence"] = {}
+    return result
+
+
+def _review_draft(project: Path, run_id: str) -> dict[str, Any]:
     draft = _read_pending_draft(project)
-    if draft is None:
-        return None
-    refs = {key for proposal in draft["proposals"]
-            for aggregate in [*proposal.get("knowledge_before", {}).values(), *proposal.get("knowledge_after", {}).values()]
-            if aggregate for item in aggregate["items"] for key in item["fragment_ids"]}
-    from .term_knowledge import evidence as knowledge_evidence, navigation_fragment
-    fragments = knowledge_evidence(project, draft["source_library"]) if refs else {}
-    for proposal in draft["proposals"]:
-        proposal_refs = {key for aggregate in [*proposal.get("knowledge_before", {}).values(), *proposal.get("knowledge_after", {}).values()]
-                         if aggregate for item in aggregate["items"] for key in item["fragment_ids"]}
-        proposal["knowledge_evidence"] = {}
-        for key in proposal_refs:
-            if key not in fragments:
-                continue
-            proposal["knowledge_evidence"][key] = navigation_fragment(fragments[key])
+    if draft is None or draft["run_id"] != run_id:
+        raise UsageError("术语决策草案已变化，请刷新后重试")
     return draft
+
+
+def decision_proposal_detail(project: Path, run_id: str, proposal_id: str) -> dict[str, Any]:
+    draft = _review_draft(project, run_id)
+    proposal = next((value for value in draft["proposals"] if value["proposal_id"] == proposal_id), None)
+    if proposal is None:
+        raise UsageError("术语决策建议不存在")
+    return _public_proposal(proposal, detail=True)
+
+
+def decision_fragment_detail(project: Path, run_id: str, fragment_id: str) -> dict[str, Any]:
+    draft = _review_draft(project, run_id)
+    refs = {key for proposal in draft["proposals"]
+            for side in ("knowledge_before", "knowledge_after")
+            for aggregate in proposal.get(side, {}).values() if aggregate
+            for item in aggregate["items"] for key in item["fragment_ids"]}
+    if fragment_id not in refs:
+        raise UsageError("片段不属于当前决策草案")
+    from .term_knowledge import evidence, navigation_fragment
+    known = evidence(project, draft["source_library"], fragment_ids={fragment_id})
+    if fragment_id not in known:
+        raise UsageError("草案引用的实体片段已缺失")
+    return navigation_fragment(known[fragment_id])
+
 
 def _decision_needs_review(
     project: Path, manifest: dict[str, Any]
@@ -320,6 +348,9 @@ def decision_review_state(project: Path) -> dict[str, Any]:
             "run_id": str(applied["run_id"]),
             "applied_terms_revision": int(applied["applied_terms_revision"]),
         }
+    if draft is not None:
+        draft = {**{key: value for key, value in draft.items() if key not in {"source_library", "source_overrides", "proposals"}},
+                 "proposals": [_public_proposal(value) for value in draft["proposals"]]}
     return {
         "draft": draft,
         "rollback": rollback,

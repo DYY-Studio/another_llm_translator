@@ -6,7 +6,7 @@ import { api, apiErrorFromResponse } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import { nativeBridgeAvailable, saveExport } from "../native";
 import { useClassicSelection } from "../useClassicSelection";
-import type { ProjectOverview, RunDecision, Segment, SummariesResponse, SummaryArtifact, SummaryBoundary, TaskOptions, TaskState } from "../types";
+import type { ProjectOverview, RunDecision, Segment, SummariesResponse, SummaryArtifact, SummaryArtifactHeader, SummaryBoundary, TaskOptions, TaskState } from "../types";
 import { fetchSummaries, queryKeys } from "../queries";
 import {
   boundarySelectionState,
@@ -62,10 +62,10 @@ function asSelectionBoundary(value: SummaryBoundary): SelectionBoundary {
 }
 
 function artifactFor(
-  artifacts: SummaryArtifact[],
+  artifacts: SummaryArtifactHeader[],
   boundary: SummaryBoundary | null,
   kind: SummaryArtifact["kind"],
-): SummaryArtifact | null {
+): SummaryArtifactHeader | null {
   if (!boundary) return null;
   const values = artifacts.filter((item) => (
     item.file_id === boundary.file_id
@@ -82,7 +82,7 @@ function artifactFor(
   return values[values.length - 1] ?? null;
 }
 
-function hasUsableArtifact(artifacts: SummaryArtifact[], boundary: SummaryBoundary, kind: SummaryArtifact["kind"]): boolean {
+function hasUsableArtifact(artifacts: SummaryArtifactHeader[], boundary: SummaryBoundary, kind: SummaryArtifact["kind"]): boolean {
   const artifact = artifactFor(artifacts, boundary, kind);
   if (!artifact) return false;
   if (kind === "full") return summaryArtifactHasUsableFull(artifact, boundary.segment_count);
@@ -333,7 +333,7 @@ function SelectionDialog({
 }: {
   boundaries: SummaryBoundary[];
   selected: Set<string>;
-  artifacts: SummaryArtifact[];
+  artifacts: SummaryArtifactHeader[];
   names: Map<string, string>;
   language: Language;
   path?: string;
@@ -793,7 +793,7 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
             <p className="summary-focused-boundary">{boundaryText(focused, names, language)}</p>
             <div className="summary-tabs" role="tablist" aria-label={translate("terms.summaryTabs", language)}><button type="button" role="tab" id="summary-full-tab" aria-selected={tab === "full"} aria-controls="summary-full-panel" className={tab === "full" ? "active" : ""} onClick={() => setTab("full")}>{translate("terms.summaryFullTab", language)}</button><button type="button" role="tab" id="summary-fragment-tab" aria-selected={tab === "fragment"} aria-controls="summary-fragment-panel" className={tab === "fragment" ? "active" : ""} onClick={() => setTab("fragment")}>{translate("terms.summaryFragmentTab", language)} {fragments.length}</button></div>
             <div id={tab === "full" ? "summary-full-panel" : "summary-fragment-panel"} role="tabpanel" aria-labelledby={tab === "full" ? "summary-full-tab" : "summary-fragment-tab"}>
-              {tab === "full" ? <SummaryArtifactCard artifact={full} boundary={focused} language={language} empty={translate("terms.summaryNoFull", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void openSummaryRun("full")} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} /> : <div className="summary-fragment-list">{fragments.map((artifact) => <SummaryArtifactCard artifact={artifact} boundary={focused} language={language} key={artifact.record_id} empty={translate("terms.summaryNoFragments", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void openSummaryRun("fragment")} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} />)}{!fragments.length && <p className="summary-empty">{translate("terms.summaryNoFragments", language)}</p>}</div>}
+              {tab === "full" ? <SummaryArtifactCard project={project} artifact={full} boundary={focused} language={language} empty={translate("terms.summaryNoFull", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void openSummaryRun("full")} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} /> : <div className="summary-fragment-list">{fragments.map((artifact) => <SummaryArtifactCard project={project} artifact={artifact} boundary={focused} language={language} key={artifact.record_id} empty={translate("terms.summaryNoFragments", language)} onSource={(segmentIds) => { setSourceSegmentIds(segmentIds); setSourceOpen(true); }} onRetry={() => void openSummaryRun("fragment")} retryDisabled={participationSaving || busy || activeSummaryTask || !participation.has(boundaryKey(focused.file_id, focused.part_id))} />)}{!fragments.length && <p className="summary-empty">{translate("terms.summaryNoFragments", language)}</p>}</div>}
             </div>
           </>}
         </main>
@@ -820,7 +820,19 @@ export function SummaryWorkspace({ project, projectId, overview, language, task,
   );
 }
 
-function SummaryArtifactCard({ artifact, boundary, language, empty, onSource, onRetry, retryDisabled }: {
+function SummaryArtifactCard({ project, artifact, ...props }: Omit<React.ComponentProps<typeof SummaryArtifactDetails>, "artifact"> & { project: string; artifact: SummaryArtifactHeader | null }) {
+  const detail = useQuery({
+    queryKey: ["summary-detail", project, artifact?.record_id, artifact?.updated_at],
+    queryFn: () => api<SummaryArtifact>(`/api/v1/projects/${project}/summaries/${encodeURIComponent(artifact!.record_id)}`),
+    enabled: artifact !== null,
+    gcTime: 0,
+  });
+  if (artifact && detail.isPending) return <p>{translate("common.loading", props.language)}</p>;
+  if (detail.error) return <p className="error-text">{errorMessage(detail.error, props.language)}</p>;
+  return <SummaryArtifactDetails {...props} artifact={detail.data ?? null} />;
+}
+
+function SummaryArtifactDetails({ artifact, boundary, language, empty, onSource, onRetry, retryDisabled }: {
   artifact: SummaryArtifact | null;
   boundary: SummaryBoundary;
   language: Language;
