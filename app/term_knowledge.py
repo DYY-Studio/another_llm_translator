@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from .errors import UsageError
 from .execution import segment_model_source
-from .sqlite_storage import new_record_id, read_segments, read_segment_positions, read_terminology_candidates
+from .sqlite_storage import new_record_id, read_segment_positions, read_terminology_candidates
 from .summary_provenance import digest
 
 
@@ -79,8 +79,6 @@ def evidence(project: Path, library: dict[str, Any], *, fragment_ids: set[str] |
         fragments = {key: value for key, value in fragments.items() if key in fragment_ids}
     ids = {f["candidate_id"] for f in fragments.values() if f.get("candidate_id")}
     records = {r["record_id"]: r for r in read_terminology_candidates(project, ids)}
-    source_ids = {r["segment_id"] for record in records.values() for r in record["source_range"]}
-    segments = {s["segment_id"]: s for s in read_segments(project, source_ids)}
     positions = positions if positions is not None else read_segment_positions(project) if records else {}
     record_sources = {}
     result = {}
@@ -96,7 +94,7 @@ def evidence(project: Path, library: dict[str, Any], *, fragment_ids: set[str] |
             if fragment["candidate_id"] not in record_sources:
                 record_sources[fragment["candidate_id"]] = (
                     {r["segment_id"]: positions.get(r["segment_id"], -1) for r in record["source_range"]},
-                    all(r["segment_id"] in segments for r in record["source_range"]),
+                    all(r["segment_id"] in positions for r in record["source_range"]),
                 )
             value["_positions"], value["valid"] = record_sources[fragment["candidate_id"]]
         result[key] = value
@@ -232,6 +230,7 @@ def entity_view(
     project: Path, library: dict[str, Any], normalized: str, *, require_current: bool = False,
     all_evidence: dict[str, dict[str, Any]] | None = None,
     positions: dict[str, int] | None = None,
+    include_unsaved_evidence: bool = True,
 ) -> dict[str, Any]:
     groups = entity_members(library)
     root = next((key for key, members in groups.items() if normalized in members), None)
@@ -241,10 +240,13 @@ def entity_view(
     member_names = set(members)
     if all_evidence is None:
         saved = require_knowledge(library)["entities"].get(root)
-        refs = {key for item in saved["items"] for key in item["fragment_ids"]} if saved else set()
-        refs.update(saved.get("summary_fragment_ids", []) if saved else [])
-        refs.update(key for key, fragment in require_knowledge(library)["fragments"].items() if fragment["owner"] in member_names)
-        known = evidence(project, library, fragment_ids=refs, positions=positions)
+        if not include_unsaved_evidence and saved is None:
+            known = {}
+        else:
+            refs = {key for item in saved["items"] for key in item["fragment_ids"]} if saved else set()
+            refs.update(saved.get("summary_fragment_ids", []) if saved else [])
+            refs.update(key for key, fragment in require_knowledge(library)["fragments"].items() if fragment["owner"] in member_names)
+            known = evidence(project, library, fragment_ids=refs, positions=positions)
     else:
         known = all_evidence
     fragments = [f for f in known.values() if f["owner"] in member_names]

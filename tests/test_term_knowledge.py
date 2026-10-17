@@ -86,6 +86,40 @@ def test_published_evidence_needs_application_and_source_changes_block_use(tmp_p
         entity_view(project, data, "alpha", require_current=True)
 
 
+def test_runtime_knowledge_projection_skips_unsaved_candidates_and_segment_bodies(tmp_path, monkeypatch):
+    from app.config import load_project_config
+    from app.term_knowledge import entity_view, publish_evidence
+    from app.term_library import term_normalization, TermNormalization
+    from app.term_matching import _TermMatchCache
+    from app.sqlite_storage import read_segments
+
+    project = make_project(tmp_path)
+    data = library()
+    record = scan_record(project, "Alpha is a captain")
+    publish_evidence(project, data, [record], term_normalization(load_project_config(project)))
+    segments = read_segments(project)
+
+    def unexpected_candidate_read(*args, **kwargs):
+        raise AssertionError("unsaved runtime knowledge must not load candidate evidence")
+
+    monkeypatch.setattr("app.term_knowledge.read_terminology_candidates", unexpected_candidate_read)
+    warnings = []
+    cache = _TermMatchCache(data, TermNormalization("NFKC", True), 10, project=project,
+                            segments=segments, warnings=warnings)
+    matches = cache.for_items(segments)
+    assert matches
+    assert warnings == ["实体说明待聚合，当前只使用已应用说明：Alpha"]
+
+    def unexpected_segment_read(*args, **kwargs):
+        raise AssertionError("knowledge freshness must use the segment position index")
+
+    monkeypatch.undo()
+    monkeypatch.setattr("app.sqlite_storage.read_segments", unexpected_segment_read)
+    view = entity_view(project, data, "alpha", positions={segments[0]["segment_id"]: 0})
+    assert view["status"] == "pending"
+    assert view["fragments"][0]["text"] == "Alpha is a captain"
+
+
 def test_empty_success_replaces_evidence_and_publication_is_idempotent(tmp_path: Path) -> None:
     from app.term_knowledge import publish_evidence, entity_view, save_items
     from app.term_library import term_normalization

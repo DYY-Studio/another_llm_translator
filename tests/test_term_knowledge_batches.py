@@ -323,10 +323,10 @@ async def test_description_generation_modes_apply_without_growing_evidence(tmp_p
                 assert view["items"][-1]["fragment_ids"] == []
                 assert view["items"][-1]["sources"] == [None]
     assert requests == ["sourced", "sourced_and_summary", "summary_only"]
-    import sqlite3
-    from app.sqlite_storage import database_path
-    with sqlite3.connect(database_path(project)) as connection:
-        connection.execute("UPDATE segments SET source = 'changed'")
+    from app.project import apply_file_replacement, prepare_file_replacement
+    revised = tmp_path / "revised.txt"
+    revised.write_text("Changed source", encoding="utf-8")
+    apply_file_replacement(project, prepare_file_replacement(project, "F0001", revised))
     assert entity_view(project, published, "alpha")["status"] == "stale"
 
 

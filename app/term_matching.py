@@ -412,7 +412,8 @@ class _TermMatchCache:
                     term = self.matcher.terms[index]
                     if self.project is not None and "knowledge_status" not in term:
                         from .term_knowledge import entity_view
-                        view = entity_view(self.project, self.library, str(term["normalized"]), positions=self.positions)
+                        view = entity_view(self.project, self.library, str(term["normalized"]),
+                                           positions=self.positions, include_unsaved_evidence=False)
                         root = view["entity_key"]
                         if root not in self._resolved_entities:
                             if view["status"] != "stale":
