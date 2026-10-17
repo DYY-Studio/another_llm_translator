@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.errors import RequestSizeError
+from app.errors import ConfigError, RequestSizeError
 from app.server_config import load_server_config, save_server_config, server_config_path
 from app.web import create_app
 from tests.test_term_decision import create_decision_project
@@ -19,7 +19,7 @@ def test_missing_estimate_setting_defaults_false_and_round_trips():
     save_server_config(config)
     assert load_server_config()["tasks"]["estimate_usage_before_run"] is True
     config["tasks"]["estimate_usage_before_run"] = 1
-    with pytest.raises(Exception, match="必须是布尔值"):
+    with pytest.raises(ConfigError, match="必须是布尔值"):
         save_server_config(config)
 
 

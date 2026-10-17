@@ -558,16 +558,24 @@ def decision_plan(
         str(item["normalized"]) for item in overrides_document.get("overrides", [])
     }
     source_conflicts = _conflicts_by_term(library.get("terms", []))
-    from .term_knowledge import entity_members, entity_view, evidence as knowledge_evidence, project_descriptions
-    known_fragments = knowledge_evidence(project, library)
-    knowledge_views_by_root = project_descriptions(project, library, all_evidence=known_fragments)
+    from .term_knowledge import entity_members, evidence as knowledge_evidence, project_descriptions, applied_descriptions
+    known_fragments = {}
+    knowledge_views = []
+    if prepare_requests:
+        known_fragments = knowledge_evidence(project, library)
+        views = project_descriptions(project, library, all_evidence=known_fragments)
+        generation = config["terminology_decision"]["description_generation"]
+        knowledge_views = [view for view in views.values()
+                           if knowledge_only or view["status"] != "current" or view["description_generation"] != generation]
+        knowledge_pending = len(knowledge_views)
+    else:
+        applied_descriptions(library)
+        # Name decisions can change entity membership. Resolve their knowledge
+        # targets at the actual phase boundary, rather than during UI/queue inspection.
+        knowledge_pending = len(entity_members(library)) if knowledge_only else 0
     states = {str(item["normalized"]): _term_state(item) for item in library.get("terms", [])}
     eligible = [state for key, state in states.items() if not knowledge_only and key not in protected and not state["disabled"]]
-    generation = config["terminology_decision"]["description_generation"]
-    knowledge_views = list(knowledge_views_by_root.values())
-    knowledge_views = [view for view in knowledge_views
-                       if knowledge_only or view["status"] != "current" or view["description_generation"] != generation]
-    if not eligible and not knowledge_views:
+    if not eligible and not knowledge_pending:
         raise UsageError("已发布术语全部受到人工 override 保护")
     evidence = ({} if knowledge_only or not prepare_requests else _batches.collect_term_evidence(
         project, list(library.get("terms", [])), config
@@ -585,7 +593,7 @@ def decision_plan(
     protected_states = [states[key] for key in sorted(protected & set(states))]
     phase_one, phase_two = [], []
     phase_one_tokens = phase_two_tokens = 0
-    if not knowledge_only and prepare_requests:
+    if not knowledge_only and prepare_requests and estimate_usage:
         phase_one, phase_one_tokens = _batches._pack_batches(
             eligible,
             phase="adjudication",
@@ -632,8 +640,8 @@ def decision_plan(
         "requests_prepared": prepare_requests,
         "estimated_requests": len(phase_one) + len(phase_two) + len(knowledge_batches) if estimate_usage else None,
         "estimated_input_tokens": phase_one_tokens + phase_two_tokens + knowledge_tokens if estimate_usage else None,
-        "total_steps": len(eligible) * 2 + len(knowledge_views),
-        "knowledge_pending": len(knowledge_views),
+        "total_steps": len(eligible) * 2 + knowledge_pending,
+        "knowledge_pending": knowledge_pending,
     }
 
 @blocking_scope

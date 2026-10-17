@@ -21,7 +21,7 @@ import uuid
 
 from collections import defaultdict
 
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Iterable, Mapping
 
 from copy import deepcopy
 
@@ -1853,11 +1853,9 @@ def save_debug_chunks(
         ) for chunk in chunks
     ))
 
-from collections.abc import AsyncIterable
-
 _Item = TypeVar("_Item")
 
-async def _async_items(items):
+async def _async_items(items: Iterable[_Item] | AsyncIterable[_Item]) -> AsyncIterator[_Item]:
     if isinstance(items, AsyncIterable):
         async for item in items:
             yield item

@@ -415,8 +415,9 @@ class _TermMatchCache:
                         view = entity_view(self.project, self.library, str(term["normalized"]), positions=self.positions)
                         root = view["entity_key"]
                         if root not in self._resolved_entities:
-                            origin = {"description_items": view["items"]}
-                            self._entity_sources[root] = self._prepare_entity(origin)
+                            if view["status"] != "stale":
+                                origin = {"description_items": view["items"]}
+                                self._entity_sources[root] = self._prepare_entity(origin)
                             for member in view["members"]:
                                 target = self.matcher.by_normalized.get(member)
                                 if target is not None:

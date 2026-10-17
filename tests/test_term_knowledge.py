@@ -813,3 +813,18 @@ def test_entity_injection_policies(sourced, unsourced, position, expected):
     assert [i["text"] for i in terms[0].get("entity_knowledge", {}).get("items", [])] == expected
     if not expected:
         assert "entity_knowledge" not in terms[0]
+
+
+def test_lazy_matching_rejects_stale_entity_before_compacting_missing_sources(tmp_path, monkeypatch):
+    from app.term_matching import _TermMatchCache
+    from app.term_library import TermNormalization
+
+    def stale_view(*args, **kwargs):
+        return {"entity_key": "alpha", "members": ["alpha"], "status": "stale",
+                "items": [{"text": "旧说明", "sources": [[{"segment_id": "removed", "start": 0, "end": 5}]]}]}
+
+    monkeypatch.setattr("app.term_knowledge.entity_view", stale_view)
+    matcher = _TermMatchCache(library(), TermNormalization("NFKC", True), 10,
+                             segments=[], project=tmp_path)
+    with pytest.raises(UsageError, match="实体说明已过期"):
+        matcher.for_items([{"segment_id": "current", "source": "Alpha"}])

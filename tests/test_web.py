@@ -5661,7 +5661,7 @@ def test_continuous_decision_policy_is_explicit_and_middle_decision_is_final_rev
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     plans: list[bool] = []
 
     def fake_plan(*_args: object, **kwargs: object) -> dict[str, object]:
@@ -5706,7 +5706,7 @@ def test_continuous_decision_does_not_acknowledge_existing_review_state(
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr("app.web_continuous.decision_plan", lambda *_args, **_kwargs: {
         "config": load_project_config(project, stage="terminology_decision"),
         "prompts": {},
@@ -5748,7 +5748,7 @@ def test_continuous_terminal_decision_is_manual_apply_and_allows_no_apply(
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr("app.web_continuous.decision_plan", lambda *_args, **_kwargs: {
         "config": load_project_config(project, stage="terminology_decision"),
         "prompts": {},
@@ -5779,7 +5779,7 @@ def test_continuous_checks_review_state_even_without_published_terms(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _projects_root, project = make_project(tmp_path)
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: None)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: None)
     monkeypatch.setattr(
         "app.web_continuous.current_decision_draft",
         lambda _project: {"status": "pending"},
@@ -5809,7 +5809,7 @@ def test_continuous_marks_protected_decision_plan_as_no_work(
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr("app.web_continuous.decision_plan", lambda *_args, **_kwargs: {
         "config": load_project_config(project, stage="terminology_decision"),
         "prompts": {},
@@ -5842,7 +5842,7 @@ def test_continuous_skipped_decision_resume_requires_decline_and_force(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _projects_root, project = make_project(tmp_path)
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: None)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: None)
     monkeypatch.setattr("app.web_continuous.run_protocol_is_current", lambda *_: True)
     monkeypatch.setattr(
         "app.web_continuous.find_running_runs",
@@ -5897,7 +5897,7 @@ def test_continuous_fingerprints_downstream_stages_with_terms_revision(
             {"terms_revision": 2, "terms": [{"normalized": "alpha"}]},
         ]
     )
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: next(libraries))
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: next(libraries))
 
     first = inspect_continuous(project, ["translation"])
     second = inspect_continuous(project, ["translation"])
@@ -6069,7 +6069,7 @@ async def test_continuous_decision_no_work_continues_to_translation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _projects_root, project = make_project(tmp_path)
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: None)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: None)
     called: list[str] = []
 
     async def fake_terminology(*_: object, **__: object) -> dict[str, object]:
@@ -6171,7 +6171,7 @@ async def test_continuous_middle_decision_applies_before_translation(
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr(
         "app.web_continuous.decision_plan",
         lambda *_args, **_kwargs: {
@@ -6297,7 +6297,7 @@ async def test_continuous_decision_checks_next_terms_revision_before_apply(
     apply_called = False
     translation_called = False
     draft: dict[str, object] | None = None
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr(
         "app.web_continuous.decision_plan",
         lambda *_args, **_kwargs: {
@@ -6462,7 +6462,7 @@ async def test_continuous_terminal_decision_optional_application(
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr(
         "app.web_continuous.decision_plan",
         lambda *_args, **_kwargs: {
@@ -6639,7 +6639,7 @@ def test_continuous_decision_resume_preflight_rejects_incompatible_run(
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr("app.web_continuous.decision_plan", lambda *_args, **_kwargs: {
         "config": load_project_config(project, stage="terminology_decision"),
         "prompts": {},

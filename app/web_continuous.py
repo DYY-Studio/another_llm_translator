@@ -452,7 +452,7 @@ def inspect_continuous(
                 run["resume_incompatibility_reason"] = run.get("resume_incompatibility_reason") or (None if compatible else "续用 Run 必须保持原有粗翻和概括选项")
         if stage == "repetition_consistency":
             if repetition_current is not None:
-                running = repetition_resume(project, repetition_current)
+                running = repetition_resume(project, repetition_current, estimate_usage=False)
                 runs = [running] if running else []
                 if running and running["scope"] != {"only_file": None}:
                     running.update(resume_compatible=False, resume_incompatibility_reason="连续运行只能续用整项目审查 Run")
@@ -1156,7 +1156,7 @@ async def run_continuous(
                     screening_enabled = prior[0]["screening_enabled"]
                 plan = (await run_blocking(lambda: repetition_plan(project, Scope(), prompt_language=prompt_language,
                     exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, estimate_usage=False)))
-                running = (await run_blocking(lambda: repetition_resume(project, plan)))
+                running = (await run_blocking(lambda: repetition_resume(project, plan, estimate_usage=False)))
                 if running and actions.get(stage) == "resume":
                     if running["scope"] != {"only_file": None}:
                         raise UsageError("连续运行只能续用整项目一致性审查 Run")

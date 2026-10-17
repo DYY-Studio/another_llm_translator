@@ -232,11 +232,6 @@ def _require_nonempty_segments(segments: list[dict[str, Any]]) -> None:
         raise UsageError("项目没有可处理的非空 Segment；请先添加源文件")
 
 
-def _segment_model_payload_value(segment: dict[str, Any], value: Any) -> Any:
-    # Model text is already normalized at the adapter boundary.
-    return value
-
-
 def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
     return {
         "all_nonempty": force_all

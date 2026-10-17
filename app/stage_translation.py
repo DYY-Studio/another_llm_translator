@@ -51,7 +51,7 @@ from .translation_validation import (
     SegmentAlignmentValidator,
 )
 
-from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _frozen_run_options, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _replace_with_runtime_parts, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _segment_model_payload_value, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests)
+from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _frozen_run_options, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _replace_with_runtime_parts, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests)
 
 
 def _summary_segment_id(item: dict[str, Any]) -> str:
@@ -510,9 +510,7 @@ async def run_translation(
             "reference_context": context,
             "summary_context": summary_context,
             "summary_context_relation": summary_context_relation,
-            "terms": _segment_model_payload_value(
-                items[0], term_match_cache.for_items(items)
-            ),
+            "terms": term_match_cache.for_items(items),
             "segments": [
                 {
                     "id": item["segment_id"],

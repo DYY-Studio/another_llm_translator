@@ -39,7 +39,7 @@ def register_repetition_routes(*, app: FastAPI, project: Callable[[str], Path]) 
             screening_enabled = original["screening_enabled"]
         estimate_usage = estimate_usage and app.state.server_config.get("tasks", {}).get("estimate_usage_before_run", False)
         plan = repetition_plan(root, Scope(only_file=only_file), prompt_language=language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, preview_only=not estimate_usage and not runs, estimate_usage=estimate_usage)
-        running = repetition_resume(root, plan) if runs else None
+        running = repetition_resume(root, plan, estimate_usage=estimate_usage) if runs else None
         if running:
             running = {**_running_run(root, STAGE, plan["config"]), **running}
         action = (run_action or ("resume" if running["resume_compatible"] else "decline")) if running else None

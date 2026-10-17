@@ -1012,7 +1012,7 @@ class WebTaskManager:
             if reuse_mixed_fingerprints:
                 raise UsageError("重复译文审查不支持跨 Run 复用结果")
             plan = repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, preview_only=not find_running_runs(project, stage), estimate_usage=False)
-            running = repetition_resume(project, plan) if not plan.get("preview_only") else None
+            running = repetition_resume(project, plan, estimate_usage=False) if not plan.get("preview_only") else None
             if running and run_action is None:
                 raise UsageError("发现未完成 Run，必须选择续用或结束旧 Run 并新建")
             if run_action == "resume" and (not running or not running["resume_compatible"]):

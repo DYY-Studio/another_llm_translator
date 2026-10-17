@@ -38,7 +38,7 @@ DRAFT_FILE = "repetition_draft.json"
 PROTOCOL_VERSION = 1
 
 
-def repetition_resume(project: Path, plan: dict[str, Any]) -> dict[str, Any] | None:
+def repetition_resume(project: Path, plan: dict[str, Any], *, estimate_usage: bool = True) -> dict[str, Any] | None:
     runs = find_running_runs(project, STAGE)
     if not runs:
         return None
@@ -55,13 +55,15 @@ def repetition_resume(project: Path, plan: dict[str, Any]) -> dict[str, Any] | N
     completed = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
     remaining = [g for g in plan["groups"] if "result" not in checkpoints.get(g["id"], {}) and not group_over_budget(g, plan, checkpoints.get(g["id"], {}))]
     comparison = [g for g in remaining if checkpoints.get(g["id"], {}).get("screening") != "skip"]
-    batches = comparison_batches(comparison, plan)
-    requests = len(batches)
-    tokens = sum(estimate for _, estimate in batches)
-    if plan["screening_enabled"]:
-        unscreened = [g for g in remaining if "screening" not in checkpoints.get(g["id"], {})]
-        requests += len(unscreened)
-        tokens += sum(g["screening_input_tokens"] for g in unscreened)
+    requests = tokens = None
+    if estimate_usage:
+        batches = comparison_batches(comparison, plan)
+        requests = len(batches)
+        tokens = sum(estimate for _, estimate in batches)
+        if plan["screening_enabled"]:
+            unscreened = [g for g in remaining if "screening" not in checkpoints.get(g["id"], {})]
+            requests += len(unscreened)
+            tokens += sum(g["screening_input_tokens"] for g in unscreened)
     latest_execution = (run.get("continuations") or [run])[-1]["stage_fingerprint"]
     return {"execution_changed": latest_execution != plan["fingerprint"], "run_id": run["run_id"], "scope": run["scope"], "prompt_language": run.get("prompt_language"),
             "screening_enabled": run.get("screening_enabled"), "exclude_punctuation_only": run.get("exclude_punctuation_only"),
@@ -450,7 +452,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
     prompt, screen = plan["prompt"], plan["screen"]
     total = plan["selected"]
     metadata = (await run_blocking(lambda: read_json(project, project / "project.json")))
-    running = (await run_blocking(lambda: repetition_resume(project, plan)))
+    running = (await run_blocking(lambda: repetition_resume(project, plan, estimate_usage=False)))
     if running and run_action == "resume" and not running["resume_compatible"]:
         raise UsageError(running["resume_incompatibility_reason"])
     resume_id, run_warnings = choose_running_run(project, STAGE, action=run_action, dry_run=False, interactive=False)
