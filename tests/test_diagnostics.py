@@ -319,6 +319,9 @@ def test_diagnostics_hub_filters_active_metrics_and_merges_latency_samples(
                 status=200,
                 error=False,
             )
+            session.complete_request(
+                request_id, content="ok", reasoning_content=None
+            )
 
         aggregate = hub.snapshot()
         assert aggregate["metrics"]["total_requests"] == 2
@@ -354,14 +357,25 @@ def test_diagnostics_hub_removes_old_terminal_records_in_current_batch(
                 messages=[{"role": "user", "content": request_id}],
                 max_attempts=1,
             )
+            hub.request_finished(
+                request_id=request_id, attempt=1,
+                latency_seconds=1.0 if index == 0 else 0.01,
+                status=200, error=False,
+            )
             hub.complete_request(request_id, content="response", reasoning_content=None)
 
     items = hub.snapshot()["requests"]["items"]
+    assert hub.snapshot()["metrics"]["average_latency_ms"] == 14.9
+    assert hub.snapshot()["metrics"]["p95_latency_ms"] == 10.0
     assert len(items) == 200
     assert all(item["detail_available"] for item in items)
     with pytest.raises(ValueError, match="本次运行中不存在请求.*REQ-0"):
         hub.request_detail("REQ-0")
     assert hub.request_detail("REQ-200")["request_id"] == "REQ-200"
+    hub.sessions["T-0"].fail_jsonl_request(
+        "REQ-0", "{}", record_type="segment", expected_ids=["s1"]
+    )
+    assert hub.snapshot()["metrics"]["average_latency_ms"] == 10.0
 
 
 def test_diagnostics_hub_clears_previous_batch_when_new_run_starts(
@@ -610,8 +624,8 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert metrics["http_errors"] == 1
     assert metrics["retry_count"] == 1
     assert metrics["rate_limit_waiting_requests"] == 0
-    assert metrics["average_latency_ms"] == 175.0
-    assert metrics["p95_latency_ms"] == 250.0
+    assert metrics["average_latency_ms"] == 100.0
+    assert metrics["p95_latency_ms"] == 100.0
     assert metrics["usage_available"] is True
     assert metrics["usage_partial"] is False
     assert metrics["input_tokens"] == 12
@@ -749,13 +763,13 @@ def test_total_request_count_resets_for_each_run(tmp_path: Path) -> None:
         assert diagnostics.snapshot()["metrics"]["p95_latency_ms"] is None
 
 
-def test_latency_metrics_aggregate_all_attempts_and_use_nearest_rank_p95(
+def test_latency_metrics_aggregate_successful_logical_requests_and_use_nearest_rank_p95(
     tmp_path: Path,
 ) -> None:
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
 
     with diagnostics.activate("sample", "translation"):
-        for request_id in ("REQ-429", "REQ-HTTP", "REQ-NETWORK", "REQ-OK"):
+        for request_id in ("REQ-429", "REQ-HTTP", "REQ-NETWORK", "REQ-CANCEL", "REQ-OK"):
             diagnostics.begin_request(
                 request_id=request_id,
                 model="model",
@@ -796,6 +810,15 @@ def test_latency_metrics_aggregate_all_attempts_and_use_nearest_rank_p95(
             error=True,
         )
         diagnostics.request_finished(
+            request_id="REQ-CANCEL",
+            attempt=1,
+            latency_seconds=0.25,
+            status=None,
+            error=False,
+            outcome="cancelled",
+        )
+        diagnostics.fail_request("REQ-CANCEL", "cancelled", interrupted=True)
+        diagnostics.request_finished(
             request_id="REQ-OK",
             attempt=1,
             latency_seconds=0.05,
@@ -805,12 +828,90 @@ def test_latency_metrics_aggregate_all_attempts_and_use_nearest_rank_p95(
         diagnostics.complete_request("REQ-OK", content="ok", reasoning_content=None)
 
         metrics = diagnostics.snapshot()["metrics"]
-        assert metrics["average_latency_ms"] == 210.0
-        assert metrics["p95_latency_ms"] == 400.0
+        assert metrics["average_latency_ms"] == 75.0
+        assert metrics["p95_latency_ms"] == 100.0
         assert metrics["http_errors"] == 3
         assert diagnostics.snapshot()["requests"]["items"][0][
             "latest_latency_ms"
         ] == 100.0
+
+
+def test_latency_metrics_remove_successful_attempt_when_jsonl_validation_fails(
+    tmp_path: Path,
+) -> None:
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    with diagnostics.activate("sample", "translation"):
+        diagnostics.begin_request(
+            request_id="REQ-JSONL", model="model", messages=[], max_attempts=1
+        )
+        diagnostics.request_finished(
+            request_id="REQ-JSONL", attempt=1, latency_seconds=0.2,
+            status=200, error=False,
+        )
+        diagnostics.complete_request(
+            "REQ-JSONL", content="response", reasoning_content=None
+        )
+        assert diagnostics.snapshot()["metrics"]["average_latency_ms"] == 200.0
+
+        diagnostics.fail_jsonl_request(
+            "REQ-JSONL", "{}", record_type="translation", expected_ids=["s1"]
+        )
+        metrics = diagnostics.snapshot()["metrics"]
+        assert metrics["average_latency_ms"] is None
+        assert metrics["p95_latency_ms"] is None
+        assert diagnostics.request_detail("REQ-JSONL")["status"] == "failed"
+
+
+def test_decision_latency_counts_only_final_successful_request_attempt(
+    tmp_path: Path,
+) -> None:
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    with diagnostics.activate("sample", "translation"):
+        diagnostics.begin_request(
+            request_id="REQ-DECISION", model="decision-model", messages=[],
+            max_attempts=2, request_kind="decision",
+        )
+        diagnostics.request_finished(
+            request_id="REQ-DECISION", attempt=1, latency_seconds=0.4,
+            status=429, error=True, retrying=True, outcome="rate_limit_error",
+        )
+        diagnostics.request_finished(
+            request_id="REQ-DECISION", attempt=2, latency_seconds=0.1,
+            status=200, error=False, outcome="succeeded",
+        )
+        diagnostics.complete_request(
+            "REQ-DECISION", content="ok", reasoning_content=None
+        )
+
+        metrics = diagnostics.snapshot()["decision"]["metrics"]
+        assert metrics["average_latency_ms"] == 100.0
+        assert metrics["p95_latency_ms"] == 100.0
+        assert diagnostics.snapshot()["metrics"]["average_latency_ms"] is None
+
+
+def test_decision_p95_window_does_not_limit_successful_average(
+    tmp_path: Path,
+) -> None:
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    with diagnostics.activate("sample", "translation"):
+        for index in range(1001):
+            request_id = f"REQ-DECISION-{index}"
+            diagnostics.begin_request(
+                request_id=request_id, model="decision-model", messages=[],
+                max_attempts=1, request_kind="decision",
+            )
+            diagnostics.request_finished(
+                request_id=request_id, attempt=1,
+                latency_seconds=10.0 if index == 0 else 0.1,
+                status=200, error=False, outcome="succeeded",
+            )
+            diagnostics.complete_request(
+                request_id, content="ok", reasoning_content=None
+            )
+
+        metrics = diagnostics.snapshot()["decision"]["metrics"]
+        assert metrics["average_latency_ms"] == 109.9
+        assert metrics["p95_latency_ms"] == 100.0
 
 
 @pytest.mark.asyncio

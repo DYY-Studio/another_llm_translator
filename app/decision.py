@@ -276,8 +276,6 @@ class DecisionClient:
                     raise
                 overview["answers"] = {k: asdict(v) for k, v in answers.items()}
                 record.update(model=data["model"], answers={k: asdict(v) for k, v in answers.items()})
-                if diagnostics is not None:
-                    diagnostics.complete_request(request_id, content=json.dumps(data, ensure_ascii=False, indent=2), reasoning_content=None, overview_answers=overview["answers"])
                 return answers
             except asyncio.CancelledError:
                 outcome = "cancelled"
@@ -318,6 +316,8 @@ class DecisionClient:
                     diagnostics.request_finished(request_id=request_id, attempt=attempt + 1,
                         key_index=lease.key_index + 1, latency_seconds=record["elapsed_seconds"],
                         status=record.get("http_status"), error=outcome not in {"succeeded", "cancelled"}, retrying=retrying, outcome=outcome)
+                    if outcome == "succeeded":
+                        diagnostics.complete_request(request_id, content=json.dumps(data, ensure_ascii=False, indent=2), reasoning_content=None, overview_answers=overview["answers"])
                     if retrying:
                         diagnostics.retried(request_id)
                 await lease.release()

@@ -78,8 +78,9 @@ class Diagnostics:
         self.http_errors = 0
         self.retry_count = 0
         self.rate_limit_waiting_requests = 0
-        self._latency_samples_seconds: list[float] = []
+        self._latency_samples_seconds: dict[str, float] = {}
         self._latency_total_seconds = 0.0
+        self._llm_attempt_count = 0
         self.usage: dict[str, Any] | None = None
         self._invocation_usage: dict[str, Any] | None = None
         self._started_monotonic: float | None = None
@@ -125,6 +126,7 @@ class Diagnostics:
         self.rate_limit_waiting_requests = 0
         self._latency_samples_seconds.clear()
         self._latency_total_seconds = 0.0
+        self._llm_attempt_count = 0
         self.usage = None
         self._invocation_usage = None
         self.requests.clear()
@@ -188,7 +190,7 @@ class Diagnostics:
                 "model": model, "total_requests": 0, "active_requests": 0,
                 "completed": 0, "failed": 0, "interrupted": 0, "questions": 0,
                 "http_errors": 0, "retry_count": 0, "rate_limit_waiting_requests": 0,
-                "latency_total": 0.0, "attempt_count": 0,
+                "latency_total": 0.0, "successful_request_count": 0, "attempt_count": 0,
                 "samples": deque(maxlen=1000), "started": time.monotonic(), "finished": None,
             })
             activity["total_requests"] += 1
@@ -244,6 +246,7 @@ class Diagnostics:
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
             "_usage_samples": 0,
             "_usage_complete": True,
+            "_decision_latency_sample_seconds": None,
             "error": None,
             "error_detail": None,
             "detail_available": True,
@@ -279,6 +282,12 @@ class Diagnostics:
                 activity = self._decision_activities[request["model"]]
                 activity[status] += 1
                 activity["finished"] = time.monotonic()
+        if status == "completed" and request["attempts"]:
+            latest = request["attempts"][-1]
+            if latest["outcome"] == "succeeded":
+                self._record_latency_sample(request, latest["latency_ms"] / 1000)
+        elif status in {"failed", "interrupted"}:
+            self._retract_latency_sample(request)
         self._touch_request(request)
         self._prune_terminal_details()
         if not was_terminal and self._terminal_sink is not None:
@@ -293,6 +302,43 @@ class Diagnostics:
                 self._request_session = uuid.uuid4().hex
                 if self._request_reset_sink is not None:
                     self._request_reset_sink()
+
+    def _record_latency_sample(self, request: dict[str, Any], latency_seconds: float) -> None:
+        if request["request_kind"] == "decision":
+            if request["_decision_latency_sample_seconds"] is not None:
+                return
+            request["_decision_latency_sample_seconds"] = latency_seconds
+            activity = self._decision_activities[request["model"]]
+            activity["samples"].append((request["request_id"], latency_seconds))
+            activity["latency_total"] += latency_seconds
+            activity["successful_request_count"] += 1
+        else:
+            if request["request_id"] in self._latency_samples_seconds:
+                return
+            self._latency_samples_seconds[request["request_id"]] = latency_seconds
+            self._latency_total_seconds += latency_seconds
+
+    def _retract_latency_sample(self, request: dict[str, Any]) -> None:
+        request_id = request["request_id"]
+        if request["request_kind"] == "decision":
+            latency_seconds = request["_decision_latency_sample_seconds"]
+            if latency_seconds is None:
+                return
+            request["_decision_latency_sample_seconds"] = None
+            activity = self._decision_activities[request["model"]]
+            activity["samples"] = deque(
+                (sample for sample in activity["samples"] if sample[0] != request_id),
+                maxlen=1000,
+            )
+            activity["latency_total"] -= latency_seconds
+            activity["successful_request_count"] -= 1
+        else:
+            self._retract_llm_latency_sample(request_id)
+
+    def _retract_llm_latency_sample(self, request_id: str) -> None:
+        latency_seconds = self._latency_samples_seconds.pop(request_id, None)
+        if latency_seconds is not None:
+            self._latency_total_seconds -= latency_seconds
 
     def request_started(self, request_id: str) -> None:
         request = self._request(request_id)
@@ -351,15 +397,12 @@ class Diagnostics:
         if request is not None and request["request_kind"] == "decision":
             activity = self._decision_activities[request["model"]]
             activity["active_requests"] = max(0, activity["active_requests"] - 1)
-            activity["samples"].append(latency_seconds)
-            activity["latency_total"] += latency_seconds
             activity["attempt_count"] += 1
             if error or (status is not None and status >= 400):
                 activity["http_errors"] += 1
         else:
             self.active_requests = max(0, self.active_requests - 1)
-            self._latency_samples_seconds.append(latency_seconds)
-            self._latency_total_seconds += latency_seconds
+            self._llm_attempt_count += 1
             if error or (status is not None and status >= 400):
                 self.http_errors += 1
         if request is None:
@@ -495,6 +538,8 @@ class Diagnostics:
             if request["attempts"] and request["request_kind"] == "llm":
                 request["attempts"][-1]["outcome"] = error
             self._finish_request(request, status="interrupted" if interrupted else "failed", error=error)
+        else:
+            self._retract_llm_latency_sample(request_id)
 
     def fail_jsonl_request(
         self, request_id: str, content: str, *, record_type: str | tuple[str, ...],
@@ -654,7 +699,7 @@ class Diagnostics:
             )
             p95_rank = math.ceil(0.95 * latency_count)
             p95_latency_ms = round(
-                sorted(self._latency_samples_seconds)[p95_rank - 1] * 1000, 1
+                sorted(self._latency_samples_seconds.values())[p95_rank - 1] * 1000, 1
             )
         return {
             "metrics": {
@@ -711,7 +756,7 @@ def _request_usage_snapshot(sessions: list[Diagnostics]) -> dict[str, Any]:
         values = [session._request_usage.get(kind, {}) for session in sessions]
         samples = sum(value.get("samples", 0) for value in values)
         attempts = sum(
-            len(session._latency_samples_seconds) if kind == "llm" else
+            session._llm_attempt_count if kind == "llm" else
             sum(activity["attempt_count"] for activity in session._decision_activities.values())
             for session in sessions
         )
@@ -726,15 +771,15 @@ def _request_usage_snapshot(sessions: list[Diagnostics]) -> dict[str, Any]:
 def _decision_snapshot(sessions: list[Diagnostics]) -> dict[str, Any]:
     activities = []
     samples = []
-    attempts = 0
     latency_total = 0.0
+    successful_count = 0
     for session in sessions:
         for activity in session._decision_activities.values():
             pending = activity["total_requests"] - sum(activity[key] for key in ("completed", "failed", "interrupted"))
             end = time.monotonic() if session._running else activity["finished"] or activity["started"]
             elapsed = end - activity["started"]
-            recent = sorted(activity["samples"])
-            count = activity["attempt_count"]
+            recent = sorted(sample[1] for sample in activity["samples"])
+            activity_successful_count = activity["successful_request_count"]
             activities.append({
                 "task_id": session.task_id, "project": session.project, "stage": session.stage,
                 **{key: activity[key] for key in (
@@ -743,18 +788,18 @@ def _decision_snapshot(sessions: list[Diagnostics]) -> dict[str, Any]:
                 )},
                 "pending": pending,
                 "requests_per_second": round(activity["total_requests"] / elapsed, 2) if elapsed > 0 else None,
-                "average_latency_ms": round(activity["latency_total"] / count * 1000, 1) if count else None,
+                "average_latency_ms": round(activity["latency_total"] / activity_successful_count * 1000, 1) if activity_successful_count else None,
                 "p95_latency_ms": round(recent[math.ceil(len(recent) * .95) - 1] * 1000, 1) if recent else None,
             })
             samples.extend(recent)
-            attempts += count
             latency_total += activity["latency_total"]
+            successful_count += activity["successful_request_count"]
     samples.sort()
     metrics = {key: sum(item[key] for item in activities) for key in (
         "total_requests", "active_requests", "http_errors", "retry_count", "rate_limit_waiting_requests",
     )}
     metrics.update(
-        average_latency_ms=round(latency_total / attempts * 1000, 1) if attempts else None,
+        average_latency_ms=round(latency_total / successful_count * 1000, 1) if successful_count else None,
         p95_latency_ms=round(samples[math.ceil(len(samples) * .95) - 1] * 1000, 1) if samples else None,
     )
     return {"metrics": metrics, "activities": activities}
@@ -1013,7 +1058,7 @@ class DiagnosticsHub(Diagnostics):
         latency_samples = [
             sample
             for session in metric_sessions
-            for sample in session._latency_samples_seconds
+            for sample in session._latency_samples_seconds.values()
         ]
         latency_count = len(latency_samples)
         average_latency_ms = (
