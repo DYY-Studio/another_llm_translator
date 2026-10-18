@@ -567,8 +567,6 @@ def normalize_project_settings(value: dict[str, Any], *, root: Path = APP_ROOT,
                                warnings: list[str] | None = None) -> dict[str, Any]:
     def missing_settings(table: dict[str, Any], schema: dict[str, Any]) -> bool:
         for key, child in schema.items():
-            if key == "stage_overrides":
-                continue
             if key not in table:
                 return True
             if child is not None and isinstance(table[key], dict) and missing_settings(table[key], child):

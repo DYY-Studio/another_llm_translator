@@ -898,7 +898,7 @@ def register_resource_routes(
         for item in decisions["presets"]:
             if item.get("protocol") != "llm":
                 continue
-            definition = (await run_blocking(get_decision_preset, item["preset_id"]))
+            definition = (await run_blocking(get_decision_preset, item["preset_id"]))["preset"]
             if definition["protocol"] == "llm" and definition["llm_preset"] == preset_id:
                 raise UsageError(f"不能删除 Decision Preset {item['preset_id']} 正在使用的 LLM Preset")
         user_file = user_root() / "llm_presets" / f"{preset_id}.json"

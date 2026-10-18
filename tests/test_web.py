@@ -7113,3 +7113,17 @@ def test_config_save_canonicalizes_unknown_and_missing_fields(tmp_path):
     saved = load_config(project / 'config.toml', snapshot=True)
     assert 'unknown' not in saved['project']
     assert saved['chunking']['stage_overrides'] == {}
+
+
+def test_delete_unreferenced_llm_preset_when_llm_decision_exists(tmp_path):
+    from app.user_config import user_root
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root, app_root=tmp_path / 'app-root'))
+    preset = client.get('/api/v1/global/presets/default').json()['preset']
+    preset['preset_id'] = 'unused'
+    assert client.put('/api/v1/global/presets/unused', json=preset).status_code == 200
+    decision = {'preset_id': 'judge', 'protocol': 'llm', 'llm_preset': 'default', 'prompt_language': 'en'}
+    assert client.put('/api/v1/global/decision-presets/judge', json=decision).status_code == 200
+    response = client.delete('/api/v1/global/presets/unused')
+    assert response.status_code == 200 and response.json() == {'deleted': True}
+    assert not (user_root() / 'llm_presets/unused.json').exists()

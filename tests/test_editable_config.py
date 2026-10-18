@@ -120,6 +120,41 @@ def test_complete_project_does_not_depend_on_invalid_global(tmp_path):
     global_path.parent.mkdir(parents=True)
     global_path.write_text('[retry]\nhttp_max_attempts = false\n')
     assert load_project_settings(project) == config
+    from app.config import normalize_project_settings
+    del config['chunking']['stage_overrides']
+    with pytest.raises(ConfigError, match='http_max_attempts'):
+        normalize_project_settings(config)
     (project / 'config.toml').write_text('[project]\ntarget_language = "English"\n')
     with pytest.raises(ConfigError, match='http_max_attempts'):
         load_project_settings(project)
+
+
+@pytest.mark.parametrize('missing_ordinary_field', [False, True])
+def test_missing_override_container_uses_global_independently_of_other_missing_fields(missing_ordinary_field):
+    from app.config import builtin_settings, normalize_project_settings
+    from app.user_config import user_root
+    global_path = user_root() / 'config/config.toml'
+    global_path.parent.mkdir(parents=True)
+    global_path.write_text('[chunking.stage_overrides.translation]\ntarget_content_tokens = 17\nmax_input_tokens = 111\n')
+    value = builtin_settings()
+    del value['chunking']['stage_overrides']
+    if missing_ordinary_field:
+        del value['retry']['http_max_attempts']
+    normalized = normalize_project_settings(value)
+    assert normalized['chunking']['stage_overrides'] == {
+        'translation': {'target_content_tokens': 17, 'max_input_tokens': 111}}
+
+
+def test_present_sparse_override_table_inherits_project_common():
+    from app.config import builtin_settings, normalize_project_settings
+    from app.request_budget import resolve_request_budget
+    from app.user_config import user_root
+    global_path = user_root() / 'config/config.toml'
+    global_path.parent.mkdir(parents=True)
+    global_path.write_text('[chunking.stage_overrides.translation]\ntarget_content_tokens = 17\nmax_input_tokens = 111\n')
+    value = builtin_settings()
+    value['chunking']['stage_overrides'] = {'translation': {'target_content_tokens': 9}}
+    del value['retry']['http_max_attempts']
+    normalized = normalize_project_settings(value)
+    assert normalized['chunking']['stage_overrides'] == {'translation': {'target_content_tokens': 9}}
+    assert resolve_request_budget(normalized, 'translation').max_input_tokens == value['chunking']['max_input_tokens']
