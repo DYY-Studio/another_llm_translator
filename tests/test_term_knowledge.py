@@ -398,7 +398,8 @@ async def test_entity_budget_fails_before_any_model_request(tmp_path: Path) -> N
     data = library()
     config = load_project_config(project, stage="terminology_decision")
     publish_evidence(project, data, [scan_record(project, "身份信息" * 1000)], term_normalization(config))
-    config["llm"].update(context_window_tokens=100, context_safety_margin_tokens=0)
+    config["llm"]["context_window_tokens"] = 100
+    config["chunking"]["context_reserve_tokens"] = 0
     batches, _, errors = pack_knowledge_batches([entity_view(project, data, "alpha")], "聚合", config)
     assert not batches
     assert "完整证据" in errors["alpha"]
