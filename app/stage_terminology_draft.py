@@ -118,7 +118,11 @@ def draft_run_context(
         ]
     config["_include_summaries"] = include_summaries
     config["llm"]["temperature_translation"] = config["llm"]["temperature_terminology"]
-    config["context"]["translation"] = config["context"]["terminology"]
+    config["context"]["translation"].update(
+        enabled=config["context"]["terminology"]["enabled"],
+        previous_segments=config["context"]["terminology"]["previous_segments"],
+        previous_summaries=False,
+    )
     config["_draft_translation"] = True
     return config, metadata, files, segments
 

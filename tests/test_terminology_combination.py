@@ -1044,3 +1044,35 @@ async def test_complete_summary_recovery_ignores_old_partial_partition(
             include_summaries=True,
             include_draft_translation=include_draft,
         )
+
+
+@pytest.mark.asyncio
+async def test_draft_run_snapshot_preserves_effective_context_settings(tmp_path):
+    from app.config import dump_config, load_config
+
+    project = await create_project(tmp_path, 'Alice entered.')
+    settings = load_config(project / 'config.toml')
+    settings['context']['terminology'] = {'enabled': False, 'previous_segments': 7}
+    settings['context']['translation'] = {
+        'enabled': True, 'previous_segments': 2, 'previous_summaries': True,
+    }
+    (project / 'config.toml').write_text(dump_config(settings))
+
+    def handler(request):
+        payload = json.loads(json.loads(request.content)['messages'][1]['content'])
+        records = [{'type': 'no_terms'}]
+        records.extend({'type': 'segment', 'id': item['id'], 'translation': '爱丽丝进来了'}
+                       for item in payload['segments'])
+        return httpx.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(project, Scope(), http_client=client, include_draft_translation=True)
+    assert result['failed'] == 0
+    snapshots = list((project / 'runs').glob('*/config.toml'))
+    assert len(snapshots) == 1
+    frozen = load_config(snapshots[0], snapshot=True)
+    assert frozen['context']['translation'] == {
+        'enabled': False, 'previous_segments': 7, 'previous_summaries': False,
+    }
+    assert frozen['context']['terminology'] == {'enabled': False, 'previous_segments': 7}
+    assert load_config(project / 'config.toml') == settings
