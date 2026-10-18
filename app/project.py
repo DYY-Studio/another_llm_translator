@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .config import LLM_MODEL_STAGES, load_config
+from .config import LLM_MODEL_STAGES, load_config, load_global_settings, load_project_settings, dump_config
 from .documents import (
     DocumentAdapter,
     DocumentImport,
@@ -537,7 +537,10 @@ def _copy_bundle(source_root: Path, target: Path, *, inherited: set[str] | froze
             continue
         destination = target / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        if relative == Path("config.toml"):
+            destination.write_text(dump_config(load_global_settings(source_root)), encoding="utf-8")
+        else:
+            shutil.copy2(source, destination)
 
 
 def ensure_missing_summary_prompts(
@@ -605,7 +608,7 @@ def init_project(
     if empty == bool(inputs):
         raise UsageError("必须提供输入文件，或显式使用 --empty 创建空项目")
     projects_root = projects_root or user_root() / "projects"
-    global_config = load_config(effective_path("config/config.toml", builtin_root=app_root))
+    global_config = load_global_settings(app_root)
     global_hash = bundle_hash(app_root)
     imports: list[tuple[DocumentAdapter, ImportedFile]] = []
     warnings: list[str] = []
@@ -1175,7 +1178,7 @@ def prepare_file_replacement(
     try:
         shutil.copy2(input_path, staged_input)
         input_digest = _replacement_input_digest(staged_input)
-        config = load_config(project / "config.toml")
+        config = load_project_settings(project)
         imports, warnings = _import_project_inputs(
             [str(staged_input)],
             recursive=False,
@@ -1401,7 +1404,7 @@ def add_project_files(
             f"存在未完成 Run，不能添加文件：{', '.join(running)}"
         )
     metadata, files, segments = _source_records(project)
-    config = load_config(project / "config.toml")
+    config = load_project_settings(project)
     imports, warnings = _import_project_inputs(
         inputs,
         recursive=recursive,
@@ -1736,7 +1739,7 @@ def sync_global_templates(
 ) -> list[str]:
     metadata = read_project_meta(project)
     try:
-        load_config(effective_path("config/config.toml", builtin_root=app_root))
+        load_global_settings(app_root)
         current_hash = bundle_hash(app_root)
     except ConfigError as exc:
         return [f"全局模板无效，继续使用项目副本：{exc}"]
@@ -1769,7 +1772,7 @@ def sync_global_templates(
     if choice not in {"update", "keep"}:
         raise UsageError("模板选择必须是 update 或 keep")
     if choice == "update":
-        load_config(effective_path("config/config.toml", builtin_root=app_root))
+        load_global_settings(app_root)
         timestamp = utc_now().replace(":", "").replace("-", "")
         backup = project / "snapshots" / "template_updates" / timestamp
         backup.mkdir(parents=True, exist_ok=False)

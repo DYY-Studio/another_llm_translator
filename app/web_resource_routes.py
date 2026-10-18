@@ -23,6 +23,7 @@ from .config import (
     LLM_MODEL_STAGES,
     dump_config,
     load_config,
+    load_global_settings, load_project_settings, normalize_config, builtin_settings,
     resolve_global_config,
     resolve_project_config,
 )
@@ -457,23 +458,19 @@ def register_resource_routes(
 
     @app.get("/api/v1/global/config")
     def get_global_config() -> dict[str, Any]:
-        return {
-            "config": load_config(
-                effective_path("config/config.toml", builtin_root=app_root)
-            )
-        }
+        warnings: list[str] = []
+        config = load_global_settings(app_root, warnings=warnings)
+        return {"config": config, "warnings": warnings}
 
     @app.put("/api/v1/global/config")
     def put_global_config(payload: dict[str, Any]) -> dict[str, bool]:
         config = payload.get("config")
         if not isinstance(config, dict):
             raise UsageError("config 必须是对象")
-        content = dump_config(config)
-        resolve_global_config(config, app_root)
-        for stage in LLM_MODEL_STAGES:
-            resolve_global_config(config, app_root, stage=stage)
-        atomic_write_text(write_user("config/config.toml"), content)
-        return {"saved": True}
+        warnings: list[str] = []
+        config = normalize_config(config, defaults=builtin_settings(app_root), warnings=warnings)
+        atomic_write_text(write_user("config/config.toml"), dump_config(config))
+        return {"saved": True, "warnings": warnings}
 
     @app.get("/api/v1/prompts/{stage}/default")
     def get_builtin_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
@@ -525,7 +522,9 @@ def register_resource_routes(
 
     @app.get("/api/v1/projects/{name}/config")
     def get_project_config(name: str) -> dict[str, Any]:
-        return {"config": load_config(project(name) / "config.toml")}
+        warnings: list[str] = []
+        config = load_project_settings(project(name), root=app_root, warnings=warnings)
+        return {"config": config, "warnings": warnings}
 
     @app.put("/api/v1/projects/{name}/config")
     def put_project_config(
@@ -534,14 +533,12 @@ def register_resource_routes(
         config = payload.get("config")
         if not isinstance(config, dict):
             raise UsageError("config 必须是对象")
-        content = dump_config(config)
+        warnings: list[str] = []
+        config = normalize_config(config, defaults=load_global_settings(app_root, warnings=warnings), warnings=warnings)
         root = project(name)
-        resolve_project_config(config, presets_root=app_root, project=root)
-        for stage in LLM_MODEL_STAGES:
-            resolve_project_config(config, stage=stage, presets_root=app_root, project=root)
         with project_write_lock(root):
-            atomic_write_text(root / "config.toml", content)
-        return {"saved": True}
+            atomic_write_text(root / "config.toml", dump_config(config))
+        return {"saved": True, "warnings": warnings}
 
     @app.get("/api/v1/projects/{name}/prompts/{stage}")
     def get_project_prompt(
@@ -1066,6 +1063,7 @@ def register_resource_routes(
             or not config["auth"]["required"]
             or valid_session(request.cookies.get(SESSION_COOKIE)),
             "loopback": loopback,
+            "warnings": app.state.server_config_warnings,
         }
 
     @app.get("/api/v1/server/interfaces")
@@ -1135,11 +1133,12 @@ def register_resource_routes(
         }
         (await run_blocking(save_server_config, next_config))
         app.state.server_config = next_config
+        app.state.server_config_warnings = []
         await app.state.tasks.set_max_active_projects(max_active_projects)
         warning = (
             "同网段设备拥有完整项目和 LLM 操作权限" if enabled and not required else ""
         )
-        return {"saved": True, "warning": warning}
+        return {"saved": True, "warning": warning, "warnings": []}
 
     @app.post("/api/v1/auth/login")
     def auth_login(
