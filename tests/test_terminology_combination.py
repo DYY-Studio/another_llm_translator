@@ -118,14 +118,14 @@ async def test_scan_descriptions_follow_source_order_despite_completion_order(
     import asyncio
     from app.sqlite_storage import read_jsonl
     from app.term_library import load_terms
-    from tests.helpers import use_llm_preset
+    from app.config import dump_config, load_config
 
     project = await create_project(tmp_path, "Alice first.\nAlice later.")
-    use_llm_preset(tmp_path, target_chunk_input_tokens=1)
     config_path = project / "config.toml"
-    config_path.write_text(config_path.read_text(encoding="utf-8").replace(
-        'scheduling_mode = "ordered_by_file"', 'scheduling_mode = "parallel"',
-    ), encoding="utf-8")
+    config = load_config(config_path)
+    config["chunking"]["target_content_tokens"] = 1
+    config["execution"]["scheduling_mode"] = "parallel"
+    config_path.write_text(dump_config(config), encoding="utf-8")
     if include_summaries:
         write_summary_participation(
             project, [{"file_id": "F0001", "part_id": "document", "selected": True}],

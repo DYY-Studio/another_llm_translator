@@ -3001,7 +3001,7 @@ async def test_translation_plans_only_dispatch_window_off_event_loop(tmp_path, m
 
     def context(*args, **kwargs):
         config, *rest = original_context(*args, **kwargs)
-        config["execution"]["target_chunk_input_tokens"] = 1
+        config["chunking"]["target_content_tokens"] = 1
         config["execution"]["max_parallel"] = 2
         return config, *rest
 
