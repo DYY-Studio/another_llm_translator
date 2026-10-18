@@ -708,9 +708,17 @@ class MyValidator:
 
 Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存 Base URL、模型、credential 引用、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色分别选择覆盖；空覆盖使用全局 Preset。
 
-Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和影响阶段语义的定义内容 Hash；单独修改 `target_chunk_input_tokens` 不会改变该指纹。
+Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和影响阶段语义的定义内容 Hash。
 
-当前 Preset schema 为 8。`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力；普通与流式 Endpoint 均由 Adapter 定义。`target_chunk_input_tokens` 是完整输入 Prompt 的 Chunk 软目标；每个阶段使用其实际解析的 Preset 值，实际请求仍受上下文硬限制、Token 安全系数和启用的 ITPM 约束。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
+当前 Preset schema 为 9。`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力；普通与流式 Endpoint 均由 Adapter 定义。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
+
+项目在 `chunking` 中保存通用请求预算：`target_content_tokens` 默认 4096，`max_input_tokens` 默认 65536，`context_reserve_tokens` 默认 16384。`stage_overrides` 可按 `terminology`、`terminology_decision`、`terminology_knowledge`、`content_summary`、`translation`、`repetition_consistency`、`proofreading`、`polishing` 指定任意子集；未指定字段逐项继承通用值。术语片段概括使用 `terminology`，联合初稿翻译使用 `translation`。实体知识使用独立的 `terminology_knowledge` 预算，但沿用术语决策模型。
+
+内容 Token 目标是分批软目标，单个不可再分单元可超过目标。每次请求的完整输入硬上限为 `min(max_input_tokens, context_window_tokens - context_reserve_tokens, enabled ITPM)`；无 ITPM 限制时忽略该项。系统把参考内容计入完整输入限制，不为满足限制而删减必需证据。文本内容遵循现有安全拆分规则；不可分的关系组件、实体或重复组超过硬上限时明确处理失败或保留既有可见待审结果。输出上限按 Preset 上限与“上下文窗口减完整输入估算”取较小值，不会再次扣除预留；Preset 的 `max_output_tokens: 0` 仍表示省略输出上限字段。
+
+项目的 LLM 协议 Decision Preset 使用项目通用 `context_reserve_tokens`，不使用阶段覆盖，也不采用 `max_input_tokens`；HTTP Decision Preset 继续使用自身的 `context_safety_margin_tokens`。
+
+用户配置与 Preset 编辑读取会忽略未知字段并返回警告，缺失字段使用对应默认值且读取不写回文件；保存时写入已知字段的规范形式。显式存在但类型或取值非法的字段仍报错。旧 LLM Preset 中已删除的预算字段按未知字段处理，不迁移到项目设置。历史 Run 快照保持严格解析，旧结构 Run 仅可查看，不能续作。此编辑规则不放宽 Adapter、插件、冻结快照或动态 `extra_body`、`extra_headers` 的协议校验。
 
 旧协议不在运行期自动转换。全局 schema 7 Preset 使用 `python -m app.llm_migration` 预览，添加 `--apply` 后备份并迁移；历史 Run 快照不改写，旧协议 Run 只供查看，正式执行需创建新 Run。
 
