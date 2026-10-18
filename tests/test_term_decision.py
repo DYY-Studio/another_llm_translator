@@ -1291,6 +1291,59 @@ def test_related_anchors_prioritize_effective_group_dependencies(
     ]
 
 
+def test_related_anchors_keep_all_direct_group_references_over_soft_limit(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(tmp_path)
+    spec = term_normalization(load_project_config(project))
+    focus = _batch_state("root", "Root")
+    direct = [
+        {**_batch_state(f"member-{index}", f"Member {index}"),
+         "group_primary": "root"}
+        for index in range(25)
+    ]
+
+    related = _related_anchors([focus], direct, spec)
+
+    assert {item["normalized"] for item in related} == {
+        item["normalized"] for item in direct
+    }
+
+
+@pytest.mark.asyncio
+async def test_retry_batch_filters_unrelated_original_anchors(tmp_path: Path) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    focus = _batch_state("root", "Root")
+    direct = {**_batch_state("direct", "Member"), "group_primary": "root"}
+    unrelated = [
+        _batch_state(f"unrelated-{index}", f"Unrelated {index}")
+        for index in range(24)
+    ]
+    payloads = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-filter-original-anchors")
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            payloads.append(payload)
+            return SimpleNamespace(content=llm_jsonl([
+                {"type": "decision", "normalized": "root",
+                 "action": "keep", "reason": "synthetic"}
+            ])), None
+
+    states = [focus, direct, *unrelated]
+    await _request_batch(
+        StubLLM(), focus=[focus], anchors=[direct, *unrelated],
+        phase="consistency", prompt="synthetic", config=config,
+        evidence=_batch_evidence(*states),
+        known_states={state["normalized"]: state for state in states},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+    assert [item["normalized"] for item in payloads[0]["anchors"]] == ["direct"]
+
+
 def test_hard_components_join_groups_and_normalized_form_owners(tmp_path: Path) -> None:
     project = create_decision_project(tmp_path)
     spec = term_normalization(load_project_config(project))
@@ -1391,7 +1444,10 @@ def test_decision_batch_overflow_policy_controls_local_planning(
     config["execution"]["input_tokens_per_minute"] = 0
     config["execution"]["token_safety_factor"] = 1
     focus = _batch_state("alice", "Alice")
-    first_anchor = _batch_state("alice smith", "Alice Smith")
+    first_anchor = {
+        **_batch_state("alice smith", "Alice Smith"),
+        "group_primary": "alice",
+    }
     second_anchor = _batch_state("alice johnson", "Alice Johnson")
     evidence = _batch_evidence(focus, first_anchor, second_anchor)
 
@@ -1417,6 +1473,7 @@ def test_decision_batch_overflow_policy_controls_local_planning(
             spec=spec,
         )
     assert error.value.reason == "context"
+
 
     config["terminology_decision"]["anchor_overflow_mode"] = "trim"
     batches, _ = _pack_batches(
@@ -1474,6 +1531,30 @@ def test_decision_batch_overflow_policy_controls_local_planning(
             spec=spec,
         )
     assert error.value.reason == "itpm"
+
+
+def test_batch_trimming_does_not_drop_direct_group_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = create_decision_project(tmp_path)
+    config = load_project_config(project, stage="terminology_decision")
+    config["llm"]["context_window_tokens"] = 100
+    config["llm"]["context_safety_margin_tokens"] = 0
+    config["execution"]["input_tokens_per_minute"] = 0
+    config["terminology_decision"]["anchor_overflow_mode"] = "trim"
+    focus = _batch_state("root", "Root")
+    direct = {**_batch_state("member", "Member"), "group_primary": "root"}
+    monkeypatch.setattr(
+        "app.term_decision_batches.estimate_messages",
+        lambda messages, _: 200 if json.loads(messages[1]["content"])["anchors"] else 50,
+    )
+
+    with pytest.raises(RequestSizeError, match="完整术语证据和 Anchors 仍超过硬限制"):
+        _pack_batches(
+            [focus], phase="consistency", target_language="简体中文",
+            anchors=[direct], evidence=_batch_evidence(focus, direct),
+            prompt="prompt", config=config, spec=term_normalization(config),
+        )
 
 
 def test_decision_parser_keeps_unknown_terms_strict() -> None:
@@ -1598,6 +1679,53 @@ async def test_new_group_relation_retries_failed_dependency_with_proposer(
     )
     assert set(result) == {"alice", "bob"}
     assert llm.targets == [["alice", "bob"], ["alice", "bob"]]
+
+
+@pytest.mark.asyncio
+async def test_rejected_candidate_dependency_keeps_full_retry_component(
+    tmp_path: Path,
+) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 2
+    focus = [_batch_state("alice", "Alice"), _batch_state("bob", "Bob"),
+             _batch_state("carol", "Carol")]
+    payload_targets = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-rejected-candidate-dependency")
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            targets = [term["normalized"] for term in payload["terms"]]
+            payload_targets.append(targets)
+            if len(payload_targets) == 1:
+                records = [
+                    {"type": "decision", "normalized": "alice", "action": "update",
+                     "reason": "synthetic", "changes": {"group_primary": "bob"}},
+                    {"type": "decision", "normalized": "bob", "action": "update",
+                     "reason": "synthetic", "changes": {"group_primary": "carol"}},
+                    {"type": "decision", "normalized": "carol", "action": "keep",
+                     "reason": "synthetic"},
+                ]
+            else:
+                records = [
+                    {"type": "decision", "normalized": normalized,
+                     "action": "keep", "reason": "synthetic"}
+                    for normalized in targets
+                ]
+            return SimpleNamespace(content=llm_jsonl(records)), None
+
+    result = await _request_batch(
+        StubLLM(), focus=focus, anchors=[], phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+    assert set(result) == {"alice", "bob", "carol"}
+    assert payload_targets == [
+        ["alice", "bob", "carol"], ["alice", "bob", "carol"]
+    ]
 
 
 @pytest.mark.asyncio
@@ -2295,7 +2423,10 @@ async def test_cross_batch_group_cycle_becomes_manual_review(
     project = create_decision_project(tmp_path)
 
     def cross_referenced_batches(states: list[dict], **_: object) -> tuple[list, int]:
-        return [([state], [other]) for state, other in zip(states, reversed(states))], 2
+        return [
+            ([state], [{**other, "group_primary": state["normalized"]}])
+            for state, other in zip(states, reversed(states))
+        ], 2
 
     monkeypatch.setattr("app.term_decision_batches._pack_batches", cross_referenced_batches)
 
@@ -3192,7 +3323,10 @@ async def test_decision_ignores_extra_read_only_anchor_records(
     ) -> tuple[list, int]:
         batches = []
         for index, state in enumerate(states):
-            references = [states[1 - index]] if phase == "consistency" else []
+            references = (
+                [{**states[1 - index], "group_primary": state["normalized"]}]
+                if phase == "consistency" else []
+            )
             batches.append(([state], references))
         return batches, len(batches)
 

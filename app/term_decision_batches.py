@@ -486,6 +486,38 @@ def _compact_anchor_evidence(
 def _compact_anchors(anchors: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{**deepcopy(anchor), "_compact_evidence": True} for anchor in anchors]
 
+def _direct_group_anchors(
+    focus: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    spec: Any,
+) -> list[dict[str, Any]]:
+    focus_forms = [
+        normalize_term(str(value), spec)
+        for item in focus
+        for value in [item["source"], *item.get("aliases", [])]
+    ]
+    focus_primaries = {
+        normalize_term(str(item["group_primary"]), spec)
+        for item in focus
+        if item.get("group_primary") is not None
+    }
+    direct = []
+    for item in candidates:
+        item_forms = {
+            normalize_term(str(value), spec)
+            for value in [item["source"], *item.get("aliases", [])]
+        }
+        primary = item.get("group_primary")
+        item_primary = (
+            normalize_term(str(primary), spec) if primary is not None else None
+        )
+        if focus_primaries.intersection(item_forms) or (
+            item_primary is not None and item_primary in focus_forms
+        ):
+            direct.append(item)
+    return direct
+
+
 def _related_anchors(
     focus: list[dict[str, Any]],
     candidates: list[dict[str, Any]],
@@ -498,25 +530,6 @@ def _related_anchors(
         for item in focus
         for value in [item["source"], *item.get("aliases", [])]
     ]
-    focus_primaries = {
-        normalize_term(str(item["group_primary"]), spec)
-        for item in focus
-        if item.get("group_primary") is not None
-    }
-
-    def direct_group_relation(item: dict[str, Any]) -> bool:
-        item_forms = {
-            normalize_term(str(value), spec)
-            for value in [item["source"], *item.get("aliases", [])]
-        }
-        primary = item.get("group_primary")
-        item_primary = (
-            normalize_term(str(primary), spec) if primary is not None else None
-        )
-        return bool(
-            focus_primaries.intersection(item_forms)
-            or (item_primary is not None and item_primary in focus_forms)
-        )
 
     def related_to_focus(item: dict[str, Any]) -> bool:
         if focus_keys.intersection(_relation_keys(item, spec)):
@@ -533,8 +546,8 @@ def _related_anchors(
 
     direct = [
         item
-        for item in candidates
-        if str(item["normalized"]) not in focus_ids and direct_group_relation(item)
+        for item in _direct_group_anchors(focus, candidates, spec)
+        if str(item["normalized"]) not in focus_ids
     ]
     direct_ids = {str(item["normalized"]) for item in direct}
     related = [
@@ -543,7 +556,7 @@ def _related_anchors(
         if str(item["normalized"]) not in focus_ids | direct_ids
         and related_to_focus(item)
     ]
-    return [*direct, *related][:RELATED_ANCHOR_LIMIT]
+    return [*direct, *related[: max(0, RELATED_ANCHOR_LIMIT - len(direct))]]
 
 def _request_limits(config: dict[str, Any]) -> tuple[int, int, int, int]:
     soft_target = int(config["execution"]["target_chunk_input_tokens"])
@@ -659,7 +672,15 @@ def _pack_batches(
         estimate = estimate_for(focus, selected_anchors)
         if estimate > hard_limit:
             if anchor_overflow_mode == "trim":
-                while selected_anchors and estimate > hard_limit:
+                direct_ids = {
+                    str(item["normalized"])
+                    for item in _direct_group_anchors(focus, anchors, spec)
+                }
+                while (
+                    selected_anchors
+                    and str(selected_anchors[-1]["normalized"]) not in direct_ids
+                    and estimate > hard_limit
+                ):
                     selected_anchors = selected_anchors[:-1]
                     estimate = estimate_for(focus, selected_anchors)
             elif anchor_overflow_mode == "compact":
@@ -817,22 +838,14 @@ async def _request_batch(
                 for item in anchors
                 if str(item["normalized"]) not in target_ids
             }
-            related_accepted = _related_anchors(
-                request_focus,
-                [
-                    state
-                    for normalized, state in accepted_states.items()
-                    if normalized not in target_ids
-                ],
-                spec,
-            )
-            related_accepted = related_accepted[
-                : max(0, RELATED_ANCHOR_LIMIT - len(anchor_states))
-            ]
             anchor_states.update(
-                (str(item["normalized"]), item) for item in related_accepted
+                (normalized, state)
+                for normalized, state in accepted_states.items()
+                if normalized not in target_ids
             )
-            request_anchors = list(anchor_states.values())
+            request_anchors = _related_anchors(
+                request_focus, list(anchor_states.values()), spec
+            )
             payload = (await run_blocking(lambda: _make_payload(
                 phase=phase,
                 target_language=str(config["project"]["target_language"]),
@@ -930,6 +943,11 @@ async def _request_batch(
                     if isinstance(error.get("normalized"), str)
                     and str(error["normalized"]) in target_ids
                 }
+                for error in errors:
+                    failed_ids.update(
+                        str(normalized)
+                        for normalized in error.get("_dependency_component", [])
+                    )
                 expanded: set[str] = set()
                 if failed_ids:
                     candidate_states = dict(known_states)
