@@ -260,7 +260,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
   const budgetStages: Array<[BudgetStage, string]> = [
     ["terminology", translate("stage.terminology", language)],
     ["terminology_decision", translate("stage.terminologyDecision", language)],
-    ["terminology_knowledge", translate("settings.descriptionGeneration", language)],
+    ["terminology_knowledge", translate("stage.terminologyKnowledge", language)],
     ["content_summary", translate("stage.contentSummary", language)],
     ["translation", translate("stage.translation", language)],
     ["repetition_consistency", translate("repetition.title", language)],
@@ -334,7 +334,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
                 return <Field key={field} label={label} help={translate(inherited ? "settings.budgetInherited" : "settings.budgetOverride", language, { value: effective })}>
                   <div className="budget-override-control">
                     <input aria-label={`${stageLabel} ${label}`} type="number" min={1} step={1} disabled={inherited} value={effective} onChange={(event) => { if (event.target.value !== "") updateBudgetOverride(stage, field, event.target.valueAsNumber); }} />
-                    <span className="budget-override-toggle"><input type="checkbox" checked={!inherited} aria-label={translate("settings.budgetOverrideToggle", language, { field: label })} onChange={(event) => updateBudgetOverride(stage, field, event.target.checked ? effective : null)} />{translate(inherited ? "settings.budgetInheritedShort" : "settings.budgetOverrideShort", language)}</span>
+                    <span className="budget-override-toggle"><input type="checkbox" checked={!inherited} aria-label={translate("settings.budgetOverrideToggle", language, { field: label })} onChange={(event) => updateBudgetOverride(stage, field, event.target.checked ? effective : null)} />{translate("settings.budgetOverrideShort", language)}</span>
                   </div>
                 </Field>;
               })}
