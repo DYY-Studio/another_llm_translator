@@ -2565,7 +2565,9 @@ async def test_scan_resume_keeps_successful_results_and_original_scope(
     tmp_path: Path, crash: bool, include_draft: bool,
 ) -> None:
     project = await create_project(tmp_path, "Alice entered.\nBob waved.")
-    use_llm_preset(tmp_path, target_chunk_input_tokens=1)
+    config = load_config(project / "config.toml")
+    config["chunking"]["target_content_tokens"] = 1
+    (project / "config.toml").write_text(dump_config(config))
     requests: list[dict] = []
     cancel = True
 
