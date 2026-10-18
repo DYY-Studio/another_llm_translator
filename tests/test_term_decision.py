@@ -2668,6 +2668,7 @@ async def test_unknown_decision_is_warned_without_format_retry(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.setattr(logging.getLogger("another_llm_translator"), "propagate", True)
     project = create_decision_project(tmp_path)
     monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
     calls = 0
