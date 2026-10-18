@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from app.errors import ConfigError, UsageError
+from app.config import dump_config, load_config
 from app.diagnostics import Diagnostics
 from app.execution import Scope
 from app.llm_response import response_record_types
@@ -1362,17 +1363,13 @@ async def test_preflight_interception_does_not_create_unused_prompt_variants(
     preset_path = config_module.APP_ROOT / "llm_presets" / "default.json"
     preset = json.loads(preset_path.read_text(encoding="utf-8"))
     preset["context_window_tokens"] = 128
-    preset["context_safety_margin_tokens"] = 0
     preset["max_output_tokens"] = 1
     preset_path.write_text(json.dumps(preset), encoding="utf-8")
     config_path = project / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            "allow_split_oversized_segment = true",
-            "allow_split_oversized_segment = false",
-        ),
-        encoding="utf-8",
-    )
+    config = load_config(config_path)
+    config["chunking"]["context_reserve_tokens"] = 0
+    config["chunking"]["allow_split_oversized_segment"] = False
+    config_path.write_text(dump_config(config), encoding="utf-8")
     calls = 0
 
     def fail_if_called(_request: httpx.Request) -> httpx.Response:
@@ -1419,17 +1416,13 @@ async def test_preflight_interception_selects_primary_mode_from_actual_requests(
     preset_path = config_module.APP_ROOT / "llm_presets" / "default.json"
     preset = json.loads(preset_path.read_text(encoding="utf-8"))
     preset["context_window_tokens"] = 4096
-    preset["context_safety_margin_tokens"] = 0
     preset["max_output_tokens"] = 1
     preset_path.write_text(json.dumps(preset), encoding="utf-8")
     config_path = project / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            "allow_split_oversized_segment = true",
-            "allow_split_oversized_segment = false",
-        ),
-        encoding="utf-8",
-    )
+    config = load_config(config_path)
+    config["chunking"]["context_reserve_tokens"] = 0
+    config["chunking"]["allow_split_oversized_segment"] = False
+    config_path.write_text(dump_config(config), encoding="utf-8")
     request_modes: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

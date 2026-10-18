@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.config import load_project_config
+from app.config import dump_config, load_config, load_project_config
 from app.errors import ConfigError, IncompleteError, UsageError
 from app.execution import Scope
 from app.main import run
@@ -1071,9 +1071,10 @@ async def test_oversized_review_segment_is_combined_once(
             tmp_path,
             context_window_tokens=1200,
             max_output_tokens=300,
-            context_safety_margin_tokens=100,
-            target_chunk_input_tokens=700,
         )
+        config = load_config(project / "config.toml")
+        config["chunking"]["target_content_tokens"] = 700
+        (project / "config.toml").write_text(dump_config(config))
         summary = await run_review(
             project, "proofreading", Scope(), http_client=client
         )

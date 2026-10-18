@@ -1028,7 +1028,10 @@ def test_budget_increase_revisits_deferred_group_on_resume(tmp_path, monkeypatch
             return await repetition.run_repetition(project, Scope(), run_action=action, http_client=client)
     with pytest.raises(StorageError):
         asyncio.run(run())
-    use_llm_preset(tmp_path, context_window_tokens=64000, context_safety_margin_tokens=1000)
+    use_llm_preset(tmp_path, context_window_tokens=64000)
+    settings = config.load_config(path)
+    settings["chunking"]["context_reserve_tokens"] = 1000
+    path.write_text(config.dump_config(settings))
     plan = repetition.repetition_plan(project, Scope())
     info = repetition.repetition_resume(project, plan)
     assert info["resume_compatible"] and info["completed"] == 0 and info["estimated_requests"] == 1

@@ -915,19 +915,17 @@ async def test_parallel_summary_split_keeps_saved_slices_reusable(
 ) -> None:
     import asyncio
     from tests.helpers import use_llm_preset
+    from app.config import dump_config, load_config
 
     project = await create_project(tmp_path, "A" * 8000 + "B" * 8000)
     path = project / "config.toml"
-    path.write_text(
-        path.read_text().replace(
-            'scheduling_mode = "ordered_by_file"', 'scheduling_mode = "parallel"'
-        )
-    )
+    config = load_config(path)
+    config["execution"]["scheduling_mode"] = "parallel"
+    config["chunking"]["target_content_tokens"] = 1
+    path.write_text(dump_config(config))
     use_llm_preset(
         tmp_path,
         context_window_tokens=3000,
-        context_safety_margin_tokens=100,
-        target_chunk_input_tokens=1,
         max_output_tokens=200,
     )
     write_summary_participation(
