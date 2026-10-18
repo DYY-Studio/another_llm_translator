@@ -1637,6 +1637,100 @@ async def test_unknown_record_does_not_discard_valid_results_or_expand_retry(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "completion_order",
+    [("alice", "bob", "carol"), ("bob", "carol", "alice")],
+)
+async def test_isolated_retry_groups_overlap_from_same_reference_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completion_order: tuple[str, str, str],
+) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 2
+    config["execution"]["max_parallel"] = 2
+    focus = [
+        _batch_state("alice", "Alice"),
+        _batch_state("bob", "Bob"),
+        _batch_state("carol", "Carol"),
+    ]
+
+    def include_sibling_anchors(focus_states, candidates, _spec):
+        focus_ids = {str(item["normalized"]) for item in focus_states}
+        return [
+            item for item in candidates
+            if str(item["normalized"]) not in focus_ids
+        ]
+
+    monkeypatch.setattr(
+        "app.term_decision_batches._related_anchors", include_sibling_anchors
+    )
+    both_started = asyncio.Event()
+    release = {normalized: asyncio.Event() for normalized in completion_order}
+    release[completion_order[0]].set()
+    active = 0
+    maximum_active = 0
+    calls = 0
+    payloads = []
+    completed = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-isolated-retry-overlap")
+
+        async def chat(self, *, messages, **kwargs):
+            nonlocal active, maximum_active, calls
+            payload = json.loads(messages[1]["content"])
+            payloads.append(payload)
+            targets = [term["normalized"] for term in payload["terms"]]
+            calls += 1
+            if calls <= 2:
+                return SimpleNamespace(content=llm_jsonl([])), None
+            active += 1
+            maximum_active = max(maximum_active, active)
+            if active == 2:
+                both_started.set()
+            await both_started.wait()
+            await release[targets[0]].wait()
+            completed.append(targets[0])
+            index = completion_order.index(targets[0])
+            if index + 1 < len(completion_order):
+                release[completion_order[index + 1]].set()
+            active -= 1
+            if targets[0] == completion_order[0]:
+                return SimpleNamespace(content=llm_jsonl([
+                    {"type": "decision", "normalized": targets[0],
+                     "action": "update", "reason": "synthetic",
+                     "changes": {"category": "角色"}}
+                ])), None
+            return SimpleNamespace(content=llm_jsonl([
+                {"type": "decision", "normalized": normalized,
+                 "action": "keep", "reason": "synthetic"}
+                for normalized in targets
+            ])), None
+
+    result = await asyncio.wait_for(_request_batch(
+        StubLLM(), focus=focus, anchors=focus, phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    ), timeout=1)
+
+    assert set(result) == {"alice", "bob", "carol"}
+    assert maximum_active == 2
+    assert completed == list(completion_order)
+    isolated_payloads = payloads[-3:]
+    for payload in isolated_payloads:
+        target = payload["terms"][0]["normalized"]
+        sibling_anchors = {
+            item["normalized"]: item for item in payload["anchors"]
+        }
+        for sibling in set(result) - {target}:
+            assert sibling in sibling_anchors
+            assert sibling_anchors[sibling]["category"] == "人物"
+
+
+@pytest.mark.asyncio
 async def test_new_group_relation_retries_failed_dependency_with_proposer(
     tmp_path: Path,
 ) -> None:
