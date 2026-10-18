@@ -76,6 +76,10 @@
 .requests-only .request-panel-decision .request-row-main code span { white-space: normal; }
 .request-cell-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .requests-only .request-list article > span { font-size: 12px; }
+.request-cell-status { min-width: 0; display: grid; gap: 3px; justify-items: start; }
+.request-cell-status .request-status { margin-right: 0; }
+.request-cell-status small, .request-cell-number small { color: var(--muted); font-size: 10px; line-height: 1.3; overflow-wrap: anywhere; }
+.request-cell-number small { display: block; }
 @media (max-width: 700px) {
   .requests-only .request-panel { overflow-x: hidden; }
   .requests-only .request-groups { min-width: 0; }
@@ -84,7 +88,7 @@
   .requests-only .request-row-main { grid-column: 1 / -1; }
   .requests-only .request-row-main header { display: flex; }
   .requests-only .request-cell-model { grid-column: span 2; }
-  .requests-only .request-list article > .request-status { margin: 0; text-align: right; }
+  .requests-only .request-list article > .request-cell-status { justify-items: end; margin: 0; text-align: right; }
   .requests-only .request-cell-number { display: flex; flex-direction: column; gap: 4px; text-align: left; }
   .requests-only .request-cell-number::before { content: attr(data-label); color: var(--muted); font-size: 10px; }
 }

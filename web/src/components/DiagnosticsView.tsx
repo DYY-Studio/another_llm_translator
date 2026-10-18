@@ -159,7 +159,13 @@ const RequestGroup = memo(function RequestGroup({
                 </div>
                 {tabular && <>
                   <span className="request-cell-model" title={item.model}>{item.model}</span>
-                  <span className={`request-status status-${item.status}`}>{requestStatusLabel(item, language)}</span>
+                  <span className="request-cell-status">
+                    <span className={`request-status status-${item.status}`}>{requestStatusLabel(item, language)}</span>
+                    {item.transport === "sse" && <>
+                      <small>{translate("diagnostics.streamEvents", language)}: {item.stream_event_count}</small>
+                      <small>{translate("diagnostics.streamReceived", language)}: {bytes(item.stream_received_bytes, language)}</small>
+                    </>}
+                  </span>
                   <span className="request-cell-number" data-label={translate("diagnostics.inputTokens", language)}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage.input_tokens, language)}` : "—"}</span>
                   <span className="request-cell-number" data-label={translate("diagnostics.outputTokens", language)}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage.output_tokens, language)}` : "—"}</span>
                   {item.request_kind === "decision"
@@ -167,7 +173,10 @@ const RequestGroup = memo(function RequestGroup({
                     : <span className="request-cell-number" data-label={translate("diagnostics.totalTokens", language)}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage.total_tokens, language)}` : "—"}</span>}
                   <span className="request-cell-number" data-label={translate("diagnostics.outputRate", language)}>{number(item.output_tokens_per_second, language, "", "—")}</span>
                   <span className="request-cell-number" data-label={translate("diagnostics.tabAttempts", language)}>{item.attempt_count}</span>
-                  <span className="request-cell-number" data-label={translate("diagnostics.requestDuration", language)}>{item.latency_ms === null ? "—" : `${(item.latency_ms / 1000).toFixed(2)} s`}</span>
+                  <span className="request-cell-number" data-label={translate("diagnostics.requestDuration", language)}>
+                    {item.latency_ms === null ? "—" : `${(item.latency_ms / 1000).toFixed(2)} s`}
+                    {item.transport === "sse" && item.stream_first_event_latency_ms !== null && <small>{item.stream_first_event_latency_ms} ms</small>}
+                  </span>
                 </>}
                 {!item.detail_available && <span className="muted">{translate("diagnostics.expired", language)}</span>}
               </article>
