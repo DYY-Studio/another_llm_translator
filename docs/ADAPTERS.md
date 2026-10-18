@@ -706,7 +706,7 @@ class MyValidator:
 
 ## 4. LLM Preset（已实现）
 
-Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存 Base URL、模型、credential 引用、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色分别选择覆盖；空覆盖使用全局 Preset。
+Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存 Base URL、模型、credential 引用、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，各 LLM 阶段可单独覆盖；空覆盖使用全局 Preset。
 
 Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和影响阶段语义的定义内容 Hash。
 
@@ -718,9 +718,9 @@ Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Pres
 
 项目的 LLM 协议 Decision Preset 使用项目通用 `context_reserve_tokens`，不使用阶段覆盖，也不采用 `max_input_tokens`；HTTP Decision Preset 继续使用自身的 `context_safety_margin_tokens`。
 
-用户配置与 Preset 编辑读取会忽略未知字段并返回警告，缺失字段使用对应默认值且读取不写回文件；保存时写入已知字段的规范形式。显式存在但类型或取值非法的字段仍报错。旧 LLM Preset 中已删除的预算字段按未知字段处理，不迁移到项目设置。历史 Run 快照保持严格解析，旧结构 Run 仅可查看，不能续作。此编辑规则不放宽 Adapter、插件、冻结快照或动态 `extra_body`、`extra_headers` 的协议校验。
+用户配置与 Preset 编辑读取会忽略未知字段并返回警告，缺失字段使用对应默认值且读取不写回文件；保存时写入已知字段的规范形式。显式存在但类型或取值非法的字段仍报错。旧 LLM Preset 中已删除的预算字段按未知字段处理，不迁移到项目设置。历史 Run 快照保持严格解析，旧结构 Run 不能续作。此编辑规则不放宽 Adapter、插件、冻结快照或动态 `extra_body`、`extra_headers` 的协议校验。
 
-旧协议不在运行期自动转换。全局 schema 7 Preset 使用 `python -m app.llm_migration` 预览，添加 `--apply` 后备份并迁移；历史 Run 快照不改写，旧协议 Run 只供查看，正式执行需创建新 Run。
+旧协议不在运行期自动转换。全局 schema 7 Preset 使用 `python -m app.llm_migration` 预览，添加 `--apply` 后备份并迁移；历史 Run 快照不改写，旧协议 Run 不能续作，正式执行需创建新 Run。
 
 `send_temperature` 为必填布尔值；关闭后省略请求模板中的温度，禁止在 Extra Body 中再次添加。阶段温度不参与关闭发送后的阶段指纹。`reasoning_effort` 为字符串或 null，null 不发送参数；等级必须属于 Adapter 的声明，不能在 Extra Body 中重复填写声明位置或别名位置。Effort 不自动调整温度、thinking 开关或思考摘要。
 
