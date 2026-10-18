@@ -63,6 +63,7 @@ def stream_response(*values: object, line_ending: str = "\n") -> httpx.Response:
 
 def streaming_config(tmp_path: Path) -> dict:
     current = load_global_config(ROOT)
+    current["chunking"]["context_reserve_tokens"] = 512
     current["llm"]["stream"] = True
     current["llm"]["stream_endpoint"] = ""
     current["retry"]["http_max_attempts"] = 1

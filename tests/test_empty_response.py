@@ -40,6 +40,7 @@ async def test_empty_original_retry_preserves_request_and_usage(
 ) -> None:
     monkeypatch.setenv("LLM_API_KEY", "test")
     config = load_global_config(ROOT)
+    config["chunking"]["context_reserve_tokens"] = 512
     config["llm"]["stream"] = stream
     config["retry"]["empty_truncated_mode"] = "retry"
     config["retry"]["empty_truncated_max_attempts"] = 1
@@ -150,6 +151,7 @@ async def test_empty_retry_exhaustion_and_disable(
 ) -> None:
     monkeypatch.setenv("LLM_API_KEY", "test")
     config = load_global_config(ROOT)
+    config["chunking"]["context_reserve_tokens"] = 512
     kind = "truncated" if reason == "length" else "unknown"
     config["retry"][f"empty_{kind}_mode"] = "retry"
     config["retry"][f"empty_{kind}_max_attempts"] = count
@@ -218,6 +220,7 @@ async def test_responses_stream_incomplete_retains_explicit_length_reason(
 
     monkeypatch.setenv("LLM_API_KEY", "test")
     config = load_global_config(ROOT)
+    config["chunking"]["context_reserve_tokens"] = 512
     config["llm"]["stream"] = True
     config["_llm_adapter"] = load_json_adapter(
         ROOT / "llm_adapters/openai-responses.json"
@@ -348,6 +351,7 @@ async def test_explicit_blocked_reason_is_not_empty_retry(
 ) -> None:
     monkeypatch.setenv("LLM_API_KEY", "test")
     config = load_global_config(ROOT)
+    config["chunking"]["context_reserve_tokens"] = 512
     calls = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:

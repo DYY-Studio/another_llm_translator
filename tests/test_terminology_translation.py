@@ -2097,7 +2097,6 @@ async def test_translation_reports_dynamic_output_budget_warning(
     use_llm_preset(
         tmp_path,
         context_window_tokens=1000,
-        context_safety_margin_tokens=100,
         max_output_tokens=5000,
     )
 
@@ -2188,9 +2187,10 @@ async def test_oversized_segment_is_split_and_saved_once(
         tmp_path,
         context_window_tokens=1200,
         max_output_tokens=300,
-        context_safety_margin_tokens=100,
-        target_chunk_input_tokens=700,
     )
+    config = load_config(project / "config.toml")
+    config["chunking"]["target_content_tokens"] = 700
+    (project / "config.toml").write_text(dump_config(config))
     requested_ids: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2565,7 +2565,9 @@ async def test_scan_resume_keeps_successful_results_and_original_scope(
     tmp_path: Path, crash: bool, include_draft: bool,
 ) -> None:
     project = await create_project(tmp_path, "Alice entered.\nBob waved.")
-    use_llm_preset(tmp_path, target_chunk_input_tokens=1)
+    config = load_config(project / "config.toml")
+    config["chunking"]["target_content_tokens"] = 1
+    (project / "config.toml").write_text(dump_config(config))
     requests: list[dict] = []
     cancel = True
 
@@ -2999,7 +3001,7 @@ async def test_translation_plans_only_dispatch_window_off_event_loop(tmp_path, m
 
     def context(*args, **kwargs):
         config, *rest = original_context(*args, **kwargs)
-        config["execution"]["target_chunk_input_tokens"] = 1
+        config["chunking"]["target_content_tokens"] = 1
         config["execution"]["max_parallel"] = 2
         return config, *rest
 

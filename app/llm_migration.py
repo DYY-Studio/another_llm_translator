@@ -11,7 +11,7 @@ from typing import Any
 
 from .errors import ConfigError, ExternalError
 from .llm_adapter import load_json_adapter, _parse_json_pointer, _resolve_json_pointer
-from .llm_preset import load_llm_preset, _parse_llm_preset
+from .llm_preset import load_llm_preset, _parse_llm_preset, CURRENT_PRESET_SCHEMA_VERSION, normalize_llm_preset
 from .project import APP_ROOT
 from .sqlite_storage import atomic_write_json
 from .user_config import user_root
@@ -66,14 +66,15 @@ def migrate_llm_resources(
                         raise ConfigError("修改过的内建副本或自定义 Adapter，请人工升级协议")
                     upgraded = json.loads(target.read_text(encoding="utf-8"))
                 else:
-                    if value.get("schema_version") == 8:
+                    if value.get("schema_version") in {8, CURRENT_PRESET_SCHEMA_VERSION}:
                         load_llm_preset(path)
                         continue
                     if value.get("schema_version") != 7:
                         raise ConfigError("自动迁移仅支持 schema 7 Preset，请人工升级")
                     upgraded = deepcopy(value)
-                    upgraded.update(schema_version=8, send_temperature=value["credential"]["kind"] != "chatgpt", reasoning_effort=None)
+                    upgraded.update(schema_version=CURRENT_PRESET_SCHEMA_VERSION, send_temperature=value["credential"]["kind"] != "chatgpt", reasoning_effort=None)
                     upgraded.setdefault("extra_headers", {})
+                    upgraded = normalize_llm_preset(upgraded, preset_id=path.stem)
                     _parse_llm_preset(upgraded)
                     relative = Path("llm_adapters") / (str(value["adapter_id"]) + ".json")
                     override = root / relative

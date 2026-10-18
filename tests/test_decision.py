@@ -422,7 +422,7 @@ def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path
             async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
                 retry = load_config(root / "config" / "config.toml")["retry"]
                 retry["http_max_attempts"] = 2
-                client = DecisionClient(frozen, http_client=http, retry=retry, debug_directory=tmp_path / "debug")
+                client = DecisionClient(frozen, context_reserve_tokens=512, http_client=http, retry=retry, debug_directory=tmp_path / "debug")
                 result = await client.choose({"text": "Evidence"}, [DecisionQuestion("term", "Choose", {"a": "A", "b": "B"})])
                 assert result["term"].choice == "a"
                 assert client.usage_summary()["total_tokens"] == 30
@@ -468,7 +468,7 @@ def test_llm_decision_http_and_parse_errors_share_send_budget(tmp_path, monkeypa
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
             retry = load_config(root / "config" / "config.toml")["retry"]
             retry["http_max_attempts"] = 2
-            client = DecisionClient(value, http_client=http, retry=retry)
+            client = DecisionClient(value, context_reserve_tokens=512, http_client=http, retry=retry)
             with pytest.raises(ExternalError, match="Decision 响应无效，重试预算耗尽"):
                 await client.choose("Evidence", [DecisionQuestion("term", "Choose", {"a": "A", "b": "B"})])
     asyncio.run(run())
@@ -494,7 +494,7 @@ def test_llm_decision_debug_records_final_outcome(tmp_path, monkeypatch, stream,
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
-            client = DecisionClient(preset, http_client=http, debug_directory=tmp_path / "debug")
+            client = DecisionClient(preset, context_reserve_tokens=512, http_client=http, debug_directory=tmp_path / "debug")
             question = DecisionQuestion("q", "Choose", {"a": "A", "b": "B"})
             if "refusal" in content:
                 assert (await client.choose("Evidence", [question]))["q"].refused
@@ -525,10 +525,10 @@ def test_llm_decision_schema_is_included_in_context_preflight(tmp_path):
     root = make_app_root(tmp_path)
     value = resolve_llm_resources(dict(preset_id='judge', protocol='llm', llm_preset='default', prompt_language='en'), root)
     questions = [DecisionQuestion(f'q_{i}', 'Choose', {'a':'A', 'b':'B'}) for i in range(10)]
-    plain = DecisionClient(value)
+    plain = DecisionClient(value, context_reserve_tokens=512)
     _, plain_estimate = plain.request_plan('Evidence', questions)
     value['_resources']['preset']['json_schema_enabled'] = True
-    client = DecisionClient(value)
+    client = DecisionClient(value, context_reserve_tokens=512)
     _, schema_estimate = client.request_plan('Evidence', questions)
     assert schema_estimate > plain_estimate
     client.preset['context_window_tokens'] = plain_estimate + client.preset['context_safety_margin_tokens']

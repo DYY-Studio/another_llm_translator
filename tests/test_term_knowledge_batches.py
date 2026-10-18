@@ -49,8 +49,9 @@ async def test_batch_keeps_success_before_retry_and_isolates_cross_entity_refs(t
 def test_budget_packing_isolates_oversized_entity(tmp_path):
     from app.term_knowledge import pack_knowledge_batches
     config = load_project_config(make_project(tmp_path), stage="terminology_decision")
-    config["execution"].update(target_chunk_input_tokens=1000, input_tokens_per_minute=0)
-    config["llm"].update(context_window_tokens=2000, context_safety_margin_tokens=0)
+    config["execution"].update(input_tokens_per_minute=0)
+    config["chunking"].update(target_content_tokens=1000, context_reserve_tokens=0)
+    config["llm"].update(context_window_tokens=2000)
     batches, tokens, errors = pack_knowledge_batches([view("a"), view("large", "大" * 10000), view("b")], "整理", config)
     assert [[v["entity_key"] for v in b] for b in batches] == [["a", "b"]]
     assert tokens > 0
@@ -113,7 +114,11 @@ async def test_knowledge_run_uses_bounded_parallel_batches(tmp_path, monkeypatch
     write_json(project, project / "terminology/overrides.json", overrides)
     prompt = _prompt(project, "zh-CN")["knowledge"]
     single = estimate_messages(render_messages(prompt, knowledge_payload([entity_view(project, data, "a")], config["project"]["target_language"])[0]), config["execution"]["token_safety_factor"])
-    use_llm_preset(tmp_path, target_chunk_input_tokens=single, max_parallel=2, max_parallel_per_key=2)
+    use_llm_preset(tmp_path, max_parallel=2, max_parallel_per_key=2)
+    from app.config import load_project_settings, dump_config
+    settings = load_project_settings(project)
+    settings["chunking"]["stage_overrides"]["terminology_knowledge"] = {"target_content_tokens": 1}
+    (project / "config.toml").write_text(dump_config(settings), encoding="utf-8")
     active = maximum = 0
     first_pair = asyncio.Event()
     calls = []
@@ -225,12 +230,10 @@ def test_soft_overflow_and_feedback_budget_are_explicit(tmp_path):
     config = load_project_config(make_project(tmp_path), stage="terminology_decision")
     config["execution"]["input_tokens_per_minute"] = 0
     size = estimate_messages(render_messages("整理", knowledge_payload([view("alpha")], config["project"]["target_language"])[0]), config["execution"]["token_safety_factor"])
-    config["execution"]["target_chunk_input_tokens"] = size - 1
-    config["terminology_decision"]["allow_soft_target_overflow"] = False
-    assert set(pack_knowledge_batches([view("alpha")], "整理", config)[2]) == {"alpha"}
-    config["terminology_decision"]["allow_soft_target_overflow"] = True
+    config["chunking"]["target_content_tokens"] = 1
     assert len(pack_knowledge_batches([view("alpha")], "整理", config)[0]) == 1
-    config["llm"].update(context_window_tokens=size + 5, context_safety_margin_tokens=0)
+    config["llm"].update(context_window_tokens=size + 5)
+    config["chunking"]["context_reserve_tokens"] = 0
     batches, _, errors = pack_knowledge_batches([view("alpha")], "整理", config, feedback="格式修正" * 100)
     assert not batches and set(errors) == {"alpha"}
 
@@ -645,3 +648,24 @@ async def test_knowledge_only_partial_failure_preserves_reviewable_success(tmp_p
     assert draft["needs_review"][0]["evidence"] == {}
     apply_decision_draft(project, confirm_all=True)
     assert [item["normalized"] for item in manual_review_state(project)["items"]] == ["beta"]
+
+
+def test_knowledge_budget_excludes_comparison_items_but_limits_complete_payload(tmp_path):
+    from app.term_knowledge import pack_knowledge_batches, knowledge_payload
+    from app.execution import estimate_messages, render_messages
+    config = load_project_config(make_project(tmp_path), stage="terminology_decision")
+    config["execution"]["input_tokens_per_minute"] = 0
+    config["chunking"].update(target_content_tokens=1, context_reserve_tokens=0)
+    config["chunking"]["stage_overrides"]["terminology_knowledge"] = {"target_content_tokens": 300}
+    entities = [view("alpha"), view("beta")]
+    for entity in entities:
+        entity["items"] = [{"text": "现有说明" * 100}]
+    batches, _, errors = pack_knowledge_batches(entities, "整理", config)
+    assert not errors
+    assert batches == [entities]
+    payload = knowledge_payload([entities[0]], config["project"]["target_language"])[0]
+    full = estimate_messages(render_messages("整理", payload), config["execution"]["token_safety_factor"])
+    config["chunking"]["stage_overrides"]["terminology_knowledge"]["max_input_tokens"] = full + 10
+    batches, _, errors = pack_knowledge_batches(entities, "整理", config)
+    assert not errors
+    assert [[entity["entity_key"] for entity in batch] for batch in batches] == [["alpha"], ["beta"]]

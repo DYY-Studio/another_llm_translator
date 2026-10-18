@@ -92,6 +92,21 @@ export type LLMStage =
 
 export type RunStage = LLMStage | "content_summary";
 export type TaskStage = RunStage | "continuous";
+export type BudgetStage =
+  | "terminology"
+  | "terminology_decision"
+  | "terminology_knowledge"
+  | "content_summary"
+  | "translation"
+  | "repetition_consistency"
+  | "proofreading"
+  | "polishing";
+
+export interface RequestBudget {
+  target_content_tokens: number;
+  max_input_tokens: number;
+  context_reserve_tokens: number;
+}
 
 export interface ResultView {
   record_id: string;
@@ -729,10 +744,6 @@ export interface TaskOptions {
     required_stages: string[];
     missing: string[];
   };
-  overflow_policy?: {
-    allow_soft_target_overflow: boolean;
-    anchor_overflow_mode: "error" | "trim" | "compact";
-  };
   document_adapter_run_options?: Array<{
     adapter_id: string;
     file_count: number;
@@ -1057,6 +1068,8 @@ export interface ProjectConfig {
     temperature_terminology_decision: number;
     temperature_content_summary: number;
     temperature_translation: number;
+    preset_repetition_consistency: string;
+    temperature_repetition_consistency: number;
     temperature_proofreading: number;
     temperature_polishing: number;
   };
@@ -1066,6 +1079,10 @@ export interface ProjectConfig {
   chunking: {
     allow_split_oversized_segment: boolean;
     cross_boundary_batching: Array<"terminology" | "translation" | "proofreading" | "polishing">;
+    target_content_tokens: number;
+    max_input_tokens: number;
+    context_reserve_tokens: number;
+    stage_overrides: Partial<Record<BudgetStage, Partial<RequestBudget>>>;
   };
   context: Record<"terminology" | "translation" | "proofreading" | "polishing", {
     enabled: boolean;
@@ -1086,8 +1103,6 @@ export interface ProjectConfig {
     unsourced_description_injection: "none" | "when_no_sourced" | "all";
   };
   terminology_decision: {
-    allow_soft_target_overflow: boolean;
-    anchor_overflow_mode: "error" | "trim" | "compact";
     description_generation: "sourced" | "sourced_and_summary" | "summary_only";
   };
   validation: {
@@ -1142,7 +1157,7 @@ export interface HTTPDecisionPreset {
   url: string;
   model: string;
   proxy_url: string;
-  credential: { kind: "environment" | "keychain"; name: string };
+  credential: { kind: "" | "environment" | "keychain"; name: string };
   context_window_tokens: number;
   context_safety_margin_tokens: number;
   token_safety_factor: number;
@@ -1158,7 +1173,12 @@ export interface LLMDecisionPreset {
   prompt_language: "zh-CN" | "en";
 }
 
-export type DecisionPreset = HTTPDecisionPreset | LLMDecisionPreset;
+export interface IncompleteDecisionPreset {
+  preset_id: string;
+  protocol: "";
+}
+
+export type DecisionPreset = HTTPDecisionPreset | LLMDecisionPreset | IncompleteDecisionPreset;
 
 export interface DecisionPresetSummary {
   preset_id: string;
@@ -1166,6 +1186,8 @@ export interface DecisionPresetSummary {
   model?: string;
   valid: boolean;
   error?: string;
+  warnings?: string[];
+  missing_fields?: string[];
 }
 
 export interface LLMPresetSummary {
@@ -1178,10 +1200,12 @@ export interface LLMPresetSummary {
   valid: boolean;
   digest?: string;
   error?: string;
+  warnings?: string[];
+  missing_fields?: string[];
 }
 
 export interface LLMPreset {
-  schema_version: 8;
+  schema_version: 9;
   preset_id: string;
   adapter_id: string;
   base_url: string;
@@ -1189,12 +1213,10 @@ export interface LLMPreset {
   credential: LLMCredential;
   proxy_url: string;
   context_window_tokens: number;
-  target_chunk_input_tokens: number;
   max_output_tokens: number;
   send_temperature: boolean;
   json_schema_enabled?: boolean;
   reasoning_effort: string | null;
-  context_safety_margin_tokens: number;
   token_safety_factor: number;
   requests_per_minute: number;
   input_tokens_per_minute: number;
@@ -1208,7 +1230,7 @@ export interface LLMPreset {
 }
 
 export interface LLMCredential {
-  kind: "environment" | "keychain" | "chatgpt";
+  kind: "" | "environment" | "keychain" | "chatgpt";
   name: string;
 }
 
@@ -1223,6 +1245,7 @@ export interface ServerStatus {
   authed: boolean;
   loopback: boolean;
   tasks: { max_active_projects: number; estimate_usage_before_run: boolean };
+  warnings?: string[];
 }
 
 export interface InterfaceEntry {

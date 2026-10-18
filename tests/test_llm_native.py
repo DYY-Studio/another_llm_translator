@@ -182,6 +182,7 @@ async def test_generic_client_only_sends_schema_when_preset_and_task_enable_it(t
 
     monkeypatch.setenv('LLM_API_KEY', 'synthetic-key')
     config = load_global_config(ROOT)
+    config["chunking"]["context_reserve_tokens"] = 512
     config['llm']['json_schema_enabled'] = enabled
     config['retry']['http_max_attempts'] = 1
     schema = {'type':'object', 'properties':{'result':{'type':'string'}}, 'required':['result'], 'additionalProperties':False}

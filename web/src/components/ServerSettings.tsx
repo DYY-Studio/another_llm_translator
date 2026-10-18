@@ -115,6 +115,10 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
       </div>
       {error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
       {message && <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
+      {status?.warnings?.length ? <div className="warning-banner config-warning-summary">
+        <strong>{translate("settings.normalizationWarnings", language, { count: status.warnings.length })}</strong>
+        <details><summary>{translate("settings.showWarnings", language)}</summary>{status.warnings.map((warning, index) => <p key={`${index}-${warning}`}>{warning}</p>)}</details>
+      </div> : null}
       {status && !status.loopback && <div className="warning-banner">{translate("server.lanViewHint", language)}</div>}
       <div className="config-form">
         <section className="config-section">

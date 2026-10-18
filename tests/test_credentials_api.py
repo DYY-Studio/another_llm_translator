@@ -76,13 +76,14 @@ def test_web_preset_with_keychain_credential_validates(
     projects_root = tmp_path / "projects"
     app_root = make_app_root(tmp_path)
     client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
-    preset = client.get("/api/v1/global/presets/default").json()
+    preset = client.get("/api/v1/global/presets/default").json()["preset"]
     preset["credential"] = {"kind": "keychain", "name": "openai-main"}
     saved = client.put("/api/v1/global/presets/default", json=preset)
     assert saved.status_code == 200
-    loaded = client.get("/api/v1/global/presets/default").json()
+    loaded = client.get("/api/v1/global/presets/default").json()["preset"]
+    assert loaded == preset
     assert loaded["credential"] == {"kind": "keychain", "name": "openai-main"}
-    assert "schema_version" in loaded and loaded["schema_version"] == 8
+    assert "schema_version" in loaded and loaded["schema_version"] == 9
 
 
 def test_web_welcome_first_and_dismiss(tmp_path: Path, monkeypatch) -> None:

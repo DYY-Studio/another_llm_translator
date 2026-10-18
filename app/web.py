@@ -114,7 +114,8 @@ def create_app(
         log_path or user_root() / "logs" / "app.log"
     )
     app.state.external_projects = set()
-    app.state.server_config = server_config or load_server_config()
+    app.state.server_config_warnings = []
+    app.state.server_config = server_config or load_server_config(warnings=app.state.server_config_warnings)
     tasks_config = app.state.server_config.get("tasks", {})
     app.state.tasks = WebTaskManager(
         app.state.diagnostics,

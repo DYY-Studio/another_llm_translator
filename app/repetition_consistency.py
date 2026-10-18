@@ -5,6 +5,7 @@ from .async_utils import run_blocking, blocking_scope
 import asyncio
 import hashlib
 import json
+import math
 import unicodedata
 from collections import defaultdict
 from collections.abc import Callable
@@ -16,13 +17,14 @@ import httpx
 
 from . import config as config_module
 from .config import load_project_config
+from .request_budget import resolve_request_budget, request_input_limit
 from .decision import DecisionClient, DecisionQuestion, decision_preset_path, load_decision_preset
 from .decision_prompt import get_declaration, resolve_prompt
 from .diagnostics import current_diagnostics
 from .stage_runtime import _prompt, _prompt_language
 from .errors import ContextLengthError, ExternalError, StorageError, UsageError
-from .execution import (Scope, choose_running_run, combine_usage, continue_run, create_run, estimate_messages, finalize_run, find_running_runs,
-                        render_messages, run_bounded, select_scope, unavailable_usage)
+from .execution import (Scope, choose_running_run, combine_usage, continue_run, create_run, estimate_messages, estimate_tokens, finalize_run, find_running_runs,
+                        render_messages, run_bounded, run_protocol_is_current, select_scope, unavailable_usage)
 from .llm_client import empty_response_split_scope, LLMClient, SlidingWindowLimiter
 from .llm_keys import KeyPool
 from .project import load_segments, load_source_files
@@ -43,7 +45,7 @@ def repetition_resume(project: Path, plan: dict[str, Any], *, estimate_usage: bo
     if not runs:
         return None
     run = runs[0]
-    compatible = (run.get("repetition_checkpoint") == 2 and run.get("repetition_protocol") == PROTOCOL_VERSION
+    compatible = (run_protocol_is_current(project, run["run_id"]) and run.get("repetition_checkpoint") == 2 and run.get("repetition_protocol") == PROTOCOL_VERSION
                   and run.get("repetition_input_fingerprint") == plan["input_fingerprint"])
     reason = None if compatible else "Run 检查点或协议不兼容，或原文、译文及术语证据已变化，请结束旧 Run 并新建"
     try:
@@ -124,8 +126,7 @@ def group_over_budget(group: dict[str, Any], plan: dict[str, Any], saved: dict[s
         return group["over_budget"]
     config = plan["config"]
     tokens = group["comparison_input_tokens"]
-    itpm = config["execution"]["input_tokens_per_minute"]
-    return tokens > config["llm"]["context_window_tokens"] - config["llm"]["context_safety_margin_tokens"] or (itpm > 0 and tokens > itpm)
+    return tokens > request_input_limit(config, resolve_request_budget(config, STAGE))
 
 
 def digest(value: Any) -> str:
@@ -163,12 +164,13 @@ def repetition_execution_fingerprint(config: dict[str, Any], prompt: str, screen
                                      preset: dict[str, Any] | None, input_fingerprint: str | None = None) -> str:
     return digest({"input": input_fingerprint, "protocol": PROTOCOL_VERSION,
         "llm": config["_llm_preset_hash"], "adapter": config["_llm_adapter_hash"],
-        "temperature": config["llm"]["temperature_translation"], "retry": config["retry"],
-        "execution": config["execution"], "decision": preset, "prompt": prompt, "screen": screen_content})
+        "temperature": config["llm"]["temperature_repetition_consistency"], "retry": config["retry"],
+        "execution": config["execution"], "budget": vars(resolve_request_budget(config, STAGE)), "decision": preset,
+        "decision_context_reserve_tokens": config["chunking"]["context_reserve_tokens"] if preset and preset["protocol"] == "llm" else None, "prompt": prompt, "screen": screen_content})
 
 
 def repetition_resources(project: Path, prompt_language: str | None, screening_enabled: bool) -> tuple[dict[str, Any], str, dict[str, Any] | None, DecisionQuestion | None, dict[str, Any] | None, str]:
-    config = load_project_config(project, stage="translation")
+    config = load_project_config(project, stage=STAGE)
     language = _prompt_language(project, STAGE, prompt_language)
     prompt = _prompt(project, STAGE, language)
     screen_content = screen = preset = None
@@ -256,8 +258,8 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
     evidence: dict[str, dict[str, Any]] = {}
     sources: dict[str, str] = {}
     groups = []
-    decision = DecisionClient(preset) if preset else None
-    llm_limit = config["llm"]["context_window_tokens"] - config["llm"]["context_safety_margin_tokens"]
+    decision = DecisionClient(preset, context_reserve_tokens=config["chunking"]["context_reserve_tokens"]) if preset else None
+    llm_limit = request_input_limit(config, resolve_request_budget(config, STAGE))
     decision_limit = decision.preset["context_window_tokens"] - decision.preset["context_safety_margin_tokens"] if decision else 0
     for number, items in enumerate(candidates, 1):
         variants = list(dict.fromkeys(bases[str(s["segment_id"])]["text"] for s in items))
@@ -303,8 +305,7 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
         comparison_tokens = estimate_messages(messages, config["execution"]["token_safety_factor"])
         group["screening_input_tokens"] = screening_tokens
         group["comparison_input_tokens"] = comparison_tokens
-        itpm = config["execution"]["input_tokens_per_minute"]
-        group["over_budget"] = (screening_enabled and screening_tokens > decision_limit) or comparison_tokens > llm_limit or (itpm > 0 and comparison_tokens > itpm)
+        group["over_budget"] = (screening_enabled and screening_tokens > decision_limit) or comparison_tokens > llm_limit
         groups.append(group)
     selected_count = sum(len(g["occurrences"]) for g in groups)
     input_fingerprint = digest({"scope": {"only_file": scope.only_file}, "screening_enabled": screening_enabled,
@@ -361,22 +362,24 @@ def comparison_messages(groups: list[dict[str, Any]], plan: dict[str, Any]) -> l
 
 def comparison_batches(groups: list[dict[str, Any]], plan: dict[str, Any]) -> list[tuple[list[dict[str, Any]], int]]:
     config = plan["config"]
-    limits = [config["execution"]["target_chunk_input_tokens"],
-        config["llm"]["context_window_tokens"] - config["llm"]["context_safety_margin_tokens"]]
-    if config["execution"]["input_tokens_per_minute"] > 0:
-        limits.append(config["execution"]["input_tokens_per_minute"])
-    target = min(limits)
+    budget = resolve_request_budget(config, STAGE)
+    hard_limit = request_input_limit(config, budget)
     factor = config["execution"]["token_safety_factor"]
     batches = []
     current = []
     estimate = 0
     for group in groups:
         candidate = [*current, group]
-        candidate_estimate = estimate_messages(comparison_messages(candidate, plan), factor)
-        if current and candidate_estimate > target:
+        payload = comparison_payload(candidate, plan["evidence"], plan["sources"], config["project"]["target_language"], plan["terms"])
+        candidate_estimate = estimate_messages(render_messages(plan["prompt"], payload), factor)
+        target_content = [{"id": item["id"], "source": item["source"], "translations": item["translations"],
+            "occurrences": [{key: occurrence[key] for key in ("id", "file", "part", "position", "variant")}
+                            for occurrence in item["occurrences"]]} for item in payload["repetitions"]]
+        target_estimate = math.ceil(estimate_tokens(json.dumps(target_content, ensure_ascii=False, separators=(",", ":"))) * factor)
+        if current and (candidate_estimate > hard_limit or target_estimate > budget.target_content_tokens):
             batches.append((current, estimate))
             current = [group]
-            estimate = group["comparison_input_tokens"]
+            estimate = estimate_messages(comparison_messages(current, plan), factor)
         else:
             current, estimate = candidate, candidate_estimate
     if current:
@@ -476,7 +479,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
     completed = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
     if on_progress:
         on_progress(completed, 0, total)
-    decision = DecisionClient(plan["decision_preset"], retry=config["retry"], project_id=metadata["project_id"],
+    decision = DecisionClient(plan["decision_preset"], context_reserve_tokens=config["chunking"]["context_reserve_tokens"], retry=config["retry"], project_id=metadata["project_id"],
                               run_id=run_id, stage=STAGE, debug_directory=run_dir / "debug") if plan["screening_enabled"] else None
     limiter = limiter or SlidingWindowLimiter(config["execution"]["requests_per_minute"], config["execution"]["input_tokens_per_minute"])
     def finalize_execution(status, extra_warnings=()):
@@ -542,11 +545,20 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                 async def compare_batch(batch, parent_request_id=None):
                     pending, estimated = batch
                     for attempt in range(config["retry"]["format_max_attempts"] + 1):
+                        repacked = await run_blocking(comparison_batches, pending, plan)
+                        if len(repacked) > 1:
+                            for child in repacked:
+                                await compare_batch(child, parent_request_id)
+                            return
+                        pending, estimated = repacked[0]
+                        if estimated > request_input_limit(config, resolve_request_budget(config, STAGE)):
+                            for group in pending:
+                                group["over_budget"] = True
+                                save_result(group, {"proposals": [], "keep": [], "uncertain": [o["id"] for o in group["occurrences"]]})
+                            return
                         messages = (await run_blocking(lambda: comparison_messages(pending, plan)))
-                        if attempt:
-                            estimated = (await run_blocking(lambda: estimate_messages(messages, config["execution"]["token_safety_factor"])))
                         try:
-                            response, request_id = await llm.chat(messages=messages, temperature=config["llm"]["temperature_translation"],
+                            response, request_id = await llm.chat(messages=messages, temperature=config["llm"]["temperature_repetition_consistency"],
                                 estimated_input_tokens=estimated, parent_request_id=parent_request_id)
                         except ContextLengthError as exc:
                             if len(pending) == 1:

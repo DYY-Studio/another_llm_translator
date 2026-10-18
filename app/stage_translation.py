@@ -636,7 +636,7 @@ async def run_translation(
 
     assert run_id is not None and run_dir is not None
     decision_clients = {
-        preset_id: DecisionClient(definition, http_client=http_client, retry=config["retry"],
+        preset_id: DecisionClient(definition, context_reserve_tokens=config["chunking"]["context_reserve_tokens"], http_client=http_client, retry=config["retry"],
             debug_directory=run_dir if config["debug"]["enabled"] else None,
             project_id=metadata["project_id"], run_id=run_id, stage=run_stage)
         for preset_id, definition in config.get("_decision_preset_definitions", {}).items()

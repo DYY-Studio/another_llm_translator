@@ -1,5 +1,6 @@
 """Source-backed entity explanations; scan candidates remain the evidence owner."""
 from __future__ import annotations
+import json
 from .async_utils import run_blocking
 
 from copy import deepcopy
@@ -474,24 +475,28 @@ def pack_knowledge_batches(views: list[dict[str, Any]], prompt: str, config: dic
                            feedback: str = "") -> tuple[list[list[dict[str, Any]]], int, dict[str, str]]:
     """Pack complete entities, isolating invalid/oversized evidence without trimming."""
     from .execution import estimate_messages, render_messages
-    from .term_decision_batches import _request_limits
-    soft, hard, _, _ = _request_limits(config)
-    overflow = config["terminology_decision"]["allow_soft_target_overflow"]
+    from .request_budget import resolve_request_budget, request_input_limit
+    from .execution import estimate_tokens
+    import math
+    budget = resolve_request_budget(config, "terminology_knowledge")
+    soft, hard = budget.target_content_tokens, request_input_limit(config, budget)
     batches, errors = [], {}
     current: list[dict[str, Any]] = []
     total = 0
     range_cache: dict = {}
 
-    def estimate(group: list[dict[str, Any]]) -> int:
+    def estimate(group: list[dict[str, Any]]) -> tuple[int, int]:
         payload, _ = knowledge_payload(group, config["project"]["target_language"], config["terminology_decision"]["description_generation"], range_cache=range_cache)
+        entities = [{key: value for key, value in entity.items() if key != "current_items"} for entity in payload["entities"]]
+        content = math.ceil(estimate_tokens(json.dumps(entities, ensure_ascii=False, separators=(",", ":"))) * float(config["execution"]["token_safety_factor"]))
         if feedback:
             payload["validation_feedback"] = feedback
-        return estimate_messages(render_messages(prompt, payload), float(config["execution"]["token_safety_factor"]))
+        return estimate_messages(render_messages(prompt, payload), float(config["execution"]["token_safety_factor"])), content
 
     def flush() -> None:
         nonlocal current, total
         if current:
-            total += estimate(current)
+            total += estimate(current)[0]
             batches.append(current)
             current = []
 
@@ -502,16 +507,16 @@ def pack_knowledge_batches(views: list[dict[str, Any]], prompt: str, config: dic
             continue
         if not active:
             continue
-        size = estimate([view])
-        if size > hard or (size > soft and not overflow):
-            limit = hard if size > hard else soft
-            errors[view["entity_key"]] = f"实体完整证据请求估算 {size} tokens，超过{'硬限制' if size > hard else '软预算'} {limit} tokens"
+        size, _ = estimate([view])
+        if size > hard:
+            errors[view["entity_key"]] = f"实体完整证据请求估算 {size} tokens，超过硬限制 {hard} tokens"
             continue
-        if current and estimate([*current, view]) > min(soft, hard):
-            flush()
+        if current:
+            full, content = estimate([*current, view])
+            if full > hard or content > soft:
+                flush()
         current.append(view)
-        if size > soft:
-            flush()
+
     flush()
     return batches, total, errors
 
@@ -552,6 +557,8 @@ async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, co
     from .errors import AppError, FatalExternalError, StorageError
     from .execution import estimate_messages, render_messages
     from .llm_response import parse_jsonl_document
+    from .request_budget import resolve_request_budget
+    budget = resolve_request_budget(config, "terminology_knowledge")
     pending = list(views)
     errors: dict[str, str] = {}
     feedback = ""
@@ -570,6 +577,7 @@ async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, co
                 response, request_id = await llm.chat(
                     messages=messages, temperature=float(config["llm"]["temperature_terminology_decision"]),
                     estimated_input_tokens=estimate, request_id=new_record_id("REQ"), parent_request_id=parent_request_id,
+                    request_budget=budget,
                 )
             except AppError as exc:
                 if isinstance(exc, (FatalExternalError, StorageError)):

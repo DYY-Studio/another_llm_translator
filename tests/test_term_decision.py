@@ -42,7 +42,7 @@ from app.term_decision_rules import (
     _group_violations, _hard_components, _recover_invalid_relationship_components,
 )
 from app.term_decision_batches import (
-    _compact_anchor_evidence, _make_payload, _pack_batches, _related_anchors,
+    _make_payload, _pack_batches, _related_anchors,
     _request_batch, collect_term_evidence, collect_term_review_evidence,
 )
 from app.term_decision_drafts import (
@@ -392,8 +392,6 @@ def test_decision_config_migrates_defaults_and_cli_contract(tmp_path: Path) -> N
     assert config["llm"]["preset_terminology_decision"] == ""
     assert config["llm"]["temperature_terminology_decision"] == 0.1
     assert config["terminology_decision"] == {
-        "allow_soft_target_overflow": True,
-        "anchor_overflow_mode": "error",
         "description_generation": "sourced",
     }
     config["terminology_decision"] = "invalid"
@@ -751,23 +749,6 @@ def test_decision_payload_reuses_request_local_boundary_refs_across_terms() -> N
     )
 
 
-def test_compact_anchor_payload_removes_samples_before_location_projection() -> None:
-    focus = _batch_state("focus", "Focus")
-    anchor = {**_batch_state("anchor", "Anchor"), "_compact_evidence": True}
-    evidence = _compact_anchor_evidence(_batch_evidence(focus, anchor), [anchor])
-
-    payload = _make_payload(
-        phase="consistency",
-        target_language="简体中文",
-        focus=[focus],
-        anchors=[anchor],
-        evidence=evidence,
-    )
-
-    assert payload["anchors"][0]["evidence"]["samples"] == []
-    assert payload["terms"][0]["evidence"]["samples"][0]["boundary_ref"] == 1
-
-
 def test_final_review_prompt_forbids_unresolved_decisions() -> None:
     prompt = full_prompt(
         "terminology_decision",
@@ -1024,20 +1005,15 @@ def test_final_review_payload_projects_windows_to_request_local_refs() -> None:
     serialized = json.dumps(focus_evidence, ensure_ascii=False)
     assert all(value not in serialized for value in ("F1", "chapter-1", "S0", "S1"))
 
-    compacted = _compact_anchor_evidence(evidence, [{**anchor, "_compact_evidence": True}])
-    assert compacted["anchor"]["samples"] == []
-    assert compacted["anchor"]["windows"] == []
-    assert compacted["focus"]["windows"]
-
 
 def test_final_review_request_estimation_includes_windows_and_rejects_hard_overflow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = create_decision_project(tmp_path)
     config = load_project_config(project, stage="terminology_decision")
-    config["execution"]["target_chunk_input_tokens"] = 1000
+    config["chunking"]["target_content_tokens"] = 1000
     config["llm"]["context_window_tokens"] = 50
-    config["llm"]["context_safety_margin_tokens"] = 0
+    config["chunking"]["context_reserve_tokens"] = 0
     config["execution"]["input_tokens_per_minute"] = 0
     focus = _batch_state("focus", "Focus")
     evidence = _batch_evidence(focus)
@@ -1072,7 +1048,7 @@ def test_final_review_request_estimation_includes_windows_and_rejects_hard_overf
 
     monkeypatch.setattr("app.term_decision_batches.estimate_messages", estimate)
 
-    with pytest.raises(RequestSizeError, match="完整术语及证据仍超过硬限制"):
+    with pytest.raises(RequestSizeError, match="完整术语证据和 Anchors"):
         _pack_batches(
             [focus],
             phase="final_review",
@@ -1365,9 +1341,9 @@ def test_hard_component_is_never_split_and_reports_all_members_when_oversized(
 ) -> None:
     project = create_decision_project(tmp_path)
     config = load_project_config(project, stage="terminology_decision")
-    config["execution"]["target_chunk_input_tokens"] = 50
+    config["chunking"]["target_content_tokens"] = 50
     config["llm"]["context_window_tokens"] = 100
-    config["llm"]["context_safety_margin_tokens"] = 0
+    config["chunking"]["context_reserve_tokens"] = 0
     config["execution"]["input_tokens_per_minute"] = 0
     root = _batch_state("root", "Root")
     member = {**_batch_state("member", "Member"), "group_primary": "root"}
@@ -1433,105 +1409,30 @@ def test_dry_run_plans_second_phase_instead_of_doubling_first(
     }
 
 
-def test_decision_batch_overflow_policy_controls_local_planning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project = create_decision_project(tmp_path)
-    config = load_project_config(project, stage="terminology_decision")
-    config["execution"]["target_chunk_input_tokens"] = 50
-    config["llm"]["context_window_tokens"] = 120
-    config["llm"]["context_safety_margin_tokens"] = 0
+def test_decision_batches_keep_required_anchors_and_allow_soft_singletons(tmp_path: Path) -> None:
+    from app.execution import estimate_messages, render_messages
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["chunking"].update(target_content_tokens=1, context_reserve_tokens=0)
     config["execution"]["input_tokens_per_minute"] = 0
-    config["execution"]["token_safety_factor"] = 1
     focus = _batch_state("alice", "Alice")
-    first_anchor = {
-        **_batch_state("alice smith", "Alice Smith"),
-        "group_primary": "alice",
-    }
-    second_anchor = _batch_state("alice johnson", "Alice Johnson")
-    evidence = _batch_evidence(focus, first_anchor, second_anchor)
-
-    def estimate(messages: list[dict[str, str]], _: float) -> int:
-        payload = json.loads(messages[1]["content"])
-        anchors = payload["anchors"]
-        samples = sum(len(item["evidence"]["samples"]) for item in anchors)
-        return 31 + 20 * len(payload["terms"]) + 15 * len(anchors) + 4 * samples
-
-    monkeypatch.setattr("app.term_decision_batches.estimate_messages", estimate)
-    spec = term_normalization(config)
-
-    config["terminology_decision"]["anchor_overflow_mode"] = "error"
-    with pytest.raises(RequestSizeError, match="Anchor 超限策略为 error") as error:
-        _pack_batches(
-            [focus],
-            phase="consistency",
-            target_language="简体中文",
-            anchors=[first_anchor, second_anchor],
-            evidence=evidence,
-            prompt="prompt",
-            config=config,
-            spec=spec,
-        )
-    assert error.value.reason == "context"
-
-
-    config["terminology_decision"]["anchor_overflow_mode"] = "trim"
-    batches, _ = _pack_batches(
-        [focus],
-        phase="consistency",
-        target_language="简体中文",
-        anchors=[first_anchor, second_anchor],
-        evidence=evidence,
-        prompt="prompt",
-        config=config,
-        spec=spec,
-    )
-    assert [item["source"] for item in batches[0][1]] == ["Alice Smith"]
-
-    config["terminology_decision"]["anchor_overflow_mode"] = "compact"
-    batches, _ = _pack_batches(
-        [focus],
-        phase="consistency",
-        target_language="简体中文",
-        anchors=[first_anchor, second_anchor],
-        evidence=evidence,
-        prompt="prompt",
-        config=config,
-        spec=spec,
-    )
-    assert len(batches[0][1]) == 2
-    assert all(item.get("_compact_evidence") for item in batches[0][1])
-
-    config["terminology_decision"]["anchor_overflow_mode"] = "error"
-    config["terminology_decision"]["allow_soft_target_overflow"] = False
-    with pytest.raises(RequestSizeError, match="超过软目标") as error:
-        _pack_batches(
-            [focus],
-            phase="consistency",
-            target_language="简体中文",
-            anchors=[],
-            evidence=evidence,
-            prompt="prompt",
-            config=config,
-            spec=spec,
-        )
-    assert error.value.reason == "context"
-
-    config["terminology_decision"]["allow_soft_target_overflow"] = True
-    config["execution"]["input_tokens_per_minute"] = 40
-    with pytest.raises(RequestSizeError, match="限制 40 tokens") as error:
-        _pack_batches(
-            [focus],
-            phase="consistency",
-            target_language="简体中文",
-            anchors=[],
-            evidence=evidence,
-            prompt="prompt",
-            config=config,
-            spec=spec,
-        )
+    anchor = {**_batch_state("ally", "Ally"), "group_primary": "alice"}
+    evidence = _batch_evidence(focus, anchor)
+    kwargs = dict(phase="consistency", target_language="简体中文", anchors=[anchor],
+                  evidence=evidence, prompt="prompt", config=config, spec=term_normalization(config))
+    batches, tokens = _pack_batches([focus], **kwargs)
+    assert len(batches) == 1
+    assert batches[0][1] == [anchor]
+    payload = _make_payload(phase="consistency", target_language="简体中文", focus=[focus], anchors=[anchor], evidence=evidence)
+    full = estimate_messages(render_messages("prompt", payload), config["execution"]["token_safety_factor"])
+    assert tokens == full
+    config["chunking"]["max_input_tokens"] = full - 1
+    with pytest.raises(RequestSizeError, match="完整术语证据和 Anchors"):
+        _pack_batches([focus], **kwargs)
+    config["chunking"]["max_input_tokens"] = 65536
+    config["execution"]["input_tokens_per_minute"] = full - 1
+    with pytest.raises(RequestSizeError) as error:
+        _pack_batches([focus], **kwargs)
     assert error.value.reason == "itpm"
-
 
 def test_batch_trimming_does_not_drop_direct_group_references(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1539,9 +1440,8 @@ def test_batch_trimming_does_not_drop_direct_group_references(
     project = create_decision_project(tmp_path)
     config = load_project_config(project, stage="terminology_decision")
     config["llm"]["context_window_tokens"] = 100
-    config["llm"]["context_safety_margin_tokens"] = 0
+    config["chunking"]["context_reserve_tokens"] = 0
     config["execution"]["input_tokens_per_minute"] = 0
-    config["terminology_decision"]["anchor_overflow_mode"] = "trim"
     focus = _batch_state("root", "Root")
     direct = {**_batch_state("member", "Member"), "group_primary": "root"}
     monkeypatch.setattr(
@@ -1549,7 +1449,7 @@ def test_batch_trimming_does_not_drop_direct_group_references(
         lambda messages, _: 200 if json.loads(messages[1]["content"])["anchors"] else 50,
     )
 
-    with pytest.raises(RequestSizeError, match="完整术语证据和 Anchors 仍超过硬限制"):
+    with pytest.raises(RequestSizeError, match="完整术语证据和 Anchors"):
         _pack_batches(
             [focus], phase="consistency", target_language="简体中文",
             anchors=[direct], evidence=_batch_evidence(focus, direct),
@@ -3475,6 +3375,8 @@ async def test_decision_ignores_extra_read_only_anchor_records(
     def scoped_batches(
         states: list[dict[str, object]], *, phase: str, **_: object
     ) -> tuple[list, int]:
+        if len(states) == 1:
+            return [(states, _["anchors"])], 10
         batches = []
         for index, state in enumerate(states):
             references = (
@@ -4028,10 +3930,6 @@ async def test_web_decision_review_rejections_and_apply(tmp_path: Path) -> None:
     assert options.status_code == 200
     assert options.json()["selected"] == 2
     assert options.json()["has_pending_draft"] is True
-    assert options.json()["overflow_policy"] == {
-        "allow_soft_target_overflow": True,
-        "anchor_overflow_mode": "error",
-    }
     review = client.get("/api/v1/projects/decision-demo/terms/decision").json()
     proposal_id = review["draft"]["proposals"][0]["proposal_id"]
     rejected = client.put(
@@ -5744,8 +5642,8 @@ async def test_decision_rechecks_complete_request_limit_before_sending(
 ) -> None:
     project = create_decision_project(tmp_path)
     config = load_project_config(project, stage="terminology_decision")
-    config["llm"].update(context_window_tokens=100 if reason == "context" else 1000,
-                         context_safety_margin_tokens=20)
+    config["llm"].update(context_window_tokens=100 if reason == "context" else 1000)
+    config["chunking"]["context_reserve_tokens"] = 20
     config["execution"]["input_tokens_per_minute"] = 80 if reason == "itpm" else 0
     focus = [_batch_state("alice", "Alice"), _batch_state("bob", "Bob")]
     estimated_payloads = []
@@ -5753,7 +5651,7 @@ async def test_decision_rechecks_complete_request_limit_before_sending(
     def estimate(messages, factor):
         payload = json.loads(messages[1]["content"])
         estimated_payloads.append(payload)
-        return 80 if overflow_on_retry and len(estimated_payloads) == 1 else 81
+        return 80 if overflow_on_retry and llm.calls == 0 else 81
 
     monkeypatch.setattr("app.term_decision_batches.estimate_messages", estimate)
 
@@ -6021,3 +5919,58 @@ async def test_replacement_cleanup_failure_preserves_completed_decision_and_warn
     assert "draft removal denied" in current["warnings"][0]
     manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
     assert manifest["status"] == "completed" and manifest["decision_status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_retry_repacks_feedback_with_frozen_accepted_anchors(tmp_path, monkeypatch):
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["chunking"].update(target_content_tokens=1000, max_input_tokens=100, context_reserve_tokens=0)
+    config["execution"]["input_tokens_per_minute"] = 0
+    focus = [_batch_state(key, source) for key, source in
+             (("alice", "Alice"), ("alice one", "Alice One"), ("alice two", "Alice Two"))]
+    requests = []
+
+    def estimate(messages, _factor):
+        payload = json.loads(messages[1]["content"])
+        return 30 * len(payload["terms"]) + (50 if payload.get("validation_repair") else 0) + 10 * len(payload["anchors"])
+
+    monkeypatch.setattr("app.term_decision_batches.estimate_messages", estimate)
+
+    class Model:
+        logger = logging.getLogger("test-feedback-repack")
+
+        async def chat(self, **kwargs):
+            payload = json.loads(kwargs["messages"][1]["content"])
+            requests.append(payload)
+            terms = payload["terms"][:1] if len(requests) == 1 else payload["terms"]
+            assert kwargs["estimated_input_tokens"] <= 100
+            return SimpleNamespace(content=llm_jsonl([
+                dict(type="decision", normalized=term["normalized"], action="keep", reason="确认")
+                for term in terms])), str(len(requests))
+
+    result = await _request_batch(
+        Model(), focus=focus, anchors=[], phase="consistency", prompt="prompt", config=config,
+        evidence=_batch_evidence(*focus), known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={}, spec=term_normalization(config))
+    assert set(result) == {term["normalized"] for term in focus}
+    assert len(requests) == 3
+    assert {payload["terms"][0]["normalized"] for payload in requests[1:]} == {"alice one", "alice two"}
+    for payload in requests[1:]:
+        assert len(payload["terms"]) == 1
+        assert payload["validation_repair"]
+        assert [anchor["normalized"] for anchor in payload["anchors"]] == ["alice"]
+        assert payload["anchors"][0]["evidence"]["samples"]
+
+
+def test_previous_preset_protocol_cannot_resume_decision_run(tmp_path):
+    from app.term_decision import decision_resume_compatibility
+    project = create_decision_project(tmp_path)
+    run_id, run_dir, _, _ = create_complete_legacy_group_run(project)
+    path = run_dir / "llm_preset.json"
+    preset = json.loads(path.read_text(encoding="utf-8"))
+    preset["schema_version"] = 8
+    path.write_text(json.dumps(preset), encoding="utf-8")
+    compatible, reason = decision_resume_compatibility(project, run_id, source_terms_revision=1)
+    assert not compatible
+    assert "协议不兼容" in reason
+    assert read_json(project, run_dir / "manifest.json")["run_id"] == run_id

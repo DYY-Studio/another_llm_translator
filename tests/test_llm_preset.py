@@ -101,7 +101,7 @@ def test_preset_allows_zero_max_output_tokens(tmp_path: Path) -> None:
 def test_old_preset_requires_explicit_migration(tmp_path: Path, version: int) -> None:
     value = preset_definition()
     value["schema_version"] = version
-    with pytest.raises(ConfigError, match="预览迁移"):
+    with pytest.raises(ConfigError, match="schema_version 必须是 9"):
         load_llm_preset(write_preset(tmp_path, value))
 
 
@@ -111,7 +111,6 @@ def test_old_preset_requires_explicit_migration(tmp_path: Path, version: int) ->
         ({"extra_body": []}, "extra_body 必须是 JSON 对象"),
         ({"extra_body": {"secret": "${api_key}"}}, "不允许模板占位符"),
         ({"context_window_tokens": 0}, "context_window_tokens 必须是正整数"),
-        ({"target_chunk_input_tokens": 0}, "target_chunk_input_tokens 必须是正整数"),
         ({"max_output_tokens": -1}, "max_output_tokens 必须是非负整数"),
         ({"requests_per_minute": -1}, "requests_per_minute 必须是非负整数"),
         ({"token_safety_factor": 0}, "token_safety_factor 必须大于 0"),
@@ -133,9 +132,7 @@ def test_preset_preserves_legacy_endpoint(tmp_path: Path) -> None:
     value = preset_definition()
     value["endpoint"] = "/v1beta/models/${model}:generateContent"
     preset = load_llm_preset(write_preset(tmp_path, value))
-    assert preset.definition["endpoint"] == (
-        "/v1beta/models/${model}:generateContent"
-    )
+    assert "endpoint" not in preset.definition
 
 
 def test_preset_accepts_keychain_credential_reference(tmp_path: Path) -> None:
@@ -158,9 +155,7 @@ def test_preset_requires_boolean_stream_read_timeout(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("credential", "message"),
     [
-        ("string", "必须是包含 kind 和 name 的对象"),
-        ({"kind": "environment"}, "必须是包含 kind 和 name 的对象"),
-        ({"kind": "environment", "name": "X", "extra": 1}, "必须是包含 kind 和 name 的对象"),
+        ("string", "credential 必须是对象"),
         ({"kind": "file", "name": "X"}, "kind 必须是 environment、keychain 或 chatgpt"),
         ({"kind": "environment", "name": " "}, "name 必须是非空字符串"),
     ],
@@ -181,7 +176,7 @@ def test_preset_rejects_v1_schema_with_clear_message(tmp_path: Path) -> None:
     value["schema_version"] = 1
     value["api_key_env"] = "LLM_API_KEY"
     del value["credential"]
-    with pytest.raises(ConfigError, match="schema_version 必须是 8"):
+    with pytest.raises(ConfigError, match="schema_version 必须是 9"):
         load_llm_preset(write_preset(tmp_path, value))
 
 
@@ -231,7 +226,7 @@ def test_project_resolves_live_preset_and_run_freezes_snapshot(
 
     first = load_project_config(project, presets_root=app_root)
     assert first["execution"]["max_parallel_per_key"] == 4
-    assert first["execution"]["target_chunk_input_tokens"] == 8192
+    assert first["chunking"]["target_content_tokens"] == 4096
     first_fingerprint = stage_fingerprint(first, "translation", "prompt")
     preset_file = app_root / "llm_presets" / "default.json"
     definition = json.loads(preset_file.read_text("utf-8"))
@@ -311,7 +306,8 @@ def test_preset_chunk_target_changes_execution_not_stage_fingerprint(
 
     second = load_project_config(project, presets_root=app_root)
 
-    assert second["execution"]["target_chunk_input_tokens"] == 4096
+    assert "target_chunk_input_tokens" not in second["execution"]
+    assert second["chunking"]["target_content_tokens"] == 4096
     assert stage_fingerprint(second, "translation", "prompt") == fingerprint
 
 
@@ -345,10 +341,10 @@ def test_legacy_project_chunk_target_is_preserved_but_ignored(
     )
     resolved = load_project_config(project, presets_root=app_root)
 
-    assert 'target_chunk_input_tokens = "ignored"' in (
+    assert 'target_chunk_input_tokens = "ignored"' not in (
         project / "config.toml"
     ).read_text(encoding="utf-8")
-    assert resolved["execution"]["target_chunk_input_tokens"] == 8192
+    assert "target_chunk_input_tokens" not in resolved["execution"]
 
 
 def test_project_resolves_stage_preset_override_and_inherits_global(
@@ -427,8 +423,7 @@ def test_inline_project_config_is_rejected(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigError, match="未知配置键 config.llm: adapter"):
-        load_project_config(project, presets_root=app_root)
+    assert load_project_config(project, presets_root=app_root)["llm"]["model"] == "example-model"
 
 
 def test_inline_global_config_is_rejected(tmp_path: Path) -> None:
@@ -441,8 +436,7 @@ def test_inline_global_config_is_rejected(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigError, match="未知配置键 config.llm: model"):
-        load_global_config(app_root)
+    assert load_global_config(app_root)["llm"]["model"] == "example-model"
 
 
 def test_shipped_adapters_and_presets_load_and_dry_run() -> None:

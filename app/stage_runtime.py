@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .request_budget import resolve_request_budget, request_input_limit
 from .async_utils import run_blocking
 
 import asyncio
@@ -250,20 +251,6 @@ def _scope_record(scope: Scope, *, force_all: bool = False) -> dict[str, Any]:
     }
 
 
-def _configured_output_warning(config: dict[str, Any]) -> str | None:
-    maximum_available = (
-        config["llm"]["context_window_tokens"]
-        - config["llm"]["context_safety_margin_tokens"]
-    )
-    configured = config["llm"]["max_output_tokens"]
-    if configured <= maximum_available:
-        return None
-    return (
-        f"max_output_tokens={configured} 超过上下文可用上限 "
-        f"{maximum_available}；实际请求将按剩余空间自动收窄"
-    )
-
-
 def _finalize_planning_failure(
     project: Path,
     run_dir: Path | None,
@@ -330,9 +317,6 @@ def _assemble_warnings(
         warnings.append(resume_message)
         if resume_arguments_ignored:
             warnings.append("续作已忽略本次命令的范围参数或 --force")
-    configured_output_warning = _configured_output_warning(config)
-    if configured_output_warning:
-        warnings.append(configured_output_warning)
     warnings.extend(extra)
     fingerprint_warning = _confirm_fingerprint_reuse(
         stage,
@@ -490,9 +474,6 @@ def _split_oversized_preflight(
             continue
         except RequestSizeError as exc:
             exact_checked += 1
-            if exc.reason != "context":
-                fail_planning(exc)
-                raise
             if not config["chunking"]["allow_split_oversized_segment"]:
                 preflight_failed.append(segment)
                 continue
@@ -523,9 +504,6 @@ def _split_oversized_preflight(
                 accepted_parts.append(part)
             except RequestSizeError as exc:
                 exact_checked += 1
-                if exc.reason != "context":
-                    fail_planning(exc)
-                    raise
                 try:
                     children = split_part(part)
                 except ConfigError as split_error:
@@ -937,8 +915,10 @@ async def _localized_request_loop(
         payload, id_map = (await run_blocking(lambda: localize_request_ids(payload, items)))
         messages = (await run_blocking(lambda: render_messages(prompt, payload)))
         request_id = f"REQ-{uuid.uuid4().hex[:12].upper()}"
-        estimated = (await run_blocking(lambda: _request_estimate(messages, config, request_id)))
+        estimated_before_send = False
         try:
+            estimated = (await run_blocking(lambda: _request_estimate(messages, config, request_id)))
+            estimated_before_send = True
             response, request_id = await llm.chat(
                 messages=messages,
                 temperature=config["llm"][f"temperature_{stage}"],
@@ -955,6 +935,10 @@ async def _localized_request_loop(
         except FatalExternalError:
             raise
         except ContextLengthError as exc:
+            if not estimated_before_send and len(items) > 1:
+                middle = len(items) // 2
+                tasks[0:0] = [(items[:middle], parent_request_id, format_attempt), (items[middle:], parent_request_id, format_attempt)]
+                continue
             if accept_response is not None and buffered:
                 await accept_response(group, buffered, complete=False)
             if exc.segment_ids is None:
@@ -1108,22 +1092,11 @@ def _request_estimate(
         messages,
         config["execution"]["token_safety_factor"],
     )
-    input_limit = (
-        config["llm"]["context_window_tokens"]
-        - config["llm"]["context_safety_margin_tokens"]
-    )
+    input_limit = request_input_limit(config, resolve_request_budget(config, config["_request_budget_stage"]))
     if estimated > input_limit:
         raise ContextLengthError(
             "渲染后的 Prompt 超过模型硬限制",
             request_id=request_id,
-        )
-    if (
-        config["execution"]["input_tokens_per_minute"] > 0
-        and estimated > config["execution"]["input_tokens_per_minute"]
-    ):
-        raise RequestSizeError(
-            "单请求预测 Token 超过 ITPM",
-            reason="itpm",
         )
     return estimated
 

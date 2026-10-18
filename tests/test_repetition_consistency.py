@@ -733,7 +733,9 @@ def test_completed_checkpoint_resume_needs_no_requests_and_keeps_usage(tmp_path,
         asyncio.run(run())
     if shrink_budget:
         from tests.helpers import use_llm_preset
-        use_llm_preset(tmp_path, context_window_tokens=100, context_safety_margin_tokens=10)
+        use_llm_preset(tmp_path, context_window_tokens=100)
+        path = project / "config.toml"
+        path.write_text(path.read_text().replace("context_reserve_tokens = 100", "context_reserve_tokens = 10"))
     info = repetition.repetition_resume(project, repetition.repetition_plan(project, Scope(), screening_enabled=True))
     assert info["completed"] == 3 and info["estimated_requests"] == 0
     manifest_path = project / "runs" / info["run_id"] / "manifest.json"
@@ -905,7 +907,7 @@ def test_batch_budget_keeps_groups_whole_and_reuses_configured_target(tmp_path, 
     project = multiple_groups_project(tmp_path, monkeypatch)
     initial = repetition.repetition_plan(project, Scope())
     config_value = initial["config"]
-    config_value["execution"]["target_chunk_input_tokens"] = max(g["comparison_input_tokens"] for g in initial["groups"]) - 1
+    config_value["chunking"]["stage_overrides"]["repetition_consistency"] = {"target_content_tokens": 1}
     monkeypatch.setattr(repetition, "load_project_config", lambda *args, **kwargs: config_value)
     plan = repetition.repetition_plan(project, Scope())
     assert plan["estimated_requests"] == 2 and plan["fingerprint"] != initial["fingerprint"]
@@ -945,7 +947,8 @@ def test_resume_changed_execution_preserves_phase_sources(tmp_path, monkeypatch,
         value["endpoint"] = "/alternate/chat"
         path.write_text(json.dumps(value))
     elif change == "budget":
-        use_llm_preset(tmp_path, target_chunk_input_tokens=3000)
+        path = project / "config.toml"
+        path.write_text(path.read_text().replace("target_content_tokens = 4096", "target_content_tokens = 3000"))
     elif change == "retry":
         path = project / "config.toml"
         path.write_text(path.read_text().replace("format_max_attempts = 2", "format_max_attempts = 1"))
@@ -969,7 +972,7 @@ def test_resume_changed_execution_preserves_phase_sources(tmp_path, monkeypatch,
     assert requests[0]["messages"][0]["content"] == (snapshot / "prompt.txt").read_text()
 
 
-@pytest.mark.parametrize("change", ["source", "context", "terms", "target", "protocol", "old_checkpoint"])
+@pytest.mark.parametrize("change", ["source", "context", "terms", "target", "protocol", "old_checkpoint", "old_preset"])
 def test_resume_rejects_evidence_or_protocol_changes(tmp_path, monkeypatch, change):
     from app import repetition_consistency as repetition
     from app.sqlite_storage import write_json
@@ -993,6 +996,11 @@ def test_resume_rejects_evidence_or_protocol_changes(tmp_path, monkeypatch, chan
         monkeypatch.setattr(repetition, "load_project_config", lambda *args, **kwargs: value)
     elif change == "protocol":
         monkeypatch.setattr(repetition, "PROTOCOL_VERSION", repetition.PROTOCOL_VERSION + 1)
+    elif change == "old_preset":
+        path = project / "runs" / info["run_id"] / "llm_preset.json"
+        value = json.loads(path.read_text())
+        value["schema_version"] = 8
+        path.write_text(json.dumps(value))
     else:
         path = project / "runs" / info["run_id"] / "manifest.json"
         value = read_json(project, path)
@@ -1006,7 +1014,9 @@ def test_budget_increase_revisits_deferred_group_on_resume(tmp_path, monkeypatch
     from app.errors import StorageError
     from tests.helpers import use_llm_preset
     project = repetition_project(tmp_path, monkeypatch)
-    use_llm_preset(tmp_path, context_window_tokens=100, context_safety_margin_tokens=10)
+    use_llm_preset(tmp_path, context_window_tokens=100)
+    path = project / "config.toml"
+    path.write_text(path.read_text().replace("context_reserve_tokens = 100", "context_reserve_tokens = 10"))
     original_write = repetition.atomic_write_text
     def fail_publish(path, text):
         if path.name == repetition.DRAFT_FILE:
@@ -1018,7 +1028,10 @@ def test_budget_increase_revisits_deferred_group_on_resume(tmp_path, monkeypatch
             return await repetition.run_repetition(project, Scope(), run_action=action, http_client=client)
     with pytest.raises(StorageError):
         asyncio.run(run())
-    use_llm_preset(tmp_path, context_window_tokens=64000, context_safety_margin_tokens=1000)
+    use_llm_preset(tmp_path, context_window_tokens=64000)
+    settings = config.load_config(path)
+    settings["chunking"]["context_reserve_tokens"] = 1000
+    path.write_text(config.dump_config(settings))
     plan = repetition.repetition_plan(project, Scope())
     info = repetition.repetition_resume(project, plan)
     assert info["resume_compatible"] and info["completed"] == 0 and info["estimated_requests"] == 1
@@ -1108,8 +1121,9 @@ def test_hard_budget_accepts_exact_limit(tmp_path, monkeypatch):
     project = repetition_project(tmp_path, monkeypatch)
     initial = repetition_plan(project, Scope())
     limit = initial["groups"][0]["comparison_input_tokens"]
-    use_llm_preset(tmp_path, context_window_tokens=limit + 10, context_safety_margin_tokens=10,
-                   target_chunk_input_tokens=limit, input_tokens_per_minute=limit)
+    use_llm_preset(tmp_path, context_window_tokens=limit + 10, input_tokens_per_minute=limit)
+    path = project / "config.toml"
+    path.write_text(path.read_text().replace("context_reserve_tokens = 100", "context_reserve_tokens = 10"))
     plan = repetition_plan(project, Scope())
     assert not plan["groups"][0]["over_budget"] and plan["estimated_requests"] == 1
 
@@ -1238,7 +1252,9 @@ async def test_continuous_repetition_applies_or_stops_for_review(tmp_path, monke
     events = []
     if waiting == "budget":
         from tests.helpers import use_llm_preset
-        use_llm_preset(tmp_path, context_window_tokens=100, context_safety_margin_tokens=10)
+        use_llm_preset(tmp_path, context_window_tokens=100)
+        path = project / "config.toml"
+        path.write_text(path.read_text().replace("context_reserve_tokens = 100", "context_reserve_tokens = 10"))
 
     async def translate(*args, **kwargs):
         events.append("translation")
@@ -1531,3 +1547,41 @@ def test_replacement_cleanup_failure_does_not_reopen_published_run(tmp_path, mon
     for run_id, state in [(old_id, "replaced"), (result["run_id"], "pending")]:
         manifest = read_json(project, project / "runs" / run_id / "manifest.json")
         assert manifest["status"] == "completed" and manifest["draft_status"] == state
+
+
+def test_comparison_reference_context_affects_only_hard_budget(tmp_path, monkeypatch):
+    from app import repetition_consistency as repetition
+    project = multiple_groups_project(tmp_path, monkeypatch)
+    plan = repetition.repetition_plan(project, Scope())
+    for key in plan["sources"]:
+        plan["sources"][key] = "上下文" * 300
+    plan["config"]["chunking"]["stage_overrides"]["repetition_consistency"] = {"target_content_tokens": 1000}
+    batches = repetition.comparison_batches(plan["groups"], plan)
+    assert len(batches) == 1 and batches[0][1] > 1000
+    singleton_tokens = max(repetition.comparison_batches([group], plan)[0][1] for group in plan["groups"])
+    plan["config"]["chunking"]["stage_overrides"]["repetition_consistency"]["max_input_tokens"] = singleton_tokens
+    batches = repetition.comparison_batches(plan["groups"], plan)
+    assert len(batches) == 2
+    assert all(tokens <= singleton_tokens and len(groups) == 1 for groups, tokens in batches)
+
+
+def test_repetition_uses_its_own_model_and_temperature(tmp_path, monkeypatch):
+    from app.repetition_consistency import repetition_plan, run_repetition
+    project = repetition_project(tmp_path, monkeypatch)
+    preset_path = config.APP_ROOT / "llm_presets" / "default.json"
+    definition = json.loads(preset_path.read_text())
+    definition.update(preset_id="repetition", model="repetition-model")
+    (preset_path.parent / "repetition.json").write_text(json.dumps(definition))
+    path = project / "config.toml"
+    path.write_text(path.read_text().replace('preset_repetition_consistency = ""', 'preset_repetition_consistency = "repetition"')
+                    .replace("temperature_repetition_consistency = 0.1", "temperature_repetition_consistency = 0.23"))
+    plan = repetition_plan(project, Scope())
+    assert plan["config"]["_llm_preset_id"] == "repetition"
+    requests = []
+
+    async def run():
+        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+            return await run_repetition(project, Scope(), prepared_plan=plan, http_client=client)
+
+    assert asyncio.run(run())["completed"] == 3
+    assert requests[0]["model"] == "repetition-model" and requests[0]["temperature"] == 0.23

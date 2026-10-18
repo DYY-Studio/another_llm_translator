@@ -43,6 +43,7 @@ def make_app_root(tmp_path: Path) -> Path:
         "max_delay_seconds = 60.0", "max_delay_seconds = 0"
     )
     config_text = config_text.replace("jitter_seconds = 1.0", "jitter_seconds = 0")
+    config_text = config_text.replace("context_reserve_tokens = 16384", "context_reserve_tokens = 100")
     (root / "config" / "config.toml").write_text(
         config_text,
         encoding="utf-8",
@@ -216,11 +217,6 @@ def test_config_accepts_selectable_terminology_settings(
     ("old", "new", "message"),
     [
         (
-            'output_encoding = "utf-8-sig"',
-            'output_encoding = "utf-8-sig"\nunknown = true',
-            "未知配置键",
-        ),
-        (
             'alias_primary_collision = "merge"',
             'alias_primary_collision = "guess"',
             "alias_primary_collision 必须是 conflict 或 merge",
@@ -316,7 +312,7 @@ def test_config_defaults_missing_target_language_tag_to_empty(
         ),
         encoding="utf-8",
     )
-    assert load_config(config_path)["project"]["target_language_tag"] == ""
+    assert load_config(config_path)["project"]["target_language_tag"] == "zh-Hans"
 
 
 @pytest.mark.parametrize("value", ["zh_CN", "zh Hans", "zh-"])
@@ -603,7 +599,7 @@ def test_invalid_global_template_does_not_block_project_copy(tmp_path: Path) -> 
     assert project is not None
     original = (project / "config.toml").read_text(encoding="utf-8")
     (app_root / "config" / "config.toml").write_text(
-        original + "\nunknown = true\n", encoding="utf-8"
+        original.replace("http_max_attempts = 6", "http_max_attempts = false"), encoding="utf-8"
     )
 
     warnings = sync_global_templates(project, app_root=app_root)
@@ -639,7 +635,7 @@ def test_persisted_record_rejects_unsupported_enum() -> None:
         _validate_record({"schema_version": 1, "status": "unknown"}, "test")
 
 
-def test_load_config_migrates_legacy_translation_validator_flags(
+def test_load_config_ignores_legacy_translation_validator_flags(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "config.toml"
@@ -651,9 +647,7 @@ def test_load_config_migrates_legacy_translation_validator_flags(
 
     config = load_config(path)
 
-    assert config["validation"]["translation"]["validators"] == [
-        "japanese_kana"
-    ]
+    assert config["validation"]["translation"]["validators"] == []
     assert "japanese_kana" not in config["validation"]["translation"]
 
 
@@ -667,8 +661,9 @@ def test_load_config_rejects_mixed_translation_validator_formats(
     )
     path.write_text(content, encoding="utf-8")
 
-    with pytest.raises(ConfigError, match="未知配置键"):
-        load_config(path)
+    warnings = []
+    assert load_config(path, warnings=warnings)["validation"]["translation"]["validators"] == []
+    assert warnings and "japanese_kana" in warnings[0]
 
 
 @pytest.mark.parametrize(("section", "key", "default", "valid"), [

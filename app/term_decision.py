@@ -195,6 +195,9 @@ def decision_resume_compatibility(
     final_review: bool = False,
     knowledge_only: bool = False,
 ) -> tuple[bool, str | None]:
+    from .execution import run_protocol_is_current
+    if not run_protocol_is_current(project, run_id):
+        return False, "旧 Run 协议不兼容，请结束旧 Run 并新建"
     try:
         manifest = read_json(
             project, project / "runs" / run_id / "manifest.json"

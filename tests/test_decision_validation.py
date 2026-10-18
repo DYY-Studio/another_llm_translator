@@ -402,10 +402,10 @@ async def test_alignment_uses_complete_segments_in_split_and_joint_requests(tmp_
     config = load_config(project / "config.toml")
     config["decision"]["preset"] = "local"
     config["validation"]["translation"]["validators"] = ["segment_alignment"]
-    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
     if mode == "split":
-        use_llm_preset(tmp_path, context_window_tokens=1200, max_output_tokens=300,
-                       context_safety_margin_tokens=100, target_chunk_input_tokens=700)
+        config["chunking"]["target_content_tokens"] = 700
+        use_llm_preset(tmp_path, context_window_tokens=1200, max_output_tokens=300)
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
     monkeypatch.setenv("DECISION_TEST_KEY", "test")
     decision_calls, llm_calls = [], []
     def respond(request):

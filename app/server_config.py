@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigError
+from .config import normalize_settings
 from .user_config import user_root
 
 
@@ -21,7 +22,7 @@ def server_config_path() -> Path:
     return user_root() / "server.toml"
 
 
-def load_server_config() -> dict[str, Any]:
+def load_server_config(*, warnings: list[str] | None = None) -> dict[str, Any]:
     path = server_config_path()
     if not path.is_file():
         return default_server_config()
@@ -29,19 +30,7 @@ def load_server_config() -> dict[str, Any]:
         value = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"无法读取服务器配置 {path}: {exc}") from exc
-    config = default_server_config()
-    lan = value.get("lan", {})
-    auth = value.get("auth", {})
-    tasks = value.get("tasks", {})
-    for key in ("enabled", "bind_address"):
-        if key in lan:
-            config["lan"][key] = lan[key]
-    for key in ("required", "username"):
-        if key in auth:
-            config["auth"][key] = auth[key]
-    for key in ("max_active_projects", "estimate_usage_before_run"):
-        if key in tasks:
-            config["tasks"][key] = tasks[key]
+    config = normalize_settings(value, default_server_config(), warnings=warnings, path="server")
     _validate(config)
     return config
 
@@ -64,14 +53,8 @@ def _validate(config: dict[str, Any]) -> None:
         raise ConfigError("server.toml tasks.max_active_projects 必须是正整数")
 
 
-def save_server_config(config: dict[str, Any]) -> None:
-    defaults = default_server_config()
-    config = {
-        **defaults,
-        "lan": {**defaults["lan"], **config.get("lan", {})},
-        "auth": {**defaults["auth"], **config.get("auth", {})},
-        "tasks": {**defaults["tasks"], **config.get("tasks", {})},
-    }
+def save_server_config(config: dict[str, Any], *, warnings: list[str] | None = None) -> None:
+    config = normalize_settings(config, default_server_config(), warnings=warnings, path="server")
     _validate(config)
     lan = config["lan"]
     auth = config["auth"]

@@ -12,10 +12,11 @@ from typing import Any
 from .errors import ConfigError, ConfigFieldError
 from .llm_adapter import JSONLLMAdapter, load_json_adapter
 from .llm_preset import LLMPreset, load_llm_preset, preset_path
-from .user_config import APP_ROOT, effective_path
+from .user_config import APP_ROOT, BUILTIN_ROOT, effective_path
+from .request_budget import BUDGET_FIELDS, BUDGET_STAGES
 
 LLM_STAGES = ("terminology", "translation", "proofreading", "polishing")
-LLM_MODEL_STAGES = (*LLM_STAGES, "terminology_decision", "content_summary")
+LLM_MODEL_STAGES = (*LLM_STAGES, "terminology_decision", "content_summary", "repetition_consistency")
 
 SCHEMA: dict[str, Any] = {
     "project": {
@@ -29,12 +30,14 @@ SCHEMA: dict[str, Any] = {
         "preset_terminology": None,
         "preset_terminology_decision": None,
         "preset_content_summary": None,
+        "preset_repetition_consistency": None,
         "preset_translation": None,
         "preset_proofreading": None,
         "preset_polishing": None,
         "temperature_terminology": None,
         "temperature_terminology_decision": None,
         "temperature_content_summary": None,
+        "temperature_repetition_consistency": None,
         "temperature_translation": None,
         "temperature_proofreading": None,
         "temperature_polishing": None,
@@ -42,6 +45,8 @@ SCHEMA: dict[str, Any] = {
     "decision": {"preset": None},
     "execution": {"scheduling_mode": None},
     "chunking": {
+        **dict.fromkeys(BUDGET_FIELDS),
+        "stage_overrides": None,
         "allow_split_oversized_segment": None,
         "cross_boundary_batching": None,
     },
@@ -64,8 +69,6 @@ SCHEMA: dict[str, Any] = {
         "unsourced_description_injection": None,
     },
     "terminology_decision": {
-        "allow_soft_target_overflow": None,
-        "anchor_overflow_mode": None,
         "description_generation": None,
     },
     "validation": {
@@ -162,8 +165,6 @@ def is_well_formed_language_tag(value: str) -> bool:
 
 def _reject_unknown(value: dict[str, Any], schema: dict[str, Any], path: str) -> None:
     unknown = set(value) - set(schema)
-    if path == "config.chunking":
-        unknown.discard("target_chunk_input_tokens")
     if unknown:
         joined = ", ".join(sorted(unknown))
         raise ConfigError(f"未知配置键 {path}: {joined}")
@@ -254,6 +255,7 @@ def validate_config(config: dict[str, Any]) -> None:
         "temperature_terminology",
         "temperature_terminology_decision",
         "temperature_content_summary",
+        "temperature_repetition_consistency",
         "temperature_translation",
         "temperature_proofreading",
         "temperature_polishing",
@@ -350,6 +352,18 @@ def validate_config(config: dict[str, Any]) -> None:
         )
     if len(cross_boundary_batching) != len(set(cross_boundary_batching)):
         raise ConfigError("chunking.cross_boundary_batching 不能包含重复阶段")
+    overrides = config["chunking"]["stage_overrides"]
+    if not isinstance(overrides, dict) or set(overrides) - set(BUDGET_STAGES):
+        raise ConfigError("chunking.stage_overrides 必须是已知预算阶段表")
+    budgets = [("chunking", {key: config["chunking"][key] for key in BUDGET_FIELDS})]
+    for stage, fields in overrides.items():
+        if not isinstance(fields, dict) or set(fields) - set(BUDGET_FIELDS):
+            raise ConfigError(f"chunking.stage_overrides.{stage} 必须是预算字段表")
+        budgets.append((f"chunking.stage_overrides.{stage}", fields))
+    for path, fields in budgets:
+        for key, number in fields.items():
+            if type(number) is not int or number < (0 if key == "context_reserve_tokens" else 1):
+                raise ConfigError(f"{path}.{key} 必须是{'非负' if key == 'context_reserve_tokens' else '正'}整数")
     normalization = config["terminology"]["unicode_normalization"]
     if not isinstance(normalization, str) or normalization not in {
         "",
@@ -383,20 +397,6 @@ def validate_config(config: dict[str, Any]) -> None:
         or max_terms <= 0
     ):
         raise ConfigError("terminology.max_terms_per_segment 必须是正整数")
-    decision_config = config["terminology_decision"]
-    if not isinstance(decision_config["allow_soft_target_overflow"], bool):
-        raise ConfigError(
-            "terminology_decision.allow_soft_target_overflow 必须是布尔值"
-        )
-    anchor_overflow_mode = decision_config["anchor_overflow_mode"]
-    if not isinstance(anchor_overflow_mode, str) or anchor_overflow_mode not in {
-        "error",
-        "trim",
-        "compact",
-    }:
-        raise ConfigError(
-            "terminology_decision.anchor_overflow_mode 必须是 error、trim 或 compact"
-        )
     if not isinstance(config["debug"]["enabled"], bool):
         raise ConfigError("debug.enabled 必须是布尔值")
     for key in (
@@ -442,13 +442,13 @@ def dump_config(config: dict[str, Any]) -> str:
             lines.append("")
         lines.append("[" + ".".join(path) + "]")
         for key, child_schema in schema.items():
-            if child_schema is None:
+            if child_schema is None and key != "stage_overrides":
                 lines.append(f"{key} = {_toml_scalar(value[key])}")
-        if path == ("chunking",) and "target_chunk_input_tokens" in value:
-            lines.append(
-                "target_chunk_input_tokens = "
-                + _toml_scalar(value["target_chunk_input_tokens"])
-            )
+        if path == ("chunking",):
+            lines.extend(["", "[chunking.stage_overrides]"])
+            for stage, fields in value["stage_overrides"].items():
+                lines.extend(["", f"[chunking.stage_overrides.{stage}]"])
+                lines.extend(f"{key} = {_toml_scalar(fields[key])}" for key in BUDGET_FIELDS if key in fields)
         for key, child_schema in schema.items():
             if child_schema is not None:
                 write_table((*path, key), value[key], child_schema)
@@ -468,91 +468,113 @@ def _toml_scalar(value: Any) -> str:
     return str(value)
 
 
-def load_config(path: Path) -> dict[str, Any]:
+def report_unknown(path: str, keys: set[str], warnings: list[str] | None) -> None:
+    if not keys:
+        return
+    message = f"忽略未知配置字段 {path}: {', '.join(sorted(keys))}"
+    if warnings is not None:
+        warnings.append(message)
+    else:
+        from .logging_utils import get_logger
+        get_logger("config").warning(message)
+
+
+def normalize_settings(
+    value: dict[str, Any], defaults: dict[str, Any], *,
+    warnings: list[str] | None = None, path: str = "config",
+) -> dict[str, Any]:
+    """Fill absent fixed settings while preserving errors in present values."""
+    if not isinstance(value, dict):
+        raise ConfigError(f"配置节必须是表：{path}")
+    report_unknown(path, set(value) - set(defaults), warnings)
+    result = {}
+    for key, default in defaults.items():
+        if key not in value:
+            result[key] = deepcopy(default)
+        elif path == "config.chunking" and key == "stage_overrides":
+            overrides = value[key]
+            if not isinstance(overrides, dict):
+                raise ConfigError("chunking.stage_overrides 必须是表")
+            report_unknown(f"{path}.{key}", set(overrides) - set(BUDGET_STAGES), warnings)
+            result[key] = {}
+            for stage, fields in overrides.items():
+                if stage not in BUDGET_STAGES:
+                    continue
+                if not isinstance(fields, dict):
+                    raise ConfigError(f"chunking.stage_overrides.{stage} 必须是表")
+                report_unknown(f"{path}.{key}.{stage}", set(fields) - set(BUDGET_FIELDS), warnings)
+                result[key][stage] = {name: deepcopy(child) for name, child in fields.items() if name in BUDGET_FIELDS}
+        elif isinstance(default, dict):
+            result[key] = normalize_settings(value[key], default, warnings=warnings, path=f"{path}.{key}")
+        else:
+            result[key] = deepcopy(value[key])
+    return result
+
+
+def builtin_settings() -> dict[str, Any]:
+    return _read_settings(BUILTIN_ROOT / "config/config.toml")
+
+
+def _read_settings(path: Path) -> dict[str, Any]:
     try:
-        config = tomllib.loads(path.read_text(encoding="utf-8"))
+        return tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"无法读取配置：{path}: {exc}") from exc
-    retry = config.get("retry")
-    if isinstance(retry, dict):
-        retry.setdefault("unresolved_retry_scope", "unresolved")
-        retry.setdefault("empty_truncated_mode", "split")
-        retry.setdefault("empty_truncated_max_attempts", 2)
-        retry.setdefault("empty_unknown_mode", "retry")
-        retry.setdefault("empty_unknown_max_attempts", 1)
-    terminology = config.get("terminology")
-    if isinstance(terminology, dict):
-        terminology.setdefault("alias_primary_collision", "merge")
-        terminology.setdefault("sourced_description_injection", "all")
-        terminology.setdefault("unsourced_description_injection", "all")
-    terminology_decision = config.get("terminology_decision")
-    if terminology_decision is None:
-        terminology_decision = {}
-        config["terminology_decision"] = terminology_decision
-    if isinstance(terminology_decision, dict):
-        terminology_decision.setdefault("allow_soft_target_overflow", True)
-        terminology_decision.setdefault("anchor_overflow_mode", "error")
-        terminology_decision.setdefault("description_generation", "sourced")
-    llm = config.get("llm")
-    if isinstance(llm, dict):
-        llm.setdefault("preset_terminology_decision", "")
-        llm.setdefault("temperature_terminology_decision", 0.1)
-        llm.setdefault("preset_content_summary", "")
-        llm.setdefault("temperature_content_summary", 0.1)
-    chunking = config.get("chunking")
-    if isinstance(chunking, dict):
-        chunking.setdefault("cross_boundary_batching", [])
-    context = config.get("context")
-    translation_context = (
-        context.get("translation") if isinstance(context, dict) else None
-    )
-    if isinstance(translation_context, dict):
-        translation_context.setdefault("previous_summaries", False)
-    project = config.get("project")
-    if isinstance(project, dict):
-        project.setdefault("target_language_tag", "")
-    validation = config.get("validation")
-    translation_validation = (
-        validation.get("translation")
-        if isinstance(validation, dict)
-        else None
-    )
-    if (
-        isinstance(translation_validation, dict)
-        and "validators" not in translation_validation
-    ):
-        legacy_keys = ("japanese_kana", "korean_hangul")
-        if all(key in translation_validation for key in legacy_keys):
-            if any(
-                type(translation_validation[key]) is not bool
-                for key in legacy_keys
-            ):
-                raise ConfigError(
-                    "旧版 validation.translation.japanese_kana 和 "
-                    "korean_hangul 必须是布尔值"
-                )
-            translation_validation["validators"] = [
-                key
-                for key in legacy_keys
-                if translation_validation[key] is True
-            ]
-            for key in legacy_keys:
-                del translation_validation[key]
-    config.setdefault("decision", {"preset": ""})
-    translation_validation = config.get("validation", {}).get("translation")
-    if isinstance(translation_validation, dict):
-        translation_validation.setdefault("decision_enabled", False)
-        translation_validation.setdefault("decision_preset", "")
-        translation_validation.setdefault("decision_confidence_threshold", 0.8)
-        translation_validation.setdefault("decision_warning_threshold", 0.8)
-        translation_validation.setdefault("decision_context_enabled", False)
-        translation_validation.setdefault("decision_previous_segments", 1)
-        translation_validation.setdefault("alignment", {"decision_preset": "", "confidence_threshold": 0.8, "tail_segments": 3})
-        alignment = translation_validation["alignment"]
-        if isinstance(alignment, dict):
-            alignment.setdefault("warning_threshold", 0.8)
-    validate_config(config)
+
+
+def load_config(
+    path: Path, *, defaults: dict[str, Any] | None = None,
+    warnings: list[str] | None = None, snapshot: bool = False,
+) -> dict[str, Any]:
+    config = _read_settings(path)
+    if not snapshot:
+        config = normalize_config(config, defaults=defaults, warnings=warnings)
+    else:
+        validate_config(config)
     return config
+
+
+def normalize_config(
+    config: dict[str, Any], *, defaults: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    result = normalize_settings(config, defaults if defaults is not None else builtin_settings(), warnings=warnings)
+    validate_config(result)
+    return result
+
+
+def canonical_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Extract settings from an already resolved runtime configuration."""
+    def project(value: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+        return {key: deepcopy(value[key]) if child is None else project(value[key], child)
+                for key, child in schema.items()}
+    result = project(config, SCHEMA)
+    validate_config(result)
+    return result
+
+
+def load_global_settings(root: Path = APP_ROOT, *, warnings: list[str] | None = None) -> dict[str, Any]:
+    return load_config(effective_path("config/config.toml", builtin_root=root),
+                       defaults=builtin_settings(), warnings=warnings)
+
+
+def load_project_settings(project: Path, *, root: Path = APP_ROOT,
+                          warnings: list[str] | None = None) -> dict[str, Any]:
+    return normalize_project_settings(_read_settings(project / "config.toml"), root=root, warnings=warnings)
+
+
+def normalize_project_settings(value: dict[str, Any], *, root: Path = APP_ROOT,
+                               warnings: list[str] | None = None) -> dict[str, Any]:
+    def missing_settings(table: dict[str, Any], schema: dict[str, Any]) -> bool:
+        for key, child in schema.items():
+            if key not in table:
+                return True
+            if child is not None and isinstance(table[key], dict) and missing_settings(table[key], child):
+                return True
+        return False
+
+    defaults = load_global_settings(root, warnings=warnings) if missing_settings(value, SCHEMA) else builtin_settings()
+    return normalize_config(value, defaults=defaults, warnings=warnings)
 
 
 def load_project_config(
@@ -562,7 +584,7 @@ def load_project_config(
     presets_root: Path | None = None,
 ) -> dict[str, Any]:
     return resolve_project_config(
-        load_config(project / "config.toml"),
+        load_project_settings(project, root=presets_root or APP_ROOT),
         stage=stage,
         presets_root=presets_root,
         project=project,
@@ -578,6 +600,7 @@ def _resolve_config(
     project: Path | None = None,
 ) -> dict[str, Any]:
     config = deepcopy(config)
+    config["_request_budget_stage"] = stage or "translation"
     from .plugins import resolve_translation_validators
 
     validator_bindings = resolve_translation_validators(
@@ -628,7 +651,7 @@ def resolve_project_config(
 
 def load_global_config(root: Path) -> dict[str, Any]:
     return resolve_global_config(
-        load_config(effective_path("config/config.toml", builtin_root=root)), root
+        load_global_settings(root), root
     )
 
 
@@ -656,7 +679,7 @@ def decision_validator_overrides(config: dict[str, Any]) -> dict[str, str]:
 
 
 def _resolve_decision_config(config: dict[str, Any], root: Path, *, snapshot: bool = False, project: Path | None = None) -> None:
-    from .decision import decision_preset_path, load_decision_preset
+    from .decision import decision_preset_path, load_decision_preset, validate_decision_preset
     definitions = {}
     bindings = {}
     for validator_id, override in decision_validator_overrides(config).items():
@@ -667,6 +690,7 @@ def _resolve_decision_config(config: dict[str, Any], root: Path, *, snapshot: bo
         path = decision_preset_path(root, preset_id) if snapshot else effective_path(
             str(decision_preset_path(Path(), preset_id)), builtin_root=root)
         definition = load_decision_preset(path, snapshot=snapshot)
+        validate_decision_preset({key: value for key, value in definition.items() if key != "_resources"})
         if definition["protocol"] == "llm" and not snapshot:
             from .decision_llm import resolve_llm_resources
             definition = resolve_llm_resources(definition, root, project=project)
@@ -678,11 +702,11 @@ def _resolve_decision_config(config: dict[str, Any], root: Path, *, snapshot: bo
 
 
 def load_run_config(run_dir: Path) -> dict[str, Any]:
-    config = load_config(run_dir / "config.toml")
+    config = load_config(run_dir / "config.toml", snapshot=True)
     _resolve_decision_config(config, run_dir, snapshot=True)
     from .decision_prompt import resolve_run_prompts
     resolve_run_prompts(config, snapshot=run_dir)
-    preset = load_llm_preset(run_dir / "llm_preset.json")
+    preset = load_llm_preset(run_dir / "llm_preset.json", snapshot=True)
     return _resolve_llm_config(
         config,
         adapter=load_json_adapter(run_dir / "llm_adapter.json"),
@@ -696,6 +720,8 @@ def _resolve_llm_config(
     adapter: JSONLLMAdapter,
     preset: LLMPreset,
 ) -> dict[str, Any]:
+    from .llm_preset import validate_executable_preset
+    validate_executable_preset(preset.definition)
     definition = preset.definition
     if adapter.adapter_id != preset.adapter_id:
         raise ConfigError("LLM Adapter 文件中的 adapter_id 与配置不一致")
@@ -712,7 +738,6 @@ def _resolve_llm_config(
                 "max_output_tokens",
                 "send_temperature",
                 "reasoning_effort",
-                "context_safety_margin_tokens",
                 "stream",
                 "stream_read_timeout_enabled",
             )
@@ -731,7 +756,6 @@ def _resolve_llm_config(
             key: definition[key]
             for key in (
                 "token_safety_factor",
-                "target_chunk_input_tokens",
                 "requests_per_minute",
                 "input_tokens_per_minute",
                 "max_parallel",
@@ -742,11 +766,7 @@ def _resolve_llm_config(
     )
     config["_llm_preset_id"] = preset.preset_id
     config["_llm_preset_hash"] = preset.digest
-    fingerprint_definition = {
-        key: value
-        for key, value in definition.items()
-        if key not in {"target_chunk_input_tokens", "endpoint", "stream_endpoint"}
-    }
+    fingerprint_definition = dict(definition)
     if definition["credential"]["kind"] == "chatgpt":
         from .chatgpt_oauth import ChatGPTConnection
         connection = ChatGPTConnection()

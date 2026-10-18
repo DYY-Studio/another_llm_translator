@@ -118,14 +118,14 @@ async def test_scan_descriptions_follow_source_order_despite_completion_order(
     import asyncio
     from app.sqlite_storage import read_jsonl
     from app.term_library import load_terms
-    from tests.helpers import use_llm_preset
+    from app.config import dump_config, load_config
 
     project = await create_project(tmp_path, "Alice first.\nAlice later.")
-    use_llm_preset(tmp_path, target_chunk_input_tokens=1)
     config_path = project / "config.toml"
-    config_path.write_text(config_path.read_text(encoding="utf-8").replace(
-        'scheduling_mode = "ordered_by_file"', 'scheduling_mode = "parallel"',
-    ), encoding="utf-8")
+    config = load_config(config_path)
+    config["chunking"]["target_content_tokens"] = 1
+    config["execution"]["scheduling_mode"] = "parallel"
+    config_path.write_text(dump_config(config), encoding="utf-8")
     if include_summaries:
         write_summary_participation(
             project, [{"file_id": "F0001", "part_id": "document", "selected": True}],
@@ -915,19 +915,17 @@ async def test_parallel_summary_split_keeps_saved_slices_reusable(
 ) -> None:
     import asyncio
     from tests.helpers import use_llm_preset
+    from app.config import dump_config, load_config
 
     project = await create_project(tmp_path, "A" * 8000 + "B" * 8000)
     path = project / "config.toml"
-    path.write_text(
-        path.read_text().replace(
-            'scheduling_mode = "ordered_by_file"', 'scheduling_mode = "parallel"'
-        )
-    )
+    config = load_config(path)
+    config["execution"]["scheduling_mode"] = "parallel"
+    config["chunking"]["target_content_tokens"] = 1
+    path.write_text(dump_config(config))
     use_llm_preset(
         tmp_path,
         context_window_tokens=3000,
-        context_safety_margin_tokens=100,
-        target_chunk_input_tokens=1,
         max_output_tokens=200,
     )
     write_summary_participation(
@@ -1044,3 +1042,35 @@ async def test_complete_summary_recovery_ignores_old_partial_partition(
             include_summaries=True,
             include_draft_translation=include_draft,
         )
+
+
+@pytest.mark.asyncio
+async def test_draft_run_snapshot_preserves_effective_context_settings(tmp_path):
+    from app.config import dump_config, load_config
+
+    project = await create_project(tmp_path, 'Alice entered.')
+    settings = load_config(project / 'config.toml')
+    settings['context']['terminology'] = {'enabled': False, 'previous_segments': 7}
+    settings['context']['translation'] = {
+        'enabled': True, 'previous_segments': 2, 'previous_summaries': True,
+    }
+    (project / 'config.toml').write_text(dump_config(settings))
+
+    def handler(request):
+        payload = json.loads(json.loads(request.content)['messages'][1]['content'])
+        records = [{'type': 'no_terms'}]
+        records.extend({'type': 'segment', 'id': item['id'], 'translation': '爱丽丝进来了'}
+                       for item in payload['segments'])
+        return httpx.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(project, Scope(), http_client=client, include_draft_translation=True)
+    assert result['failed'] == 0
+    snapshots = list((project / 'runs').glob('*/config.toml'))
+    assert len(snapshots) == 1
+    frozen = load_config(snapshots[0], snapshot=True)
+    assert frozen['context']['translation'] == {
+        'enabled': False, 'previous_segments': 7, 'previous_summaries': False,
+    }
+    assert frozen['context']['terminology'] == {'enabled': False, 'previous_segments': 7}
+    assert load_config(project / 'config.toml') == settings

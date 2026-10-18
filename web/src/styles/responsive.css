@@ -235,6 +235,7 @@
   .config-heading { position: static; margin: 0 -14px 20px; padding: 20px 14px; }
   .settings-sticky-heading { position: static; margin: 0 -14px 20px; padding: 20px 14px; }
   .config-grid { grid-template-columns: 1fr; }
+  .budget-stage-fields { grid-template-columns: 1fr; }
   .config-section { padding: 16px 14px; }
   .context-config-row { grid-template-columns: 1fr; gap: 6px; }
   .preset-layout { height: auto; display: flex; flex-direction: column; }
