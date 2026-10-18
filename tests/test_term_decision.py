@@ -1731,6 +1731,65 @@ async def test_isolated_retry_groups_overlap_from_same_reference_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_isolated_group_primary_cycle_retries_combined_component(
+    tmp_path: Path,
+) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 3
+    config["execution"]["max_parallel"] = 2
+    alpha = {**_batch_state("alpha", "Alpha"), "aliases": ["prefixBetaSuffixA"]}
+    beta = {**_batch_state("beta", "Beta"), "aliases": ["prefixAlphaSuffixB"]}
+    focus = [alpha, beta]
+    payloads = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-isolated-group-cycle")
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            payloads.append(payload)
+            targets = [term["normalized"] for term in payload["terms"]]
+            if len(payloads) <= 2:
+                return SimpleNamespace(content=llm_jsonl([])), None
+            if len(payloads) <= 4:
+                target = targets[0]
+                primary = "beta" if target == "alpha" else "alpha"
+                return SimpleNamespace(content=llm_jsonl([
+                    {"type": "decision", "normalized": target,
+                     "action": "update", "reason": "synthetic",
+                     "changes": {"group_primary": primary}}
+                ])), None
+            return SimpleNamespace(content=llm_jsonl([
+                {"type": "decision", "normalized": target,
+                 "action": "keep", "reason": "synthetic"}
+                for target in targets
+            ])), None
+
+    result = await _request_batch(
+        StubLLM(), focus=focus, anchors=focus, phase="consistency",
+        prompt="synthetic", config=config,
+        evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+
+    assert set(result) == {"alpha", "beta"}
+    assert [payload["terms"][0]["normalized"] for payload in payloads[2:4]] == [
+        "alpha", "beta"
+    ]
+    assert [payload["anchors"][0]["normalized"] for payload in payloads[2:4]] == [
+        "beta", "alpha"
+    ]
+    assert [term["normalized"] for term in payloads[4]["terms"]] == [
+        "alpha", "beta"
+    ]
+    assert len(payloads) == 5
+    assert payloads[4]["validation_repair"] == "依据本次 terms/anchors 联合检查组关系和 alias 归属"
+    assert all(decision["action"] == "keep" for decision in result.values())
+
+
+@pytest.mark.asyncio
 async def test_new_group_relation_retries_failed_dependency_with_proposer(
     tmp_path: Path,
 ) -> None:
