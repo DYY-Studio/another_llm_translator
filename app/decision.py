@@ -269,7 +269,10 @@ class DecisionClient:
                     if isinstance(usage, dict) and type(usage.get("input_tokens")) is int and usage["input_tokens"] >= 0:
                         record["usage"] = {"input_tokens": usage["input_tokens"], "output_tokens": 0, "total_tokens": usage["input_tokens"]}
                         if diagnostics is not None:
-                            diagnostics.record_request_usage(request_id, record["usage"], complete=True)
+                            diagnostics.record_request_usage(
+                                request_id, record["usage"], attempt=attempt + 1,
+                                complete=True, output_tokens_known=False,
+                            )
                     answers = (await run_blocking(lambda: self._parse(data, questions)))
                 except (ValueError, TypeError, KeyError):
                     outcome = "response_parse_error"

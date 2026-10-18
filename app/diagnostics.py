@@ -246,6 +246,7 @@ class Diagnostics:
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
             "_usage_samples": 0,
             "_usage_complete": True,
+            "_attempt_output_usage": {},
             "_decision_latency_sample_seconds": None,
             "error": None,
             "error_detail": None,
@@ -514,10 +515,25 @@ class Diagnostics:
             request["has_reasoning"] = True
         self._finish_request(request, status="completed")
 
-    def record_request_usage(self, request_id: str, usage: dict[str, int], *, complete: bool) -> None:
+    def record_request_usage(
+        self,
+        request_id: str,
+        usage: dict[str, int],
+        *,
+        attempt: int,
+        complete: bool,
+        output_tokens_known: bool = True,
+    ) -> None:
         request = self._request(request_id)
         if request is None:
             return
+        attempt_output, attempt_reliable = request["_attempt_output_usage"].get(
+            attempt, (0, True)
+        )
+        request["_attempt_output_usage"][attempt] = (
+            attempt_output + usage["output_tokens"],
+            attempt_reliable and complete and output_tokens_known,
+        )
         for key in request["usage"]:
             request["usage"][key] += usage[key]
         request["_usage_samples"] += 1
@@ -591,10 +607,25 @@ class Diagnostics:
         observed = request["_usage_samples"] > 0
         available = observed and request["_usage_complete"] and request["_usage_samples"] == len(request["attempts"])
         latency_ms = sum(attempt["latency_ms"] for attempt in request["attempts"])
+        last_attempt = (
+            request["attempts"][-1]
+            if request["status"] == "completed" and request["attempts"]
+            else None
+        )
+        attempt_usage = (
+            request["_attempt_output_usage"].get(last_attempt["attempt"])
+            if last_attempt is not None and last_attempt["outcome"] == "succeeded"
+            else None
+        )
+        output_tokens_per_second = None
+        if attempt_usage is not None and attempt_usage[1] and last_attempt["latency_ms"] > 0:
+            output_tokens_per_second = round(
+                attempt_usage[0] * 1000 / last_attempt["latency_ms"], 2
+            )
         summary = {
             "usage": {**request["usage"], "available": available, "partial": observed and not available},
             "latency_ms": round(latency_ms, 1) if request["attempts"] else None,
-            "output_tokens_per_second": round(request["usage"]["output_tokens"] * 1000 / latency_ms, 2) if available and latency_ms > 0 else None,
+            "output_tokens_per_second": output_tokens_per_second,
             "timestamp": request["timestamp"],
             "finished_at": request["finished_at"],
             "project": request["project"],
@@ -945,12 +976,26 @@ class DiagnosticsHub(Diagnostics):
             request_id, content=content, reasoning_content=reasoning_content, overview_answers=overview_answers
         )
 
-    def record_request_usage(self, request_id: str, usage: dict[str, int], *, complete: bool) -> None:
+    def record_request_usage(
+        self,
+        request_id: str,
+        usage: dict[str, int],
+        *,
+        attempt: int,
+        complete: bool,
+        output_tokens_known: bool = True,
+    ) -> None:
         target = self._active_session()
         if target is not None:
-            target.record_request_usage(request_id, usage, complete=complete)
+            target.record_request_usage(
+                request_id, usage, attempt=attempt, complete=complete,
+                output_tokens_known=output_tokens_known,
+            )
             return
-        super().record_request_usage(request_id, usage, complete=complete)
+        super().record_request_usage(
+            request_id, usage, attempt=attempt, complete=complete,
+            output_tokens_known=output_tokens_known,
+        )
 
     def fail_request(self, request_id: str, error: str, *, interrupted: bool = False, detail: str | None = None) -> None:
         target = self._active_session()

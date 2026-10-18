@@ -58,12 +58,89 @@ def test_request_usage_accumulates_only_its_attempts(tmp_path, samples, expected
             diagnostics.request_started("REQ-USAGE")
             diagnostics.request_finished(request_id="REQ-USAGE", attempt=attempt, latency_seconds=0.5, status=200, error=False)
             if attempt <= samples:
-                diagnostics.record_request_usage("REQ-USAGE", {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}, complete=True)
+                diagnostics.record_request_usage("REQ-USAGE", {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}, attempt=attempt, complete=True)
+        diagnostics.complete_request("REQ-USAGE", content="ok", reasoning_content=None)
         detail = diagnostics.request_detail("REQ-USAGE")
         assert detail["usage"] == expected_usage
         assert diagnostics.snapshot()["request_usage"]["llm"] == expected_usage
         assert detail["latency_ms"] == 1000
         assert detail["output_tokens_per_second"] == expected_rate
+
+
+def test_request_output_rate_uses_last_success_attempt_and_keeps_all_usage(tmp_path):
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    with diagnostics.activate("sample", "translation"):
+        diagnostics.begin_request(
+            request_id="REQ-RETRY-RATE", model="test", messages=[], max_attempts=2
+        )
+        diagnostics.record_request_usage(
+            "REQ-RETRY-RATE",
+            {"input_tokens": 90, "output_tokens": 99, "total_tokens": 189},
+            attempt=1,
+            complete=True,
+        )
+        diagnostics.request_finished(
+            request_id="REQ-RETRY-RATE", attempt=1, latency_seconds=2.0,
+            status=None, error=True, outcome="network_error",
+        )
+        diagnostics.request_finished(
+            request_id="REQ-RETRY-RATE", attempt=2, latency_seconds=0.5,
+            status=200, error=False, outcome="succeeded",
+        )
+        diagnostics.record_request_usage(
+            "REQ-RETRY-RATE",
+            {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            attempt=2,
+            complete=True,
+        )
+        diagnostics.complete_request(
+            "REQ-RETRY-RATE", content="ok", reasoning_content=None
+        )
+
+        detail = diagnostics.request_detail("REQ-RETRY-RATE")
+        assert detail["usage"] == {
+            "input_tokens": 100, "output_tokens": 104, "total_tokens": 204,
+            "available": True, "partial": False,
+        }
+        assert detail["output_tokens_per_second"] == 10.0
+
+
+@pytest.mark.parametrize(
+    ("record_usage", "complete", "output_tokens_known", "latency_seconds"),
+    [
+        (False, True, True, 0.5),
+        (True, False, True, 0.5),
+        (True, True, False, 0.5),
+        (True, True, True, 0.0),
+    ],
+)
+def test_request_output_rate_is_unavailable_without_reliable_final_attempt_usage(
+    tmp_path, record_usage, complete, output_tokens_known, latency_seconds
+):
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
+    with diagnostics.activate("sample", "translation"):
+        diagnostics.begin_request(
+            request_id="REQ-RATE-UNKNOWN", model="test", messages=[], max_attempts=1
+        )
+        if record_usage:
+            diagnostics.record_request_usage(
+                "REQ-RATE-UNKNOWN",
+                {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                attempt=1,
+                complete=complete,
+                output_tokens_known=output_tokens_known,
+            )
+        diagnostics.request_finished(
+            request_id="REQ-RATE-UNKNOWN", attempt=1,
+            latency_seconds=latency_seconds, status=200, error=False,
+            outcome="succeeded",
+        )
+        diagnostics.complete_request(
+            "REQ-RATE-UNKNOWN", content="ok", reasoning_content=None
+        )
+        detail = diagnostics.request_detail("REQ-RATE-UNKNOWN")
+        assert detail["output_tokens_per_second"] is None
+        assert detail["usage"]["output_tokens"] == (5 if record_usage else 0)
 
 
 @pytest.mark.asyncio
@@ -1251,7 +1328,9 @@ async def test_llm_runtime_reports_safe_diagnostics(tmp_path: Path) -> None:
     assert request_summary["status"] == "completed"
     assert request_summary["attempt_count"] == 2
     assert request_summary["usage"] == {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10, "available": False, "partial": True}
-    assert request_summary["output_tokens_per_second"] is None
+    assert request_summary["output_tokens_per_second"] == round(
+        2 * 1000 / request_summary["latest_latency_ms"], 2
+    )
     assert request_summary["has_content"] is True
     assert request_summary["has_reasoning"] is True
     request_detail = diagnostics.request_detail(request_summary["request_id"])

@@ -706,6 +706,7 @@ async def test_stream_finish_reason_error_discards_partial_output_before_success
 ) -> None:
     current = streaming_config(tmp_path)
     current["retry"]["http_max_attempts"] = 2
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
     calls = 0
 
     def handler(_: httpx.Request) -> httpx.Response:
@@ -714,6 +715,7 @@ async def test_stream_finish_reason_error_discards_partial_output_before_success
         if calls == 1:
             return stream_response(
                 {"choices": [{"delta": {"content": "半成品"}}]},
+                {"usage": {"prompt_tokens": 90, "completion_tokens": 99, "total_tokens": 189}},
                 {
                     "choices": [{"delta": {}, "finish_reason": "error"}],
                     "error": {"status": 504, "message": "timeout"},
@@ -723,16 +725,24 @@ async def test_stream_finish_reason_error_discards_partial_output_before_success
         return stream_response(
             {"choices": [{"delta": {"content": "完成"}}]},
             {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            {"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}},
             "[DONE]",
         )
 
-    response, llm, client = await run_client(current, tmp_path, handler)
+    response, llm, client = await run_client(
+        current, tmp_path, handler, diagnostics=diagnostics
+    )
     await client.aclose()
 
     assert calls == 2
     assert response.content == "完成"
     assert "半成品" not in response.content
-    assert llm.usage_summary()["available"] is False
+    assert llm.usage_summary()["available"] is True
+    request = diagnostics.snapshot()["requests"]["items"][0]
+    assert request["usage"]["output_tokens"] == 104
+    assert request["output_tokens_per_second"] == round(
+        5 * 1000 / request["latest_latency_ms"], 2
+    )
 
 
 @pytest.mark.asyncio

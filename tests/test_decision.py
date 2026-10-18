@@ -17,7 +17,7 @@ def test_decision_diagnostics_retains_counts_after_detail_eviction(tmp_path, dia
     with diagnostics.activate("project", "translation", task_id="TASK"):
         diagnostics.begin_request(request_id="LLM", model="generator", messages=[], max_attempts=1)
         diagnostics.request_finished(request_id="LLM", attempt=1, latency_seconds=.01, status=200, error=False)
-        diagnostics.record_request_usage("LLM", {"input_tokens": 22, "output_tokens": 2, "total_tokens": 24}, complete=True)
+        diagnostics.record_request_usage("LLM", {"input_tokens": 22, "output_tokens": 2, "total_tokens": 24}, attempt=1, complete=True)
         diagnostics.complete_request("LLM", content="translation", reasoning_content=None)
         for index in range(201):
             request_id = f"DEC-{index}"
@@ -26,7 +26,7 @@ def test_decision_diagnostics_retains_counts_after_detail_eviction(tmp_path, dia
             diagnostics.request_started(request_id)
             diagnostics.request_finished(request_id=request_id, attempt=1, latency_seconds=.01,
                                          status=200, error=False)
-            diagnostics.record_request_usage(request_id, {"input_tokens": 10, "output_tokens": 0, "total_tokens": 10}, complete=True)
+            diagnostics.record_request_usage(request_id, {"input_tokens": 10, "output_tokens": 0, "total_tokens": 10}, attempt=1, complete=True, output_tokens_known=False)
             diagnostics.complete_request(request_id, content="{}", reasoning_content=None)
         snapshot = diagnostics.snapshot()
         assert snapshot["metrics"]["total_requests"] == 1
@@ -37,6 +37,7 @@ def test_decision_diagnostics_retains_counts_after_detail_eviction(tmp_path, dia
         assert snapshot["request_usage"]["decision"]["input_tokens"] == 2010
         assert snapshot["request_usage"]["llm"] == {"input_tokens": 22, "output_tokens": 2, "total_tokens": 24, "available": True, "partial": False}
         assert diagnostics.request_detail("LLM")["response_content"] == "translation"
+        assert diagnostics.request_detail("DEC-200")["output_tokens_per_second"] is None
         with pytest.raises(ValueError):
             diagnostics.request_detail("DEC-0")
 
