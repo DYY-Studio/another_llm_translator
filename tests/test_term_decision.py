@@ -134,20 +134,35 @@ def create_decision_project(tmp_path: Path, text: str = "Alice Ally\nBob") -> Pa
     return project
 
 
-def test_retry_feedback_filters_scope_and_omits_protocol_errors() -> None:
+def test_retry_feedback_filters_scope_and_guides_record_shape() -> None:
     from app.term_decision_protocol import validation_feedback
 
     errors = [
         {"code": "invalid_action", "normalized": "alice"},
         {"code": "invalid_reason", "normalized": "alice"},
         {"code": "missing_record", "normalized": "alice"},
+        {"code": "duplicate_record", "normalized": "alice"},
+        {"code": "unknown_record", "normalized": "unseen"},
         {"code": "invalid_relationship", "normalized": "alice"},
         {"code": "invalid_relationship", "normalized": "alice"},
         {"code": "invisible_alias", "normalized": "bob"},
     ]
-    assert validation_feedback(errors, {"alice"}, language="zh-CN") == "依据本次 terms/anchors 联合检查组关系和 alias 归属"
-    assert validation_feedback(errors, {"bob"}, language="zh-CN") == "aliases 仅使用本次 terms/anchors 中可见的 source/alias 原文"
-    assert validation_feedback(errors, {"other"}, language="zh-CN") == ""
+    assert validation_feedback(errors, {"alice"}, language="zh-CN") == (
+        "仅为本次 terms[] 中每项输出一条决策，并逐字照录其 normalized（含大小写和全半角符号）\n"
+        "依据本次 terms/anchors 联合检查组关系和 alias 归属"
+    )
+    assert validation_feedback(errors, {"alice"}, language="en") == (
+        "Return exactly one decision for each item in this request's terms[]; copy normalized verbatim, "
+        "including case and full-/half-width punctuation.\n"
+        "Check group relationships and alias ownership against this request's terms/anchors."
+    )
+    assert validation_feedback(errors, {"bob"}, language="zh-CN") == (
+        "aliases 仅使用本次 terms/anchors 中可见的 source/alias 原文\n"
+        "仅为本次 terms[] 中每项输出一条决策，并逐字照录其 normalized（含大小写和全半角符号）"
+    )
+    assert validation_feedback(errors, {"other"}, language="zh-CN") == (
+        "仅为本次 terms[] 中每项输出一条决策，并逐字照录其 normalized（含大小写和全半角符号）"
+    )
     assert validation_feedback([
         {"code": "invalid_document", "_document_error_code": "invalid_json"},
         *errors,
