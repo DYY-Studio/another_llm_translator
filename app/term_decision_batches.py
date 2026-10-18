@@ -746,16 +746,38 @@ async def _request_batch(
     accepted: dict[str, dict[str, Any]] = {}
     unresolved = {str(item["normalized"]) for item in focus}
     by_normalized = {str(item["normalized"]): item for item in focus}
-    component_by_term = {
-        str(item["normalized"]): {str(member["normalized"]) for member in component}
-        for component in _hard_components(focus, spec)
-        for item in component
-    }
     previous_errors: list[dict[str, Any]] = []
     previous_signature: tuple[tuple[str, str | None], ...] | None = None
     parent_request_id: str | None = None
     last_request_id: str | None = None
     max_attempts = int(config["retry"]["format_max_attempts"])
+
+    def accepted_state(normalized: str, decision: dict[str, Any]) -> dict[str, Any]:
+        action = decision["action"]
+        if action == "update":
+            return decision["after"]
+        if action == "disable":
+            return {**known_states[normalized], "disabled": True}
+        if action == "needs_review":
+            return review_states[normalized]
+        return known_states[normalized]
+
+    def dependency_graph(
+        candidate_states: dict[str, dict[str, Any]],
+    ) -> dict[str, set[str]]:
+        graph = _decision_dependency_graph(known_states, candidate_states, spec)
+        candidate_focus = {
+            normalized: candidate_states[normalized]
+            for normalized in by_normalized
+        }
+        for states in (by_normalized, candidate_focus):
+            for component in _hard_components(list(states.values()), spec):
+                members = [str(item["normalized"]) for item in component]
+                for left, right in zip(members, members[1:]):
+                    graph.setdefault(left, set()).add(right)
+                    graph.setdefault(right, set()).add(left)
+        return graph
+
     for attempt in range(max_attempts + 1):
         signature = tuple(
             sorted(
@@ -767,8 +789,15 @@ async def _request_batch(
         if isolate:
             pending_groups = []
             seen_groups: set[tuple[str, ...]] = set()
-            for normalized in sorted(unresolved):
-                group = tuple(sorted(component_by_term[normalized] & unresolved))
+            accepted_states = {
+                normalized: accepted_state(normalized, decision)
+                for normalized, decision in accepted.items()
+            }
+            retry_states = dict(known_states)
+            retry_states.update(accepted_states)
+            retry_graph = dependency_graph(retry_states)
+            for component in _dependency_components(retry_graph, unresolved):
+                group = tuple(sorted(component & unresolved))
                 if group and group not in seen_groups:
                     seen_groups.add(group)
                     pending_groups.append(set(group))
@@ -779,11 +808,31 @@ async def _request_batch(
             request_focus = [
                 by_normalized[normalized] for normalized in sorted(target_ids)
             ]
-            accepted_anchors = [
-                accepted[normalized].get("after", known_states[normalized])
-                for normalized in sorted(accepted)
+            accepted_states = {
+                normalized: accepted_state(normalized, decision)
+                for normalized, decision in accepted.items()
+            }
+            anchor_states = {
+                str(item["normalized"]): item
+                for item in anchors
+                if str(item["normalized"]) not in target_ids
+            }
+            related_accepted = _related_anchors(
+                request_focus,
+                [
+                    state
+                    for normalized, state in accepted_states.items()
+                    if normalized not in target_ids
+                ],
+                spec,
+            )
+            related_accepted = related_accepted[
+                : max(0, RELATED_ANCHOR_LIMIT - len(anchor_states))
             ]
-            request_anchors = [*anchors, *accepted_anchors]
+            anchor_states.update(
+                (str(item["normalized"]), item) for item in related_accepted
+            )
+            request_anchors = list(anchor_states.values())
             payload = (await run_blocking(lambda: _make_payload(
                 phase=phase,
                 target_language=str(config["project"]["target_language"]),
@@ -827,10 +876,7 @@ async def _request_batch(
                 visible_states=[*request_focus, *request_anchors],
                 known_states={
                     **known_states,
-                    **{
-                        normalized: decision.get("after", known_states[normalized])
-                        for normalized, decision in accepted.items()
-                    },
+                    **accepted_states,
                 },
                 read_only_terms=read_only_terms | set(accepted),
                 prompt_language=prompt_language,
@@ -846,6 +892,22 @@ async def _request_batch(
                     request_id,
                     len(ignored_read_only),
                     ",".join(dict.fromkeys(ignored_read_only[:10])),
+                )
+            unknown_records = [
+                error for error in errors
+                if error["code"] == "unknown_record" and not batch_error
+            ]
+            if unknown_records:
+                llm.logger.warning(
+                    "rejected unknown terminology decisions request=%s count=%d normalized=%s",
+                    request_id,
+                    len(unknown_records),
+                    ",".join(
+                        dict.fromkeys(
+                            str(error.get("normalized"))
+                            for error in unknown_records[:10]
+                        )
+                    ),
                 )
             if normalized_redundant:
                 llm.logger.warning(
@@ -866,11 +928,18 @@ async def _request_batch(
                     str(error["normalized"])
                     for error in errors
                     if isinstance(error.get("normalized"), str)
+                    and str(error["normalized"]) in target_ids
                 }
-                expanded = set().union(
-                    *(component_by_term[normalized] for normalized in failed_ids),
-                    set(),
-                )
+                expanded: set[str] = set()
+                if failed_ids:
+                    candidate_states = dict(known_states)
+                    for normalized, decision in {**accepted, **decisions}.items():
+                        candidate_states[normalized] = accepted_state(
+                            normalized, decision
+                        )
+                    graph = dependency_graph(candidate_states)
+                    for component in _dependency_components(graph, failed_ids):
+                        expanded.update(component & set(by_normalized))
                 for normalized in expanded:
                     accepted.pop(normalized, None)
                 unresolved.difference_update(decisions)

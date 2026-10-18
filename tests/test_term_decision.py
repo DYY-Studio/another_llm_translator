@@ -1510,7 +1510,222 @@ def test_decision_parser_keeps_unknown_terms_strict() -> None:
     assert len(errors) == 1
     assert errors[0]["code"] == "unknown_record"
     assert "未知术语决策 normalized：not-an-anchor" in errors[0]["message"]
-    assert batch_error is True
+    assert batch_error is False
+
+
+@pytest.mark.asyncio
+async def test_unknown_record_does_not_discard_valid_results_or_expand_retry(
+    tmp_path: Path,
+) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 2
+    focus = [_batch_state("alice", "Alice"), _batch_state("bob", "Bob")]
+
+    class StubLLM:
+        logger = logging.getLogger("test-unknown-partial")
+
+        def __init__(self):
+            self.targets = []
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            targets = [term["normalized"] for term in payload["terms"]]
+            self.targets.append(targets)
+            records = [
+                {"type": "decision", "normalized": targets[0],
+                 "action": "keep", "reason": "synthetic"}
+            ]
+            if len(self.targets) == 1:
+                records.append({"type": "decision", "normalized": "foreign",
+                                "action": "keep", "reason": "synthetic"})
+            else:
+                records = [{"type": "decision", "normalized": targets[0],
+                            "action": "keep", "reason": "synthetic"}]
+            return SimpleNamespace(content=llm_jsonl(records)), None
+
+    llm = StubLLM()
+    result = await _request_batch(
+        llm, focus=focus, anchors=[], phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+    assert set(result) == {"alice", "bob"}
+    assert llm.targets == [["alice", "bob"], ["bob"]]
+
+
+@pytest.mark.asyncio
+async def test_new_group_relation_retries_failed_dependency_with_proposer(
+    tmp_path: Path,
+) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 2
+    focus = [_batch_state("alice", "Alice"), _batch_state("bob", "Bob")]
+
+    class StubLLM:
+        logger = logging.getLogger("test-dynamic-dependency")
+
+        def __init__(self):
+            self.targets = []
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            targets = [term["normalized"] for term in payload["terms"]]
+            self.targets.append(targets)
+            if len(self.targets) == 1:
+                records = [
+                    {"type": "decision", "normalized": "alice", "action": "update",
+                     "reason": "synthetic", "changes": {"group_primary": "bob"}},
+                    {"type": "decision", "normalized": "bob", "action": "update",
+                     "reason": "synthetic", "changes": {"aliases": ["Invisible"]}},
+                ]
+            else:
+                records = [
+                    {"type": "decision", "normalized": normalized,
+                     "action": "keep", "reason": "synthetic"}
+                    for normalized in targets
+                ]
+            return SimpleNamespace(content=llm_jsonl(records)), None
+
+    llm = StubLLM()
+    result = await _request_batch(
+        llm, focus=focus, anchors=[], phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+    assert set(result) == {"alice", "bob"}
+    assert llm.targets == [["alice", "bob"], ["alice", "bob"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("accepted_action", "anchor_category"),
+    [("update", "角色"), ("disable", "__disabled__"),
+     ("needs_review", "待审状态"), ("keep", "人物")],
+)
+async def test_retry_references_action_specific_accepted_state(
+    tmp_path: Path, accepted_action: str, anchor_category: str | None,
+) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 2
+    alice = _batch_state("alice", "Bobbie")
+    bob = _batch_state("bob", "Bob")
+    review_state = {**alice, "category": "待审状态"}
+    payloads = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-action-reference")
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            payloads.append(payload)
+            if len(payloads) == 1:
+                accepted = {"type": "decision", "normalized": "alice",
+                            "action": accepted_action, "reason": "synthetic"}
+                if accepted_action == "update":
+                    accepted["changes"] = {"category": "角色"}
+                failed = {"type": "decision", "normalized": "bob",
+                          "action": "update", "reason": "synthetic",
+                          "changes": {"aliases": ["Invisible"]}}
+                records = [accepted, failed]
+            else:
+                records = [{"type": "decision", "normalized": "bob",
+                            "action": "keep", "reason": "synthetic"}]
+            return SimpleNamespace(content=llm_jsonl(records)), None
+
+    llm = StubLLM()
+    result = await _request_batch(
+        llm, focus=[alice, bob], anchors=[], phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(alice, bob),
+        known_states={"alice": alice, "bob": bob}, read_only_terms=set(),
+        prompt_language="zh-CN", review_states={"alice": review_state},
+        spec=term_normalization(config),
+    )
+    assert set(result) == {"alice", "bob"}
+    anchors_on_retry = payloads[1]["anchors"]
+    alice_anchor = next((item for item in anchors_on_retry
+                         if item["normalized"] == "alice"), None)
+    if anchor_category == "__disabled__":
+        assert alice_anchor is not None
+        assert alice_anchor["disabled"] is True
+    else:
+        assert alice_anchor is not None
+        assert alice_anchor["category"] == anchor_category
+
+
+@pytest.mark.asyncio
+async def test_duplicate_record_retries_only_its_target(tmp_path: Path) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 2
+    focus = [_batch_state("alice", "Alice"), _batch_state("bob", "Bob")]
+    payload_targets = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-duplicate-retry")
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            targets = [term["normalized"] for term in payload["terms"]]
+            payload_targets.append(targets)
+            if len(payload_targets) == 1:
+                records = [
+                    {"type": "decision", "normalized": "alice", "action": "keep",
+                     "reason": "synthetic"},
+                    {"type": "decision", "normalized": "alice", "action": "keep",
+                     "reason": "duplicate"},
+                    {"type": "decision", "normalized": "bob", "action": "keep",
+                     "reason": "synthetic"},
+                ]
+            else:
+                records = [{"type": "decision", "normalized": "alice",
+                            "action": "keep", "reason": "synthetic"}]
+            return SimpleNamespace(content=llm_jsonl(records)), None
+
+    result = await _request_batch(
+        StubLLM(), focus=focus, anchors=[], phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+    assert set(result) == {"alice", "bob"}
+    assert payload_targets == [["alice", "bob"], ["alice"]]
+
+
+@pytest.mark.asyncio
+async def test_incomplete_jsonl_retries_the_entire_response(tmp_path: Path) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 1
+    focus = [_batch_state("alice", "Alice"), _batch_state("bob", "Bob")]
+    payload_targets = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-invalid-document-retry")
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            targets = [term["normalized"] for term in payload["terms"]]
+            payload_targets.append(targets)
+            if len(payload_targets) == 1:
+                return SimpleNamespace(content='{"type":"decision","normalized":"alice","action":"keep","reason":"synthetic"}\n'), None
+            return SimpleNamespace(content=llm_jsonl([
+                {"type": "decision", "normalized": normalized,
+                 "action": "keep", "reason": "synthetic"}
+                for normalized in targets
+            ])), None
+
+    result = await _request_batch(
+        StubLLM(), focus=focus, anchors=[], phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+    assert set(result) == {"alice", "bob"}
+    assert payload_targets == [["alice", "bob"], ["alice", "bob"]]
 
 
 def test_scalar_conflicts_require_explicit_resolution_and_allow_new_values() -> None:
@@ -2164,36 +2379,31 @@ async def test_decision_group_violation_enters_format_repair(
 
 
 @pytest.mark.asyncio
-async def test_decision_format_repair_lists_exact_target_scope(
+async def test_unknown_decision_is_warned_without_format_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     project = create_decision_project(tmp_path)
     monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
     calls = 0
-    repairs = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls, repairs
+        nonlocal calls
         calls += 1
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        if calls % 2 == 0:
-            repairs += 1
-            assert "format_correction" not in payload
-            assert "validation_repair" not in payload
-            content = llm_jsonl(decision_response(payload))
-        else:
-            content = llm_jsonl(
-                [
-                    *decision_response(payload),
-                    {
-                        "type": "decision",
-                        "normalized": "not-an-anchor",
-                        "action": "keep",
-                        "reason": "越界",
-                    },
-                ]
-            )
+        assert "validation_repair" not in payload
+        content = llm_jsonl(
+            [
+                *decision_response(payload),
+                {
+                    "type": "decision",
+                    "normalized": "not-an-anchor",
+                    "action": "keep",
+                    "reason": "越界",
+                },
+            ]
+        )
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": content}}]},
@@ -2207,8 +2417,8 @@ async def test_decision_format_repair_lists_exact_target_scope(
     del os.environ["LLM_API_KEY"]
 
     assert summary["proposals"] == 1
-    assert calls == 8
-    assert repairs == 4
+    assert calls == 4
+    assert "rejected unknown terminology decisions" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2298,7 +2508,7 @@ async def test_format_repair_preserves_valid_records_and_retries_only_unresolved
             else:
                 assert "format_correction" not in payload
                 assert "validation_repair" not in payload
-                assert "alice" in {item["normalized"] for item in payload["anchors"]}
+                assert "alice" not in {item["normalized"] for item in payload["anchors"]}
                 content = llm_jsonl(decision_response(payload))
         else:
             content = llm_jsonl(decision_response(payload))
@@ -5285,7 +5495,7 @@ async def test_decision_rechecks_complete_request_limit_before_sending(
     if overflow_on_retry:
         payload = estimated_payloads[-1]
         assert [term["normalized"] for term in payload["terms"]] == ["bob"]
-        assert "alice" in {term["normalized"] for term in payload["anchors"]}
+        assert "alice" not in {term["normalized"] for term in payload["anchors"]}
         assert payload["validation_repair"] == "依据本次 terms/anchors 联合检查组关系和 alias 归属"
 
 

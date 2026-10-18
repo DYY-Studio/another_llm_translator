@@ -476,7 +476,6 @@ def _analyze_decisions(
                 ignored_read_only.append(normalized)
                 continue
             reject("unknown_record", f"未知术语决策 normalized：{normalized}", value)
-            batch_error = True
             continue
         if normalized in seen_targets:
             reject("duplicate_record", f"术语决策重复：{normalized}", value)
