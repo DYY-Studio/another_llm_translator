@@ -3,7 +3,7 @@ import { Fragment, useLayoutEffect, useEffect, useId, useMemo, useRef, useState,
 import { api, errorPayloadFrom } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import { openExternalUrl } from "../native";
-import type { AdapterCapabilities, CredentialSummary, HTTPDecisionPreset, DecisionPreset, DecisionPresetSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
+import type { AdapterCapabilities, BudgetStage, CredentialSummary, HTTPDecisionPreset, DecisionPreset, DecisionPresetSummary, LLMPreset, LLMPresetSummary, ModelRow, ProjectConfig, PromptLibraryEntry, RequestBudget, RunStage, SettingsField, TranslationValidatorSummary } from "../types";
 import { ChatGPTSettings, type ChatGPTConnectionSummary } from "./ChatGPTSettings";
 import { AdapterSettings } from "./AdapterSettings";
 import { ServerSettings } from "./ServerSettings";
@@ -106,6 +106,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
   const [decisionPresets, setDecisionPresets] = useState<DecisionPresetSummary[]>([]);
   const [validators, setValidators] = useState<TranslationValidatorSummary[]>([]);
   const [message, setMessage] = useState("");
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [error, setError] = useState<unknown>(null);
   const [saving, setSaving] = useState(false);
   const loadRevision = useRef(0);
@@ -117,13 +118,14 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
   async function load() {
     const revision = ++loadRevision.current;
     const [configResponse, presetResponse, validatorResponse, decisionResponse] = await Promise.all([
-      api<{ config: Record<string, unknown> }>(configPath),
+      api<{ config: Record<string, unknown>; warnings?: string[] }>(configPath),
       api<{ presets: LLMPresetSummary[] }>("/api/v1/global/presets"),
       api<{ validators: TranslationValidatorSummary[] }>("/api/v1/translation-validators"),
       api<{ presets: DecisionPresetSummary[] }>("/api/v1/global/decision-presets"),
     ]);
     if (revision !== loadRevision.current) return;
     setConfig(configResponse.config as unknown as ProjectConfig);
+    setWarnings(configResponse.warnings ?? []);
     setPresets(presetResponse.presets);
     setValidators(validatorResponse.validators);
     setDecisionPresets(decisionResponse.presets);
@@ -181,8 +183,10 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
     setMessage("");
     setError(null);
     try {
-      await api(configPath, { method: "PUT", body: JSON.stringify({ config }) });
+      const result = await api<{ warnings?: string[] }>(configPath, { method: "PUT", body: JSON.stringify({ config }) });
+      const saveWarnings = result.warnings ?? [];
       await load();
+      if (saveWarnings.length) setWarnings((current) => [...new Set([...current, ...saveWarnings])]);
       setMessage(scope === "global" ? translate("settings.globalSaved", language) : translate("settings.projectSaved", language));
     } catch (reason) {
       setError(reason);
@@ -215,7 +219,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
   if (!config) return <section className="text-settings"><p className={error ? "error-text" : "muted"}>{error ? errorMessage(error, language) : translate("settings.loadingConfig", language)}</p></section>;
 
   const presetOptions = presets.filter((item) => item.valid);
-  const supportsTemperature = (stage: RunStage) => presetOptions.find((item) => item.preset_id === (config.llm[`preset_${stage}`] || config.llm.preset))?.temperature_supported !== false;
+  const supportsTemperature = (stage: RunStage | "repetition_consistency") => presetOptions.find((item) => item.preset_id === (config.llm[`preset_${stage}`] || config.llm.preset))?.temperature_supported !== false;
   const configuredValidatorIds = new Set(config.validation.translation.validators);
   const validatorRows = [
     ...validators,
@@ -253,6 +257,30 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
     ["polishing", translate("stage.polishing", language)],
   ];
   const stagePresetFields = modelStages.map(([stage, label]) => [stage, translate("settings.stagePreset", language, { stage: label })] as const);
+  const budgetStages: Array<[BudgetStage, string]> = [
+    ["terminology", translate("stage.terminology", language)],
+    ["terminology_decision", translate("stage.terminologyDecision", language)],
+    ["terminology_knowledge", translate("settings.descriptionGeneration", language)],
+    ["content_summary", translate("stage.contentSummary", language)],
+    ["translation", translate("stage.translation", language)],
+    ["repetition_consistency", translate("repetition.title", language)],
+    ["proofreading", translate("stage.proofreading", language)],
+    ["polishing", translate("stage.polishing", language)],
+  ];
+  const budgetFields: Array<[keyof RequestBudget, string]> = [
+    ["target_content_tokens", translate("settings.budgetTarget", language)],
+    ["max_input_tokens", translate("settings.budgetMaximum", language)],
+    ["context_reserve_tokens", translate("settings.budgetReserve", language)],
+  ];
+  function updateBudgetOverride(stage: BudgetStage, field: keyof RequestBudget, value: number | null) {
+    update((draft) => {
+      const overrides = draft.chunking.stage_overrides ?? (draft.chunking.stage_overrides = {});
+      const stageOverride = overrides[stage] ?? (overrides[stage] = {});
+      if (value === null) delete stageOverride[field];
+      else stageOverride[field] = value;
+      if (!Object.keys(stageOverride).length) delete overrides[stage];
+    });
+  }
   const crossBoundaryStages: Array<[ContextStage, string]> = contextLabels;
   return (
     <section className="config-settings">
@@ -265,6 +293,7 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
       </div>
       {error != null ? <Feedback message={errorMessage(error, language)} onDismiss={() => setError((current: unknown) => current === error ? null : current)} /> : null}
       {message && <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
+      <ConfigWarnings warnings={warnings} language={language} />
       <div className="config-form">
         <ConfigSection title={translate("settings.projectInput", language)} description={translate("settings.projectInputHint", language)}>
           <Field label={translate("settings.targetLanguage", language)}><input ref={targetLanguageRef} value={config.project.target_language} onChange={(event) => update((draft) => { draft.project.target_language = event.target.value; })} /></Field>
@@ -288,8 +317,29 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <NumberField label={translate("settings.tempTermDecision", language)} value={config.llm.temperature_terminology_decision} min={0} step={0.1} disabled={!supportsTemperature("terminology_decision")} help={translate(supportsTemperature("terminology_decision") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_terminology_decision = value; })} />
           <NumberField label={translate("settings.tempContentSummary", language)} value={config.llm.temperature_content_summary} min={0} step={0.1} disabled={!supportsTemperature("content_summary")} help={translate(supportsTemperature("content_summary") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_content_summary = value; })} />
           <NumberField label={translate("settings.tempTranslation", language)} value={config.llm.temperature_translation} min={0} step={0.1} disabled={!supportsTemperature("translation")} help={translate(supportsTemperature("translation") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_translation = value; })} />
+          <Field label={translate("settings.stagePreset", language, { stage: translate("repetition.title", language) })} help={translate("settings.presetEmptyHint", language)}><select value={config.llm.preset_repetition_consistency} onChange={(event) => update((draft) => { draft.llm.preset_repetition_consistency = event.target.value; })}><option value="">{translate("settings.useGlobalPreset", language)}</option>{presetOptions.map((item) => <option key={item.preset_id} value={item.preset_id}>{item.preset_id} · {item.model}</option>)}</select></Field>
+          <NumberField label={translate("settings.tempRepetition", language)} value={config.llm.temperature_repetition_consistency} min={0} step={0.1} disabled={!supportsTemperature("repetition_consistency")} help={translate(supportsTemperature("repetition_consistency") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_repetition_consistency = value; })} />
           <NumberField label={translate("settings.tempProofreading", language)} value={config.llm.temperature_proofreading} min={0} step={0.1} disabled={!supportsTemperature("proofreading")} help={translate(supportsTemperature("proofreading") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_proofreading = value; })} />
           <NumberField label={translate("settings.tempPolishing", language)} value={config.llm.temperature_polishing} min={0} step={0.1} disabled={!supportsTemperature("polishing")} help={translate(supportsTemperature("polishing") ? "settings.temperatureHint" : "preset.temperatureUnsupported", language)} onChange={(value) => update((draft) => { draft.llm.temperature_polishing = value; })} />
+        </ConfigSection>
+        <ConfigSection title={translate("settings.requestBudget", language)} description={translate("settings.requestBudgetHint", language)}>
+          {budgetFields.map(([field, label]) => <NumberField key={field} label={label} value={config.chunking[field]} min={1} step={1} onChange={(value) => update((draft) => { draft.chunking[field] = value; })} />)}
+          {budgetStages.map(([stage, stageLabel]) => <div className="grid-span budget-stage-row" key={stage}>
+            <strong>{stageLabel}</strong>
+            <div className="budget-stage-fields">
+              {budgetFields.map(([field, label]) => {
+                const override = config.chunking.stage_overrides?.[stage]?.[field];
+                const inherited = override === undefined;
+                const effective = override ?? config.chunking[field];
+                return <Field key={field} label={label} help={translate(inherited ? "settings.budgetInherited" : "settings.budgetOverride", language, { value: effective })}>
+                  <div className="budget-override-control">
+                    <input aria-label={`${stageLabel} ${label}`} type="number" min={1} step={1} disabled={inherited} value={effective} onChange={(event) => { if (event.target.value !== "") updateBudgetOverride(stage, field, event.target.valueAsNumber); }} />
+                    <span className="budget-override-toggle"><input type="checkbox" checked={!inherited} aria-label={translate("settings.budgetOverrideToggle", language, { field: label })} onChange={(event) => updateBudgetOverride(stage, field, event.target.checked ? effective : null)} />{translate(inherited ? "settings.budgetInheritedShort" : "settings.budgetOverrideShort", language)}</span>
+                  </div>
+                </Field>;
+              })}
+            </div>
+          </div>)}
         </ConfigSection>
         <ConfigSection title={translate("settings.decisionConnection", language)} description={translate("settings.decisionConnectionHint", language)}>
           {decisionPresetField(config.decision.preset, (value) => update((draft) => { draft.decision.preset = value; }), false)}
@@ -324,8 +374,6 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           </Field>
         </ConfigSection>
         <ConfigSection title={translate("settings.terminologyDecision", language)} description={translate("settings.terminologyDecisionHint", language)}>
-          <ToggleField label={translate("settings.allowSoftTargetOverflow", language)} checked={config.terminology_decision.allow_soft_target_overflow} help={translate("settings.allowSoftTargetOverflowHint", language)} onChange={(value) => update((draft) => { draft.terminology_decision.allow_soft_target_overflow = value; })} />
-          <Field label={translate("settings.anchorOverflowMode", language)} help={translate("settings.anchorOverflowModeHint", language)}><select value={config.terminology_decision.anchor_overflow_mode} onChange={(event) => update((draft) => { draft.terminology_decision.anchor_overflow_mode = event.target.value as ProjectConfig["terminology_decision"]["anchor_overflow_mode"]; })}><option value="error">{translate("settings.anchorOverflowError", language)}</option><option value="trim">{translate("settings.anchorOverflowTrim", language)}</option><option value="compact">{translate("settings.anchorOverflowCompact", language)}</option></select></Field>
           <Field label={translate("settings.descriptionGeneration", language)} help={translate("settings.descriptionGenerationHint", language)}>
             <select value={config.terminology_decision.description_generation} onChange={(event) => update((draft) => { draft.terminology_decision.description_generation = event.target.value as ProjectConfig["terminology_decision"]["description_generation"]; })}>
               <option value="sourced">{translate("settings.descriptionSourced", language)}</option>
@@ -756,7 +804,6 @@ function PresetSettings({ language }: { language: Language }) {
               <ModelPicker key={`${selected}:${preset.adapter_id}`} language={language} value={preset.model} models={models} loading={modelsLoading} error={modelsError} onChange={(value) => update((draft) => { draft.model = value; })} onDiscover={() => void discoverModels()} onSelect={(value) => { update((draft) => { draft.model = value; }); setMessage(translate("preset.selected", language, { model: value })); }} />
               <Field label={translate("preset.proxyUrl", language)} help={translate(fixedConnection?.proxy_source === "connection" ? "preset.connectionProxyHint" : "preset.proxyUrlHint", language)}>{fixedConnection?.proxy_source === "connection" ? <span>{chatgpt?.proxy_url || translate("preset.noProxy", language)}</span> : <input value={preset.proxy_url} onChange={(event) => updateConnection((draft) => { draft.proxy_url = event.target.value; })} />}</Field>
               <NumberField label={translate("preset.contextWindow", language)} value={preset.context_window_tokens} min={1} step={1} help={translate("preset.contextWindowHint", language)} onChange={(value) => update((draft) => { draft.context_window_tokens = value; })} />
-              <NumberField label={translate("preset.targetChunkInputTokens", language)} value={preset.target_chunk_input_tokens} min={1} step={1} help={translate("preset.targetChunkInputTokensHint", language)} onChange={(value) => update((draft) => { draft.target_chunk_input_tokens = value; })} />
               <NumberField label={translate(capabilities?.max_output_tokens === false ? "preset.outputBudget" : "preset.maxOutputTokens", language)} value={preset.max_output_tokens} min={capabilities?.max_output_tokens_minimum ?? 0} step={1} help={translate(capabilities?.max_output_tokens === false ? "preset.outputBudgetHint" : (capabilities?.max_output_tokens_minimum ?? 0) > 0 ? "preset.requiredOutputTokensHint" : "preset.maxOutputTokensHint", language, { minimum: capabilities?.max_output_tokens_minimum ?? 0 })} onChange={(value) => update((draft) => { draft.max_output_tokens = value; })} />
               <ToggleField label="JSON Schema" checked={preset.json_schema_enabled ?? false} disabled={!capabilities?.json_schema && !preset.json_schema_enabled} help={translate(capabilities?.json_schema ? "preset.jsonSchemaHint" : "preset.jsonSchemaUnsupported", language)} onChange={(value) => update((draft) => { draft.json_schema_enabled = value; })} />
               <ToggleField label={translate("preset.sendTemperature", language)} checked={preset.send_temperature} disabled={!capabilities?.temperature && !preset.send_temperature} help={translate("preset.sendTemperatureHint", language)} onChange={(value) => update((draft) => { draft.send_temperature = value; })} />
@@ -768,7 +815,6 @@ function PresetSettings({ language }: { language: Language }) {
                 </select>
               </Field>}
               {preset.reasoning_effort !== null && (!capabilities?.reasoning_effort || !capabilities.reasoning_effort.values.includes(preset.reasoning_effort)) && <p className="error-banner">{translate("preset.reasoningUnsupported", language)}</p>}
-              <NumberField label={translate("preset.contextSafetyMargin", language)} value={preset.context_safety_margin_tokens} min={0} step={1} help={translate("preset.contextSafetyMarginHint", language)} onChange={(value) => update((draft) => { draft.context_safety_margin_tokens = value; })} />
               <NumberField label={translate("preset.tokenSafetyFactor", language)} value={preset.token_safety_factor} min={0.01} step={0.05} help={translate("preset.tokenSafetyFactorHint", language)} onChange={(value) => update((draft) => { draft.token_safety_factor = value; })} />
               <NumberField label={translate("preset.rpm", language)} value={preset.requests_per_minute} min={0} step={1} help={translate("preset.rpmHint", language)} onChange={(value) => update((draft) => { draft.requests_per_minute = value; })} />
               <NumberField label={translate("preset.itpm", language)} value={preset.input_tokens_per_minute} min={0} step={1} help={translate("preset.itpmHint", language)} onChange={(value) => update((draft) => { draft.input_tokens_per_minute = value; })} />
@@ -1039,6 +1085,13 @@ function ModelPicker({ language, value, models, loading, error, onChange, onDisc
   );
 }
 
+function ConfigWarnings({ warnings, language }: { warnings: string[]; language: Language }) {
+  if (!warnings.length) return null;
+  return <div className="warning-banner config-warning-summary">
+    <strong>{translate("settings.normalizationWarnings", language, { count: warnings.length })}</strong>
+    <details><summary>{translate("settings.showWarnings", language)}</summary>{warnings.map((warning, index) => <p key={`${index}-${warning}`}>{warning}</p>)}</details>
+  </div>;
+}
 function ConfigSection({ title, description, warning = false, children }: { title: string; description: string; warning?: boolean; children: ReactNode }) { return <fieldset className={`config-section${warning ? " warning" : ""}`}><legend>{title}</legend><p>{description}</p><div className="config-grid">{children}</div></fieldset>; }
 function Field({ label, help, children, className = "" }: { label: string; help?: string; children: ReactNode; className?: string }) { return <label className={`config-field${className ? ` ${className}` : ""}`}><span>{label}</span>{children}{help && <small>{help}</small>}</label>; }
 function NumberField({ label, value, onChange, help, min, max, step, disabled }: { label: string; value: number; onChange: (value: number) => void; help?: string; min?: number; max?: number; step: number; disabled?: boolean }) { return <Field label={label} help={help}><input type="number" disabled={disabled} value={value} min={min} max={max} step={step} onChange={(event) => { if (event.target.value !== "") onChange(event.target.valueAsNumber); }} /></Field>; }

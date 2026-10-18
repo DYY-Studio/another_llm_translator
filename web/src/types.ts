@@ -92,6 +92,21 @@ export type LLMStage =
 
 export type RunStage = LLMStage | "content_summary";
 export type TaskStage = RunStage | "continuous";
+export type BudgetStage =
+  | "terminology"
+  | "terminology_decision"
+  | "terminology_knowledge"
+  | "content_summary"
+  | "translation"
+  | "repetition_consistency"
+  | "proofreading"
+  | "polishing";
+
+export interface RequestBudget {
+  target_content_tokens: number;
+  max_input_tokens: number;
+  context_reserve_tokens: number;
+}
 
 export interface ResultView {
   record_id: string;
@@ -1057,6 +1072,8 @@ export interface ProjectConfig {
     temperature_terminology_decision: number;
     temperature_content_summary: number;
     temperature_translation: number;
+    preset_repetition_consistency: string;
+    temperature_repetition_consistency: number;
     temperature_proofreading: number;
     temperature_polishing: number;
   };
@@ -1066,6 +1083,10 @@ export interface ProjectConfig {
   chunking: {
     allow_split_oversized_segment: boolean;
     cross_boundary_batching: Array<"terminology" | "translation" | "proofreading" | "polishing">;
+    target_content_tokens: number;
+    max_input_tokens: number;
+    context_reserve_tokens: number;
+    stage_overrides: Partial<Record<BudgetStage, Partial<RequestBudget>>>;
   };
   context: Record<"terminology" | "translation" | "proofreading" | "polishing", {
     enabled: boolean;
@@ -1086,8 +1107,6 @@ export interface ProjectConfig {
     unsourced_description_injection: "none" | "when_no_sourced" | "all";
   };
   terminology_decision: {
-    allow_soft_target_overflow: boolean;
-    anchor_overflow_mode: "error" | "trim" | "compact";
     description_generation: "sourced" | "sourced_and_summary" | "summary_only";
   };
   validation: {
@@ -1181,7 +1200,7 @@ export interface LLMPresetSummary {
 }
 
 export interface LLMPreset {
-  schema_version: 8;
+  schema_version: 9;
   preset_id: string;
   adapter_id: string;
   base_url: string;
@@ -1189,12 +1208,10 @@ export interface LLMPreset {
   credential: LLMCredential;
   proxy_url: string;
   context_window_tokens: number;
-  target_chunk_input_tokens: number;
   max_output_tokens: number;
   send_temperature: boolean;
   json_schema_enabled?: boolean;
   reasoning_effort: string | null;
-  context_safety_margin_tokens: number;
   token_safety_factor: number;
   requests_per_minute: number;
   input_tokens_per_minute: number;
