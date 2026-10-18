@@ -744,10 +744,6 @@ export interface TaskOptions {
     required_stages: string[];
     missing: string[];
   };
-  overflow_policy?: {
-    allow_soft_target_overflow: boolean;
-    anchor_overflow_mode: "error" | "trim" | "compact";
-  };
   document_adapter_run_options?: Array<{
     adapter_id: string;
     file_count: number;

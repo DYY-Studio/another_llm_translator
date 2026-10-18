@@ -5,10 +5,6 @@ import type { RunDecision, RunningRun, TaskOptions } from "../types";
 
 type ResultPolicy = "pending" | "reuse" | "force";
 
-function overflowModeLabel(mode: "error" | "trim" | "compact", language: Language) {
-  return translate(`terms.decisionOverflow${mode[0].toUpperCase()}${mode.slice(1)}`, language);
-}
-
 function stageLabelKey(stage: TaskOptions["stage"]): string {
   return stage === "content_summary" ? "stage.contentSummary" : `stage.${stage}`;
 }
@@ -240,10 +236,6 @@ function StageRunDialog({
           <span>{translate(options.knowledge_only ? "terms.knowledgeOnlyScope" : "terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
           {options.estimated_requests != null && options.estimated_input_tokens != null && <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests, tokens: options.estimated_input_tokens })}</span>}
           {options.estimate_error && <span className="warning-banner">{translate("runDialog.estimateFailed", language, { error: errorMessage(options.estimate_error, language) })}</span>}
-          {!options.knowledge_only && options.overflow_policy && <span>{translate("terms.decisionOverflowPolicy", language, {
-            soft: translate(options.overflow_policy.allow_soft_target_overflow ? "terms.decisionSoftAllowed" : "terms.decisionSoftBlocked", language),
-            mode: overflowModeLabel(options.overflow_policy.anchor_overflow_mode, language),
-          })}</span>}
           {!options.knowledge_only && <label className="config-toggle">
             <span>
               <input
