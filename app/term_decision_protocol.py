@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-DECISION_RULES_VERSION = 11
+DECISION_RULES_VERSION = 12
 DECISION_ACTIONS = frozenset({"keep", "update", "disable", "needs_review"})
 SIMPLE_ACTION_KEYS = frozenset({"type", "normalized", "action", "reason"})
 PATCH_FIELDS = frozenset(
@@ -175,6 +175,9 @@ def terminology_decision_protocol(language: str, *, phase: str) -> str:
 
 _CONTENT_RETRY_GUIDANCE = {
     "zh-CN": {
+        "unknown_record": "仅为本次 terms[] 中每项输出一条决策，并逐字照录其 normalized（含大小写和全半角符号）",
+        "missing_record": "仅为本次 terms[] 中每项输出一条决策，并逐字照录其 normalized（含大小写和全半角符号）",
+        "duplicate_record": "仅为本次 terms[] 中每项输出一条决策，并逐字照录其 normalized（含大小写和全半角符号）",
         "unresolved_conflict": "对本阶段尚未裁决的类别或译名冲突给出非空决定",
         "invisible_alias": "aliases 仅使用本次 terms/anchors 中可见的 source/alias 原文",
         "invisible_group_primary": "group_primary 仅使用本次可见、启用的根术语 normalized",
@@ -183,6 +186,9 @@ _CONTENT_RETRY_GUIDANCE = {
         "invalid_relationship": "依据本次 terms/anchors 联合检查组关系和 alias 归属",
     },
     "en": {
+        "unknown_record": "Return exactly one decision for each item in this request's terms[]; copy normalized verbatim, including case and full-/half-width punctuation.",
+        "missing_record": "Return exactly one decision for each item in this request's terms[]; copy normalized verbatim, including case and full-/half-width punctuation.",
+        "duplicate_record": "Return exactly one decision for each item in this request's terms[]; copy normalized verbatim, including case and full-/half-width punctuation.",
         "unresolved_conflict": "Resolve this phase's pending category or translation conflicts with non-empty values.",
         "invisible_alias": "Use only source/alias spellings visible in this request's terms/anchors for aliases.",
         "invisible_group_primary": "Use only a visible, enabled root term's normalized for group_primary.",
@@ -202,6 +208,9 @@ def validation_feedback(
     codes = sorted({
         error["code"] for error in errors
         if error.get("code") in guidance
-        and error.get("normalized") in target_normalized
+        and (
+            error.get("code") == "unknown_record"
+            or error.get("normalized") in target_normalized
+        )
     })
-    return "\n".join(guidance[code] for code in codes)
+    return "\n".join(dict.fromkeys(guidance[code] for code in codes))

@@ -476,7 +476,6 @@ def _analyze_decisions(
                 ignored_read_only.append(normalized)
                 continue
             reject("unknown_record", f"未知术语决策 normalized：{normalized}", value)
-            batch_error = True
             continue
         if normalized in seen_targets:
             reject("duplicate_record", f"术语决策重复：{normalized}", value)
@@ -711,12 +710,43 @@ def _analyze_decisions(
                 relationship_errors.append(
                     (normalized, _alias_violation_message(violation, prompt_language))
                 )
+    relationship_dependency_graph: dict[str, set[str]] | None = None
+    relationship_components: dict[str, set[str]] = {}
+    if relationship_errors and spec is not None:
+        relationship_dependency_graph = _decision_dependency_graph(
+            known_states, candidate_states, spec
+        )
+        candidate_focus = {
+            normalized: candidate_states[normalized] for normalized in focus_terms
+        }
+        for states in (expected, candidate_focus):
+            for component in _hard_components(list(states.values()), spec):
+                members = [str(item["normalized"]) for item in component]
+                for left, right in pairwise(members):
+                    relationship_dependency_graph.setdefault(left, set()).add(right)
+                    relationship_dependency_graph.setdefault(right, set()).add(left)
+        relationship_targets = {normalized for normalized, _ in relationship_errors}
+        for component in _dependency_components(
+            relationship_dependency_graph, relationship_targets
+        ):
+            for normalized in component & relationship_targets:
+                relationship_components[normalized] = component
+    reported_components: set[tuple[str, ...]] = set()
     for normalized, message in relationship_errors:
+        dependency_component = relationship_components.get(normalized, {normalized})
+        component_key = tuple(sorted(dependency_component))
+        dependency_nodes = (
+            sorted(dependency_component)
+            if component_key not in reported_components
+            else []
+        )
+        reported_components.add(component_key)
         errors.append(
             {
                 "code": "invalid_relationship",
                 "message": message,
                 "normalized": normalized,
+                "_dependency_component": dependency_nodes,
             }
         )
         decisions.pop(normalized, None)
