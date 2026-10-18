@@ -2,15 +2,20 @@ from __future__ import annotations
 from .async_utils import run_blocking
 
 import re
+import math
+import json
 import uuid
 from copy import deepcopy
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .request_budget import resolve_request_budget, request_input_limit
 from .config import load_project_config
 from .documents import aozora_match_views
 from .errors import RequestSizeError, StorageError, UsageError
 from .execution import (
+    estimate_tokens,
     estimate_messages,
     render_messages,
     run_bounded,
@@ -45,7 +50,7 @@ REVIEW_EVIDENCE_CONTEXT_RADIUS = 2
 RELATED_ANCHOR_LIMIT = 24
 _PHASES = ("adjudication", "consistency")
 
-__all__ = ['_compact_anchor_evidence', '_compact_anchors', '_evidence_excerpt', '_make_payload', '_pack_batches', '_related_anchors', '_relation_keys', '_request_batch', '_request_evidence', '_request_limits', 'collect_term_evidence', 'collect_term_review_evidence']
+__all__ = ['_evidence_excerpt', '_make_payload', '_pack_batches', '_related_anchors', '_relation_keys', '_request_batch', '_request_evidence', '_request_limits', 'collect_term_evidence', 'collect_term_review_evidence']
 
 
 def _collect_segment_matches(
@@ -473,26 +478,6 @@ def _request_evidence(
         projected[normalized] = value
     return projected
 
-def _compact_anchor_evidence(
-    evidence: dict[str, dict[str, Any]],
-    anchors: list[dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    """Return payload evidence with anchor samples removed when requested."""
-    if not any(item.get("_compact_evidence") for item in anchors):
-        return evidence
-    compacted = deepcopy(evidence)
-    for anchor in anchors:
-        normalized = str(anchor["normalized"])
-        value = compacted.get(normalized)
-        if isinstance(value, dict):
-            value["samples"] = []
-            if "windows" in value:
-                value["windows"] = []
-    return compacted
-
-def _compact_anchors(anchors: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{**deepcopy(anchor), "_compact_evidence": True} for anchor in anchors]
-
 def _direct_group_anchors(
     focus: list[dict[str, Any]],
     candidates: list[dict[str, Any]],
@@ -566,16 +551,20 @@ def _related_anchors(
     return [*direct, *related[: max(0, RELATED_ANCHOR_LIMIT - len(direct))]]
 
 def _request_limits(config: dict[str, Any]) -> tuple[int, int, int, int]:
-    soft_target = int(config["execution"]["target_chunk_input_tokens"])
-    context_limit = int(config["llm"]["context_window_tokens"]) - int(
-        config["llm"]["context_safety_margin_tokens"]
-    )
-    itpm_limit = int(config["execution"]["input_tokens_per_minute"])
-    hard_limit = min(
-        context_limit,
-        itpm_limit if itpm_limit > 0 else 2**63 - 1,
-    )
-    return soft_target, hard_limit, context_limit, itpm_limit
+    budget = resolve_request_budget(config, "terminology_decision")
+    hard_limit = request_input_limit(config, budget)
+    return (budget.target_content_tokens, hard_limit,
+            min(budget.max_input_tokens, config["llm"]["context_window_tokens"] - budget.context_reserve_tokens),
+            config["execution"]["input_tokens_per_minute"])
+
+
+def _decision_content_tokens(payload: dict[str, Any], factor: float) -> int:
+    fields = ("normalized", "source", "category", "preferred_translation", "aliases", "group_primary", "disabled")
+    terms = [{key: term[key] for key in fields if key in term} for term in payload["terms"]]
+    for projected, term in zip(terms, payload["terms"], strict=True):
+        if "conflicts" in term:
+            projected["conflicts"] = {key: value for key, value in term["conflicts"].items() if key in ("categories", "preferred_translations", "alias_primaries", "group_claims")}
+    return math.ceil(estimate_tokens(json.dumps(terms, ensure_ascii=False, separators=(",", ":"))) * factor)
 
 def _make_payload(
     *,
@@ -627,132 +616,50 @@ def _pack_batches(
     config: dict[str, Any],
     spec: Any,
     conflicts: dict[str, dict[str, list[Any]]] | None = None,
+    components: list[list[dict[str, Any]]] | None = None,
+    feedback_builder: Callable[[set[str]], str] | None = None,
 ) -> tuple[list[tuple[list[dict[str, Any]], list[dict[str, Any]]]], int]:
     soft_target, hard_limit, context_limit, itpm_limit = _request_limits(config)
-    decision_config = config["terminology_decision"]
-    allow_soft_overflow = bool(decision_config["allow_soft_target_overflow"])
-    anchor_overflow_mode = str(decision_config["anchor_overflow_mode"])
     token_factor = float(config["execution"]["token_safety_factor"])
 
-    def estimate_for(
-        focus: list[dict[str, Any]],
-        anchor_list: list[dict[str, Any]],
-    ) -> int:
-        payload = _make_payload(
-            phase=phase,
-            target_language=target_language,
-            focus=focus,
-            anchors=anchor_list,
-            evidence=_compact_anchor_evidence(evidence, anchor_list),
-            conflicts=conflicts,
-        )
-        return estimate_messages(
-            render_messages(prompt, payload),
-            token_factor,
-        )
-
-    def overflow_reason() -> str:
-        if hard_limit == itpm_limit and itpm_limit < context_limit:
-            return "itpm"
-        return "context"
-
-    def fail_size(
-        component: list[dict[str, Any]],
-        estimate: int,
-        *,
-        limit: int,
-        reason: str,
-        detail: str,
-    ) -> None:
-        sources = ", ".join(str(state["source"]) for state in component[:5])
-        raise RequestSizeError(
-            f"不可拆术语组件 [{sources}] 的自动决策请求估算 {estimate} tokens，"
-            f"限制 {limit} tokens；{detail}",
-            reason=reason,
-        )
-
-    def prepare_component(
-        focus: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], int]:
-        selected_anchors = _related_anchors(focus, anchors, spec)
-        had_anchors = bool(selected_anchors)
-        estimate = estimate_for(focus, selected_anchors)
-        if estimate > hard_limit:
-            if anchor_overflow_mode == "trim":
-                direct_ids = {
-                    str(item["normalized"])
-                    for item in _direct_group_anchors(focus, anchors, spec)
-                }
-                while (
-                    selected_anchors
-                    and str(selected_anchors[-1]["normalized"]) not in direct_ids
-                    and estimate > hard_limit
-                ):
-                    selected_anchors = selected_anchors[:-1]
-                    estimate = estimate_for(focus, selected_anchors)
-            elif anchor_overflow_mode == "compact":
-                selected_anchors = _compact_anchors(selected_anchors)
-                estimate = estimate_for(focus, selected_anchors)
-            if estimate > hard_limit:
-                detail = (
-                    "无 Anchors 时完整术语及证据仍超过硬限制"
-                    if not had_anchors
-                    else "完整术语证据和 Anchors 仍超过硬限制"
-                )
-                fail_size(
-                    focus,
-                    estimate,
-                    limit=hard_limit,
-                    reason=overflow_reason(),
-                    detail=f"{detail}，Anchor 超限策略为 {anchor_overflow_mode}",
-                )
-        if estimate > soft_target and not allow_soft_overflow:
-            fail_size(
-                focus,
-                estimate,
-                limit=soft_target,
-                reason="context",
-                detail="超过软目标且配置禁止继续执行",
-            )
-        return selected_anchors, estimate
+    def measure(focus: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int, int]:
+        related = _related_anchors(focus, anchors, spec)
+        payload = _make_payload(phase=phase, target_language=target_language, focus=focus,
+                                anchors=related, evidence=evidence, conflicts=conflicts)
+        if feedback_builder is not None:
+            feedback = feedback_builder({str(item["normalized"]) for item in focus})
+            if feedback:
+                payload["validation_repair"] = feedback
+        return related, estimate_messages(render_messages(prompt, payload), token_factor), _decision_content_tokens(payload, token_factor)
 
     batches: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
     total = 0
     current: list[dict[str, Any]] = []
-    batch_limit = min(soft_target, hard_limit)
-    components = _hard_components(states, spec)
-    soft_rank = {
-        str(state["normalized"]): index
-        for index, state in enumerate(_ordered_states(states, spec))
-    }
-    components.sort(
-        key=lambda component: (
-            min(soft_rank[str(state["normalized"])] for state in component),
-            tuple(str(state["normalized"]) for state in component),
-        )
-    )
+    components = _hard_components(states, spec) if components is None else components
+    soft_rank = {str(state["normalized"]): index for index, state in enumerate(_ordered_states(states, spec))}
+    components.sort(key=lambda component: (min(soft_rank[str(state["normalized"])] for state in component),
+                                            tuple(str(state["normalized"]) for state in component)))
     for component in components:
-        ordered_component = _ordered_states(component, spec)
-        proposed = [*current, *ordered_component]
-        related = _related_anchors(proposed, anchors, spec)
-        estimate = estimate_for(proposed, related)
-        if current and estimate > batch_limit:
-            previous_anchors, previous_estimate = prepare_component(current)
+        ordered = _ordered_states(component, spec)
+        candidate = [*current, *ordered]
+        related, estimate, content = measure(candidate)
+        if current and (estimate > hard_limit or content > soft_target):
+            previous_anchors, previous_estimate, _ = measure(current)
             batches.append((current, previous_anchors))
             total += previous_estimate
-            current = ordered_component
-            continue
-        if not current and estimate > batch_limit:
-            selected_anchors, single_estimate = prepare_component(ordered_component)
-            batches.append((ordered_component, selected_anchors))
-            total += single_estimate
             current = []
-            continue
-        current = proposed
+            candidate = ordered
+            related, estimate, content = measure(candidate)
+        if estimate > hard_limit:
+            sources = ", ".join(str(state["source"]) for state in candidate[:5])
+            raise RequestSizeError(
+                f"不可拆术语组件 [{sources}] 的完整术语证据和 Anchors 请求估算 {estimate} tokens，限制 {hard_limit} tokens",
+                reason="itpm" if 0 < itpm_limit < context_limit else "context")
+        current = candidate
     if current:
-        selected_anchors, final_estimate = prepare_component(current)
-        total += final_estimate
-        batches.append((current, selected_anchors))
+        related, estimate, _ = measure(current)
+        batches.append((current, related))
+        total += estimate
     return batches, total
 
 async def _request_batch(
@@ -814,37 +721,41 @@ async def _request_batch(
             )
         )
         isolate = bool(attempt and signature and signature == previous_signature)
-        if isolate:
-            pending_groups = []
-            seen_groups: set[tuple[str, ...]] = set()
-            accepted_states = {
-                normalized: accepted_state(normalized, decision)
-                for normalized, decision in accepted.items()
-            }
-            retry_states = dict(known_states)
-            retry_states.update(accepted_states)
+        if attempt == 0:
+            retry_components = _hard_components(focus, spec)
+        else:
+            accepted_states = {normalized: accepted_state(normalized, decision) for normalized, decision in accepted.items()}
+            retry_states = {**known_states, **accepted_states}
             retry_graph = dependency_graph(retry_states)
             for error in previous_errors:
-                members = sorted(
-                    set(error.get("_dependency_component", [])) & set(by_normalized)
-                )
+                members = sorted(set(error.get("_dependency_component", [])) & set(by_normalized))
                 for left, right in zip(members, members[1:]):
                     retry_graph.setdefault(left, set()).add(right)
                     retry_graph.setdefault(right, set()).add(left)
-            for component in _dependency_components(retry_graph, unresolved):
-                group = tuple(sorted(component & unresolved))
-                if group and group not in seen_groups:
-                    seen_groups.add(group)
-                    pending_groups.append(set(group))
-        else:
-            pending_groups = [set(unresolved)]
-
+            retry_components = [
+                [by_normalized[normalized] for normalized in sorted(component & unresolved)]
+                for component in _dependency_components(retry_graph, unresolved)
+                if component & unresolved
+            ]
         round_accepted = dict(accepted)
         round_accepted_states = {
             normalized: accepted_state(normalized, decision)
             for normalized, decision in round_accepted.items()
         }
         round_parent_request_id = parent_request_id
+
+        round_anchors = {str(item["normalized"]): item for item in anchors}
+        round_anchors.update(round_accepted_states)
+        packed_groups: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
+        for component_set in ([[component] for component in retry_components] if isolate else [retry_components]):
+            packed, _ = await run_blocking(lambda: _pack_batches(
+                [item for component in component_set for item in component], phase=phase,
+                target_language=str(config["project"]["target_language"]), anchors=list(round_anchors.values()),
+                evidence=evidence, prompt=prompt, config=config, spec=spec, conflicts=conflicts,
+                components=component_set,
+                feedback_builder=lambda target_ids: validation_feedback(previous_errors, target_ids, language=prompt_language)))
+            packed_groups.extend(packed)
+        pending_groups = [{str(item["normalized"]) for item in group} for group, _ in packed_groups]
 
         async def request_group(
             target_ids: set[str],
@@ -870,7 +781,7 @@ async def _request_batch(
                 target_language=str(config["project"]["target_language"]),
                 focus=request_focus,
                 anchors=request_anchors,
-                evidence=_compact_anchor_evidence(evidence, request_anchors),
+                evidence=evidence,
                 conflicts=conflicts,
             )))
             feedback = await run_blocking(

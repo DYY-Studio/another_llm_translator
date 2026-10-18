@@ -284,14 +284,6 @@ def task_options(
             },
             "selected": selected,
             "protected": len(plan["protected"]) if plan else len(protected),
-            "overflow_policy": {
-                "allow_soft_target_overflow": bool(
-                    config["terminology_decision"]["allow_soft_target_overflow"]
-                ),
-                "anchor_overflow_mode": str(
-                    config["terminology_decision"]["anchor_overflow_mode"]
-                ),
-            },
             "completed": 0,
             "pending": selected,
             "failed": 0,
