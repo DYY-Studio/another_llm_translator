@@ -43,6 +43,7 @@ def make_app_root(tmp_path: Path) -> Path:
         "max_delay_seconds = 60.0", "max_delay_seconds = 0"
     )
     config_text = config_text.replace("jitter_seconds = 1.0", "jitter_seconds = 0")
+    config_text = config_text.replace("context_reserve_tokens = 16384", "context_reserve_tokens = 100")
     (root / "config" / "config.toml").write_text(
         config_text,
         encoding="utf-8",

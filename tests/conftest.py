@@ -47,6 +47,8 @@ def isolated_user_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (runtime_root / "llm_adapters").mkdir(parents=True)
     (runtime_root / "llm_presets").mkdir()
     source_root = Path(__file__).parents[1]
+    (runtime_root / "config").mkdir()
+    shutil.copy2(source_root / "config/config.toml", runtime_root / "config/config.toml")
     for source in (source_root / "llm_adapters").glob("*.json"):
         shutil.copy2(source, runtime_root / "llm_adapters" / source.name)
     for source in (source_root / "llm_presets").glob("*.json"):

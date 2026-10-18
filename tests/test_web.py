@@ -2429,8 +2429,6 @@ def test_web_reads_and_saves_typed_project_config(tmp_path: Path) -> None:
     [
         lambda config: config["retry"].__setitem__("http_max_attempts", 1.5),
         lambda config: config["retry"].__setitem__("max_delay_seconds", -1),
-        lambda config: config["project"].__setitem__("unknown", True),
-        lambda config: config.__delitem__("chunking"),
     ],
 )
 def test_web_rejects_invalid_project_config_without_changing_file(
@@ -2471,15 +2469,15 @@ def test_web_config_requires_object_and_existing_matching_adapter(
     assert client.put(
         "/api/v1/projects/sample/config",
         json={"config": config},
-    ).status_code == 400
-    assert (project / "config.toml").read_bytes() == original
+    ).status_code == 200
+    assert load_config(project / "config.toml")["llm"]["preset"] == "missing"
     config = client.get("/api/v1/projects/sample/config").json()["config"]
     config["llm"]["preset_translation"] = "missing"
     assert client.put(
         "/api/v1/projects/sample/config",
         json={"config": config},
-    ).status_code == 400
-    assert (project / "config.toml").read_bytes() == original
+    ).status_code == 200
+    assert load_config(project / "config.toml")["llm"]["preset_translation"] == "missing"
 
 
 def test_web_edits_global_templates_without_changing_existing_project(
@@ -2533,7 +2531,7 @@ def test_web_manages_presets_and_previews_merged_extra_body(
         projects_root=projects_root,
         app_root=app_root,
     ))
-    default = client.get("/api/v1/global/presets/default").json()
+    default = client.get("/api/v1/global/presets/default").json()["preset"]
     custom = {
         **default,
         "preset_id": "openrouter",
@@ -2555,7 +2553,7 @@ def test_web_manages_presets_and_previews_merged_extra_body(
     assert saved.status_code == 200
     assert client.get(
         "/api/v1/global/presets/openrouter"
-    ).json()["stream_read_timeout_enabled"] is False
+    ).json()["preset"]["stream_read_timeout_enabled"] is False
     preview = client.get(
         "/api/v1/global/presets/openrouter/preview"
     ).json()
@@ -2641,8 +2639,9 @@ def test_web_rejects_inline_config(tmp_path: Path) -> None:
     )
 
     response = client.get("/api/v1/projects/sample/config")
-    assert response.status_code == 400
-    assert "未知配置键 config.llm: model" in response.json()["error"]
+    assert response.status_code == 200
+    assert response.json()["warnings"] and "model" in response.json()["warnings"][0]
+    assert "model" not in response.json()["config"]["llm"]
 
 
 def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:
@@ -5302,7 +5301,7 @@ def test_web_preset_models_discovery_fetches_and_parses(
 
     monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", fake_client)
     client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
-    preset = client.get("/api/v1/global/presets/default").json()
+    preset = client.get("/api/v1/global/presets/default").json()["preset"]
     saved_definition = dict(preset)
     preset.update(
         {
@@ -5338,7 +5337,7 @@ def test_web_preset_models_discovery_fetches_and_parses(
     }
     assert client.get(
         "/api/v1/global/presets/default"
-    ).json() == saved_definition
+    ).json()["preset"] == saved_definition
 
     os.environ["DRAFT_LLM_API_KEY"] = "first-secret\nsecond-secret"
     try:
@@ -7075,3 +7074,42 @@ def test_continuous_preflight_disables_old_llm_run(tmp_path: Path) -> None:
     assert run["run_id"] == run_id
     assert run["resume_compatible"] is False
     assert any("旧 LLM 协议" in item["message"] for item in result["blocking"])
+
+
+def test_editable_presets_keep_incomplete_definitions_and_report_warnings(tmp_path):
+    from app.user_config import user_root
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root, app_root=tmp_path / 'app-root'))
+    directory = user_root() / 'llm_presets'
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / 'draft.json').write_text('{"unknown":1}')
+    response = client.get('/api/v1/global/presets/draft')
+    assert response.status_code == 200
+    detail = response.json()
+    assert detail['warnings'] and 'model' in detail['missing_fields']
+    assert detail['preset']['credential'] == {'kind': '', 'name': ''}
+    assert client.get('/api/v1/global/presets/draft/preview').status_code == 400
+    saved = client.put('/api/v1/global/presets/draft', json=detail['preset'])
+    assert saved.status_code == 200
+    assert json.loads((directory / 'draft.json').read_text()) == detail['preset']
+    listed = client.get('/api/v1/global/presets').json()['presets']
+    draft = next(item for item in listed if item['preset_id'] == 'draft')
+    assert not draft['valid'] and 'model' in draft['missing_fields']
+
+    decisions = user_root() / 'decision_presets'
+    decisions.mkdir(exist_ok=True)
+    (decisions / 'draft.json').write_text('{}')
+    detail = client.get('/api/v1/global/decision-presets/draft').json()
+    assert detail['preset'] == {'preset_id': 'draft', 'protocol': ''}
+    assert detail['missing_fields'] == ['protocol']
+    assert client.put('/api/v1/global/decision-presets/draft', json=detail['preset']).status_code == 200
+
+
+def test_config_save_canonicalizes_unknown_and_missing_fields(tmp_path):
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root, app_root=tmp_path / 'app-root'))
+    response = client.put('/api/v1/projects/sample/config', json={'config': {'project': {'unknown': 1}}})
+    assert response.status_code == 200 and response.json()['warnings']
+    saved = load_config(project / 'config.toml', snapshot=True)
+    assert 'unknown' not in saved['project']
+    assert saved['chunking']['stage_overrides'] == {}

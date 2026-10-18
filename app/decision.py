@@ -51,7 +51,10 @@ def decision_preset_path(root: Path, preset_id: str) -> Path:
     return root / "decision_presets" / f"{preset_id}.json"
 
 
-def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
+def validate_decision_preset(value: dict[str, Any], *, editable: bool = False) -> dict[str, Any]:
+    if editable and value.get("protocol") == "":
+        decision_preset_path(Path(), value["preset_id"])
+        return value
     if value.get("protocol") == "llm":
         from .llm_preset import preset_path
         from .project import PROMPT_LANGUAGES
@@ -60,7 +63,8 @@ def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
         decision_preset_path(Path(), value["preset_id"])
         if not isinstance(value["llm_preset"], str):
             raise ConfigError("LLM Preset ID 格式无效")
-        preset_path(Path(), value["llm_preset"])
+        if not (editable and value["llm_preset"] == ""):
+            preset_path(Path(), value["llm_preset"])
         if value["prompt_language"] not in PROMPT_LANGUAGES:
             raise ConfigError("Prompt 语言必须是 zh-CN 或 en")
         return value
@@ -80,11 +84,11 @@ def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
         parsed.port
     except ValueError as exc:
         raise ConfigError("Decision URL 无效") from exc
-    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+    if not (editable and url == "") and (parsed.scheme not in {"http", "https"} or not parsed.hostname
             or parsed.username or parsed.password or parsed.query or parsed.fragment
             or not parsed.path or parsed.path == "/"):
         raise ConfigError("Decision URL 必须含最终 Path，不能含凭据、查询参数或 fragment")
-    if not isinstance(value["model"], str) or not value["model"].strip():
+    if not isinstance(value["model"], str) or (not editable and not value["model"].strip()):
         raise ConfigError("Decision 模型不能为空")
     proxy_url = value["proxy_url"]
     if not isinstance(proxy_url, str):
@@ -99,8 +103,8 @@ def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError("Decision 代理必须是无凭据的 HTTP/HTTPS URL")
     credential = value["credential"]
     if (not isinstance(credential, dict) or set(credential) != {"kind", "name"}
-            or not isinstance(credential["kind"], str) or credential["kind"] not in {"environment", "keychain"}
-            or not isinstance(credential["name"], str) or not credential["name"].strip()):
+            or not isinstance(credential["kind"], str) or credential["kind"] not in ({"", "environment", "keychain"} if editable else {"environment", "keychain"})
+            or not isinstance(credential["name"], str) or (not editable and not credential["name"].strip())):
         raise ConfigError("Decision 凭据引用无效")
     for key, minimum in (("requests_per_minute", 0), ("max_parallel", 1),
                          ("context_window_tokens", 1), ("context_safety_margin_tokens", 0)):
@@ -117,7 +121,41 @@ def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-def load_decision_preset(path: Path, *, snapshot: bool = False) -> dict[str, Any]:
+def normalize_decision_preset(value: Any, *, preset_id: str, warnings: list[str] | None = None) -> dict[str, Any]:
+    from .config import report_unknown
+    if not isinstance(value, dict):
+        raise ConfigError("Decision Preset 必须是对象")
+    protocol = value.get("protocol", "")
+    if not isinstance(protocol, str) or protocol not in {"", "llm", "typesafe", "openai-decisions"}:
+        raise ConfigError("不支持的 Decision 协议")
+    defaults: dict[str, Any] = {"preset_id": preset_id, "protocol": protocol}
+    if protocol == "llm":
+        defaults.update(llm_preset="", prompt_language="zh-CN")
+    elif protocol:
+        defaults.update(url="", model="", credential={"kind": "", "name": ""}, proxy_url="",
+                        request_timeout_seconds=120, requests_per_minute=30, max_parallel=4,
+                        context_window_tokens=16384, context_safety_margin_tokens=512, token_safety_factor=1.25)
+    report_unknown("Decision Preset", set(value) - set(defaults), warnings)
+    result = {key: value.get(key, default) for key, default in defaults.items()}
+    if "credential" in result:
+        credential = result["credential"]
+        if not isinstance(credential, dict):
+            raise ConfigError("Decision 凭据引用无效")
+        report_unknown("Decision Preset.credential", set(credential) - {"kind", "name"}, warnings)
+        result["credential"] = {key: credential.get(key, "") for key in ("kind", "name")}
+    return validate_decision_preset(result, editable=True)
+
+
+def missing_decision_fields(value: dict[str, Any]) -> list[str]:
+    if not value["protocol"]:
+        return ["protocol"]
+    if value["protocol"] == "llm":
+        return ["llm_preset"] if not value["llm_preset"] else []
+    return [key for key in ("url", "model") if not value[key].strip()] + [
+        f"credential.{key}" for key in ("kind", "name") if not value["credential"][key].strip()]
+
+
+def load_decision_preset(path: Path, *, snapshot: bool = False, warnings: list[str] | None = None) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -126,16 +164,28 @@ def load_decision_preset(path: Path, *, snapshot: bool = False) -> dict[str, Any
         raise ConfigError("Decision Preset 必须是对象")
     if snapshot and value.get("protocol") == "llm":
         validate_decision_preset({k: v for k, v in value.items() if k != "_resources"})
-        from .decision_llm import llm_config
-        llm_config(value, retry={"http_max_attempts": 1}, debug=False)
+        from .llm_preset import _parse_llm_preset
+        from .llm_adapter import parse_json_adapter
+        from .config import _resolve_llm_config
+        resources = value.get("_resources")
+        if not isinstance(resources, dict) or set(resources) != {"preset", "adapter", "prompt"}:
+            raise ConfigError("LLM Decision 缺少冻结资源")
+        if not isinstance(resources["prompt"], str) or not resources["prompt"].strip():
+            raise ConfigError("Decision LLM Prompt 不能为空")
+        selected = _parse_llm_preset(resources["preset"])
+        if selected.preset_id != value["llm_preset"]:
+            raise ConfigError("Decision 引用的 LLM Preset 与冻结资源不一致")
+        _resolve_llm_config({"llm": {}, "execution": {}}, preset=selected, adapter=parse_json_adapter(resources["adapter"]))
         return value
-    return validate_decision_preset(value)
+    return validate_decision_preset(value) if snapshot else normalize_decision_preset(value, preset_id=path.stem, warnings=warnings)
 
 
 class DecisionClient:
     def __init__(self, preset: dict[str, Any], *, http_client: httpx.AsyncClient | None = None,
                  retry: dict[str, Any] | None = None, debug_directory: Path | None = None,
-                 project_id: str = "", run_id: str = "", stage: str = "") -> None:
+                 project_id: str = "", run_id: str = "", stage: str = "",
+                 context_reserve_tokens: int | None = None) -> None:
+        validate_decision_preset({key: child for key, child in preset.items() if key != "_resources"})
         self.debug_directory = debug_directory
         self.project_id, self.run_id, self.stage = project_id, run_id, stage
         self.retry = {"http_max_attempts": 1, "base_delay_seconds": 0, "max_delay_seconds": 60,
@@ -145,10 +195,14 @@ class DecisionClient:
         self.llm_config = None
         if preset["protocol"] == "llm":
             from .decision_llm import llm_config
-            self.llm_config = llm_config(preset, retry=self.retry, debug=debug_directory is not None)
+            if type(context_reserve_tokens) is not int or context_reserve_tokens < 0:
+                raise ConfigError("LLM Decision 需要显式的项目通用上下文预留")
+            self.llm_config = llm_config(preset, retry=self.retry, debug=debug_directory is not None,
+                                         context_reserve_tokens=context_reserve_tokens)
             definition = self.llm_config["_llm_preset_definition"]
             self.preset.update({key: definition[key] for key in (
-                "model", "context_window_tokens", "context_safety_margin_tokens", "token_safety_factor")})
+                "model", "context_window_tokens", "token_safety_factor")})
+            self.preset["context_safety_margin_tokens"] = context_reserve_tokens
         self.http_client = http_client
         self.records: list[dict[str, Any]] = []
         limits = self.llm_config["execution"] if self.llm_config is not None else preset

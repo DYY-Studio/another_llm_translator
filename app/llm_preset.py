@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 
 from .errors import ConfigError
 
+CURRENT_PRESET_SCHEMA_VERSION = 9
+
 _PRESET_ID_RE = re.compile(r"[a-z][a-z0-9-]*")
 _PRESET_KEYS = frozenset(
     {
@@ -18,17 +20,14 @@ _PRESET_KEYS = frozenset(
         "preset_id",
         "adapter_id",
         "base_url",
-        "endpoint",
         "model",
         "credential",
         "proxy_url",
         "context_window_tokens",
-        "target_chunk_input_tokens",
         "max_output_tokens",
         "send_temperature",
         "json_schema_enabled",
         "reasoning_effort",
-        "context_safety_margin_tokens",
         "token_safety_factor",
         "requests_per_minute",
         "input_tokens_per_minute",
@@ -38,12 +37,10 @@ _PRESET_KEYS = frozenset(
         "extra_body",
         "extra_headers",
         "stream",
-        "stream_endpoint",
         "stream_read_timeout_enabled",
     }
 )
-_LEGACY_ENDPOINT_KEYS = frozenset({"endpoint", "stream_endpoint"})
-_REQUIRED_PRESET_KEYS = _PRESET_KEYS - _LEGACY_ENDPOINT_KEYS - {"json_schema_enabled"}
+_REQUIRED_PRESET_KEYS = _PRESET_KEYS
 
 
 @dataclass(frozen=True)
@@ -60,7 +57,7 @@ def preset_path(root: Path, preset_id: str) -> Path:
     return root / "llm_presets" / f"{preset_id}.json"
 
 
-def load_llm_preset(path: Path, *, model_discovery: bool = False) -> LLMPreset:
+def load_llm_preset(path: Path, *, model_discovery: bool = False, snapshot: bool = False, warnings: list[str] | None = None) -> LLMPreset:
     try:
         raw = path.read_bytes()
         value = json.loads(raw)
@@ -68,15 +65,58 @@ def load_llm_preset(path: Path, *, model_discovery: bool = False) -> LLMPreset:
         raise ConfigError(f"无法读取 LLM Preset：{path}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ConfigError(f"LLM Preset 不是合法 JSON：{path}: {exc}") from exc
-    return _parse_llm_preset(value, model_discovery=model_discovery)
+    if not snapshot:
+        value = normalize_llm_preset(value, preset_id=path.stem, warnings=warnings)
+    return _parse_llm_preset(value, model_discovery=model_discovery, editable=not snapshot)
 
 
-def _parse_llm_preset(value: Any, *, model_discovery: bool = False) -> LLMPreset:
+def normalize_llm_preset(value: Any, *, preset_id: str, warnings: list[str] | None = None) -> dict[str, Any]:
+    from .config import report_unknown
+    from .user_config import APP_ROOT
+    if not isinstance(value, dict):
+        raise ConfigError("LLM Preset 顶层必须是 JSON 对象")
+    report_unknown("LLM Preset", set(value) - _PRESET_KEYS, warnings)
+    version = value.get("schema_version", CURRENT_PRESET_SCHEMA_VERSION)
+    if type(version) is not int or version not in {8, CURRENT_PRESET_SCHEMA_VERSION}:
+        raise ConfigError("LLM Preset schema_version 必须是 9")
+    if version == 8:
+        message = "LLM Preset schema_version 8 已按当前设置读取，保存时将写入 9"
+        if warnings is not None:
+            warnings.append(message)
+        else:
+            from .logging_utils import get_logger
+            get_logger("config").warning(message)
+    defaults = json.loads((APP_ROOT / "llm_presets/default.json").read_text(encoding="utf-8"))
+    defaults.update(preset_id=preset_id, adapter_id="", base_url="", model="", credential={"kind": "", "name": ""})
+    result = {key: deepcopy(value.get(key, defaults[key])) for key in _PRESET_KEYS}
+    result["schema_version"] = CURRENT_PRESET_SCHEMA_VERSION
+    credential = result["credential"]
+    if not isinstance(credential, dict):
+        raise ConfigError("LLM Preset credential 必须是对象")
+    report_unknown("LLM Preset.credential", set(credential) - {"kind", "name"}, warnings)
+    result["credential"] = {key: credential.get(key, "") for key in ("kind", "name")}
+    return result
+
+
+def missing_preset_fields(value: dict[str, Any]) -> list[str]:
+    fields = [key for key in ("adapter_id", "base_url", "model") if not value[key].strip()]
+    fields.extend(f"credential.{key}" for key in ("kind", "name") if not value["credential"][key].strip())
+    return fields
+
+
+def validate_executable_preset(value: dict[str, Any]) -> None:
+    missing = missing_preset_fields(value)
+    if missing:
+        raise ConfigError(f"LLM Preset 缺少执行配置：{', '.join(missing)}")
+    _parse_llm_preset(value)
+
+
+def _parse_llm_preset(value: Any, *, model_discovery: bool = False, editable: bool = False) -> LLMPreset:
     if not isinstance(value, dict):
         raise ConfigError("LLM Preset 顶层必须是 JSON 对象")
     schema_version = value.get("schema_version")
-    if schema_version != 8:
-        raise ConfigError("LLM Preset schema_version 必须是 8；请运行 python -m app.llm_migration 预览迁移")
+    if type(schema_version) is not int or schema_version != CURRENT_PRESET_SCHEMA_VERSION:
+        raise ConfigError("LLM Preset schema_version 必须是 9")
     if type(value.get("json_schema_enabled", False)) is not bool:
         raise ConfigError("json_schema_enabled 必须是布尔值")
     if type(value.get("send_temperature")) is not bool:
@@ -107,28 +147,30 @@ def _parse_llm_preset(value: Any, *, model_discovery: bool = False) -> LLMPreset
         "base_url",
         "model",
     ):
-        if key == "model" and model_discovery and value[key] == "":
+        if (editable or (key == "model" and model_discovery)) and value[key] == "":
             continue
         if not isinstance(value[key], str) or not value[key].strip():
             raise ConfigError(f"LLM Preset {key} 必须是非空字符串")
     credential = value["credential"]
     if not isinstance(credential, dict) or set(credential) != {"kind", "name"}:
         raise ConfigError("LLM Preset credential 必须是包含 kind 和 name 的对象")
-    if credential["kind"] not in {"environment", "keychain", "chatgpt"}:
+    if not isinstance(credential["kind"], str) or credential["kind"] not in ({"", "environment", "keychain", "chatgpt"} if editable else {"environment", "keychain", "chatgpt"}):
         raise ConfigError(
             "LLM Preset credential.kind 必须是 environment、keychain 或 chatgpt"
         )
     if (
         not isinstance(credential["name"], str)
-        or not credential["name"].strip()
+        or (credential["name"] != "" and not credential["name"].strip())
+        or (not editable and credential["name"] == "")
     ):
         raise ConfigError("LLM Preset credential.name 必须是非空字符串")
-    if not _PRESET_ID_RE.fullmatch(value["adapter_id"]):
+    if value["adapter_id"] and not _PRESET_ID_RE.fullmatch(value["adapter_id"]):
         raise ConfigError("LLM Preset adapter_id 格式无效")
     from .chatgpt_oauth import validate_plan_preset
-    validate_plan_preset(value)
+    if not editable or not missing_preset_fields(value):
+        validate_plan_preset(value)
     parsed_base = urlsplit(value["base_url"])
-    if parsed_base.scheme not in {"http", "https"} or not parsed_base.hostname:
+    if not (editable and value["base_url"] == "") and (parsed_base.scheme not in {"http", "https"} or not parsed_base.hostname):
         raise ConfigError("LLM Preset base_url 必须是有效的 HTTP/HTTPS URL")
     proxy_url = value["proxy_url"]
     if not isinstance(proxy_url, str):
@@ -142,14 +184,12 @@ def _parse_llm_preset(value: Any, *, model_discovery: bool = False) -> LLMPreset
             raise ConfigError("LLM Preset proxy_url 必须是有效的 HTTP/HTTPS URL")
     for key in (
         "context_window_tokens",
-        "target_chunk_input_tokens",
         "max_parallel",
         "max_parallel_per_key",
     ):
         _require_integer(value, key, positive=True)
     _require_integer(value, "max_output_tokens", positive=False)
     for key in (
-        "context_safety_margin_tokens",
         "requests_per_minute",
         "input_tokens_per_minute",
     ):
@@ -162,8 +202,6 @@ def _parse_llm_preset(value: Any, *, model_discovery: bool = False) -> LLMPreset
             or number <= 0
         ):
             raise ConfigError(f"LLM Preset {key} 必须大于 0")
-    if value["context_safety_margin_tokens"] >= value["context_window_tokens"]:
-        raise ConfigError("LLM Preset 上下文安全余量必须小于上下文窗口")
     extra_body = value["extra_body"]
     if not isinstance(extra_body, dict):
         raise ConfigError("LLM Preset extra_body 必须是 JSON 对象")
@@ -190,11 +228,7 @@ def _parse_llm_preset(value: Any, *, model_discovery: bool = False) -> LLMPreset
         unknown = set(placeholders) - {"session_id", "request_id"}
         if unknown:
             raise ConfigError("LLM Preset extra_headers 包含未知占位符")
-    digest_definition = {
-        key: child
-        for key, child in value.items()
-        if key not in _LEGACY_ENDPOINT_KEYS
-    }
+    digest_definition = value
     digest_bytes = json.dumps(
         digest_definition,
         ensure_ascii=False,
