@@ -1404,7 +1404,7 @@ def test_recursive_reduction_reports_non_convergence(
     def tiny_config(project_path: Path, *, stage: str) -> dict[str, object]:
         config = original_load(project_path, stage=stage)
         config["llm"]["context_window_tokens"] = 100
-        config["llm"]["context_safety_margin_tokens"] = 0
+        config["chunking"]["context_reserve_tokens"] = 0
         return config
 
     monkeypatch.setattr("app.summary_aggregation.load_project_config", tiny_config)
@@ -1527,3 +1527,55 @@ async def test_web_task_manager_runs_content_summary_stage(
     result = manager.get(state["task_id"])
     assert result["status"] == "completed"
     assert result["usage"] == expected_usage
+
+
+def test_summary_soft_target_reduces_whole_children(tmp_path: Path, monkeypatch) -> None:
+    project = _project(tmp_path)
+    _fragment(project, summary_id="SUMMARY-FRAGMENT-1", segment_indexes=[0], text="甲" * 100)
+    _fragment(project, summary_id="SUMMARY-FRAGMENT-2", segment_indexes=[1], text="乙" * 100)
+    from app import summary_aggregation as aggregation
+    original_load = aggregation.load_project_config
+
+    def load(path, *, stage):
+        config = original_load(path, stage=stage)
+        config["chunking"]["stage_overrides"]["content_summary"] = {"target_content_tokens": 150}
+        return config
+
+    monkeypatch.setattr(aggregation, "load_project_config", load)
+    requests = []
+
+    async def run():
+        def handler(request):
+            requests.append(json.loads(request.content))
+            return _summary_response(request)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await aggregate_summaries(project, [{"file_id": "F0001", "part_id": "document"}], http_client=client)
+
+    result = asyncio.run(run())
+    assert result["completed"] == 1
+    assert [len(json.loads(body["messages"][1]["content"])["summaries"]) for body in requests] == [1, 1, 2]
+
+
+@pytest.mark.parametrize("limit_kind", ["max_input_tokens", "input_tokens_per_minute"])
+def test_summary_hard_limit_prevents_send(tmp_path: Path, monkeypatch, limit_kind) -> None:
+    project = _project(tmp_path)
+    _fragment(project, summary_id="SUMMARY-FRAGMENT-1", segment_indexes=[0], text="甲")
+    _fragment(project, summary_id="SUMMARY-FRAGMENT-2", segment_indexes=[1], text="乙")
+    from app import summary_aggregation as aggregation
+    original_load = aggregation.load_project_config
+
+    def load(path, *, stage):
+        config = original_load(path, stage=stage)
+        config["chunking" if limit_kind == "max_input_tokens" else "execution"][limit_kind] = 1
+        return config
+
+    monkeypatch.setattr(aggregation, "load_project_config", load)
+
+    async def run():
+        def handler(request):
+            pytest.fail("hard-overflow summaries must not be sent")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await aggregate_summaries(project, [{"file_id": "F0001", "part_id": "document"}], http_client=client)
+
+    result = asyncio.run(run())
+    assert result["failed"] == 1 and result["completed"] == 0

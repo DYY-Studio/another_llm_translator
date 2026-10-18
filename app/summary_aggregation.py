@@ -4,6 +4,7 @@ from .async_utils import run_blocking, blocking_scope
 import asyncio
 import hashlib
 import json
+import math
 import uuid
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any
 import httpx
 
 from .config import load_project_config
+from .request_budget import resolve_request_budget, request_input_limit
 from .errors import (
     AppError,
     ContextLengthError,
@@ -24,6 +26,7 @@ from .errors import (
 from .execution import (
     create_run,
     estimate_messages,
+    estimate_tokens,
     finalize_run,
     render_messages,
     run_bounded,
@@ -357,6 +360,7 @@ async def aggregate_summaries(
         checked.append((boundary, current, fragments))
 
     config = (await run_blocking(lambda: load_project_config(project, stage="content_summary")))
+    budget = resolve_request_budget(config, "content_summary")
     context_config, metadata, _, _ = (await run_blocking(lambda: _project_context(
         project, stage="content_summary"
     )))
@@ -506,10 +510,7 @@ async def aggregate_summaries(
                 estimated = (await run_blocking(lambda: estimate_messages(
                     messages, config["execution"]["token_safety_factor"]
                 )))
-                limit = (
-                    config["llm"]["context_window_tokens"]
-                    - config["llm"]["context_safety_margin_tokens"]
-                )
+                limit = request_input_limit(config, budget)
                 if estimated > limit:
                     raise ContextLengthError(
                         "聚合请求超过模型上下文预算",
@@ -592,10 +593,7 @@ async def aggregate_summaries(
                         origin="adopted",
                     )
                     return artifact
-                limit = (
-                    config["llm"]["context_window_tokens"]
-                    - config["llm"]["context_safety_margin_tokens"]
-                )
+                limit = request_input_limit(config, budget)
 
                 def estimate(children: list[dict[str, Any]]) -> int:
                     payload = {
@@ -619,7 +617,9 @@ async def aggregate_summaries(
                 ) -> dict[str, Any]:
                     split_error = None
                     before_estimate = estimate(children)
-                    if before_estimate <= limit:
+                    target_estimate = math.ceil(estimate_tokens("\n".join(str(item["text"]) for item in children))
+                        * config["execution"]["token_safety_factor"])
+                    if before_estimate <= limit and (len(children) == 1 or target_estimate <= budget.target_content_tokens):
                         try:
                             return await summarize(
                                 boundary,
