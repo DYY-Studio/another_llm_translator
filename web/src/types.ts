@@ -1161,7 +1161,7 @@ export interface HTTPDecisionPreset {
   url: string;
   model: string;
   proxy_url: string;
-  credential: { kind: "environment" | "keychain"; name: string };
+  credential: { kind: "" | "environment" | "keychain"; name: string };
   context_window_tokens: number;
   context_safety_margin_tokens: number;
   token_safety_factor: number;
@@ -1177,7 +1177,12 @@ export interface LLMDecisionPreset {
   prompt_language: "zh-CN" | "en";
 }
 
-export type DecisionPreset = HTTPDecisionPreset | LLMDecisionPreset;
+export interface IncompleteDecisionPreset {
+  preset_id: string;
+  protocol: "";
+}
+
+export type DecisionPreset = HTTPDecisionPreset | LLMDecisionPreset | IncompleteDecisionPreset;
 
 export interface DecisionPresetSummary {
   preset_id: string;
@@ -1185,6 +1190,8 @@ export interface DecisionPresetSummary {
   model?: string;
   valid: boolean;
   error?: string;
+  warnings?: string[];
+  missing_fields?: string[];
 }
 
 export interface LLMPresetSummary {
@@ -1197,6 +1204,8 @@ export interface LLMPresetSummary {
   valid: boolean;
   digest?: string;
   error?: string;
+  warnings?: string[];
+  missing_fields?: string[];
 }
 
 export interface LLMPreset {
@@ -1225,7 +1234,7 @@ export interface LLMPreset {
 }
 
 export interface LLMCredential {
-  kind: "environment" | "keychain" | "chatgpt";
+  kind: "" | "environment" | "keychain" | "chatgpt";
   name: string;
 }
 
@@ -1240,6 +1249,7 @@ export interface ServerStatus {
   authed: boolean;
   loopback: boolean;
   tasks: { max_active_projects: number; estimate_usage_before_run: boolean };
+  warnings?: string[];
 }
 
 export interface InterfaceEntry {
