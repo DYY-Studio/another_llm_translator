@@ -37,11 +37,10 @@ def resolve_llm_resources(preset: dict[str, Any], root: Path, *, project: Path |
     except (OSError, UnicodeError) as exc:
         raise ConfigError(f"无法读取 Decision LLM Prompt：{prompt_file('decision_llm', language)}") from exc
     result = {**preset, "_resources": {"preset": selected.definition, "adapter": adapter.definition, "prompt": full_prompt("decision_llm", middle, language)}}
-    llm_config(result, retry=None, debug=False)
     return result
 
 
-def llm_config(preset: dict[str, Any], *, retry: dict[str, Any] | None, debug: bool) -> dict[str, Any]:
+def llm_config(preset: dict[str, Any], *, retry: dict[str, Any] | None, debug: bool, context_reserve_tokens: int) -> dict[str, Any]:
     from .config import _resolve_llm_config
     from .llm_adapter import parse_json_adapter
     from .llm_preset import _parse_llm_preset
@@ -57,7 +56,13 @@ def llm_config(preset: dict[str, Any], *, retry: dict[str, Any] | None, debug: b
     config = {"llm": {}, "execution": {}, "retry": retry,
               "debug": {"enabled": debug, "inject_timeout_every": 0, "inject_429_every": 0,
                         "inject_500_every": 0, "inject_invalid_json_every": 0, "inject_missing_segment_every": 0}}
-    return _resolve_llm_config(config, preset=selected, adapter=parse_json_adapter(resources["adapter"]))
+    config = _resolve_llm_config(config, preset=selected, adapter=parse_json_adapter(resources["adapter"]))
+    input_limit = int(config["llm"]["context_window_tokens"]) - context_reserve_tokens
+    if input_limit <= 0:
+        raise ConfigError("Decision 安全预留必须小于模型上下文窗口")
+    itpm = int(config["execution"]["input_tokens_per_minute"])
+    config["_request_input_limit"] = min(input_limit, itpm) if itpm > 0 else input_limit
+    return config
 
 
 def decision_json_schema(questions: list[DecisionQuestion]) -> dict[str, Any]:

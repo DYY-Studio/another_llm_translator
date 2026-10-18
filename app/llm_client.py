@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 import httpx
+from .request_budget import RequestBudget, resolve_request_budget, request_input_limit
 from .credentials import resolve_api_keys
 from .chatgpt_oauth import ChatGPTConnection, plan_error
 from .diagnostics import current_diagnostics
@@ -835,6 +836,7 @@ class LLMClient:
         parent_request_id: str | None = None,
         segment_id_map: dict[str, str] | None = None,
         json_schema: dict[str, Any] | None = None,
+        request_budget: RequestBudget | None = None,
     ) -> tuple[LLMResponse, str]:
         retried = {"truncated": 0, "unknown": 0}
         while True:
@@ -846,6 +848,7 @@ class LLMClient:
                 parent_request_id=parent_request_id,
                 segment_id_map=segment_id_map,
                 json_schema=json_schema,
+                request_budget=request_budget,
             )
             diagnostics = current_diagnostics()
             if response.finish_reason in self.adapter.blocked_finish_reasons:
@@ -909,10 +912,19 @@ class LLMClient:
         parent_request_id: str | None = None,
         segment_id_map: dict[str, str] | None = None,
         json_schema: dict[str, Any] | None = None,
+        request_budget: RequestBudget | None = None,
     ) -> tuple[LLMResponse, str]:
         if self.client is None:
             raise RuntimeError("LLMClient must be used as an async context manager")
         json_schema = json_schema if self.config["llm"].get("json_schema_enabled", False) else None
+        input_limit = (
+            self.config["_request_input_limit"]
+            if "_request_input_limit" in self.config
+            else request_input_limit(self.config, request_budget or resolve_request_budget(
+                self.config, self.config["_request_budget_stage"]))
+        )
+        if estimated_input_tokens > input_limit:
+            raise ContextLengthError(f"请求估算 {estimated_input_tokens} tokens 超过完整输入硬限制 {input_limit}", request_id=request_id)
         await self.prepare_keys()
         api_keys = self._api_keys
         request_id = request_id or f"REQ-{uuid.uuid4().hex[:12].upper()}"
@@ -920,7 +932,6 @@ class LLMClient:
         available_output = max(
             1,
             int(self.config["llm"]["context_window_tokens"])
-            - int(self.config["llm"]["context_safety_margin_tokens"])
             - estimated_input_tokens,
         )
         effective_output = min(configured_output, available_output)

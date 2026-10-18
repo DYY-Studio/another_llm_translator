@@ -12,7 +12,6 @@ import math
 
 import re
 
-import shutil
 
 import sys
 
@@ -33,7 +32,8 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 
-from .config import load_project_config, load_run_config
+from .config import canonical_config, dump_config, load_project_config, load_run_config
+from .request_budget import resolve_request_budget, request_input_limit
 
 
 
@@ -1193,17 +1193,9 @@ def iter_chunk_plans(
     partition_key: Callable[[dict[str, Any]], object] | None = None,
     on_oversized: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None,
 ) -> Iterable[ChunkPlan]:
-    input_limit = (
-        config["llm"]["context_window_tokens"]
-        - config["llm"]["context_safety_margin_tokens"]
-    )
-    target_limits = [
-        config["execution"]["target_chunk_input_tokens"],
-        input_limit,
-    ]
-    if config["execution"]["input_tokens_per_minute"] > 0:
-        target_limits.append(config["execution"]["input_tokens_per_minute"])
-    target = min(target_limits)
+    budget = resolve_request_budget(config, config.get("_request_budget_stage", stage))
+    input_limit = request_input_limit(config, budget)
+    target = budget.target_content_tokens
     factor = config["execution"]["token_safety_factor"]
     prompt_builder = prompt_builder or (lambda _items: prompt)
     cross_boundary = stage in config["chunking"]["cross_boundary_batching"]
@@ -1235,7 +1227,13 @@ def iter_chunk_plans(
                     render_messages(prompt_builder(candidate), payload), factor
                 )
                 started_new_chunk = False
-                if current and estimated > target:
+                content_items = payload.get("segments", payload.get("source_segments", []))
+                content = [
+                    ({key: item[key] for key in ("source", "text", "current_text") if key in item} if isinstance(item, dict) else item)
+                    for item in content_items
+                ]
+                content_estimate = math.ceil(estimate_tokens(json.dumps(content, ensure_ascii=False, separators=(",", ":"))) * factor)
+                if current and (content_estimate > target or estimated > input_limit):
                     yield ChunkPlan(
                         file_id=str(current[0]["file_id"]),
                         segments=tuple(current),
@@ -1254,7 +1252,7 @@ def iter_chunk_plans(
                         input_tokens_per_minute=config["execution"]["input_tokens_per_minute"],
                     )
                 except RequestSizeError as exc:
-                    if exc.reason != "context" or on_oversized is None:
+                    if on_oversized is None:
                         raise
                     # The normal Chunk estimate already checked the singleton.
                     # Only overflowing singletons need the splitting preflight.
@@ -1345,10 +1343,8 @@ def estimate_single_segment_preflight(
     payload_builder: Callable[[list[dict[str, Any]]], dict[str, Any]],
 ) -> bool:
     """Validate one Segment, using a conservative estimate when possible."""
-    input_limit = (
-        config["llm"]["context_window_tokens"]
-        - config["llm"]["context_safety_margin_tokens"]
-    )
+    budget = resolve_request_budget(config, config["_request_budget_stage"])
+    input_limit = request_input_limit(config, budget)
     factor = config["execution"]["token_safety_factor"]
     payload = payload_builder([segment])
     messages = render_messages(prompt, payload)
@@ -1472,7 +1468,7 @@ def create_run(
     run_id = f"RUN-{timestamp}-{STAGE_CODES[stage]}-{suffix}"
     run_dir = project / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
-    shutil.copy2(project / "config.toml", run_dir / "config.toml")
+    (run_dir / "config.toml").write_text(dump_config(canonical_config(config)), encoding="utf-8")
     _write_llm_snapshots(run_dir, config)
     atomic_write_json(
         run_dir / "document_adapter_prompt_requirements.json",
@@ -1557,7 +1553,7 @@ def run_protocol_is_current(project: Path, run_id: str) -> bool:
     directory = project / "runs" / run_id
     preset = json.loads((directory / "llm_preset.json").read_text(encoding="utf-8"))
     adapter = json.loads((directory / "llm_adapter.json").read_text(encoding="utf-8"))
-    return preset.get("schema_version") == 8 and adapter.get("schema_version") == ADAPTER_SCHEMA_VERSION
+    return preset.get("schema_version") == 9 and adapter.get("schema_version") == ADAPTER_SCHEMA_VERSION
 
 
 def choose_running_run(
@@ -1677,7 +1673,7 @@ def continue_run(
     relative = Path("continuations") / f"{index:04d}"
     snapshot_dir = run_dir / relative
     snapshot_dir.mkdir(parents=True, exist_ok=False)
-    shutil.copy2(project / "config.toml", snapshot_dir / "config.toml")
+    (snapshot_dir / "config.toml").write_text(dump_config(canonical_config(config)), encoding="utf-8")
     _write_llm_snapshots(snapshot_dir, config)
     atomic_write_json(
         snapshot_dir / "document_adapter_prompt_requirements.json",
