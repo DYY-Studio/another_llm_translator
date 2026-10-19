@@ -3,6 +3,7 @@ import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
 import type { TaskUsage } from "../types";
 import { Modal } from "./Modal";
+import { Feedback } from "./InteractionProvider";
 
 type TextTranslationResult = {
   text: string;
@@ -37,7 +38,10 @@ export function TextTranslationDialog({ project, language, open, onClose }: {
       const next = await api<TextTranslationResult>(`/api/v1/projects/${encodeURIComponent(project)}/text-translation`, {
         method: "POST", body: JSON.stringify({ source }), signal: request.signal,
       });
-      if (!request.signal.aborted) setResult(next);
+      if (!request.signal.aborted) {
+        setResult(next);
+        setNotice(t("textTranslation.completed"));
+      }
     } catch (reason) {
       if (request.signal.aborted) setNotice(t("textTranslation.cancelled"));
       else setError(reason);
@@ -80,14 +84,12 @@ export function TextTranslationDialog({ project, language, open, onClose }: {
         <textarea readOnly value={result?.text ?? ""} placeholder={busy ? t("textTranslation.running") : ""} />
       </label>
     </div>
-    <div aria-live="polite">
-      {error != null && <p className="error-text" role="alert">{errorMessage(error, language)}</p>}
-      {result?.warnings.map((warning) => <p className="warning-banner" key={warning}>{warning}</p>)}
-      {result && <p className="muted">{result.usage?.available
-        ? translate("repetition.usage", language, { input: result.usage.input_tokens, output: result.usage.output_tokens })
-        : t("textTranslation.usageUnavailable")}{result.usage?.partial ? ` (${t("repetition.partialUsage")})` : ""}</p>}
-      {notice && <p>{notice}</p>}
-    </div>
+    {error != null && <Feedback message={errorMessage(error, language)} onDismiss={() => setError(null)} />}
+    {result?.warnings.map((warning) => <Feedback message={warning} type="warning" key={warning} />)}
+    {notice && <Feedback message={notice} type="success" onDismiss={() => setNotice("")} />}
+    {result && <p className="muted">{result.usage?.available
+      ? translate("repetition.usage", language, { input: result.usage.input_tokens, output: result.usage.output_tokens })
+      : t("textTranslation.usageUnavailable")}{result.usage?.partial ? ` (${t("repetition.partialUsage")})` : ""}</p>}
     <div className="modal-actions">
       <button className="quiet-button" disabled={!result} onClick={() => void copy()}>{t("textTranslation.copy")}</button>
       {busy
