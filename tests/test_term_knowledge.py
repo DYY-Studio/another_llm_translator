@@ -40,18 +40,21 @@ def test_knowledge_payload_compacts_ranges_without_bridging_gaps_or_slices():
     ranges = source_range(inputs, originals, {})
     fragment = {"id": "persistent", "state": "active", "text": "完整说明",
                 "owner": "alpha", "original_owner": "alpha", "origin": "scan",
-                "source_range": ranges, "_positions": {f"S{i}": i for i in range(8)}}
+                "source_range": ranges, "_positions": {f"S{i}": i for i in range(8)},
+                "_file_orders": {"F1": 4}}
     before = deepcopy(fragment)
     view = {"entity_key": "alpha", "members": ["alpha"], "items": [], "fragments": [fragment]}
     payload, refs = knowledge_payload([view], "简体中文")
     assert refs == {"K1": ("alpha", "persistent")}
     assert payload["entities"][0]["fragments"][0]["text"] == "完整说明"
+    assert payload["sources"] == {"S1": {"file_order": 4, "part_id": "P1"},
+                                  "S2": {"file_order": 4, "part_id": "P2"}}
     assert payload["entities"][0]["fragments"][0]["source_range"] == [
-        {"file_id": "F1", "part_id": "P1", "first": {"position": 0, "start": 0}, "last": {"position": 1, "end": 6}},
-        {"file_id": "F1", "part_id": "P1", "first": {"position": 3, "start": 0}, "last": {"position": 4, "end": 3}},
-        {"file_id": "F1", "part_id": "P1", "first": {"position": 5, "start": 0}, "last": {"position": 5, "end": 6}},
-        {"file_id": "F1", "part_id": "P1", "first": {"position": 6, "start": 4}, "last": {"position": 6, "end": 6}},
-        {"file_id": "F1", "part_id": "P2", "first": {"position": 7, "start": 0}, "last": {"position": 7, "end": 6}},
+        {"source": "S1", "first": {"position": 0, "start": 0}, "last": {"position": 1, "end": 6}},
+        {"source": "S1", "first": {"position": 3, "start": 0}, "last": {"position": 4, "end": 3}},
+        {"source": "S1", "first": {"position": 5, "start": 0}, "last": {"position": 5, "end": 6}},
+        {"source": "S1", "first": {"position": 6, "start": 4}, "last": {"position": 6, "end": 6}},
+        {"source": "S2", "first": {"position": 7, "start": 0}, "last": {"position": 7, "end": 6}},
     ]
     assert fragment == before
 
@@ -273,7 +276,8 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
         assert "NAME_RULE_SENTINEL" not in messages[0]["content"]
         assert "KNOWLEDGE_RULE_SENTINEL" in messages[0]["content"]
         scan = next(f for f in payload["entities"][0]["fragments"] if f["origin"] == "scan")
-        assert scan["source_range"] == [{"file_id": "F0001", "part_id": "document",
+        assert payload["sources"] == {"S1": {"file_order": 1, "part_id": "document"}}
+        assert scan["source_range"] == [{"source": "S1",
                                         "first": {"position": 0, "start": 0}, "last": {"position": 0, "end": 14}}]
         attempts.append(payload)
         refs = [f["id"] for f in payload["entities"][0]["fragments"]]
@@ -1055,3 +1059,41 @@ def test_lazy_matching_rejects_stale_entity_before_compacting_missing_sources(tm
                              segments=[], project=tmp_path)
     with pytest.raises(UsageError, match="实体说明已过期"):
         matcher.for_items([{"segment_id": "current", "source": "Alpha"}])
+
+
+def test_knowledge_sources_use_current_project_file_order(tmp_path: Path):
+    from app.project import init_project
+    from app.sqlite_storage import read_files, reorder_files
+    from app.term_knowledge import entity_view, knowledge_payload, publish_evidence
+    from app.config import load_project_config
+    from app.term_library import term_normalization
+    from tests.test_foundation import make_app_root
+
+    inputs = []
+    for index in range(3):
+        path = tmp_path / f"{index}.txt"
+        path.write_text("Alpha", encoding="utf-8")
+        inputs.append(str(path))
+    project, _ = init_project(inputs, name="ordered", app_root=make_app_root(tmp_path / "app"),
+                              projects_root=tmp_path / "projects")
+    files = read_files(project)
+    data = library()
+    publish_evidence(project, data, [scan_record(project, "身份说明")],
+                     term_normalization(load_project_config(project)))
+    reordered = [files[2]["file_id"], files[0]["file_id"], files[1]["file_id"]]
+    reorder_files(project, reordered)
+    view = entity_view(project, data, "alpha")
+    payload, refs = knowledge_payload([view], "简体中文")
+    assert list(payload["sources"].values()) == [
+        {"file_order": 2, "part_id": "document"},
+        {"file_order": 3, "part_id": "document"},
+        {"file_order": 1, "part_id": "document"},
+    ]
+    ranges = payload["entities"][0]["fragments"][0]["source_range"]
+    assert [payload["sources"][r["source"]]["file_order"] for r in ranges] == [2, 3, 1]
+    assert refs == {"K1": ("alpha", view["fragments"][0]["id"])}
+    view["fragments"][0]["source_range"] = [
+        r for r in view["fragments"][0]["source_range"] if r["file_id"] == files[1]["file_id"]
+    ]
+    subset, _ = knowledge_payload([view], "简体中文")
+    assert subset["sources"] == {"S1": {"file_order": 3, "part_id": "document"}}

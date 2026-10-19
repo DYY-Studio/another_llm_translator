@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from .errors import UsageError
 from .execution import segment_model_source
-from .sqlite_storage import new_record_id, read_segment_positions, read_terminology_candidates
+from .sqlite_storage import new_record_id, read_files, read_segment_positions, read_terminology_candidates
 from .summary_provenance import digest
 
 
@@ -129,10 +129,11 @@ def evidence(project: Path, library: dict[str, Any], *, fragment_ids: set[str] |
     ids = {f["candidate_id"] for f in fragments.values() if f.get("candidate_id")}
     records = {r["record_id"]: r for r in read_terminology_candidates(project, ids)}
     positions = positions if positions is not None else read_segment_positions(project) if records else {}
+    file_orders = {f["file_id"]: f["file_order"] for f in read_files(project)} if records else {}
     record_sources = {}
     result = {}
     for key, fragment in fragments.items():
-        value = {**fragment, "id": key, "source_range": None, "valid": True, "_positions": {}}
+        value = {**fragment, "id": key, "source_range": None, "valid": True, "_positions": {}, "_file_orders": file_orders}
         if fragment.get("candidate_id"):
             record = records.get(fragment["candidate_id"])
             if record is None:
@@ -450,6 +451,8 @@ def knowledge_payload(views: list[dict[str, Any]], target_language: str, descrip
     refs: dict[str, tuple[str, str]] = {}
     range_cache = {} if range_cache is None else range_cache
     entities = []
+    sources: dict[str, dict[str, Any]] = {}
+    source_ids: dict[tuple[int, str], str] = {}
     for view in views:
         fragments = []
         for f in view["fragments"]:
@@ -461,14 +464,22 @@ def knowledge_payload(views: list[dict[str, Any]], target_language: str, descrip
             if cache_key not in range_cache:
                 range_cache[cache_key] = (f["source_range"], f["_positions"], compact_source_ranges(f["source_range"], f["_positions"]))
             compact_ranges = range_cache[cache_key][2]
+            source_ranges = None if compact_ranges is None else []
+            for r in compact_ranges or []:
+                source_key = (f["_file_orders"][r["file_id"]], r["part_id"])
+                if source_key not in source_ids:
+                    source_id = f"S{len(sources) + 1}"
+                    source_ids[source_key] = source_id
+                    sources[source_id] = {"file_order": source_key[0], "part_id": source_key[1]}
+                source_ranges.append({"source": source_ids[source_key], "first": r["first"], "last": r["last"]})
             fragments.append({"id": key, "text": f["text"], "owner": f["owner"],
                               "original_source": f.get("source", f["original_owner"]),
-                              "origin": f["origin"], "source_range": compact_ranges})
+                              "origin": f["origin"], "source_range": source_ranges})
         entities.append({"entity": view["entity_key"], "members": view["members"],
                          "current_items": [{"text": item["text"]} for item in view["items"]],
                          "fragments": fragments})
     return {"phase": "knowledge", "target_language": target_language,
-            "description_generation": description_generation, "entities": entities}, refs
+            "description_generation": description_generation, "sources": sources, "entities": entities}, refs
 
 
 def pack_knowledge_batches(views: list[dict[str, Any]], prompt: str, config: dict[str, Any], *,
@@ -488,7 +499,7 @@ def pack_knowledge_batches(views: list[dict[str, Any]], prompt: str, config: dic
     def estimate(group: list[dict[str, Any]]) -> tuple[int, int]:
         payload, _ = knowledge_payload(group, config["project"]["target_language"], config["terminology_decision"]["description_generation"], range_cache=range_cache)
         entities = [{key: value for key, value in entity.items() if key != "current_items"} for entity in payload["entities"]]
-        content = math.ceil(estimate_tokens(json.dumps(entities, ensure_ascii=False, separators=(",", ":"))) * float(config["execution"]["token_safety_factor"]))
+        content = math.ceil(estimate_tokens(json.dumps({"sources": payload["sources"], "entities": entities}, ensure_ascii=False, separators=(",", ":"))) * float(config["execution"]["token_safety_factor"]))
         if feedback:
             payload["validation_feedback"] = feedback
         return estimate_messages(render_messages(prompt, payload), float(config["execution"]["token_safety_factor"])), content

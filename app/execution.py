@@ -352,9 +352,13 @@ _FIELD_PREFIX = {
         "zh-CN": "fragments: 全部有效证据，含无来源内容。id 是请求内唯一引用，owner 是当前归属，original_source 是原术语归属。",
         "en": "fragments: All valid evidence, including unsourced content. id is a request-wide unique reference; owner is the current term owner and original_source preserves the original term.",
     },
+    "sources": {
+        "zh-CN": "sources: 请求内共享来源表，source 短 ID 仅用于索引；file_order 是当前项目从 1 开始的文件顺序，part_id 标识文件内的内容边界，不表示先后。",
+        "en": "sources: Request-wide source table. Short source IDs are lookup keys only; file_order is the current one-based project file order, and part_id identifies a content boundary within that file without implying order.",
+    },
     "source_range": {
-        "zh-CN": "source_range: 连续源文区间，包含 file_id、part_id、first 和 last；position 是从 0 开始的 Segment 位置，start/end 是首尾 Segment 内字符偏移，end 不包含端点；无来源为 null。范围及顺序表示证据位置，不表示事实生效范围或事件时间。",
-        "en": "source_range: Contiguous source intervals containing file_id, part_id, first, and last. position is the zero-based Segment position; start/end are character offsets within the first/last Segment, with end exclusive; null means unsourced. Ranges and order indicate evidence positions, not fact-effective ranges or event time.",
+        "zh-CN": "source_range: 连续源文区间，source 引用 sources 中的条目，first/last 包含从 0 开始、按当前项目文件顺序排列的全局 Segment position；start/end 是首尾 Segment 内字符偏移，end 不包含端点；无来源为 null。范围及顺序表示证据位置，不表示事实生效范围或事件时间。",
+        "en": "source_range: Contiguous source intervals. source references an entry in sources; first/last contain the zero-based global Segment position in current project file order. start/end are character offsets within the first/last Segment, with end exclusive; null means unsourced. Ranges and order indicate evidence positions, not fact-effective ranges or event time.",
     },
     "validation_feedback": {
         "zh-CN": "validation_feedback: 程序提供的本轮格式修正反馈。",
@@ -701,7 +705,7 @@ _PROMPT_DECLARATIONS = {
 for _phase in ("adjudication", "consistency", "containment", "final_review", "knowledge"):
     _PROMPT_DECLARATIONS[("terminology_decision", _phase)] = {
         "fields": (
-            ("target_language", "entities", "current_items", "fragments", "source_range", "validation_feedback")
+            ("target_language", "sources", "entities", "current_items", "fragments", "source_range", "validation_feedback")
             if _phase == "knowledge" else
             ("target_language", "decision_terms", "anchors", "evidence", "conflicts",
              "description", "reference_context", "validation_repair")
