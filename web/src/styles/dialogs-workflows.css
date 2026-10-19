@@ -122,6 +122,15 @@
 .modal label.check-row { display: flex; }
 .modal input[type=file] { padding: 7px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
+.text-translation-dialog { width: min(960px, calc(100vw - 32px)); }
+.text-translation-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.text-translation-heading h2 { margin: 0; }
+.text-translation-dialog > p { font-size: 13px; }
+.text-translation-dialog .comparison textarea { min-height: 280px; }
+@media (max-width: 700px) {
+  .text-translation-dialog .comparison { grid-template-columns: 1fr; }
+  .text-translation-dialog .comparison textarea { min-height: 160px; }
+}
 .repetition-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-block: 12px; }
 .repetition-actions select { max-width: 100%; }
 .repetition-group { display: grid; gap: 12px; }

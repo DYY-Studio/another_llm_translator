@@ -266,7 +266,7 @@ class LLMClient:
         config: dict[str, Any],
         limiter: SlidingWindowLimiter | KeyPool,
         *,
-        run_dir: Path,
+        run_dir: Path | None,
         project_id: str,
         run_id: str,
         stage: str,
@@ -289,6 +289,7 @@ class LLMClient:
         self.run_dir = run_dir
         self.project_id = project_id
         self.run_id = run_id
+        self.session_id = run_id or str(uuid.uuid4())
         self.stage = stage
         self.client = client
         self.owns_client = client is None
@@ -744,7 +745,7 @@ class LLMClient:
             await self.client.aclose()
 
     async def _debug_attempt(self, *args: Any, **kwargs: Any) -> None:
-        if not self.config["debug"]["enabled"]:
+        if self.run_dir is None or not self.config["debug"]["enabled"]:
             return
         async with self.log_lock:
             await run_blocking(self._write_debug_attempt, *args, **kwargs)
@@ -768,7 +769,7 @@ class LLMClient:
         parent_request_id: str | None = None,
         overview: dict[str, Any] | None = None,
     ) -> None:
-        if not self.config["debug"]["enabled"]:
+        if self.run_dir is None or not self.config["debug"]["enabled"]:
             return
         payload_dir = self.run_dir / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
@@ -1061,7 +1062,7 @@ class LLMClient:
                     reasoning_effort=self.config["llm"]["reasoning_effort"],
                     extra_body=self.config.get("_llm_extra_body"),
                     extra_headers=self.config.get("_llm_extra_headers"),
-                    session_id=self.run_id,
+                    session_id=self.session_id,
                     request_id=request_id,
                     json_schema=json_schema,
                 )

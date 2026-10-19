@@ -49,9 +49,51 @@ from .translation_validation import (
     TranslationValidationContext,
     validate_translation_response,
     SegmentAlignmentValidator,
+    TranslationValidator,
 )
 
 from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _frozen_run_options, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _replace_with_runtime_parts, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests)
+
+
+def translation_validation_resources(
+    config: dict[str, Any], *, project_id: str,
+    http_client: httpx.AsyncClient | None = None, run_dir: Path | None = None,
+    run_id: str = "", stage: str = "translation",
+) -> tuple[dict[str, DecisionClient], DecisionClient | None, tuple[TranslationValidator, ...]]:
+    decision_clients = {
+        preset_id: DecisionClient(definition, context_reserve_tokens=config["chunking"]["context_reserve_tokens"], http_client=http_client, retry=config["retry"],
+            debug_directory=run_dir if config["debug"]["enabled"] else None,
+            project_id=project_id, run_id=run_id, stage=stage)
+        for preset_id, definition in config.get("_decision_preset_definitions", {}).items()
+    }
+    decision_bindings = config.get("_decision_validator_presets", {})
+    decision_client = decision_clients.get(decision_bindings.get("preferred_term_usage"))
+    alignment_options = config["validation"]["translation"]["alignment"]
+    translation_validators = tuple(
+        SegmentAlignmentValidator(decision_clients[decision_bindings["segment_alignment"]],
+            confidence_threshold=alignment_options["confidence_threshold"],
+            warning_threshold=alignment_options["warning_threshold"],
+            tail_segments=alignment_options["tail_segments"],
+            prompt=config["_decision_prompt_definitions"]["segment_alignment"]["content"])
+        if validator.validator_id == "segment_alignment" else validator
+        for validator in config["_translation_validator_instances"]
+    )
+
+    return decision_clients, decision_client, translation_validators
+
+
+def translation_payload(
+    target_language: str, items: list[dict[str, Any]], terms: list[dict[str, Any]], *,
+    reference_context: list[str | dict[str, Any]], summary_context: list[str], summary_context_relation: str | None,
+) -> dict[str, Any]:
+    return {
+        "target_language": target_language,
+        "reference_context": reference_context,
+        "summary_context": summary_context,
+        "summary_context_relation": summary_context_relation,
+        "terms": terms,
+        "segments": [{"id": item["segment_id"], "source": segment_model_source(item)} for item in items],
+    }
 
 
 def _summary_segment_id(item: dict[str, Any]) -> str:
@@ -505,20 +547,11 @@ async def run_translation(
         if config["execution"]["scheduling_mode"] == "parallel":
             context = [item["source"] for item in context]
         summary_context, summary_context_relation = summary_context_index.for_items(items)
-        payload = {
-            "target_language": config["project"]["target_language"],
-            "reference_context": context,
-            "summary_context": summary_context,
-            "summary_context_relation": summary_context_relation,
-            "terms": term_match_cache.for_items(items),
-            "segments": [
-                {
-                    "id": item["segment_id"],
-                    "source": segment_model_source(item),
-                }
-                for item in items
-            ],
-        }
+        payload = translation_payload(
+            config["project"]["target_language"], items, term_match_cache.for_items(items),
+            reference_context=context, summary_context=summary_context,
+            summary_context_relation=summary_context_relation,
+        )
 
         if draft_scan is not None:
             payload["response_mode"] = draft_scan.mode(items).value
@@ -635,23 +668,9 @@ async def run_translation(
         }
 
     assert run_id is not None and run_dir is not None
-    decision_clients = {
-        preset_id: DecisionClient(definition, context_reserve_tokens=config["chunking"]["context_reserve_tokens"], http_client=http_client, retry=config["retry"],
-            debug_directory=run_dir if config["debug"]["enabled"] else None,
-            project_id=metadata["project_id"], run_id=run_id, stage=run_stage)
-        for preset_id, definition in config.get("_decision_preset_definitions", {}).items()
-    }
-    decision_bindings = config.get("_decision_validator_presets", {})
-    decision_client = decision_clients.get(decision_bindings.get("preferred_term_usage"))
-    alignment_options = config["validation"]["translation"]["alignment"]
-    translation_validators = tuple(
-        SegmentAlignmentValidator(decision_clients[decision_bindings["segment_alignment"]],
-            confidence_threshold=alignment_options["confidence_threshold"],
-            warning_threshold=alignment_options["warning_threshold"],
-            tail_segments=alignment_options["tail_segments"],
-            prompt=config["_decision_prompt_definitions"]["segment_alignment"]["content"])
-        if validator.validator_id == "segment_alignment" else validator
-        for validator in translation_validators
+    decision_clients, decision_client, translation_validators = translation_validation_resources(
+        config, project_id=metadata["project_id"], http_client=http_client,
+        run_dir=run_dir, run_id=run_id, stage=run_stage,
     )
 
     result_path = stage_result_path(project, "translation")
