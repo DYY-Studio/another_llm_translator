@@ -41,7 +41,7 @@ async def translate_text(
     metadata = await run_blocking(read_project_meta_read_only, project)
     # These identities exist only within this request, never in project storage.
     segment = dict(segment_id="TEXT", file_id="TEXT", part_id="TEXT", source=source,
-                   order=0, is_empty=False)
+                   line_index=0, is_empty=False)
     warnings: list[str] = []
     library = await run_blocking(lambda: load_terms(project, resolve_knowledge=False))
     if library is None:

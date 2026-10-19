@@ -107,7 +107,8 @@ def test_empty_temporary_translation_is_rejected(tmp_path: Path) -> None:
         asyncio.run(translate_text(tmp_path, " \n "))
 
 
-def test_temporary_translation_splits_and_reassembles_one_segment(tmp_path: Path) -> None:
+@pytest.mark.parametrize("rejection", ["context", "format"])
+def test_temporary_translation_recovers_and_reassembles_one_segment(tmp_path: Path, rejection: str) -> None:
     from app.text_translation import translate_text
 
     async def scenario() -> None:
@@ -118,6 +119,8 @@ def test_temporary_translation_splits_and_reassembles_one_segment(tmp_path: Path
             body = json.loads(json.loads(request.content)["messages"][1]["content"])
             bodies.append(body)
             if len(bodies) == 1:
+                if rejection == "format":
+                    return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([])}}]})
                 return httpx.Response(400, json={"error": {"message": "context length exceeded", "code": "context_length_exceeded"}})
             item = body["segments"][0]
             return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
@@ -127,7 +130,7 @@ def test_temporary_translation_splits_and_reassembles_one_segment(tmp_path: Path
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             result = await translate_text(project, "hello world", http_client=client)
         assert result["text"] == "HELLO WORLD"
-        assert len(bodies) == 3
+        assert len(bodies) == (3 if rejection == "context" else 2)
         assert list_run_index(project) == ([], 0)
 
     asyncio.run(scenario())
