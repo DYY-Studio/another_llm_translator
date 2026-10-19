@@ -205,6 +205,7 @@ def test_missing_translation_fails_preflight(tmp_path, monkeypatch):
 
 def test_over_budget_group_is_visible_without_sending_requests(tmp_path, monkeypatch):
     from app.repetition_consistency import current_draft, run_repetition
+    from app.repetition_drafts import apply_draft, save_choices
     project = repetition_project(tmp_path, monkeypatch)
     path = config.APP_ROOT / "decision_presets" / "local.json"
     value = json.loads(path.read_text())
@@ -216,9 +217,18 @@ def test_over_budget_group_is_visible_without_sending_requests(tmp_path, monkeyp
         async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as client:
             await run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     asyncio.run(run())
-    group = current_draft(project)["groups"][0]
+    draft = current_draft(project)
+    group = draft["groups"][0]
     assert group["screening"] == "over_budget"
     assert group["uncertain"] == ["1", "2", "3"]
+    proposal = group["proposals"][0]
+    assert proposal["manual"] and not proposal["default_accepted"]
+    save_choices(project, {proposal["id"]: {"accepted": True, "target": "1", "apply": ["3"]}}, run_id=draft["run_id"])
+    assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 1
+    segments = load_segments(project)
+    states = latest_stage_states(project, "translation", [s["segment_id"] for s in segments])
+    assert states[segments[3]["segment_id"]]["completed"]["text"] == "我会去接你"
+    assert states[segments[5]["segment_id"]]["completed"]["text"] == "我会来接你"
 
 
 def generate(project):

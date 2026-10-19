@@ -154,6 +154,7 @@
   .term-decision-sticky { top: calc(58px + var(--mobile-run-status-height)); }
   .term-decision-filters { grid-template-columns: 1fr 1fr; }
   .term-decision-filters input { grid-column: 1 / -1; }
+  .repetition-filters input { grid-column: auto; }
   .term-decision-filters .term-decision-pages { grid-column: 1 / -1; }
   .term-decision-proposal-heading { align-items: stretch; flex-direction: column; }
   .decision-proposal-state { justify-content: space-between; }

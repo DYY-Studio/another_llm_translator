@@ -146,8 +146,10 @@ def read_draft(project: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(draft, dict) or draft.get("run_id") != manifest["run_id"]:
         raise StorageError("重复译文审查草案身份无效")
     for group in draft["groups"]:
-        if group["screening"] == "skip" and not group["proposals"]:
-            members = [o["id"] for o in group["occurrences"]]
+        if group["proposals"]:
+            continue
+        members = [o["id"] for o in group["occurrences"]]
+        if group["screening"] == "skip" or set(group["uncertain"]) == set(members):
             group["proposals"] = [{"id": f"{group['id']}-manual", "members": members,
                 "target": members[0], "apply": members, "default_accepted": False, "reason": "", "manual": True}]
     return draft
