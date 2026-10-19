@@ -156,3 +156,23 @@ def test_text_translation_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert seen[0][0:2] == (project, "hello")
         assert seen[0][2]["limiter"] is not None
         assert client.post("/api/v1/projects/sample/text-translation", json={"source": 3}).status_code == 400
+
+
+def test_text_translation_options_use_translation_preset(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+    from app.web import create_app
+    from tests.test_web import make_project
+
+    projects_root, project = make_project(tmp_path)
+    presets = tmp_path / "runtime-global/llm_presets"
+    definition = json.loads((presets / "default.json").read_text())
+    definition.update(preset_id="text-preview", model="translation-model")
+    (presets / "text-preview.json").write_text(json.dumps(definition))
+    config = load_config(project / "config.toml")
+    config["llm"]["preset_translation"] = "text-preview"
+    (project / "config.toml").write_text(dump_config(config))
+    with TestClient(create_app(projects_root=projects_root, app_root=tmp_path / "app-root")) as client:
+        response = client.get("/api/v1/projects/sample/text-translation")
+        assert response.status_code == 200
+        assert response.json() == {"preset": {"id": "text-preview", "model": "translation-model"}}
+    assert list_run_index(project) == ([], 0)

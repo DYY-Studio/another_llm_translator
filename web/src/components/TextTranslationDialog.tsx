@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
-import type { TaskUsage } from "../types";
+import type { TaskOptions, TaskUsage } from "../types";
 import { Modal } from "./Modal";
 import { Feedback } from "./InteractionProvider";
 
@@ -20,11 +20,21 @@ export function TextTranslationDialog({ project, language, open, onClose }: {
   const t = (key: string) => translate(key, language);
   const [source, setSource] = useState("");
   const [result, setResult] = useState<TextTranslationResult | null>(null);
+  const [preset, setPreset] = useState<TaskOptions["preset"] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [notice, setNotice] = useState("");
   const controller = useRef<AbortController | null>(null);
   useEffect(() => () => controller.current?.abort(), []);
+  useEffect(() => {
+    if (!open) return;
+    const request = new AbortController();
+    setPreset(null);
+    api<Pick<TaskOptions, "preset">>(`/api/v1/projects/${encodeURIComponent(project)}/text-translation`, { signal: request.signal })
+      .then((options) => { if (!request.signal.aborted) setPreset(options.preset); })
+      .catch((reason) => { if (!request.signal.aborted) setError(reason); });
+    return () => request.abort();
+  }, [open, project]);
 
   async function translateText() {
     if (controller.current || !source.trim()) return;
@@ -74,6 +84,11 @@ export function TextTranslationDialog({ project, language, open, onClose }: {
     </div>
     <p className="muted">{t("textTranslation.hint")}</p>
     <p className="muted">{t("textTranslation.termsHint")}</p>
+    {preset && <div className="run-preset" aria-label={t("runDialog.currentPreset")}>
+      <span>{t("runDialog.currentPreset")}</span>
+      <strong><code>{preset.id}</code></strong>
+      <small>{preset.model}</small>
+    </div>}
     <div className="comparison">
       <label>{t("textTranslation.source")}
         <textarea autoFocus value={source} disabled={busy} onChange={(event) => {
@@ -94,7 +109,7 @@ export function TextTranslationDialog({ project, language, open, onClose }: {
       <button className="quiet-button" disabled={!result} onClick={() => void copy()}>{t("textTranslation.copy")}</button>
       {busy
         ? <button className="quiet-button" onClick={() => controller.current?.abort()}>{t("common.cancel")}</button>
-        : <button className="primary-button" disabled={!source.trim()} onClick={() => void translateText()}>{t("textTranslation.translate")}</button>}
+        : <button className="primary-button" disabled={!source.trim() || !preset} onClick={() => void translateText()}>{t("textTranslation.translate")}</button>}
     </div>
   </Modal>;
 }

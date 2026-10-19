@@ -606,6 +606,13 @@ def register_task_routes(
     project: Callable[[str], Path],
     project_paths: Callable[[], list[Path]],
 ) -> None:
+    @app.get("/api/v1/projects/{name}/text-translation")
+    def text_translation_options(name: str) -> dict[str, Any]:
+        from .config import load_project_config
+
+        config = load_project_config(project(name), stage="translation")
+        return {"preset": {"id": config["_llm_preset_id"], "model": config["llm"]["model"]}}
+
     @app.post("/api/v1/projects/{name}/text-translation")
     async def translate_project_text(name: str, payload: TextTranslationPayload, request: Request) -> dict[str, Any]:
         from .async_utils import run_blocking
