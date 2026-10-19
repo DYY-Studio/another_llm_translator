@@ -135,6 +135,7 @@ Run 索引与镜像、终止草稿文件移除、术语说明的事务性升级�
 ### 具体阶段模块
 
 - `stage_translation.py`：翻译 payload、完整候选批次验收、拆分 Segment 重组、组件内即时校验修复与预算耗尽处理。
+- `text_translation.py`：单个内存 Segment 的临时翻译，复用翻译 payload、校验器装配、请求循环和拆分工具，不创建 Run 或保存阶段结果。
 - `stage_review.py`：校对/润色的基准选择、accepted/suggested 结果，以及建议应用。
 - `stage_terminology.py`：术语扫描、候选任务、联合片段概括和发布，分别跟踪术语与概括的切片覆盖。
 - `stage_terminology_draft.py`：实验粗翻及联合概括的扫描状态、合并请求与独立结果恢复，分别跟踪各类结果的切片覆盖，按本次响应模式选择 Document Adapter 要求；复用翻译执行器进行译文校验和保存。

@@ -388,9 +388,11 @@ class _TermMatchCache:
         limit: int,
         *, segments: list[dict[str, Any]], warnings: list[str] | None = None,
         sourced_policy: str = "all", unsourced_policy: str = "all", project=None,
+        positionless: bool = False,
     ) -> None:
         self.matcher = _PreparedTermMatcher(library, spec) if library else None
         self.project = project
+        self.positionless = positionless
         self.library = library
         self._resolved_entities: set[str] = set()
         self.spec = spec
@@ -413,12 +415,15 @@ class _TermMatchCache:
                     if self.project is not None and "knowledge_status" not in term:
                         from .term_knowledge import entity_view
                         view = entity_view(self.project, self.library, str(term["normalized"]),
-                                           positions=self.positions, include_unsaved_evidence=False)
+                                           positions=None if self.positionless else self.positions, include_unsaved_evidence=False)
                         root = view["entity_key"]
                         if root not in self._resolved_entities:
                             if view["status"] != "stale":
                                 origin = {"description_items": view["items"]}
-                                self._entity_sources[root] = self._prepare_entity(origin)
+                                self._entity_sources[root] = (
+                                    [{"text": item["text"]} for item in view["items"]]
+                                    if self.positionless else self._prepare_entity(origin)
+                                )
                             for member in view["members"]:
                                 target = self.matcher.by_normalized.get(member)
                                 if target is not None:
@@ -521,7 +526,12 @@ class _TermMatchCache:
                         entity = str(origin.get("entity_key") or origin.get("group_primary") or normalized)
                         entities.setdefault(entity, (current, origin))
                 current["aliases"].update(str(alias) for alias in term.get("aliases", []) if alias)
-        if entities and (self.sourced_policy != "none" or self.unsourced_policy != "none"):
+        if self.positionless:
+            for entity, (current, origin) in entities.items():
+                descriptions = self._entity_sources.get(entity, [])
+                if descriptions:
+                    current["entity_knowledge"] = {"entity": entity, "items": descriptions}
+        elif entities and (self.sourced_policy != "none" or self.unsourced_policy != "none"):
             bounds = []
             for item in items:
                 original_id = str(item.get("_original_segment_id") or item["segment_id"])

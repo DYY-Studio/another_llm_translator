@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import tomllib
@@ -7,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 
 from .errors import UsageError
 from .execution import Scope
@@ -19,7 +20,7 @@ from .sqlite_storage import (
     read_project_meta_read_only,
     read_run_record,
 )
-from .web_payloads import TaskStartPayload
+from .web_payloads import TaskStartPayload, TextTranslationPayload
 from .web_tasks import task_options
 
 
@@ -605,6 +606,33 @@ def register_task_routes(
     project: Callable[[str], Path],
     project_paths: Callable[[], list[Path]],
 ) -> None:
+    @app.post("/api/v1/projects/{name}/text-translation")
+    async def translate_project_text(name: str, payload: TextTranslationPayload, request: Request) -> dict[str, Any]:
+        from .async_utils import run_blocking
+        from .config import load_project_config
+        from .text_translation import translate_text
+
+        root = await run_blocking(project, name)
+        config = await run_blocking(lambda: load_project_config(root, stage="translation"))
+        limiter, release = app.state.tasks.limiter_pool.acquire(config)
+
+        async def wait_for_disconnect() -> None:
+            while (await request.receive())["type"] != "http.disconnect":
+                pass
+
+        translation = asyncio.create_task(translate_text(root, payload.source, config=config, limiter=limiter))
+        disconnected = asyncio.create_task(wait_for_disconnect())
+        try:
+            done, _ = await asyncio.wait((translation, disconnected), return_when=asyncio.FIRST_COMPLETED)
+            if translation in done:
+                return await translation
+            raise HTTPException(status_code=499, detail="请求已取消")
+        finally:
+            translation.cancel()
+            disconnected.cancel()
+            await asyncio.gather(translation, disconnected, return_exceptions=True)
+            release()
+
     def validate_language(value: object) -> str:
         if value not in PROMPT_LANGUAGES:
             raise UsageError("language 必须是 zh-CN 或 en")

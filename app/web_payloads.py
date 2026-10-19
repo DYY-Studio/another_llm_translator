@@ -92,6 +92,11 @@ class TaskStartPayload(_WebPayload):
     summary_selection: list[BoundaryPayload] = Field(default_factory=list)
 
 
+class TextTranslationPayload(_WebPayload):
+    model_config = ConfigDict(extra="forbid")
+    source: StrictStr = Field(min_length=1)
+
+
 class StorageConfirmPayload(_WebPayload):
     confirm: StrictBool
 
