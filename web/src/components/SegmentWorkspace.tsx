@@ -16,6 +16,7 @@ import {
 } from "../segmentReadState";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
+import { TextTranslationDialog } from "./TextTranslationDialog";
 const RepetitionReview = lazy(() => import("./RepetitionReview").then(module => ({ default: module.RepetitionReview })));
 
 interface WorkspaceCacheEntry {
@@ -146,6 +147,7 @@ export function SegmentWorkspace({
   );
   const selection = useClassicSelection();
   const [repetitionOpen, setRepetitionOpen] = useState(false);
+  const [textTranslationOpen, setTextTranslationOpen] = useState(false);
   const [boundary, setBoundary] = useState("all");
   const [status, setStatus] = useState("all");
   const [search, setSearch] = useState("");
@@ -620,7 +622,8 @@ export function SegmentWorkspace({
           <div className="batch-toolbar segment-batch-toolbar">
             <span>{translate("workspace.selectedCount", language, { selected: selectedVisibleIds.length, total })}</span>
             <div className="segment-batch-actions">
-              {stage === "translation" && <button className="quiet-button repetition-entry" onClick={() => setRepetitionOpen(true)}>{translate("repetition.title", language)}</button>}
+              {stage === "translation" && <button className="quiet-button" onClick={() => setTextTranslationOpen(true)}>{translate("textTranslation.title", language)}</button>}
+              {stage === "translation" && <button className="quiet-button" onClick={() => setRepetitionOpen(true)}>{translate("repetition.title", language)}</button>}
               {stage !== "translation" && (
                 <>
                   <button className="quiet-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "apply", scope: "selected" })}>{translate("workspace.applySelected", language)}</button>
@@ -762,6 +765,7 @@ export function SegmentWorkspace({
           onConfirm={runBatch}
         />
       )}
+      {stage === "translation" && <TextTranslationDialog project={project} language={language} open={textTranslationOpen} onClose={() => setTextTranslationOpen(false)} />}
     </div>
   );
 }
