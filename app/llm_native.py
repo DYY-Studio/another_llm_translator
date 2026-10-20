@@ -84,7 +84,10 @@ def reasoning_deltas(fmt: str, data: dict[str, Any]) -> list[str]:
         return []
     choices = _blocks(data.get("choices", []))
     delta = _object(choices[0].get("delta", {})) if choices else {}
-    return [_string(delta[key]) for key in ("reasoning_content", "reasoning") if key in delta and delta[key] is not None]
+    for key in ("reasoning_content", "reasoning"):
+        if key in delta:
+            return [_string(delta[key])] if delta[key] is not None else []
+    return []
 
 
 def stream_error(fmt: str, data: dict[str, Any]) -> StreamErrorDetails | None:

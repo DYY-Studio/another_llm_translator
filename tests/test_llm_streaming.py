@@ -458,12 +458,20 @@ async def test_openai_stream_aggregates_split_utf8_reasoning_and_usage(
 
 
 @pytest.mark.asyncio
-async def test_openai_stream_accepts_reasoning_alias(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("delta", "expected"), [
+    ({"reasoning": "思考"}, "思考"),
+    ({"reasoning_content": "思考", "reasoning": "思考"}, "思考"),
+    ({"reasoning_content": "思考", "reasoning": "另一字段"}, "思考"),
+    ({"reasoning_content": None, "reasoning": "思考"}, None),
+])
+async def test_openai_stream_uses_first_present_reasoning_field(
+    tmp_path: Path, delta: dict, expected: str | None,
+) -> None:
     current = streaming_config(tmp_path)
 
     def handler(_: httpx.Request) -> httpx.Response:
         return stream_response(
-            {"choices": [{"delta": {"reasoning": "思考"}}]},
+            {"choices": [{"delta": delta}]},
             {"choices": [{"delta": {"content": "完成"}}]},
             "[DONE]",
         )
@@ -472,7 +480,7 @@ async def test_openai_stream_accepts_reasoning_alias(tmp_path: Path) -> None:
     await client.aclose()
 
     assert response.content == "完成"
-    assert response.reasoning_content == "思考"
+    assert response.reasoning_content == expected
 
 
 @pytest.mark.asyncio

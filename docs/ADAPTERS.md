@@ -198,6 +198,8 @@ schema 4 的 JSON Pointer Adapter 可以增加 `streaming` 对象；宿主在全
 
 `reasoning_events` 可以为空；内置 Anthropic 不暴露 thinking。OpenAI-compatible 可同时声明 `delta.reasoning_content` 与 `delta.reasoning`，以兼容两类互斥的流式字段。
 
+内置 Chat Completions 流式解析按 `reasoning_content`、`reasoning` 的顺序取首个存在的字段，`null` 表示本事件没有思考增量，不拼接两个字段，与非流式解析一致。
+
 `terminal` 二选一声明 sentinel 或条件；默认每条流必须命中终止条件。`allow_clean_eof` 是可选布尔值，缺省为 `false`。
 
 显式启用后，HTTP 2xx 响应在已收到至少一个合法 SSE `data` 事件、没有读取/协议错误并自然到达 body EOF 时，也可作为第二种终止方式；EOF 前的所有事件仍会被读取，因此尾部 usage 能够被收集。这只放宽传输终止判定，聚合正文仍须通过现有响应格式解析和阶段校验。
