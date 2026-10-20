@@ -2429,8 +2429,6 @@ def test_web_reads_and_saves_typed_project_config(tmp_path: Path) -> None:
     [
         lambda config: config["retry"].__setitem__("http_max_attempts", 1.5),
         lambda config: config["retry"].__setitem__("max_delay_seconds", -1),
-        lambda config: config["project"].__setitem__("unknown", True),
-        lambda config: config.__delitem__("chunking"),
     ],
 )
 def test_web_rejects_invalid_project_config_without_changing_file(
@@ -2471,15 +2469,15 @@ def test_web_config_requires_object_and_existing_matching_adapter(
     assert client.put(
         "/api/v1/projects/sample/config",
         json={"config": config},
-    ).status_code == 400
-    assert (project / "config.toml").read_bytes() == original
+    ).status_code == 200
+    assert load_config(project / "config.toml")["llm"]["preset"] == "missing"
     config = client.get("/api/v1/projects/sample/config").json()["config"]
     config["llm"]["preset_translation"] = "missing"
     assert client.put(
         "/api/v1/projects/sample/config",
         json={"config": config},
-    ).status_code == 400
-    assert (project / "config.toml").read_bytes() == original
+    ).status_code == 200
+    assert load_config(project / "config.toml")["llm"]["preset_translation"] == "missing"
 
 
 def test_web_edits_global_templates_without_changing_existing_project(
@@ -2533,7 +2531,7 @@ def test_web_manages_presets_and_previews_merged_extra_body(
         projects_root=projects_root,
         app_root=app_root,
     ))
-    default = client.get("/api/v1/global/presets/default").json()
+    default = client.get("/api/v1/global/presets/default").json()["preset"]
     custom = {
         **default,
         "preset_id": "openrouter",
@@ -2555,7 +2553,7 @@ def test_web_manages_presets_and_previews_merged_extra_body(
     assert saved.status_code == 200
     assert client.get(
         "/api/v1/global/presets/openrouter"
-    ).json()["stream_read_timeout_enabled"] is False
+    ).json()["preset"]["stream_read_timeout_enabled"] is False
     preview = client.get(
         "/api/v1/global/presets/openrouter/preview"
     ).json()
@@ -2641,8 +2639,9 @@ def test_web_rejects_inline_config(tmp_path: Path) -> None:
     )
 
     response = client.get("/api/v1/projects/sample/config")
-    assert response.status_code == 400
-    assert "未知配置键 config.llm: model" in response.json()["error"]
+    assert response.status_code == 200
+    assert response.json()["warnings"] and "model" in response.json()["warnings"][0]
+    assert "model" not in response.json()["config"]["llm"]
 
 
 def test_web_file_removal_is_all_or_nothing(tmp_path: Path) -> None:
@@ -4138,47 +4137,53 @@ async def test_web_task_manager_queues_projects_fifo_until_slot_is_free(
     _, third_project = make_project(tmp_path / "third")
     entered: list[Path] = []
     release = asyncio.Event()
+    both_entered = asyncio.Event()
 
     async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
         entered.append(project)
+        if len(entered) == 2:
+            both_entered.set()
         await release.wait()
         return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
 
     monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
     manager = WebTaskManager(max_active_projects=2)
-    first = await manager.start(
-        first_project,
-        "translation",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-    second = await manager.start(
-        second_project,
-        "translation",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-    third = await manager.start(
-        third_project,
-        "translation",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-    await asyncio.sleep(0)
-    assert entered == [first_project, second_project]
-    assert manager.get(third["task_id"])["status"] == "queued"
+    started = []
 
-    release.set()
-    await asyncio.gather(
-        manager.tasks[first["task_id"]].asyncio_task,
-        manager.tasks[second["task_id"]].asyncio_task,
-    )
-    assert manager.tasks[third["task_id"]].asyncio_task is not None
-    await manager.tasks[third["task_id"]].asyncio_task
-    assert entered == [first_project, second_project, third_project]
+    async def drain_tasks() -> None:
+        while True:
+            tasks = [
+                manager.tasks[item["task_id"]].asyncio_task
+                for item in started
+                if manager.tasks[item["task_id"]].asyncio_task is not None
+                and not manager.tasks[item["task_id"]].asyncio_task.done()
+            ]
+            if not tasks:
+                return
+            await asyncio.gather(*tasks)
+
+    try:
+        for project in (first_project, second_project, third_project):
+            started.append(await manager.start(
+                project,
+                "translation",
+                scope=Scope(),
+                reuse_mixed_fingerprints=False,
+                run_action=None,
+            ))
+        third = started[2]
+        await asyncio.wait_for(both_entered.wait(), timeout=5)
+        assert entered == [first_project, second_project]
+        assert manager.get(third["task_id"])["status"] == "queued"
+
+        release.set()
+        await drain_tasks()
+        assert manager.tasks[third["task_id"]].asyncio_task is not None
+        assert entered == [first_project, second_project, third_project]
+        assert manager.get(third["task_id"])["status"] == "completed"
+    finally:
+        release.set()
+        await drain_tasks()
 
 
 @pytest.mark.asyncio
@@ -4288,13 +4293,15 @@ async def test_web_task_manager_revalidates_queued_start(
     original_options = web_tasks_module.task_options
     second_calls = 0
 
-    def changed_options(project: Path, stage: str) -> dict[str, object]:
+    def changed_options(
+        project: Path, stage: str, **kwargs: object
+    ) -> dict[str, object]:
         nonlocal second_calls
         if project == second_project:
             second_calls += 1
         if project == second_project and second_calls == 2:
             raise UsageError("排队期间项目设置已变化")
-        return original_options(project, stage)
+        return original_options(project, stage, **kwargs)
 
     monkeypatch.setattr("app.web_tasks.task_options", changed_options)
     manager = WebTaskManager(max_active_projects=1)
@@ -4341,9 +4348,11 @@ async def test_web_task_manager_rejects_changed_selection_before_promotion(
     original_options = web_tasks_module.task_options
     second_calls = 0
 
-    def changed_options(project: Path, stage: str) -> dict[str, object]:
+    def changed_options(
+        project: Path, stage: str, **kwargs: object
+    ) -> dict[str, object]:
         nonlocal second_calls
-        options = original_options(project, stage)
+        options = original_options(project, stage, **kwargs)
         if project == second_project:
             second_calls += 1
             if second_calls == 1:
@@ -4939,13 +4948,15 @@ async def test_web_task_manager_promotion_failure_releases_slot_for_next_task(
     original_options = web_tasks_module.task_options
     second_calls = 0
 
-    def fail_second_promotion(project: Path, stage: str) -> dict[str, object]:
+    def fail_second_promotion(
+        project: Path, stage: str, **kwargs: object
+    ) -> dict[str, object]:
         nonlocal second_calls
         if project == second_project:
             second_calls += 1
             if second_calls == 2:
                 raise UsageError("promotion validation failed")
-        return original_options(project, stage)
+        return original_options(project, stage, **kwargs)
 
     monkeypatch.setattr("app.web_tasks.task_options", fail_second_promotion)
     manager = WebTaskManager(max_active_projects=1)
@@ -5290,7 +5301,7 @@ def test_web_preset_models_discovery_fetches_and_parses(
 
     monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", fake_client)
     client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
-    preset = client.get("/api/v1/global/presets/default").json()
+    preset = client.get("/api/v1/global/presets/default").json()["preset"]
     saved_definition = dict(preset)
     preset.update(
         {
@@ -5326,7 +5337,7 @@ def test_web_preset_models_discovery_fetches_and_parses(
     }
     assert client.get(
         "/api/v1/global/presets/default"
-    ).json() == saved_definition
+    ).json()["preset"] == saved_definition
 
     os.environ["DRAFT_LLM_API_KEY"] = "first-secret\nsecond-secret"
     try:
@@ -5661,7 +5672,7 @@ def test_continuous_decision_policy_is_explicit_and_middle_decision_is_final_rev
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     plans: list[bool] = []
 
     def fake_plan(*_args: object, **kwargs: object) -> dict[str, object]:
@@ -5706,7 +5717,7 @@ def test_continuous_decision_does_not_acknowledge_existing_review_state(
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr("app.web_continuous.decision_plan", lambda *_args, **_kwargs: {
         "config": load_project_config(project, stage="terminology_decision"),
         "prompts": {},
@@ -5748,7 +5759,7 @@ def test_continuous_terminal_decision_is_manual_apply_and_allows_no_apply(
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr("app.web_continuous.decision_plan", lambda *_args, **_kwargs: {
         "config": load_project_config(project, stage="terminology_decision"),
         "prompts": {},
@@ -5779,7 +5790,7 @@ def test_continuous_checks_review_state_even_without_published_terms(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _projects_root, project = make_project(tmp_path)
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: None)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: None)
     monkeypatch.setattr(
         "app.web_continuous.current_decision_draft",
         lambda _project: {"status": "pending"},
@@ -5809,7 +5820,7 @@ def test_continuous_marks_protected_decision_plan_as_no_work(
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr("app.web_continuous.decision_plan", lambda *_args, **_kwargs: {
         "config": load_project_config(project, stage="terminology_decision"),
         "prompts": {},
@@ -5842,7 +5853,7 @@ def test_continuous_skipped_decision_resume_requires_decline_and_force(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _projects_root, project = make_project(tmp_path)
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: None)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: None)
     monkeypatch.setattr("app.web_continuous.run_protocol_is_current", lambda *_: True)
     monkeypatch.setattr(
         "app.web_continuous.find_running_runs",
@@ -5897,7 +5908,7 @@ def test_continuous_fingerprints_downstream_stages_with_terms_revision(
             {"terms_revision": 2, "terms": [{"normalized": "alpha"}]},
         ]
     )
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: next(libraries))
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: next(libraries))
 
     first = inspect_continuous(project, ["translation"])
     second = inspect_continuous(project, ["translation"])
@@ -6069,7 +6080,7 @@ async def test_continuous_decision_no_work_continues_to_translation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _projects_root, project = make_project(tmp_path)
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: None)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: None)
     called: list[str] = []
 
     async def fake_terminology(*_: object, **__: object) -> dict[str, object]:
@@ -6171,7 +6182,7 @@ async def test_continuous_middle_decision_applies_before_translation(
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr(
         "app.web_continuous.decision_plan",
         lambda *_args, **_kwargs: {
@@ -6297,7 +6308,7 @@ async def test_continuous_decision_checks_next_terms_revision_before_apply(
     apply_called = False
     translation_called = False
     draft: dict[str, object] | None = None
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr(
         "app.web_continuous.decision_plan",
         lambda *_args, **_kwargs: {
@@ -6462,7 +6473,7 @@ async def test_continuous_terminal_decision_optional_application(
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr(
         "app.web_continuous.decision_plan",
         lambda *_args, **_kwargs: {
@@ -6639,7 +6650,7 @@ def test_continuous_decision_resume_preflight_rejects_incompatible_run(
         "terms_revision": 2,
         "terms": [{"normalized": "alpha", "disabled": False}],
     }
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project: library)
+    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: library)
     monkeypatch.setattr("app.web_continuous.decision_plan", lambda *_args, **_kwargs: {
         "config": load_project_config(project, stage="terminology_decision"),
         "prompts": {},
@@ -7063,3 +7074,56 @@ def test_continuous_preflight_disables_old_llm_run(tmp_path: Path) -> None:
     assert run["run_id"] == run_id
     assert run["resume_compatible"] is False
     assert any("旧 LLM 协议" in item["message"] for item in result["blocking"])
+
+
+def test_editable_presets_keep_incomplete_definitions_and_report_warnings(tmp_path):
+    from app.user_config import user_root
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root, app_root=tmp_path / 'app-root'))
+    directory = user_root() / 'llm_presets'
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / 'draft.json').write_text('{"unknown":1}')
+    response = client.get('/api/v1/global/presets/draft')
+    assert response.status_code == 200
+    detail = response.json()
+    assert detail['warnings'] and 'model' in detail['missing_fields']
+    assert detail['preset']['credential'] == {'kind': '', 'name': ''}
+    assert client.get('/api/v1/global/presets/draft/preview').status_code == 400
+    saved = client.put('/api/v1/global/presets/draft', json=detail['preset'])
+    assert saved.status_code == 200
+    assert json.loads((directory / 'draft.json').read_text()) == detail['preset']
+    listed = client.get('/api/v1/global/presets').json()['presets']
+    draft = next(item for item in listed if item['preset_id'] == 'draft')
+    assert not draft['valid'] and 'model' in draft['missing_fields']
+
+    decisions = user_root() / 'decision_presets'
+    decisions.mkdir(exist_ok=True)
+    (decisions / 'draft.json').write_text('{}')
+    detail = client.get('/api/v1/global/decision-presets/draft').json()
+    assert detail['preset'] == {'preset_id': 'draft', 'protocol': ''}
+    assert detail['missing_fields'] == ['protocol']
+    assert client.put('/api/v1/global/decision-presets/draft', json=detail['preset']).status_code == 200
+
+
+def test_config_save_canonicalizes_unknown_and_missing_fields(tmp_path):
+    projects_root, project = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root, app_root=tmp_path / 'app-root'))
+    response = client.put('/api/v1/projects/sample/config', json={'config': {'project': {'unknown': 1}}})
+    assert response.status_code == 200 and response.json()['warnings']
+    saved = load_config(project / 'config.toml', snapshot=True)
+    assert 'unknown' not in saved['project']
+    assert saved['chunking']['stage_overrides'] == {}
+
+
+def test_delete_unreferenced_llm_preset_when_llm_decision_exists(tmp_path):
+    from app.user_config import user_root
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root, app_root=tmp_path / 'app-root'))
+    preset = client.get('/api/v1/global/presets/default').json()['preset']
+    preset['preset_id'] = 'unused'
+    assert client.put('/api/v1/global/presets/unused', json=preset).status_code == 200
+    decision = {'preset_id': 'judge', 'protocol': 'llm', 'llm_preset': 'default', 'prompt_language': 'en'}
+    assert client.put('/api/v1/global/decision-presets/judge', json=decision).status_code == 200
+    response = client.delete('/api/v1/global/presets/unused')
+    assert response.status_code == 200 and response.json() == {'deleted': True}
+    assert not (user_root() / 'llm_presets/unused.json').exists()

@@ -55,7 +55,7 @@ function clock(value: string, language: Language) {
 }
 
 function requestStatusLabel(request: Pick<DiagnosticsRequestSummary, "status" | "error">, language: Language) {
-  if (request.status === "failed" && ["format_error", "empty_response_unknown", "empty_response_truncated", "context_length_error"].includes(request.error ?? "")) {
+  if (request.status === "failed" && ["format_error", "json_format_error", "response_incomplete", "response_id_mismatch", "response_field_error", "empty_response_unknown", "empty_response_truncated", "context_length_error"].includes(request.error ?? "")) {
     return translate(`reqResult.${request.error}`, language);
   }
   return translate(`reqStatus.${request.status}`, language);
@@ -159,11 +159,24 @@ const RequestGroup = memo(function RequestGroup({
                 </div>
                 {tabular && <>
                   <span className="request-cell-model" title={item.model}>{item.model}</span>
-                  <span className={`request-status status-${item.status}`}>{requestStatusLabel(item, language)}</span>
-                  {(["input_tokens", "output_tokens", "total_tokens"] as const).map((metric, index) => <span className="request-cell-number" data-label={translate(`diagnostics.${["inputTokens", "outputTokens", "totalTokens"][index]}`, language)} key={metric}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage[metric], language)}` : "—"}</span>)}
+                  <span className="request-cell-status">
+                    <span className={`request-status status-${item.status}`}>{requestStatusLabel(item, language)}</span>
+                    {item.transport === "sse" && <>
+                      <small>{translate("diagnostics.streamEvents", language)}: {item.stream_event_count}</small>
+                      <small>{translate("diagnostics.streamReceived", language)}: {bytes(item.stream_received_bytes, language)}</small>
+                    </>}
+                  </span>
+                  <span className="request-cell-number" data-label={translate("diagnostics.inputTokens", language)}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage.input_tokens, language)}` : "—"}</span>
+                  <span className="request-cell-number" data-label={translate("diagnostics.outputTokens", language)}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage.output_tokens, language)}` : "—"}</span>
+                  {item.request_kind === "decision"
+                    ? <span className="request-cell-number" data-label={translate("diagnostics.decisionQuestions", language)}>{number(item.question_count, language)}</span>
+                    : <span className="request-cell-number" data-label={translate("diagnostics.totalTokens", language)}>{item.usage.available || item.usage.partial ? `${item.usage.partial ? "≥ " : ""}${number(item.usage.total_tokens, language)}` : "—"}</span>}
                   <span className="request-cell-number" data-label={translate("diagnostics.outputRate", language)}>{number(item.output_tokens_per_second, language, "", "—")}</span>
                   <span className="request-cell-number" data-label={translate("diagnostics.tabAttempts", language)}>{item.attempt_count}</span>
-                  <span className="request-cell-number" data-label={translate("diagnostics.requestDuration", language)}>{item.latency_ms === null ? "—" : `${(item.latency_ms / 1000).toFixed(2)} s`}</span>
+                  <span className="request-cell-number" data-label={translate("diagnostics.requestDuration", language)}>
+                    {item.latency_ms === null ? "—" : `${(item.latency_ms / 1000).toFixed(2)} s`}
+                    {item.transport === "sse" && item.stream_first_event_latency_ms !== null && <small>{item.stream_first_event_latency_ms} ms</small>}
+                  </span>
                 </>}
                 {!item.detail_available && <span className="muted">{translate("diagnostics.expired", language)}</span>}
               </article>
@@ -359,6 +372,7 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
   const decisionPending = decisionActivities.reduce((total, item) => total + item.pending, 0);
   const decisionFailures = decisionActivities.reduce((total, item) => total + item.failed + item.interrupted, 0);
   const metrics = value ? { ...value.metrics, ...(requestKind === "decision" ? value.decision.metrics : {}) } : undefined;
+  const usage = value?.request_usage[requestKind];
   const liveDecisionRequests = Array.from(requestSummaries.values()).filter((item) => (
     item.request_kind === "decision" && selectedActivity !== null
     && (item.task_id ?? null) === selectedActivity.task_id && item.model === selectedActivity.model
@@ -377,12 +391,12 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
     setSelectedActivity(null);
     setPausedDecisionRequests(null);
   }
-  const throughput = metrics
+  const throughput = metrics && metrics.elapsed_seconds > 0 && (usage?.available || usage?.partial)
     ? {
-        input: metrics.throughput_input_tokens_per_second,
-        output: metrics.throughput_output_tokens_per_second,
-        total: metrics.throughput_tokens_per_second,
-      }[throughputMetric]
+        input: usage.input_tokens,
+        output: usage.output_tokens,
+        total: usage.total_tokens,
+      }[throughputMetric] / metrics.elapsed_seconds
     : null;
 
   function changeThroughputMetric(metric: ThroughputMetric) {
@@ -400,13 +414,13 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
       <div className="diagnostics-metrics">
         <article><span>{translate("diagnostics.currentRequests", language)}</span><strong>{number(metrics?.active_requests ?? 0, language)}</strong><small>{translate("diagnostics.concurrency", language)}</small></article>
         <article><span>{translate("diagnostics.totalRequests", language)}</span><strong>{number(metrics?.total_requests ?? 0, language)}</strong><small>{translate("diagnostics.logicalRequests", language)}</small></article>
-        <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{metrics?.usage_available || metrics?.usage_partial ? number(metrics.input_tokens, language) : translate("diagnostics.unavailable", language)}</strong><small>{translate("diagnostics.combinedUsage", language)}</small></article>
-        <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{metrics?.usage_available || metrics?.usage_partial ? number(metrics.output_tokens, language) : translate("diagnostics.unavailable", language)}</strong><small>{translate("diagnostics.combinedUsage", language)}</small></article>
+        <article><span>{translate("diagnostics.inputTokens", language)}</span><strong>{usage?.available || usage?.partial ? number(usage.input_tokens, language) : translate("diagnostics.unavailable", language)}</strong><small>{translate(usage?.partial ? "diagnostics.knownUsage" : "diagnostics.requestUsage", language, { kind: requestKind === "decision" ? "Decision" : "LLM" })}</small></article>
+        <article><span>{translate("diagnostics.outputTokens", language)}</span><strong>{usage?.available || usage?.partial ? number(usage.output_tokens, language) : translate("diagnostics.unavailable", language)}</strong><small>{translate(usage?.partial ? "diagnostics.knownUsage" : "diagnostics.requestUsage", language, { kind: requestKind === "decision" ? "Decision" : "LLM" })}</small></article>
         <article><span>{translate(requestKind === "decision" ? "diagnostics.decisionRate" : "diagnostics.throughput", language)}</span><strong>{number(requestKind === "decision" ? decisionActivities.reduce((total, item) => total + (item.requests_per_second ?? 0), 0) : throughput, language)}</strong><small>{translate(requestKind === "decision" ? "diagnostics.requestsPerSecond" : "diagnostics.tokensPerSecond", language)}</small></article>
       </div>
 
       <div className="diagnostics-details" ref={detailsRef} aria-label={translate("diagnostics.requestSummary", language)}>
-        <span>Usage <strong>{metrics?.usage_available ? translate("diagnostics.usageComplete", language) : metrics?.usage_partial ? translate("diagnostics.usagePartial", language) : translate("diagnostics.unavailable", language)}</strong></span>
+        <span>Usage <strong>{usage?.available ? translate("diagnostics.usageComplete", language) : usage?.partial ? translate("diagnostics.usagePartial", language) : translate("diagnostics.unavailable", language)}</strong></span>
         <span>{translate("diagnostics.averageLatency", language)} <strong>{number(metrics?.average_latency_ms ?? null, language, " ms")}</strong></span>
         <span title={requestKind === "decision" ? translate("diagnostics.decisionP95Hint", language) : undefined}>{translate("diagnostics.p95Latency", language)} <strong>{number(metrics?.p95_latency_ms ?? null, language, " ms")}</strong></span>
         <span>{translate("diagnostics.httpErrors", language)} <strong>{number(metrics?.http_errors ?? 0, language)}</strong></span>
@@ -454,7 +468,7 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
           </div>
         </section>}
 
-        <section className="diagnostics-panel request-panel">
+        <section className={`diagnostics-panel request-panel${requestKind === "decision" ? " request-panel-decision" : ""}`}>
           <div className="diagnostics-panel-heading">
             <nav className="diagnostics-subtabs" aria-label={translate("diagnostics.requestKind", language)}>
               <button className={requestKind === "llm" ? "active" : ""} aria-pressed={requestKind === "llm"} onClick={() => setRequestKind("llm")}>LLM</button>
@@ -481,7 +495,10 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
           </div> :
           <div className={`request-groups ${requestTotal ? "has-requests" : ""} ${!requestGroups.active.length || !requestGroups.finished.length ? "single" : ""}`}>
             {requestsOnly && <div className="request-table-heading" aria-hidden="true">
-              {["requestId", "model", "status", "inputTokens", "outputTokens", "totalTokens", "outputRate", "tabAttempts", "requestDuration"].map(key => <span key={key}>{translate(`diagnostics.${key}`, language)}</span>)}
+              {(requestKind === "decision"
+                ? ["requestId", "model", "status", "inputTokens", "outputTokens", "decisionQuestions", "outputRate", "tabAttempts", "requestDuration"]
+                : ["requestId", "model", "status", "inputTokens", "outputTokens", "totalTokens", "outputRate", "tabAttempts", "requestDuration"]
+              ).map(key => <span key={key}>{translate(`diagnostics.${key}`, language)}</span>)}
             </div>}
             {requestGroups.active.length > 0 && (
               <RequestGroup
@@ -579,6 +596,7 @@ function RuntimeDiagnosticsView({ language, requestsOnly = false }: { language: 
                   {(["input_tokens", "output_tokens", "total_tokens"] as const).map((metric, index) => <span key={metric}>{translate(`diagnostics.${["inputTokens", "outputTokens", "totalTokens"][index]}`, language)} <strong>{detail.usage.available || detail.usage.partial ? `${detail.usage.partial ? "≥ " : ""}${number(detail.usage[metric], language)}` : "—"}</strong></span>)}
                   {detail.transport === "sse" && <span>{translate("diagnostics.streamProgress", language)} <strong>{detail.stream_event_count} events · {bytes(detail.stream_received_bytes, language)}{detail.stream_first_event_latency_ms === null ? "" : ` · ${detail.stream_first_event_latency_ms} ms first`}</strong></span>}
                 </div>
+                {detail.error_detail && <div className="warning-banner" style={{ whiteSpace: "pre-wrap" }}>{detail.error_detail}</div>}
                 {detailTab === "overview" && <RequestOverview snapshot={detail.overview} truncated={detail.overview_truncated || detail.response_content_truncated} language={language} />}
                 {detailTab === "request" && (
                   <div className="exchange-request-detail">

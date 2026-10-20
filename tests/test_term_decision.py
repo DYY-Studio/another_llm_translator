@@ -42,7 +42,7 @@ from app.term_decision_rules import (
     _group_violations, _hard_components, _recover_invalid_relationship_components,
 )
 from app.term_decision_batches import (
-    _compact_anchor_evidence, _make_payload, _pack_batches, _related_anchors,
+    _make_payload, _pack_batches, _related_anchors,
     _request_batch, collect_term_evidence, collect_term_review_evidence,
 )
 from app.term_decision_drafts import (
@@ -52,7 +52,7 @@ from app.term_decision_drafts import (
 from app.term_decision_protocol import DECISION_RULES_VERSION
 from app.web import create_app
 from app.web_store import WebStore
-from tests.helpers import llm_jsonl, write_term_library
+from tests.helpers import llm_jsonl, write_term_library, wait_for_web_task
 from tests.test_documents import make_epub
 from tests.test_foundation import make_app_root
 
@@ -134,20 +134,35 @@ def create_decision_project(tmp_path: Path, text: str = "Alice Ally\nBob") -> Pa
     return project
 
 
-def test_retry_feedback_filters_scope_and_omits_protocol_errors() -> None:
+def test_retry_feedback_filters_scope_and_guides_record_shape() -> None:
     from app.term_decision_protocol import validation_feedback
 
     errors = [
         {"code": "invalid_action", "normalized": "alice"},
         {"code": "invalid_reason", "normalized": "alice"},
         {"code": "missing_record", "normalized": "alice"},
+        {"code": "duplicate_record", "normalized": "alice"},
+        {"code": "unknown_record", "normalized": "unseen"},
         {"code": "invalid_relationship", "normalized": "alice"},
         {"code": "invalid_relationship", "normalized": "alice"},
         {"code": "invisible_alias", "normalized": "bob"},
     ]
-    assert validation_feedback(errors, {"alice"}, language="zh-CN") == "依据本次 terms/anchors 联合检查组关系和 alias 归属"
-    assert validation_feedback(errors, {"bob"}, language="zh-CN") == "aliases 仅使用本次 terms/anchors 中可见的 source/alias 原文"
-    assert validation_feedback(errors, {"other"}, language="zh-CN") == ""
+    assert validation_feedback(errors, {"alice"}, language="zh-CN") == (
+        "仅为本次 terms[] 中每项输出一条决策，并逐字照录其 normalized（含大小写和全半角符号）\n"
+        "依据本次 terms/anchors 联合检查组关系和 alias 归属"
+    )
+    assert validation_feedback(errors, {"alice"}, language="en") == (
+        "Return exactly one decision for each item in this request's terms[]; copy normalized verbatim, "
+        "including case and full-/half-width punctuation.\n"
+        "Check group relationships and alias ownership against this request's terms/anchors."
+    )
+    assert validation_feedback(errors, {"bob"}, language="zh-CN") == (
+        "aliases 仅使用本次 terms/anchors 中可见的 source/alias 原文\n"
+        "仅为本次 terms[] 中每项输出一条决策，并逐字照录其 normalized（含大小写和全半角符号）"
+    )
+    assert validation_feedback(errors, {"other"}, language="zh-CN") == (
+        "仅为本次 terms[] 中每项输出一条决策，并逐字照录其 normalized（含大小写和全半角符号）"
+    )
     assert validation_feedback([
         {"code": "invalid_document", "_document_error_code": "invalid_json"},
         *errors,
@@ -377,8 +392,7 @@ def test_decision_config_migrates_defaults_and_cli_contract(tmp_path: Path) -> N
     assert config["llm"]["preset_terminology_decision"] == ""
     assert config["llm"]["temperature_terminology_decision"] == 0.1
     assert config["terminology_decision"] == {
-        "allow_soft_target_overflow": True,
-        "anchor_overflow_mode": "error",
+        "description_generation": "sourced",
     }
     config["terminology_decision"] = "invalid"
     with pytest.raises(ConfigError, match="配置节必须是表"):
@@ -583,11 +597,12 @@ async def test_decision_carries_fragment_descriptions_through_final_review(tmp_p
     add_unsourced(knowledge, "alice", "新身份线索", "import")
     moved = add_unsourced(knowledge, "bob", "原本描述 Bob", "import")
     knowledge["fragments"][moved]["owner"] = "alice"
+    add_unsourced(knowledge, "alice", "另一条身份线索", "import")
     disabled = add_unsourced(knowledge, "alice", "已停用内容", "import")
     knowledge["fragments"][disabled]["state"] = "inactive"
     write_json(project, path, library)
     plan = decision_plan(project, final_review=True)
-    expected = "[alice] unhelpful\n\n[alice] 新身份线索\n\n[bob] 原本描述 Bob"
+    expected = "[alice]\nunhelpful\n\n新身份线索\n\n另一条身份线索\n\n[bob]\n原本描述 Bob"
     for phase in ("adjudication", "consistency", "final_review", "containment"):
         evidence = deepcopy(plan["evidence"])
         if phase == "final_review":
@@ -598,7 +613,7 @@ async def test_decision_carries_fragment_descriptions_through_final_review(tmp_p
             anchors=[plan["states"]["bob"]], evidence=evidence,
         )
         assert payload["terms"][0]["description"] == expected
-        assert payload["terms"][0]["applied_description"] == "unhelpful"
+        assert payload["applied_descriptions"][payload["terms"][0]["applied_description_ref"]] == "unhelpful"
         assert payload["anchors"][0]["description"] is None
         assert "description" not in payload["terms"][0]["evidence"]
 
@@ -615,7 +630,7 @@ async def test_decision_carries_fragment_descriptions_through_final_review(tmp_p
         for term in payload["terms"]:
             if term["normalized"] == "alice":
                 assert term["description"] == expected
-                assert term["applied_description"] == "unhelpful"
+                assert payload["applied_descriptions"][term["applied_description_ref"]] == "unhelpful"
             record = dict(type="decision", normalized=term["normalized"], action="keep", reason="确认")
             if term["normalized"] == "alice":
                 if payload["phase"] != "final_review":
@@ -733,23 +748,6 @@ def test_decision_payload_reuses_request_local_boundary_refs_across_terms() -> N
         set(sample) == {"boundary_ref", "source", "match_view", "matched_forms"}
         for sample in [*focus_samples, *anchor_samples]
     )
-
-
-def test_compact_anchor_payload_removes_samples_before_location_projection() -> None:
-    focus = _batch_state("focus", "Focus")
-    anchor = {**_batch_state("anchor", "Anchor"), "_compact_evidence": True}
-    evidence = _compact_anchor_evidence(_batch_evidence(focus, anchor), [anchor])
-
-    payload = _make_payload(
-        phase="consistency",
-        target_language="简体中文",
-        focus=[focus],
-        anchors=[anchor],
-        evidence=evidence,
-    )
-
-    assert payload["anchors"][0]["evidence"]["samples"] == []
-    assert payload["terms"][0]["evidence"]["samples"][0]["boundary_ref"] == 1
 
 
 def test_final_review_prompt_forbids_unresolved_decisions() -> None:
@@ -986,32 +984,15 @@ def test_final_review_payload_projects_windows_to_request_local_refs() -> None:
         }
     ]
     assert focus_evidence["windows"] == [
-        {
-            "window_ref": 1,
-            "hit_segment_refs": [2],
-            "segments": [
-                {
-                    "segment_ref": 1,
-                    "boundary_ref": 1,
-                    "source": "before",
-                    "is_empty": False,
-                },
-                {
-                    "segment_ref": 2,
-                    "boundary_ref": 1,
-                    "source": "focus hit",
-                    "is_empty": False,
-                },
-            ],
-        }
+        {"window_ref": 1, "hit_segment_refs": [2], "segment_refs": [1, 2]}
     ]
+    assert payload["anchors"][0]["evidence"]["windows"] == focus_evidence["windows"]
+    assert payload["context_segments"] == {
+        "1": {"boundary_ref": 1, "source": "before", "is_empty": False},
+        "2": {"boundary_ref": 1, "source": "focus hit", "is_empty": False},
+    }
     serialized = json.dumps(focus_evidence, ensure_ascii=False)
     assert all(value not in serialized for value in ("F1", "chapter-1", "S0", "S1"))
-
-    compacted = _compact_anchor_evidence(evidence, [{**anchor, "_compact_evidence": True}])
-    assert compacted["anchor"]["samples"] == []
-    assert compacted["anchor"]["windows"] == []
-    assert compacted["focus"]["windows"]
 
 
 def test_final_review_request_estimation_includes_windows_and_rejects_hard_overflow(
@@ -1019,9 +1000,9 @@ def test_final_review_request_estimation_includes_windows_and_rejects_hard_overf
 ) -> None:
     project = create_decision_project(tmp_path)
     config = load_project_config(project, stage="terminology_decision")
-    config["execution"]["target_chunk_input_tokens"] = 1000
+    config["chunking"]["target_content_tokens"] = 1000
     config["llm"]["context_window_tokens"] = 50
-    config["llm"]["context_safety_margin_tokens"] = 0
+    config["chunking"]["context_reserve_tokens"] = 0
     config["execution"]["input_tokens_per_minute"] = 0
     focus = _batch_state("focus", "Focus")
     evidence = _batch_evidence(focus)
@@ -1056,7 +1037,7 @@ def test_final_review_request_estimation_includes_windows_and_rejects_hard_overf
 
     monkeypatch.setattr("app.term_decision_batches.estimate_messages", estimate)
 
-    with pytest.raises(RequestSizeError, match="完整术语及证据仍超过硬限制"):
+    with pytest.raises(RequestSizeError, match="完整术语证据和 Anchors"):
         _pack_batches(
             [focus],
             phase="final_review",
@@ -1069,7 +1050,8 @@ def test_final_review_request_estimation_includes_windows_and_rejects_hard_overf
         )
 
     assert observed[0]["phase"] == "final_review"
-    assert observed[0]["terms"][0]["evidence"]["windows"][0]["segments"]
+    assert observed[0]["terms"][0]["evidence"]["windows"][0]["segment_refs"]
+    assert observed[0]["context_segments"]["1"]["source"] == "x" * 500
 
 
 def test_final_review_rejects_needs_review_as_a_retry_error() -> None:
@@ -1275,6 +1257,59 @@ def test_related_anchors_prioritize_effective_group_dependencies(
     ]
 
 
+def test_related_anchors_keep_all_direct_group_references_over_soft_limit(
+    tmp_path: Path,
+) -> None:
+    project = create_decision_project(tmp_path)
+    spec = term_normalization(load_project_config(project))
+    focus = _batch_state("root", "Root")
+    direct = [
+        {**_batch_state(f"member-{index}", f"Member {index}"),
+         "group_primary": "root"}
+        for index in range(25)
+    ]
+
+    related = _related_anchors([focus], direct, spec)
+
+    assert {item["normalized"] for item in related} == {
+        item["normalized"] for item in direct
+    }
+
+
+@pytest.mark.asyncio
+async def test_retry_batch_filters_unrelated_original_anchors(tmp_path: Path) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    focus = _batch_state("root", "Root")
+    direct = {**_batch_state("direct", "Member"), "group_primary": "root"}
+    unrelated = [
+        _batch_state(f"unrelated-{index}", f"Unrelated {index}")
+        for index in range(24)
+    ]
+    payloads = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-filter-original-anchors")
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            payloads.append(payload)
+            return SimpleNamespace(content=llm_jsonl([
+                {"type": "decision", "normalized": "root",
+                 "action": "keep", "reason": "synthetic"}
+            ])), None
+
+    states = [focus, direct, *unrelated]
+    await _request_batch(
+        StubLLM(), focus=[focus], anchors=[direct, *unrelated],
+        phase="consistency", prompt="synthetic", config=config,
+        evidence=_batch_evidence(*states),
+        known_states={state["normalized"]: state for state in states},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+    assert [item["normalized"] for item in payloads[0]["anchors"]] == ["direct"]
+
+
 def test_hard_components_join_groups_and_normalized_form_owners(tmp_path: Path) -> None:
     project = create_decision_project(tmp_path)
     spec = term_normalization(load_project_config(project))
@@ -1296,9 +1331,9 @@ def test_hard_component_is_never_split_and_reports_all_members_when_oversized(
 ) -> None:
     project = create_decision_project(tmp_path)
     config = load_project_config(project, stage="terminology_decision")
-    config["execution"]["target_chunk_input_tokens"] = 50
+    config["chunking"]["target_content_tokens"] = 50
     config["llm"]["context_window_tokens"] = 100
-    config["llm"]["context_safety_margin_tokens"] = 0
+    config["chunking"]["context_reserve_tokens"] = 0
     config["execution"]["input_tokens_per_minute"] = 0
     root = _batch_state("root", "Root")
     member = {**_batch_state("member", "Member"), "group_primary": "root"}
@@ -1364,100 +1399,52 @@ def test_dry_run_plans_second_phase_instead_of_doubling_first(
     }
 
 
-def test_decision_batch_overflow_policy_controls_local_planning(
+def test_decision_batches_keep_required_anchors_and_allow_soft_singletons(tmp_path: Path) -> None:
+    from app.execution import estimate_messages, render_messages
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["chunking"].update(target_content_tokens=1, context_reserve_tokens=0)
+    config["execution"]["input_tokens_per_minute"] = 0
+    focus = _batch_state("alice", "Alice")
+    anchor = {**_batch_state("ally", "Ally"), "group_primary": "alice"}
+    evidence = _batch_evidence(focus, anchor)
+    kwargs = dict(phase="consistency", target_language="简体中文", anchors=[anchor],
+                  evidence=evidence, prompt="prompt", config=config, spec=term_normalization(config))
+    batches, tokens = _pack_batches([focus], **kwargs)
+    assert len(batches) == 1
+    assert batches[0][1] == [anchor]
+    payload = _make_payload(phase="consistency", target_language="简体中文", focus=[focus], anchors=[anchor], evidence=evidence)
+    full = estimate_messages(render_messages("prompt", payload), config["execution"]["token_safety_factor"])
+    assert tokens == full
+    config["chunking"]["max_input_tokens"] = full - 1
+    with pytest.raises(RequestSizeError, match="完整术语证据和 Anchors"):
+        _pack_batches([focus], **kwargs)
+    config["chunking"]["max_input_tokens"] = 65536
+    config["execution"]["input_tokens_per_minute"] = full - 1
+    with pytest.raises(RequestSizeError) as error:
+        _pack_batches([focus], **kwargs)
+    assert error.value.reason == "itpm"
+
+def test_batch_trimming_does_not_drop_direct_group_references(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = create_decision_project(tmp_path)
     config = load_project_config(project, stage="terminology_decision")
-    config["execution"]["target_chunk_input_tokens"] = 50
-    config["llm"]["context_window_tokens"] = 120
-    config["llm"]["context_safety_margin_tokens"] = 0
+    config["llm"]["context_window_tokens"] = 100
+    config["chunking"]["context_reserve_tokens"] = 0
     config["execution"]["input_tokens_per_minute"] = 0
-    config["execution"]["token_safety_factor"] = 1
-    focus = _batch_state("alice", "Alice")
-    first_anchor = _batch_state("alice smith", "Alice Smith")
-    second_anchor = _batch_state("alice johnson", "Alice Johnson")
-    evidence = _batch_evidence(focus, first_anchor, second_anchor)
-
-    def estimate(messages: list[dict[str, str]], _: float) -> int:
-        payload = json.loads(messages[1]["content"])
-        anchors = payload["anchors"]
-        samples = sum(len(item["evidence"]["samples"]) for item in anchors)
-        return 31 + 20 * len(payload["terms"]) + 15 * len(anchors) + 4 * samples
-
-    monkeypatch.setattr("app.term_decision_batches.estimate_messages", estimate)
-    spec = term_normalization(config)
-
-    config["terminology_decision"]["anchor_overflow_mode"] = "error"
-    with pytest.raises(RequestSizeError, match="Anchor 超限策略为 error") as error:
-        _pack_batches(
-            [focus],
-            phase="consistency",
-            target_language="简体中文",
-            anchors=[first_anchor, second_anchor],
-            evidence=evidence,
-            prompt="prompt",
-            config=config,
-            spec=spec,
-        )
-    assert error.value.reason == "context"
-
-    config["terminology_decision"]["anchor_overflow_mode"] = "trim"
-    batches, _ = _pack_batches(
-        [focus],
-        phase="consistency",
-        target_language="简体中文",
-        anchors=[first_anchor, second_anchor],
-        evidence=evidence,
-        prompt="prompt",
-        config=config,
-        spec=spec,
+    focus = _batch_state("root", "Root")
+    direct = {**_batch_state("member", "Member"), "group_primary": "root"}
+    monkeypatch.setattr(
+        "app.term_decision_batches.estimate_messages",
+        lambda messages, _: 200 if json.loads(messages[1]["content"])["anchors"] else 50,
     )
-    assert [item["source"] for item in batches[0][1]] == ["Alice Smith"]
 
-    config["terminology_decision"]["anchor_overflow_mode"] = "compact"
-    batches, _ = _pack_batches(
-        [focus],
-        phase="consistency",
-        target_language="简体中文",
-        anchors=[first_anchor, second_anchor],
-        evidence=evidence,
-        prompt="prompt",
-        config=config,
-        spec=spec,
-    )
-    assert len(batches[0][1]) == 2
-    assert all(item.get("_compact_evidence") for item in batches[0][1])
-
-    config["terminology_decision"]["anchor_overflow_mode"] = "error"
-    config["terminology_decision"]["allow_soft_target_overflow"] = False
-    with pytest.raises(RequestSizeError, match="超过软目标") as error:
+    with pytest.raises(RequestSizeError, match="完整术语证据和 Anchors"):
         _pack_batches(
-            [focus],
-            phase="consistency",
-            target_language="简体中文",
-            anchors=[],
-            evidence=evidence,
-            prompt="prompt",
-            config=config,
-            spec=spec,
+            [focus], phase="consistency", target_language="简体中文",
+            anchors=[direct], evidence=_batch_evidence(focus, direct),
+            prompt="prompt", config=config, spec=term_normalization(config),
         )
-    assert error.value.reason == "context"
-
-    config["terminology_decision"]["allow_soft_target_overflow"] = True
-    config["execution"]["input_tokens_per_minute"] = 40
-    with pytest.raises(RequestSizeError, match="限制 40 tokens") as error:
-        _pack_batches(
-            [focus],
-            phase="consistency",
-            target_language="简体中文",
-            anchors=[],
-            evidence=evidence,
-            prompt="prompt",
-            config=config,
-            spec=spec,
-        )
-    assert error.value.reason == "itpm"
 
 
 def test_decision_parser_keeps_unknown_terms_strict() -> None:
@@ -1494,7 +1481,422 @@ def test_decision_parser_keeps_unknown_terms_strict() -> None:
     assert len(errors) == 1
     assert errors[0]["code"] == "unknown_record"
     assert "未知术语决策 normalized：not-an-anchor" in errors[0]["message"]
-    assert batch_error is True
+    assert batch_error is False
+
+
+@pytest.mark.asyncio
+async def test_unknown_record_does_not_discard_valid_results_or_expand_retry(
+    tmp_path: Path,
+) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 2
+    focus = [_batch_state("alice", "Alice"), _batch_state("bob", "Bob")]
+
+    class StubLLM:
+        logger = logging.getLogger("test-unknown-partial")
+
+        def __init__(self):
+            self.targets = []
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            targets = [term["normalized"] for term in payload["terms"]]
+            self.targets.append(targets)
+            records = [
+                {"type": "decision", "normalized": targets[0],
+                 "action": "keep", "reason": "synthetic"}
+            ]
+            if len(self.targets) == 1:
+                records.append({"type": "decision", "normalized": "foreign",
+                                "action": "keep", "reason": "synthetic"})
+            else:
+                records = [{"type": "decision", "normalized": targets[0],
+                            "action": "keep", "reason": "synthetic"}]
+            return SimpleNamespace(content=llm_jsonl(records)), None
+
+    llm = StubLLM()
+    result = await _request_batch(
+        llm, focus=focus, anchors=[], phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+    assert set(result) == {"alice", "bob"}
+    assert llm.targets == [["alice", "bob"], ["bob"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "completion_order",
+    [("alice", "bob", "carol"), ("bob", "carol", "alice")],
+)
+async def test_isolated_retry_groups_overlap_from_same_reference_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completion_order: tuple[str, str, str],
+) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 2
+    config["execution"]["max_parallel"] = 2
+    focus = [
+        _batch_state("alice", "Alice"),
+        _batch_state("bob", "Bob"),
+        _batch_state("carol", "Carol"),
+    ]
+
+    def include_sibling_anchors(focus_states, candidates, _spec):
+        focus_ids = {str(item["normalized"]) for item in focus_states}
+        return [
+            item for item in candidates
+            if str(item["normalized"]) not in focus_ids
+        ]
+
+    monkeypatch.setattr(
+        "app.term_decision_batches._related_anchors", include_sibling_anchors
+    )
+    both_started = asyncio.Event()
+    release = {normalized: asyncio.Event() for normalized in completion_order}
+    release[completion_order[0]].set()
+    active = 0
+    maximum_active = 0
+    calls = 0
+    payloads = []
+    completed = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-isolated-retry-overlap")
+
+        async def chat(self, *, messages, **kwargs):
+            nonlocal active, maximum_active, calls
+            payload = json.loads(messages[1]["content"])
+            payloads.append(payload)
+            targets = [term["normalized"] for term in payload["terms"]]
+            calls += 1
+            if calls <= 2:
+                return SimpleNamespace(content=llm_jsonl([])), None
+            active += 1
+            maximum_active = max(maximum_active, active)
+            if active == 2:
+                both_started.set()
+            await both_started.wait()
+            await release[targets[0]].wait()
+            completed.append(targets[0])
+            index = completion_order.index(targets[0])
+            if index + 1 < len(completion_order):
+                release[completion_order[index + 1]].set()
+            active -= 1
+            if targets[0] == completion_order[0]:
+                return SimpleNamespace(content=llm_jsonl([
+                    {"type": "decision", "normalized": targets[0],
+                     "action": "update", "reason": "synthetic",
+                     "changes": {"category": "角色"}}
+                ])), None
+            return SimpleNamespace(content=llm_jsonl([
+                {"type": "decision", "normalized": normalized,
+                 "action": "keep", "reason": "synthetic"}
+                for normalized in targets
+            ])), None
+
+    result = await asyncio.wait_for(_request_batch(
+        StubLLM(), focus=focus, anchors=focus, phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    ), timeout=1)
+
+    assert set(result) == {"alice", "bob", "carol"}
+    assert maximum_active == 2
+    assert completed == list(completion_order)
+    isolated_payloads = payloads[-3:]
+    for payload in isolated_payloads:
+        target = payload["terms"][0]["normalized"]
+        sibling_anchors = {
+            item["normalized"]: item for item in payload["anchors"]
+        }
+        for sibling in set(result) - {target}:
+            assert sibling in sibling_anchors
+            assert sibling_anchors[sibling]["category"] == "人物"
+
+
+@pytest.mark.asyncio
+async def test_isolated_group_primary_cycle_retries_combined_component(
+    tmp_path: Path,
+) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 3
+    config["execution"]["max_parallel"] = 2
+    alpha = {**_batch_state("alpha", "Alpha"), "aliases": ["prefixBetaSuffixA"]}
+    beta = {**_batch_state("beta", "Beta"), "aliases": ["prefixAlphaSuffixB"]}
+    focus = [alpha, beta]
+    payloads = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-isolated-group-cycle")
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            payloads.append(payload)
+            targets = [term["normalized"] for term in payload["terms"]]
+            if len(payloads) <= 2:
+                return SimpleNamespace(content=llm_jsonl([])), None
+            if len(payloads) <= 4:
+                target = targets[0]
+                primary = "beta" if target == "alpha" else "alpha"
+                return SimpleNamespace(content=llm_jsonl([
+                    {"type": "decision", "normalized": target,
+                     "action": "update", "reason": "synthetic",
+                     "changes": {"group_primary": primary}}
+                ])), None
+            return SimpleNamespace(content=llm_jsonl([
+                {"type": "decision", "normalized": target,
+                 "action": "keep", "reason": "synthetic"}
+                for target in targets
+            ])), None
+
+    result = await _request_batch(
+        StubLLM(), focus=focus, anchors=focus, phase="consistency",
+        prompt="synthetic", config=config,
+        evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+
+    assert set(result) == {"alpha", "beta"}
+    assert [payload["terms"][0]["normalized"] for payload in payloads[2:4]] == [
+        "alpha", "beta"
+    ]
+    assert [payload["anchors"][0]["normalized"] for payload in payloads[2:4]] == [
+        "beta", "alpha"
+    ]
+    assert [term["normalized"] for term in payloads[4]["terms"]] == [
+        "alpha", "beta"
+    ]
+    assert len(payloads) == 5
+    assert payloads[4]["validation_repair"] == "依据本次 terms/anchors 联合检查组关系和 alias 归属"
+    assert all(decision["action"] == "keep" for decision in result.values())
+
+
+@pytest.mark.asyncio
+async def test_new_group_relation_retries_failed_dependency_with_proposer(
+    tmp_path: Path,
+) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 2
+    focus = [_batch_state("alice", "Alice"), _batch_state("bob", "Bob")]
+
+    class StubLLM:
+        logger = logging.getLogger("test-dynamic-dependency")
+
+        def __init__(self):
+            self.targets = []
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            targets = [term["normalized"] for term in payload["terms"]]
+            self.targets.append(targets)
+            if len(self.targets) == 1:
+                records = [
+                    {"type": "decision", "normalized": "alice", "action": "update",
+                     "reason": "synthetic", "changes": {"group_primary": "bob"}},
+                    {"type": "decision", "normalized": "bob", "action": "update",
+                     "reason": "synthetic", "changes": {"aliases": ["Invisible"]}},
+                ]
+            else:
+                records = [
+                    {"type": "decision", "normalized": normalized,
+                     "action": "keep", "reason": "synthetic"}
+                    for normalized in targets
+                ]
+            return SimpleNamespace(content=llm_jsonl(records)), None
+
+    llm = StubLLM()
+    result = await _request_batch(
+        llm, focus=focus, anchors=[], phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+    assert set(result) == {"alice", "bob"}
+    assert llm.targets == [["alice", "bob"], ["alice", "bob"]]
+
+
+@pytest.mark.asyncio
+async def test_rejected_candidate_dependency_keeps_full_retry_component(
+    tmp_path: Path,
+) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 2
+    focus = [_batch_state("alice", "Alice"), _batch_state("bob", "Bob"),
+             _batch_state("carol", "Carol")]
+    payload_targets = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-rejected-candidate-dependency")
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            targets = [term["normalized"] for term in payload["terms"]]
+            payload_targets.append(targets)
+            if len(payload_targets) == 1:
+                records = [
+                    {"type": "decision", "normalized": "alice", "action": "update",
+                     "reason": "synthetic", "changes": {"group_primary": "bob"}},
+                    {"type": "decision", "normalized": "bob", "action": "update",
+                     "reason": "synthetic", "changes": {"group_primary": "carol"}},
+                    {"type": "decision", "normalized": "carol", "action": "keep",
+                     "reason": "synthetic"},
+                ]
+            else:
+                records = [
+                    {"type": "decision", "normalized": normalized,
+                     "action": "keep", "reason": "synthetic"}
+                    for normalized in targets
+                ]
+            return SimpleNamespace(content=llm_jsonl(records)), None
+
+    result = await _request_batch(
+        StubLLM(), focus=focus, anchors=[], phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+    assert set(result) == {"alice", "bob", "carol"}
+    assert payload_targets == [
+        ["alice", "bob", "carol"], ["alice", "bob", "carol"]
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("accepted_action", "anchor_category"),
+    [("update", "角色"), ("disable", "__disabled__"),
+     ("needs_review", "待审状态"), ("keep", "人物")],
+)
+async def test_retry_references_action_specific_accepted_state(
+    tmp_path: Path, accepted_action: str, anchor_category: str | None,
+) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 2
+    alice = _batch_state("alice", "Bobbie")
+    bob = _batch_state("bob", "Bob")
+    review_state = {**alice, "category": "待审状态"}
+    payloads = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-action-reference")
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            payloads.append(payload)
+            if len(payloads) == 1:
+                accepted = {"type": "decision", "normalized": "alice",
+                            "action": accepted_action, "reason": "synthetic"}
+                if accepted_action == "update":
+                    accepted["changes"] = {"category": "角色"}
+                failed = {"type": "decision", "normalized": "bob",
+                          "action": "update", "reason": "synthetic",
+                          "changes": {"aliases": ["Invisible"]}}
+                records = [accepted, failed]
+            else:
+                records = [{"type": "decision", "normalized": "bob",
+                            "action": "keep", "reason": "synthetic"}]
+            return SimpleNamespace(content=llm_jsonl(records)), None
+
+    llm = StubLLM()
+    result = await _request_batch(
+        llm, focus=[alice, bob], anchors=[], phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(alice, bob),
+        known_states={"alice": alice, "bob": bob}, read_only_terms=set(),
+        prompt_language="zh-CN", review_states={"alice": review_state},
+        spec=term_normalization(config),
+    )
+    assert set(result) == {"alice", "bob"}
+    anchors_on_retry = payloads[1]["anchors"]
+    alice_anchor = next((item for item in anchors_on_retry
+                         if item["normalized"] == "alice"), None)
+    if anchor_category == "__disabled__":
+        assert alice_anchor is not None
+        assert alice_anchor["disabled"] is True
+    else:
+        assert alice_anchor is not None
+        assert alice_anchor["category"] == anchor_category
+
+
+@pytest.mark.asyncio
+async def test_duplicate_record_retries_only_its_target(tmp_path: Path) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 2
+    focus = [_batch_state("alice", "Alice"), _batch_state("bob", "Bob")]
+    payload_targets = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-duplicate-retry")
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            targets = [term["normalized"] for term in payload["terms"]]
+            payload_targets.append(targets)
+            if len(payload_targets) == 1:
+                records = [
+                    {"type": "decision", "normalized": "alice", "action": "keep",
+                     "reason": "synthetic"},
+                    {"type": "decision", "normalized": "alice", "action": "keep",
+                     "reason": "duplicate"},
+                    {"type": "decision", "normalized": "bob", "action": "keep",
+                     "reason": "synthetic"},
+                ]
+            else:
+                records = [{"type": "decision", "normalized": "alice",
+                            "action": "keep", "reason": "synthetic"}]
+            return SimpleNamespace(content=llm_jsonl(records)), None
+
+    result = await _request_batch(
+        StubLLM(), focus=focus, anchors=[], phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+    assert set(result) == {"alice", "bob"}
+    assert payload_targets == [["alice", "bob"], ["alice"]]
+
+
+@pytest.mark.asyncio
+async def test_incomplete_jsonl_retries_the_entire_response(tmp_path: Path) -> None:
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["retry"]["format_max_attempts"] = 1
+    focus = [_batch_state("alice", "Alice"), _batch_state("bob", "Bob")]
+    payload_targets = []
+
+    class StubLLM:
+        logger = logging.getLogger("test-invalid-document-retry")
+
+        async def chat(self, *, messages, **kwargs):
+            payload = json.loads(messages[1]["content"])
+            targets = [term["normalized"] for term in payload["terms"]]
+            payload_targets.append(targets)
+            if len(payload_targets) == 1:
+                return SimpleNamespace(content='{"type":"decision","normalized":"alice","action":"keep","reason":"synthetic"}\n'), None
+            return SimpleNamespace(content=llm_jsonl([
+                {"type": "decision", "normalized": normalized,
+                 "action": "keep", "reason": "synthetic"}
+                for normalized in targets
+            ])), None
+
+    result = await _request_batch(
+        StubLLM(), focus=focus, anchors=[], phase="consistency", prompt="synthetic",
+        config=config, evidence=_batch_evidence(*focus),
+        known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={},
+        spec=term_normalization(config),
+    )
+    assert set(result) == {"alice", "bob"}
+    assert payload_targets == [["alice", "bob"], ["alice", "bob"]]
 
 
 def test_scalar_conflicts_require_explicit_resolution_and_allow_new_values() -> None:
@@ -2064,7 +2466,10 @@ async def test_cross_batch_group_cycle_becomes_manual_review(
     project = create_decision_project(tmp_path)
 
     def cross_referenced_batches(states: list[dict], **_: object) -> tuple[list, int]:
-        return [([state], [other]) for state, other in zip(states, reversed(states))], 2
+        return [
+            ([state], [{**other, "group_primary": state["normalized"]}])
+            for state, other in zip(states, reversed(states))
+        ], 2
 
     monkeypatch.setattr("app.term_decision_batches._pack_batches", cross_referenced_batches)
 
@@ -2148,36 +2553,32 @@ async def test_decision_group_violation_enters_format_repair(
 
 
 @pytest.mark.asyncio
-async def test_decision_format_repair_lists_exact_target_scope(
+async def test_unknown_decision_is_warned_without_format_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.setattr(logging.getLogger("another_llm_translator"), "propagate", True)
     project = create_decision_project(tmp_path)
     monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
     calls = 0
-    repairs = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls, repairs
+        nonlocal calls
         calls += 1
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        if calls % 2 == 0:
-            repairs += 1
-            assert "format_correction" not in payload
-            assert "validation_repair" not in payload
-            content = llm_jsonl(decision_response(payload))
-        else:
-            content = llm_jsonl(
-                [
-                    *decision_response(payload),
-                    {
-                        "type": "decision",
-                        "normalized": "not-an-anchor",
-                        "action": "keep",
-                        "reason": "越界",
-                    },
-                ]
-            )
+        assert "validation_repair" not in payload
+        content = llm_jsonl(
+            [
+                *decision_response(payload),
+                {
+                    "type": "decision",
+                    "normalized": "not-an-anchor",
+                    "action": "keep",
+                    "reason": "越界",
+                },
+            ]
+        )
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": content}}]},
@@ -2191,8 +2592,8 @@ async def test_decision_format_repair_lists_exact_target_scope(
     del os.environ["LLM_API_KEY"]
 
     assert summary["proposals"] == 1
-    assert calls == 8
-    assert repairs == 4
+    assert calls == 4
+    assert "rejected unknown terminology decisions" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2282,7 +2683,7 @@ async def test_format_repair_preserves_valid_records_and_retries_only_unresolved
             else:
                 assert "format_correction" not in payload
                 assert "validation_repair" not in payload
-                assert "alice" in {item["normalized"] for item in payload["anchors"]}
+                assert "alice" not in {item["normalized"] for item in payload["anchors"]}
                 content = llm_jsonl(decision_response(payload))
         else:
             content = llm_jsonl(decision_response(payload))
@@ -2482,9 +2883,15 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
         "/api/v1/projects/decision-demo/terms/decision"
     )
     assert review.status_code == 200
-    api_sample = review.json()["draft"]["proposals"][0]["evidence"]["alice"][
-        "samples"
-    ][0]
+    public = review.json()["draft"]
+    assert "source_library" not in public and "source_overrides" not in public
+    proposal = public["proposals"][0]
+    assert proposal["evidence"] == {} and proposal["knowledge_evidence"] == {}
+    detail = TestClient(create_app(projects_root=project.parent)).get(
+        f"/api/v1/projects/decision-demo/terms/decision/{draft['run_id']}/proposals/{proposal['proposal_id']}"
+    )
+    assert detail.status_code == 200
+    api_sample = detail.json()["evidence"]["alice"]["samples"][0]
     assert api_sample["file_id"] == durable_sample["file_id"]
     assert api_sample["part_id"] == durable_sample["part_id"]
     assert api_sample["segment_id"] == durable_sample["segment_id"]
@@ -2958,9 +3365,14 @@ async def test_decision_ignores_extra_read_only_anchor_records(
     def scoped_batches(
         states: list[dict[str, object]], *, phase: str, **_: object
     ) -> tuple[list, int]:
+        if len(states) == 1:
+            return [(states, _["anchors"])], 10
         batches = []
         for index, state in enumerate(states):
-            references = [states[1 - index]] if phase == "consistency" else []
+            references = (
+                [{**states[1 - index], "group_primary": state["normalized"]}]
+                if phase == "consistency" else []
+            )
             batches.append(([state], references))
         return batches, len(batches)
 
@@ -3508,10 +3920,6 @@ async def test_web_decision_review_rejections_and_apply(tmp_path: Path) -> None:
     assert options.status_code == 200
     assert options.json()["selected"] == 2
     assert options.json()["has_pending_draft"] is True
-    assert options.json()["overflow_policy"] == {
-        "allow_soft_target_overflow": True,
-        "anchor_overflow_mode": "error",
-    }
     review = client.get("/api/v1/projects/decision-demo/terms/decision").json()
     proposal_id = review["draft"]["proposals"][0]["proposal_id"]
     rejected = client.put(
@@ -3699,10 +4107,11 @@ def test_web_decision_start_reuses_plan_and_saves_draft(
         assert started.json()["stage"] == "terminology_decision"
         assert started.json()["total_segments"] == 4
         task_id = started.json()["task_id"]
-        state = client.get(f"/api/v1/tasks/{task_id}").json()
+        state = wait_for_web_task(client, task_id)
         assert state["status"] == "completed"
         assert state["completed_segments"] == state["total_segments"] == 4
-    assert len(plans) == 2
+    assert len(plans) == 3
+    assert sum(plan["requests_prepared"] for plan in plans) == 1
     assert plans[-1]["eligible"]
     assert phases == ["adjudication", "consistency"]
     draft = current_decision_draft(project)
@@ -3723,44 +4132,44 @@ def test_web_resumes_complete_legacy_group_checkpoint_into_review(
         raise AssertionError("Web 恢复完整检查点不得重新请求模型")
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", unexpected_request)
-    client = TestClient(create_app(projects_root=project.parent))
-    options = client.get(
-        "/api/v1/projects/decision-demo/task-options/terminology_decision"
-    )
-    assert options.status_code == 200
-    assert options.json()["running_run"]["run_id"] == run_id
-    assert options.json()["running_run"]["completed_steps"] == 4
-    assert options.json()["running_run"]["total_steps"] == 4
+    with TestClient(create_app(projects_root=project.parent)) as client:
+        options = client.get(
+            "/api/v1/projects/decision-demo/task-options/terminology_decision"
+        )
+        assert options.status_code == 200
+        assert options.json()["running_run"]["run_id"] == run_id
+        assert options.json()["running_run"]["completed_steps"] == 4
+        assert options.json()["running_run"]["total_steps"] == 4
 
-    started = client.post(
-        "/api/v1/projects/decision-demo/tasks",
-        json={"stage": "terminology_decision", "run_action": "resume"},
-    )
-    assert started.status_code == 200
-    task_id = started.json()["task_id"]
-    for _ in range(20):
-        state = client.get(f"/api/v1/tasks/{task_id}").json()
-        if state["status"] in {"completed", "failed", "cancelled"}:
-            break
+        started = client.post(
+            "/api/v1/projects/decision-demo/tasks",
+            json={"stage": "terminology_decision", "run_action": "resume"},
+        )
+        assert started.status_code == 200
+        task_id = started.json()["task_id"]
+        for _ in range(20):
+            state = wait_for_web_task(client, task_id)
+            if state["status"] in {"completed", "failed", "cancelled"}:
+                break
 
-    assert state["status"] == "completed"
-    assert state["completed_segments"] == 4
-    assert state["failed_segments"] == 0
-    assert state["total_segments"] == 4
-    assert state["usage"] == observed_usage
-    assert state["summary"]["proposals"] == 1
-    assert state["summary"]["needs_review"] == 1
-    review = client.get("/api/v1/projects/decision-demo/terms/decision")
-    assert review.status_code == 200
-    assert review.json()["draft"]["run_id"] == run_id
-    assert review.json()["draft"]["needs_review"][0]["normalized"] == "alice"
-    assert (run_dir / CHECKPOINT_FILE).read_bytes() == checkpoint_before
+        assert state["status"] == "completed"
+        assert state["completed_segments"] == 4
+        assert state["failed_segments"] == 0
+        assert state["total_segments"] == 4
+        assert state["usage"] == observed_usage
+        assert state["summary"]["proposals"] == 1
+        assert state["summary"]["needs_review"] == 1
+        review = client.get("/api/v1/projects/decision-demo/terms/decision")
+        assert review.status_code == 200
+        assert review.json()["draft"]["run_id"] == run_id
+        assert review.json()["draft"]["needs_review"][0]["normalized"] == "alice"
+        assert (run_dir / CHECKPOINT_FILE).read_bytes() == checkpoint_before
 
-    refreshed = client.get(
-        "/api/v1/projects/decision-demo/task-options/terminology_decision"
-    ).json()
-    assert refreshed["running_run"] is None
-    assert refreshed["has_pending_draft"] is True
+        refreshed = client.get(
+            "/api/v1/projects/decision-demo/task-options/terminology_decision"
+        ).json()
+        assert refreshed["running_run"] is None
+        assert refreshed["has_pending_draft"] is True
 
 
 def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
@@ -3817,62 +4226,62 @@ def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
         return {"completed": 4, "failed": 0, "pending": 0}
 
     monkeypatch.setattr("app.web_tasks.run_terminology_decision", fake_decision)
-    client = TestClient(create_app(projects_root=project.parent))
-    options = client.get(
-        "/api/v1/projects/decision-demo/task-options/terminology_decision"
-    )
-    assert options.status_code == 200
-    assert options.json()["running_run"]["run_id"] == run_id
-    assert options.json()["running_run"]["completed_steps"] == 1
-    assert options.json()["running_run"]["total_steps"] == 4
-    assert options.json()["running_run"]["resume_compatible"] is True
-    assert options.json()["running_run"]["resume_incompatibility_reason"] is None
-    assert (
-        client.post(
+    with TestClient(create_app(projects_root=project.parent)) as client:
+        options = client.get(
+            "/api/v1/projects/decision-demo/task-options/terminology_decision"
+        )
+        assert options.status_code == 200
+        assert options.json()["running_run"]["run_id"] == run_id
+        assert options.json()["running_run"]["completed_steps"] == 1
+        assert options.json()["running_run"]["total_steps"] == 4
+        assert options.json()["running_run"]["resume_compatible"] is True
+        assert options.json()["running_run"]["resume_incompatibility_reason"] is None
+        assert (
+            client.post(
+                "/api/v1/projects/decision-demo/tasks",
+                json={"stage": "terminology_decision"},
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/api/v1/projects/decision-demo/tasks",
+                json={
+                    "stage": "terminology_decision",
+                    "run_action": "resume",
+                    "force": True,
+                },
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/api/v1/projects/decision-demo/tasks",
+                json={"stage": "terminology_decision", "run_action": "decline"},
+            ).status_code
+            == 400
+        )
+
+        resumed = client.post(
             "/api/v1/projects/decision-demo/tasks",
-            json={"stage": "terminology_decision"},
-        ).status_code
-        == 400
-    )
-    assert (
-        client.post(
+            json={"stage": "terminology_decision", "run_action": "resume"},
+        )
+        assert resumed.status_code == 200
+        wait_for_web_task(client, resumed.json()["task_id"])
+        assert received == [run_id]
+
+        forced = client.post(
             "/api/v1/projects/decision-demo/tasks",
             json={
                 "stage": "terminology_decision",
-                "run_action": "resume",
+                "run_action": "decline",
                 "force": True,
             },
-        ).status_code
-        == 400
-    )
-    assert (
-        client.post(
-            "/api/v1/projects/decision-demo/tasks",
-            json={"stage": "terminology_decision", "run_action": "decline"},
-        ).status_code
-        == 400
-    )
-
-    resumed = client.post(
-        "/api/v1/projects/decision-demo/tasks",
-        json={"stage": "terminology_decision", "run_action": "resume"},
-    )
-    assert resumed.status_code == 200
-    client.get(f"/api/v1/tasks/{resumed.json()['task_id']}")
-    assert received == [run_id]
-
-    forced = client.post(
-        "/api/v1/projects/decision-demo/tasks",
-        json={
-            "stage": "terminology_decision",
-            "run_action": "decline",
-            "force": True,
-        },
-    )
-    assert forced.status_code == 200
-    client.get(f"/api/v1/tasks/{forced.json()['task_id']}")
-    assert received == [run_id, None]
-    assert read_json(project, run_dir / "manifest.json")["status"] == "interrupted"
+        )
+        assert forced.status_code == 200
+        wait_for_web_task(client, forced.json()["task_id"])
+        assert received == [run_id, None]
+        assert read_json(project, run_dir / "manifest.json")["status"] == "interrupted"
 
 
 def test_web_rejects_decision_resume_after_terms_revision_changes(
@@ -3932,32 +4341,32 @@ def test_web_decision_failure_exposes_saved_run_for_resume(
         raise UsageError("模型协议错误")
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", fail_batch)
-    client = TestClient(create_app(projects_root=project.parent))
-    started = client.post(
-        "/api/v1/projects/decision-demo/tasks",
-        json={"stage": "terminology_decision"},
-    )
-    assert started.status_code == 200
-    task_id = started.json()["task_id"]
-    state = client.get(f"/api/v1/tasks/{task_id}").json()
-    assert state["status"] == "failed"
-    assert state["error"] == {
-        "error": "模型协议错误",
-        "code": "usage_error",
-        "params": {},
-    }
+    with TestClient(create_app(projects_root=project.parent)) as client:
+        started = client.post(
+            "/api/v1/projects/decision-demo/tasks",
+            json={"stage": "terminology_decision"},
+        )
+        assert started.status_code == 200
+        task_id = started.json()["task_id"]
+        state = wait_for_web_task(client, task_id)
+        assert state["status"] == "failed"
+        assert state["error"] == {
+            "error": "模型协议错误",
+            "code": "usage_error",
+            "params": {},
+        }
 
-    options = client.get(
-        "/api/v1/projects/decision-demo/task-options/terminology_decision"
-    )
-    assert options.status_code == 200
-    assert options.json()["running_run"]["completed_steps"] == 0
-    assert options.json()["running_run"]["total_steps"] == 4
-    interruption = options.json()["running_run"]["last_interruption"]
-    assert interruption["error_code"] == "usage_error"
-    assert interruption["reason"] == "unexpected_error"
-    assert interruption["completed_steps"] == 0
-    assert interruption["total_steps"] == 4
+        options = client.get(
+            "/api/v1/projects/decision-demo/task-options/terminology_decision"
+        )
+        assert options.status_code == 200
+        assert options.json()["running_run"]["completed_steps"] == 0
+        assert options.json()["running_run"]["total_steps"] == 4
+        interruption = options.json()["running_run"]["last_interruption"]
+        assert interruption["error_code"] == "usage_error"
+        assert interruption["reason"] == "unexpected_error"
+        assert interruption["completed_steps"] == 0
+        assert interruption["total_steps"] == 4
 
 
 @pytest.mark.asyncio
@@ -5223,8 +5632,8 @@ async def test_decision_rechecks_complete_request_limit_before_sending(
 ) -> None:
     project = create_decision_project(tmp_path)
     config = load_project_config(project, stage="terminology_decision")
-    config["llm"].update(context_window_tokens=100 if reason == "context" else 1000,
-                         context_safety_margin_tokens=20)
+    config["llm"].update(context_window_tokens=100 if reason == "context" else 1000)
+    config["chunking"]["context_reserve_tokens"] = 20
     config["execution"]["input_tokens_per_minute"] = 80 if reason == "itpm" else 0
     focus = [_batch_state("alice", "Alice"), _batch_state("bob", "Bob")]
     estimated_payloads = []
@@ -5232,7 +5641,7 @@ async def test_decision_rechecks_complete_request_limit_before_sending(
     def estimate(messages, factor):
         payload = json.loads(messages[1]["content"])
         estimated_payloads.append(payload)
-        return 80 if overflow_on_retry and len(estimated_payloads) == 1 else 81
+        return 80 if overflow_on_retry and llm.calls == 0 else 81
 
     monkeypatch.setattr("app.term_decision_batches.estimate_messages", estimate)
 
@@ -5262,7 +5671,7 @@ async def test_decision_rechecks_complete_request_limit_before_sending(
     if overflow_on_retry:
         payload = estimated_payloads[-1]
         assert [term["normalized"] for term in payload["terms"]] == ["bob"]
-        assert "alice" in {term["normalized"] for term in payload["anchors"]}
+        assert "alice" not in {term["normalized"] for term in payload["anchors"]}
         assert payload["validation_repair"] == "依据本次 terms/anchors 联合检查组关系和 alias 归属"
 
 
@@ -5500,3 +5909,82 @@ async def test_replacement_cleanup_failure_preserves_completed_decision_and_warn
     assert "draft removal denied" in current["warnings"][0]
     manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
     assert manifest["status"] == "completed" and manifest["decision_status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_retry_repacks_feedback_with_frozen_accepted_anchors(tmp_path, monkeypatch):
+    config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
+    config["chunking"].update(target_content_tokens=1000, max_input_tokens=100, context_reserve_tokens=0)
+    config["execution"]["input_tokens_per_minute"] = 0
+    focus = [_batch_state(key, source) for key, source in
+             (("alice", "Alice"), ("alice one", "Alice One"), ("alice two", "Alice Two"))]
+    requests = []
+
+    def estimate(messages, _factor):
+        payload = json.loads(messages[1]["content"])
+        return 30 * len(payload["terms"]) + (50 if payload.get("validation_repair") else 0) + 10 * len(payload["anchors"])
+
+    monkeypatch.setattr("app.term_decision_batches.estimate_messages", estimate)
+
+    class Model:
+        logger = logging.getLogger("test-feedback-repack")
+
+        async def chat(self, **kwargs):
+            payload = json.loads(kwargs["messages"][1]["content"])
+            requests.append(payload)
+            terms = payload["terms"][:1] if len(requests) == 1 else payload["terms"]
+            assert kwargs["estimated_input_tokens"] <= 100
+            return SimpleNamespace(content=llm_jsonl([
+                dict(type="decision", normalized=term["normalized"], action="keep", reason="确认")
+                for term in terms])), str(len(requests))
+
+    result = await _request_batch(
+        Model(), focus=focus, anchors=[], phase="consistency", prompt="prompt", config=config,
+        evidence=_batch_evidence(*focus), known_states={term["normalized"]: term for term in focus},
+        read_only_terms=set(), prompt_language="zh-CN", review_states={}, spec=term_normalization(config))
+    assert set(result) == {term["normalized"] for term in focus}
+    assert len(requests) == 3
+    assert {payload["terms"][0]["normalized"] for payload in requests[1:]} == {"alice one", "alice two"}
+    for payload in requests[1:]:
+        assert len(payload["terms"]) == 1
+        assert payload["validation_repair"]
+        assert [anchor["normalized"] for anchor in payload["anchors"]] == ["alice"]
+        assert payload["anchors"][0]["evidence"]["samples"]
+
+
+def test_previous_preset_protocol_cannot_resume_decision_run(tmp_path):
+    from app.term_decision import decision_resume_compatibility
+    project = create_decision_project(tmp_path)
+    run_id, run_dir, _, _ = create_complete_legacy_group_run(project)
+    path = run_dir / "llm_preset.json"
+    preset = json.loads(path.read_text(encoding="utf-8"))
+    preset["schema_version"] = 8
+    path.write_text(json.dumps(preset), encoding="utf-8")
+    compatible, reason = decision_resume_compatibility(project, run_id, source_terms_revision=1)
+    assert not compatible
+    assert "协议不兼容" in reason
+    assert read_json(project, run_dir / "manifest.json")["run_id"] == run_id
+
+
+def test_payload_shares_applied_descriptions_without_regrouping_comparison_text():
+    first = _batch_state("first", "First")
+    member = _batch_state("member", "Member")
+    anchor = _batch_state("anchor", "Anchor")
+    empty = _batch_state("empty", "Empty")
+    first["description"] = anchor["description"] = "共享已应用说明"
+    member.update(group_primary="first", description="临时并组前的另一份说明")
+    empty["description"] = None
+    evidence = _batch_evidence(first, member, anchor, empty)
+    for item in evidence.values():
+        item["description"] = "原始证据说明"
+    before = deepcopy(evidence)
+    payload = _make_payload(phase="consistency", target_language="中文", focus=[first, member, empty],
+                            anchors=[anchor], evidence=evidence)
+    assert payload["applied_descriptions"] == {
+        "D1": "共享已应用说明", "D2": "临时并组前的另一份说明",
+    }
+    assert [term["applied_description_ref"] for term in payload["terms"]] == ["D1", "D2", None]
+    assert payload["anchors"][0]["applied_description_ref"] == "D1"
+    assert all(term["description"] == "原始证据说明" for term in payload["terms"])
+    assert all("applied_description" not in term for term in payload["terms"] + payload["anchors"])
+    assert evidence == before

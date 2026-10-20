@@ -198,6 +198,8 @@ schema 4 的 JSON Pointer Adapter 可以增加 `streaming` 对象；宿主在全
 
 `reasoning_events` 可以为空；内置 Anthropic 不暴露 thinking。OpenAI-compatible 可同时声明 `delta.reasoning_content` 与 `delta.reasoning`，以兼容两类互斥的流式字段。
 
+内置 Chat Completions 流式解析按 `reasoning_content`、`reasoning` 的顺序取首个存在的字段，`null` 表示本事件没有思考增量，不拼接两个字段，与非流式解析一致。
+
 `terminal` 二选一声明 sentinel 或条件；默认每条流必须命中终止条件。`allow_clean_eof` 是可选布尔值，缺省为 `false`。
 
 显式启用后，HTTP 2xx 响应在已收到至少一个合法 SSE `data` 事件、没有读取/协议错误并自然到达 body EOF 时，也可作为第二种终止方式；EOF 前的所有事件仍会被读取，因此尾部 usage 能够被收集。这只放宽传输终止判定，聚合正文仍须通过现有响应格式解析和阶段校验。
@@ -321,6 +323,10 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 版本前缀 `/v1`、`/v1beta` 写在 Preset `base_url` 中。普通和流式 endpoint 仍由 Adapter 声明。
 
+### JSONL 分隔符容错
+
+模型仍应返回以换行分隔的 JSONL。宿主也接受完整 JSON 对象之间以半角逗号分隔，允许与换行混用；记录内容和最终 `end` 校验保持不变。采用此容错时，Run 警告记录“已接受逗号分隔的 JSONL 响应”。
+
 ### 术语提取实验响应
 
 术语＋粗翻、术语＋概括和术语＋粗翻＋概括均使用显式术语声明：有术语返回 `term` 记录；无合格术语必须返回唯一的 `{"type":"no_terms"}`，不能附加字段或与 `term` 并存。末行仍为 `{"type":"end"}`，只表示结束。实验中的单独补扫请求也遵守这一规则；仅补译或仅补概括请求不声明术语结果。缺少或无效的声明属于整次响应的格式错误。
@@ -331,7 +337,9 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 ### 自动术语决策关系校验
 
-名称与关系决策各阶段的 `description` 为按术语当前归属拼接的全部有效、未停用说明片段，每段以方括号标明原术语归属；`applied_description` 单独提供已应用实体说明作对照。两者均只读。片段可能重复、存在分歧或描述不同位置，排列顺序不表示事实发生时间。拼接文本计入现有分批预算，不截断。
+终审请求通过共享 `context_segments` 表提供上下文 Segment，以请求内 `segment_ref` 索引，条目保留 `boundary_ref`、`source` 和 `is_empty`。各术语 `evidence.windows` 的 `segment_refs` 按原文顺序引用共享表，`hit_segment_refs` 保留该术语自己的命中位置，`window_ref` 仅在所属术语内有效。样本摘录和匹配视图仍按术语保留。
+
+名称与关系决策各阶段的 `description` 为按术语当前归属拼接的全部有效、未停用说明片段，同一原归属的片段归为一组，每组以方括号标明原术语归属。请求级 `applied_descriptions` 表按完整正文去重，目标术语和 Anchors 通过 `applied_description_ref` 引用各自原有的已应用说明作对照，无说明时引用为 `null`。临时分组变化不改变各术语的对照正文。两者均只读。片段可能重复、存在分歧或描述不同位置，排列顺序不表示事实发生时间。拼接文本计入现有分批预算，不截断。
 
 `changes` 按完整最终状态检查 [术语组规则](MINIMAL.md#51-术语)，覆盖新增 Alias、
 组关系变更和成员重新启用。新增非法关系返回 `invalid_relationship`；普通决策无法完整
@@ -340,15 +348,21 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 在此前阶段的最终状态上，额外以 `containment` 请求复核原文长短包含而译名疑似不一致的组合。
 子串关系只筛选候选，不构成硬冲突；可明确保留独立译法，无法可靠判断则将关联组件恢复到原状态并进入 `needs_review`。
 同一复核组合中发生的修改作为整体建议接受或拒绝；复核不能修改受保护条目，不能通过修改制造新的未确认包含冲突。
-此复核位于可选自动终审之后，仍可产生待审项。当前决策规则版本为 11；旧规则草案须重新生成，不作转换。
+此复核位于可选自动终审之后，仍可产生待审项。当前决策规则版本为 12；旧 Run 和旧规则草案不作转换，须新建 Run。
 
-固定 Prefix 按阶段声明输入字段、只读参考与任务，固定 Suffix 按阶段声明输出协议；JSONL 响应追加一次结束约束。可编辑中段位于两者之间，负责信息取舍、详略与表达策略；来源边界、引用及输出覆盖要求由固定协议定义。联合模式声明参与阶段和附加输出协议；设置预览与实际请求共用组装入口，固定规则版本纳入 fingerprint。名称与关系阶段的 `description` 和 `applied_description` 均为只读。
+完整合法 JSONL 中的未知 `normalized` 会明确拒绝并记录警告，不影响本次其他目标。缺少、重复或内容校验失败的目标按原状态与候选状态间的完整关系依赖组件重试；依赖失败的已接受结果一并撤回。损坏 JSONL 或缺少 `end` 仍使整份响应无效。重试请求只附带相关 anchors，按完整请求重新计算预算。`update` 参考应用后的状态，`disable` 参考已禁用状态，`needs_review` 参考本阶段待审状态，`keep` 参考当前状态。
+
+重复相同错误触发的隔离修正会在同一轮使用固定的已接受状态快照，并受现有 `max_parallel` 限制；各请求结果统一合并后检查组合关系。若组合引入关系冲突，会撤回受影响依赖组件并在既有格式修正轮数内重试。
+
+固定 Prefix 按阶段声明输入字段、只读参考与任务，固定 Suffix 按阶段声明输出协议；JSONL 响应追加一次结束约束。可编辑中段位于两者之间，负责信息取舍、详略与表达策略；来源边界、引用及输出覆盖要求由固定协议定义。联合模式声明参与阶段和附加输出协议；设置预览与实际请求共用组装入口，固定规则版本纳入 fingerprint。名称与关系阶段的 `description` 和共享已应用说明均为只读。
 
 ### 实体说明决策与接口
 
-名称与关系确定后，`phase: "knowledge"` 发送 `target_language` 和 `entities` 数组；各实体包含 `entity`、`members`、`current_items` 和全部有效 `fragments`。片段包含整次请求内唯一的短 ID（如 `K1`）、原归属、当前归属、说明及来源范围。实体证据完整且不可拆分，按现有软目标、硬限制和安全系数装箱，批次共用现有并发调度与 KeyPool。超限实体单独失败。Prompt 使用独立资源 `terminology_knowledge` 的中段，不携带名称与关系决策中段；该资源不是独立执行阶段或模型设置。
+完整自动决策在名称与关系确定后，或仅实体说明模式直接运行时，`phase: "knowledge"` 发送 `target_language`、`description_generation` 和 `entities` 数组；各实体包含 `entity`、`members`、`current_items` 和全部有效 `fragments`。片段包含整次请求内唯一的短 ID（如 `K1`）、原归属、当前归属、说明及来源范围。实体证据完整且不可拆分，按现有软目标、硬限制和安全系数装箱，批次共用现有并发调度与 KeyPool。超限实体单独失败。Prompt 使用独立资源 `terminology_knowledge` 的中段，不携带名称与关系决策中段；该资源不是独立执行阶段或模型设置。
 
-请求中的 `source_range` 将连续源文表示为区间，每项包含 `file_id`、`part_id`、`first: {position, start}` 和 `last: {position, end}`。`position` 是从 0 开始的 Segment 位置，偏移是首尾 Segment 内的字符位置，`end` 为不包含端点。跨文件、分部、位置间断或切片空缺分别保留。无来源片段为 `null`。持久化来源和引用校验仍使用完整 Segment 范围。
+Web 的任务启动与 task-options 接口在 `stage: "terminology_decision"` 下接受布尔 `knowledge_only`（默认 `false`）。`true` 只执行实体说明阶段，不能与 `final_review: true` 组合，Run、检查点及草案记录该标记。
+
+请求中的 `sources` 是按文件分组的批次共享来源数组，每组包含当前项目从 1 开始的 `file_order`，以及将全请求唯一短 ID（如 `S1`）映射到文件内内容边界 `part_id` 的 `parts` 表。来源短 ID 和 `part_id` 不表示顺序。`source_range` 将连续源文表示为区间，每项包含引用各文件 `parts` 表中短 ID 的 `source`、`first: {position, start}` 和 `last: {position, end}`。`position` 是按当前项目文件顺序排列、从 0 开始的全局 Segment 位置，偏移是首尾 Segment 内的字符位置，`end` 为不包含端点。跨文件、分部、位置间断或切片空缺分别保留。无来源片段为 `null`。持久化来源和引用校验仍使用完整 Segment 范围。
 
 每个请求实体恰好返回一条实体记录，允许乱序，最后返回终止记录：
 
@@ -357,11 +371,13 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 {"type":"end"}
 ```
 
-字段严格校验，条目文字非空且引用非空。完整文档中的缺失或重复实体、非法条目、未知或跨实体引用仅使对应实体失败；成功实体立即保存检查点，只重试未完成实体，格式反馈纳入预算并重新分批。未知实体、损坏 JSONL 或缺少终止记录使整次响应无效。停用或失效证据不发送。宿主将短引用转换为持久化 `fragment_ids`；扫描片段以候选记录 ID 和条目序号标识，并关联原 Segment、实际输入切片范围及原文/模型输入摘要。
+`description_generation` 为 `sourced` 时使用上述格式；`sourced_and_summary` 额外要求一个非空字符串 `summary`，概括全部有效证据中的核心信息；`summary_only` 要求 `items` 为空且 `summary` 为一份非空精简总结。总结保存为 `fragment_ids: []` 的无来源条目，不加入原始证据集，宿主单独记录其证据依赖以保持过期检查。
+
+字段严格校验，`items` 中条目文字非空且引用非空。完整文档中的缺失或重复实体、非法条目、未知或跨实体引用仅使对应实体失败；成功实体立即保存检查点，只重试未完成实体，格式反馈纳入预算并重新分批。未知实体、损坏 JSONL 或缺少终止记录使整次响应无效。停用或失效证据不发送。宿主将短引用转换为持久化 `fragment_ids`；扫描片段以候选记录 ID 和条目序号标识，并关联原 Segment、实际输入切片范围及原文/模型输入摘要。
 
 术语查询附加 `entity_key`、`knowledge_status`（`current`、`pending`、`stale`）、`description_items`，保留只读 `description` 投影。条目只返回 `text` 和 `fragment_ids`。`GET /api/v1/projects/{name}/terms/knowledge?normalized=...` 返回条目、片段和导航所需的引用范围，不暴露来源摘要。
 
-翻译、校对、润色和联合粗翻的 `entity_knowledge.items` 提供 `text`、`source_relation` 和布尔 `unsourced`，每个命中实体只提供一次全部已应用条目。`source_relation` 最多包含三个指示，例如 `["before 1", "within", "after 2"]`；无来源说明使用空数组及 `unsourced: true`，混合引用同时保留相对关系和无来源标记。位置以本次待处理源文的首尾范围为准，使用原 Segment 位置和实际切片偏移，结束偏移不包含端点；范围内空缺归为 `within`，参考上下文不扩大范围。`before`、`after` 分别按同一实体各条目的最早相关证据位置升序编号，同位置同号，`within` 不编号。位置和编号表示证据先后，不表示事实生效范围或事件时间。生成请求不发送具体来源区间或当前位置数组；持久来源、实体详情和导航保留完整范围。
+翻译、校对、润色和联合粗翻的 `entity_knowledge.items` 提供 `text`、`source_relation` 和布尔 `unsourced`，每个命中实体只提供一次按注入策略筛选后的已应用条目，筛选语义见 [产品规格](MINIMAL.md#实体说明实验)。`source_relation` 最多包含三个指示，例如 `["before 1", "within", "after 2"]`；无来源说明使用空数组及 `unsourced: true`，混合引用同时保留相对关系和无来源标记。位置以本次待处理源文的首尾范围为准，使用原 Segment 位置和实际切片偏移，结束偏移不包含端点；范围内空缺归为 `within`，参考上下文不扩大范围。`before`、`after` 分别按同一实体各条目的最早相关证据位置升序编号，同位置同号，`within` 不编号。位置和编号表示证据先后，不表示事实生效范围或事件时间。生成请求不发送具体来源区间或当前位置数组；持久来源、实体详情和导航保留完整范围。
 
 `PUT` 同一路径使用现有写锁和事务，必须提供 `normalized`、`expected_revision`、`action`，操作字段分别为：
 
@@ -694,13 +710,21 @@ class MyValidator:
 
 ## 4. LLM Preset（已实现）
 
-Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存 Base URL、模型、credential 引用、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，并可为术语、翻译、校对和润色分别选择覆盖；空覆盖使用全局 Preset。
+Preset 位于全局 `llm_presets/<preset_id>.json`，实时引用一个 Adapter ID，并保存 Base URL、模型、credential 引用、模型 Token 能力和端点限速等连接设置。项目配置一个全局 Preset，各 LLM 阶段可单独覆盖；空覆盖使用全局 Preset。
 
-Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和影响阶段语义的定义内容 Hash；单独修改 `target_chunk_input_tokens` 不会改变该指纹。
+Run 保存当前阶段实际解析的 Preset 快照，阶段指纹包含该 Preset ID 和影响阶段语义的定义内容 Hash。
 
-当前 Preset schema 为 8。`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力；普通与流式 Endpoint 均由 Adapter 定义。`target_chunk_input_tokens` 是完整输入 Prompt 的 Chunk 软目标；每个阶段使用其实际解析的 Preset 值，实际请求仍受上下文硬限制、Token 安全系数和启用的 ITPM 约束。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
+当前 Preset schema 为 9。`stream` 明确控制是否使用所引用 Adapter 的 SSE 能力；普通与流式 Endpoint 均由 Adapter 定义。RPM/ITPM 按每个 Key 独立计算，`max_parallel` 是 Preset 总并发上限，`max_parallel_per_key` 是所有 Key 共用的单 Key 并发上限。
 
-旧协议不在运行期自动转换。全局 schema 7 Preset 使用 `python -m app.llm_migration` 预览，添加 `--apply` 后备份并迁移；历史 Run 快照不改写，旧协议 Run 只供查看，正式执行需创建新 Run。
+项目在 `chunking` 中保存通用请求预算：`target_content_tokens` 默认 4096，`max_input_tokens` 默认 65536，`context_reserve_tokens` 默认 16384。`stage_overrides` 可按 `terminology`、`terminology_decision`、`terminology_knowledge`、`content_summary`、`translation`、`repetition_consistency`、`proofreading`、`polishing` 指定任意子集；未指定字段逐项继承通用值。术语片段概括使用 `terminology`，联合初稿翻译使用 `translation`。实体知识使用独立的 `terminology_knowledge` 预算，但沿用术语决策模型。
+
+内容 Token 目标是分批软目标，单个不可再分单元可超过目标。每次请求的完整输入硬上限为 `min(max_input_tokens, context_window_tokens - context_reserve_tokens, enabled ITPM)`；无 ITPM 限制时忽略该项。系统把参考内容计入完整输入限制，不为满足限制而删减必需证据。文本内容遵循现有安全拆分规则；不可分的关系组件、实体或重复组超过硬上限时明确处理失败或保留既有可见待审结果。输出上限按 Preset 上限与“上下文窗口减完整输入估算”取较小值，不会再次扣除预留；Preset 的 `max_output_tokens: 0` 仍表示省略输出上限字段。
+
+项目的 LLM 协议 Decision Preset 使用项目通用 `context_reserve_tokens`，不使用阶段覆盖，也不采用 `max_input_tokens`；HTTP Decision Preset 继续使用自身的 `context_safety_margin_tokens`。
+
+用户配置与 Preset 编辑读取会忽略未知字段并返回警告，缺失字段使用对应默认值且读取不写回文件；保存时写入已知字段的规范形式。显式存在但类型或取值非法的字段仍报错。旧 LLM Preset 中已删除的预算字段按未知字段处理，不迁移到项目设置。历史 Run 快照保持严格解析，旧结构 Run 不能续作。此编辑规则不放宽 Adapter、插件、冻结快照或动态 `extra_body`、`extra_headers` 的协议校验。
+
+旧协议不在运行期自动转换。全局 schema 7 Preset 使用 `python -m app.llm_migration` 预览，添加 `--apply` 后备份并迁移；历史 Run 快照不改写，旧协议 Run 不能续作，正式执行需创建新 Run。
 
 `send_temperature` 为必填布尔值；关闭后省略请求模板中的温度，禁止在 Extra Body 中再次添加。阶段温度不参与关闭发送后的阶段指纹。`reasoning_effort` 为字符串或 null，null 不发送参数；等级必须属于 Adapter 的声明，不能在 Extra Body 中重复填写声明位置或别名位置。Effort 不自动调整温度、thinking 开关或思考摘要。
 
@@ -784,6 +808,8 @@ Decision 在 Preset 开启 JSON Schema 时按本次问题生成约束，固定�
 完整请求预算包含 Schema，概率取值、概率和及置信度仍由现有校验器检查。
 请求与格式错误共享 `retry.http_max_attempts` 发送预算；空响应沿用 LLM 的专用重试规则。
 
+HTTP Decision 用量读取响应 `usage.input_tokens`，仅接受非负整数，输出 Tokens 计为 0；LLM Decision 使用所选 Adapter 返回的输入、输出计量。各次已返回用量的尝试均计入用量，即使答案格式校验失败。两种模式均计入 Decision 请求用量，与生成 LLM 请求用量分开。
+
 `decision_llm` 使用普通 LLM 提示词资源机制：Prefix 按字段声明拼接输入结构及指令边界，
 中段定义判断策略和拒答条件，Suffix 定义输出结构及字段约束。中段按语言提供全局资源、
 项目覆盖、恢复继承、内置草稿及命名模板。运行冻结完整系统提示词、所选 LLM Preset 和 Adapter，
@@ -848,7 +874,7 @@ LLM Prompt 的 `/api/v1/prompts/{stage}/default?language=...` GET 直接读取�
 
 原始执行及每次 continuation 使用共享快照装配保存实际 LLM 与 Decision 资源；术语证据在 Run 中保存一次。失败和取消保持 Run 为 `running`，未完成出现不计为失败，`last_interruption` 记录错误、步骤进度及可取得的请求 ID。Run 收集去重的预检、续作和客户端警告，实际 LLM 调用保存带执行来源索引的密钥审计；使用共享用量累计，零请求续作保留已有用量。
 
-`repetition_consistency` 是独立 Prompt 资源，使用标准 Prefix、中段、Suffix 装配；模型连接沿用翻译 Preset。输入包含 `target_language`、请求内共享的 `context`、`terms`、`files`、`parts`，以及 `repetitions` 数组。每个重复组含稳定的短 `id`、`source`、`translations` 与 `occurrences`；出现短 ID 仅在所属重复组内有效，不得跨组引用。每次出现携带短 ID、File/part、位置、从零开始的译文索引、前后文引用和术语引用。`file` 是项目文件顺序中从 1 开始的索引，`files` 将本请求涉及的索引映射到文件名；`part` 是请求内 `parts` 表从 1 开始的索引，表中声明内容边界名称，每个 File/part 边界单独编号；`position` 是文件内从 0 开始的 Segment 序号，包含空片段。术语正文仅发送一次，命中的别名保存在各次出现的术语引用 `aliases` 中；术语引用的 `source_relations` 按顺序对应 `entity_knowledge.items`，关系以该次出现的局部上下文为基准。
+`repetition_consistency` 是独立 Prompt 资源，使用标准 Prefix、中段、Suffix 装配；模型连接使用重复译文一致性审查 Preset。当前请求协议版本为 2，旧协议 Run 不跨版本续作。输入包含 `target_language`、请求内共享的 `context`、`terms`、`entity_knowledge`、`files`、`parts`，以及 `repetitions` 数组。每个重复组含稳定的短 `id`、`source`、`translations` 与 `occurrences`；出现短 ID 仅在所属重复组内有效，不得跨组引用。每次出现携带短 ID、File/part、位置、从零开始的译文索引、前后文引用和术语引用。`file` 是项目文件顺序中从 1 开始的索引，`files` 将本请求涉及的索引映射到文件名；`part` 是请求内 `parts` 表从 1 开始的索引，表中声明内容边界名称，每个 File/part 边界单独编号；`position` 是文件内从 0 开始的 Segment 序号，包含空片段。术语正文仅发送一次，命中的别名保存在各次出现的术语引用 `aliases` 中；`entity_knowledge` 按实体组织说明条目，每条以全请求唯一的 `K` 短 ID 索引，保留 `text` 和 `unsourced`。术语基本信息独立于说明子集去重，每次出现的术语引用通过 `knowledge: [{id, source_relation}]` 选择适用说明并保留以该次局部上下文为基准的位置关系。不同实体及不同 `unsourced` 标记的条目分别索引。
 
 响应为单个 JSON 对象，仅含 `repetitions` 数组，每个输入重复组恰好对应一个结果，含原样组 `id`、`groups`、`keep`、`uncertain`。每个统一子组含 `members`、`target`、`apply`、`reason`；成员至少两个，`target` 必须是组内成员并选择其现有译文，`apply` 是 `members` 的无重复子集，可以为空，`reason` 使用目标语言。各次出现的短 ID 必须完整、不重复地划入子组或保留、待审列表。该协议不输出 JSONL 或结束记录。
 

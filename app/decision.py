@@ -1,5 +1,6 @@
 """Host-managed HTTP Choice decisions."""
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import asyncio
 import hashlib
@@ -50,7 +51,10 @@ def decision_preset_path(root: Path, preset_id: str) -> Path:
     return root / "decision_presets" / f"{preset_id}.json"
 
 
-def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
+def validate_decision_preset(value: dict[str, Any], *, editable: bool = False) -> dict[str, Any]:
+    if editable and value.get("protocol") == "":
+        decision_preset_path(Path(), value["preset_id"])
+        return value
     if value.get("protocol") == "llm":
         from .llm_preset import preset_path
         from .project import PROMPT_LANGUAGES
@@ -59,7 +63,8 @@ def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
         decision_preset_path(Path(), value["preset_id"])
         if not isinstance(value["llm_preset"], str):
             raise ConfigError("LLM Preset ID 格式无效")
-        preset_path(Path(), value["llm_preset"])
+        if not (editable and value["llm_preset"] == ""):
+            preset_path(Path(), value["llm_preset"])
         if value["prompt_language"] not in PROMPT_LANGUAGES:
             raise ConfigError("Prompt 语言必须是 zh-CN 或 en")
         return value
@@ -79,11 +84,11 @@ def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
         parsed.port
     except ValueError as exc:
         raise ConfigError("Decision URL 无效") from exc
-    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+    if not (editable and url == "") and (parsed.scheme not in {"http", "https"} or not parsed.hostname
             or parsed.username or parsed.password or parsed.query or parsed.fragment
             or not parsed.path or parsed.path == "/"):
         raise ConfigError("Decision URL 必须含最终 Path，不能含凭据、查询参数或 fragment")
-    if not isinstance(value["model"], str) or not value["model"].strip():
+    if not isinstance(value["model"], str) or (not editable and not value["model"].strip()):
         raise ConfigError("Decision 模型不能为空")
     proxy_url = value["proxy_url"]
     if not isinstance(proxy_url, str):
@@ -98,8 +103,8 @@ def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError("Decision 代理必须是无凭据的 HTTP/HTTPS URL")
     credential = value["credential"]
     if (not isinstance(credential, dict) or set(credential) != {"kind", "name"}
-            or not isinstance(credential["kind"], str) or credential["kind"] not in {"environment", "keychain"}
-            or not isinstance(credential["name"], str) or not credential["name"].strip()):
+            or not isinstance(credential["kind"], str) or credential["kind"] not in ({"", "environment", "keychain"} if editable else {"environment", "keychain"})
+            or not isinstance(credential["name"], str) or (not editable and not credential["name"].strip())):
         raise ConfigError("Decision 凭据引用无效")
     for key, minimum in (("requests_per_minute", 0), ("max_parallel", 1),
                          ("context_window_tokens", 1), ("context_safety_margin_tokens", 0)):
@@ -116,7 +121,41 @@ def validate_decision_preset(value: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-def load_decision_preset(path: Path, *, snapshot: bool = False) -> dict[str, Any]:
+def normalize_decision_preset(value: Any, *, preset_id: str, warnings: list[str] | None = None) -> dict[str, Any]:
+    from .config import report_unknown
+    if not isinstance(value, dict):
+        raise ConfigError("Decision Preset 必须是对象")
+    protocol = value.get("protocol", "")
+    if not isinstance(protocol, str) or protocol not in {"", "llm", "typesafe", "openai-decisions"}:
+        raise ConfigError("不支持的 Decision 协议")
+    defaults: dict[str, Any] = {"preset_id": preset_id, "protocol": protocol}
+    if protocol == "llm":
+        defaults.update(llm_preset="", prompt_language="zh-CN")
+    elif protocol:
+        defaults.update(url="", model="", credential={"kind": "", "name": ""}, proxy_url="",
+                        request_timeout_seconds=120, requests_per_minute=30, max_parallel=4,
+                        context_window_tokens=16384, context_safety_margin_tokens=512, token_safety_factor=1.25)
+    report_unknown("Decision Preset", set(value) - set(defaults), warnings)
+    result = {key: value.get(key, default) for key, default in defaults.items()}
+    if "credential" in result:
+        credential = result["credential"]
+        if not isinstance(credential, dict):
+            raise ConfigError("Decision 凭据引用无效")
+        report_unknown("Decision Preset.credential", set(credential) - {"kind", "name"}, warnings)
+        result["credential"] = {key: credential.get(key, "") for key in ("kind", "name")}
+    return validate_decision_preset(result, editable=True)
+
+
+def missing_decision_fields(value: dict[str, Any]) -> list[str]:
+    if not value["protocol"]:
+        return ["protocol"]
+    if value["protocol"] == "llm":
+        return ["llm_preset"] if not value["llm_preset"] else []
+    return [key for key in ("url", "model") if not value[key].strip()] + [
+        f"credential.{key}" for key in ("kind", "name") if not value["credential"][key].strip()]
+
+
+def load_decision_preset(path: Path, *, snapshot: bool = False, warnings: list[str] | None = None) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -125,16 +164,28 @@ def load_decision_preset(path: Path, *, snapshot: bool = False) -> dict[str, Any
         raise ConfigError("Decision Preset 必须是对象")
     if snapshot and value.get("protocol") == "llm":
         validate_decision_preset({k: v for k, v in value.items() if k != "_resources"})
-        from .decision_llm import llm_config
-        llm_config(value, retry={"http_max_attempts": 1}, debug=False)
+        from .llm_preset import _parse_llm_preset
+        from .llm_adapter import parse_json_adapter
+        from .config import _resolve_llm_config
+        resources = value.get("_resources")
+        if not isinstance(resources, dict) or set(resources) != {"preset", "adapter", "prompt"}:
+            raise ConfigError("LLM Decision 缺少冻结资源")
+        if not isinstance(resources["prompt"], str) or not resources["prompt"].strip():
+            raise ConfigError("Decision LLM Prompt 不能为空")
+        selected = _parse_llm_preset(resources["preset"])
+        if selected.preset_id != value["llm_preset"]:
+            raise ConfigError("Decision 引用的 LLM Preset 与冻结资源不一致")
+        _resolve_llm_config({"llm": {}, "execution": {}}, preset=selected, adapter=parse_json_adapter(resources["adapter"]))
         return value
-    return validate_decision_preset(value)
+    return validate_decision_preset(value) if snapshot else normalize_decision_preset(value, preset_id=path.stem, warnings=warnings)
 
 
 class DecisionClient:
     def __init__(self, preset: dict[str, Any], *, http_client: httpx.AsyncClient | None = None,
                  retry: dict[str, Any] | None = None, debug_directory: Path | None = None,
-                 project_id: str = "", run_id: str = "", stage: str = "") -> None:
+                 project_id: str = "", run_id: str = "", stage: str = "",
+                 context_reserve_tokens: int | None = None) -> None:
+        validate_decision_preset({key: child for key, child in preset.items() if key != "_resources"})
         self.debug_directory = debug_directory
         self.project_id, self.run_id, self.stage = project_id, run_id, stage
         self.retry = {"http_max_attempts": 1, "base_delay_seconds": 0, "max_delay_seconds": 60,
@@ -144,10 +195,14 @@ class DecisionClient:
         self.llm_config = None
         if preset["protocol"] == "llm":
             from .decision_llm import llm_config
-            self.llm_config = llm_config(preset, retry=self.retry, debug=debug_directory is not None)
+            if type(context_reserve_tokens) is not int or context_reserve_tokens < 0:
+                raise ConfigError("LLM Decision 需要显式的项目通用上下文预留")
+            self.llm_config = llm_config(preset, retry=self.retry, debug=debug_directory is not None,
+                                         context_reserve_tokens=context_reserve_tokens)
             definition = self.llm_config["_llm_preset_definition"]
             self.preset.update({key: definition[key] for key in (
-                "model", "context_window_tokens", "context_safety_margin_tokens", "token_safety_factor")})
+                "model", "context_window_tokens", "token_safety_factor")})
+            self.preset["context_safety_margin_tokens"] = context_reserve_tokens
         self.http_client = http_client
         self.records: list[dict[str, Any]] = []
         limits = self.llm_config["execution"] if self.llm_config is not None else preset
@@ -186,7 +241,7 @@ class DecisionClient:
         available = self.preset["context_window_tokens"] - self.preset["context_safety_margin_tokens"]
         while True:
             evidence = {**state, "reference_context": context} if reference_context is not None else state
-            body, estimated = self.request_plan(evidence, questions)
+            body, estimated = (await run_blocking(lambda: self.request_plan(evidence, questions)))
             if estimated <= available or not context:
                 break
             context = context[1:]
@@ -264,14 +319,20 @@ class DecisionClient:
                     raise FatalExternalError(f"Decision 请求失败：HTTP {response.status_code}")
                 try:
                     data = response.json()
-                    answers = self._parse(data, questions)
+                    usage = data.get("usage") if isinstance(data, dict) else None
+                    if isinstance(usage, dict) and type(usage.get("input_tokens")) is int and usage["input_tokens"] >= 0:
+                        record["usage"] = {"input_tokens": usage["input_tokens"], "output_tokens": 0, "total_tokens": usage["input_tokens"]}
+                        if diagnostics is not None:
+                            diagnostics.record_request_usage(
+                                request_id, record["usage"], attempt=attempt + 1,
+                                complete=True, output_tokens_known=False,
+                            )
+                    answers = (await run_blocking(lambda: self._parse(data, questions)))
                 except (ValueError, TypeError, KeyError):
                     outcome = "response_parse_error"
                     raise
                 overview["answers"] = {k: asdict(v) for k, v in answers.items()}
-                record.update(model=data["model"], answers={k: asdict(v) for k, v in answers.items()}, usage=data.get("usage"))
-                if diagnostics is not None:
-                    diagnostics.complete_request(request_id, content=json.dumps(data, ensure_ascii=False, indent=2), reasoning_content=None, overview_answers=overview["answers"])
+                record.update(model=data["model"], answers={k: asdict(v) for k, v in answers.items()})
                 return answers
             except asyncio.CancelledError:
                 outcome = "cancelled"
@@ -297,21 +358,23 @@ class DecisionClient:
                     base = f"{request_id}-A{attempt + 1:03d}"
                     directory = self.debug_directory / "payloads"
                     directory.mkdir(parents=True, exist_ok=True)
-                    atomic_write_json(directory / f"{base}.request.json", body)
-                    atomic_write_json(directory / f"{base}.overview.json", overview)
+                    (await run_blocking(lambda: atomic_write_json(directory / f"{base}.request.json", body)))
+                    (await run_blocking(lambda: atomic_write_json(directory / f"{base}.overview.json", overview)))
                     if data is not None:
-                        atomic_write_json(directory / f"{base}.response.json", data)
+                        (await run_blocking(lambda: atomic_write_json(directory / f"{base}.response.json", data)))
                     if outcome != "succeeded":
-                        atomic_write_json(directory / f"{base}.error.json", {"error": record.get("error", outcome)})
-                    append_jsonl_file(self.debug_directory / "attempts.jsonl", record_header(
+                        (await run_blocking(lambda: atomic_write_json(directory / f"{base}.error.json", {"error": record.get("error", outcome)})))
+                    (await run_blocking(lambda: append_jsonl_file(self.debug_directory / "attempts.jsonl", record_header(
                         "request_attempt", self.project_id, record_id=base, run_id=self.run_id,
                         request_id=request_id, stage=self.stage, attempt=attempt + 1,
                         http_status=record.get("http_status"), outcome=outcome,
-                        status="completed" if outcome == "succeeded" else "failed", error=record.get("error")))
+                        status="completed" if outcome == "succeeded" else "failed", error=record.get("error")))))
                 if diagnostics is not None:
                     diagnostics.request_finished(request_id=request_id, attempt=attempt + 1,
                         key_index=lease.key_index + 1, latency_seconds=record["elapsed_seconds"],
                         status=record.get("http_status"), error=outcome not in {"succeeded", "cancelled"}, retrying=retrying, outcome=outcome)
+                    if outcome == "succeeded":
+                        diagnostics.complete_request(request_id, content=json.dumps(data, ensure_ascii=False, indent=2), reasoning_content=None, overview_answers=overview["answers"])
                     if retrying:
                         diagnostics.retried(request_id)
                 await lease.release()

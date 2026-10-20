@@ -64,7 +64,9 @@ def _run_manifest(project: Path, **fields: object) -> dict[str, object]:
 
 
 def config() -> dict:
-    return load_global_config(ROOT)
+    current = load_global_config(ROOT)
+    current["chunking"]["context_reserve_tokens"] = 100
+    return current
 
 
 def segments() -> list[dict]:
@@ -88,7 +90,7 @@ def test_stage_fingerprint_ignores_chunk_but_tracks_scheduling() -> None:
         (ROOT / "prompts" / "translation.zh-CN.middle.txt").read_text(encoding="utf-8"),
     )
     original = stage_fingerprint(first, "translation", prompt, terms_revision=1)
-    first["execution"]["target_chunk_input_tokens"] = 100
+    first["chunking"]["target_content_tokens"] = 100
     assert stage_fingerprint(first, "translation", prompt, terms_revision=1) == original
     first["chunking"]["cross_boundary_batching"] = ["translation"]
     assert stage_fingerprint(first, "translation", prompt, terms_revision=1) == original
@@ -162,7 +164,7 @@ def test_single_segment_preflight_falls_back_when_upper_bound_is_uncertain() -> 
     )
     assert upper > exact
     current["llm"]["context_window_tokens"] = (
-        exact + current["llm"]["context_safety_margin_tokens"]
+        exact + current["chunking"]["context_reserve_tokens"]
     )
     current["execution"]["input_tokens_per_minute"] = 0
     assert estimate_single_segment_preflight(
@@ -492,6 +494,7 @@ def test_materialize_chunk_stream_namespaces_continuation_chunks() -> None:
 def test_resume_debug_chunks_do_not_reuse_sqlite_record_ids(tmp_path: Path) -> None:
     project = _finalize_project(tmp_path)
     current = config()
+    current["chunking"]["target_content_tokens"] = 2222
     metadata = read_json(project, project / "project.json")
     run_id, run_dir = create_run(
         project,
@@ -520,6 +523,9 @@ def test_resume_debug_chunks_do_not_reuse_sqlite_record_ids(tmp_path: Path) -> N
         [fresh],
     )
 
+    import tomllib
+    assert tomllib.loads((run_dir / "config.toml").read_text())["chunking"]["target_content_tokens"] == 2222
+    current["chunking"]["target_content_tokens"] = 3333
     resumed_id, resumed_dir, continuation_index = continue_run(
         project,
         run_id,
@@ -534,6 +540,7 @@ def test_resume_debug_chunks_do_not_reuse_sqlite_record_ids(tmp_path: Path) -> N
         prompt_variants={"summary-only": "prompt"},
         prompt_languages={"summary-only": "zh-CN"},
     )
+    assert tomllib.loads((run_dir / "continuations/0001/config.toml").read_text())["chunking"]["target_content_tokens"] == 3333
     assert resumed_id == run_id
     assert continuation_index == 1
     continuation = read_json(project, run_dir / "manifest.json")["continuations"][0]
@@ -831,7 +838,9 @@ def test_chunk_and_context_stop_at_document_part_boundary() -> None:
     ]
     context_index = PreviousContextIndex(source)
     assert context_index.previous(source[2], 3) == []
+    assert context_index.previous_ids(source[2], 3) == ()
     assert context_index.previous(source[3], 3) == [{"source": "第二章"}]
+    assert context_index.previous_ids(source[3], 3) == ("F0001-S000003",)
 
 
 def test_chunk_builder_can_cross_file_and_part_boundaries_when_enabled() -> None:
@@ -1014,7 +1023,7 @@ def test_chunk_builder_partitions_alternating_empty_lines_within_soft_target() -
                 }
             )
     current = config()
-    current["execution"]["target_chunk_input_tokens"] = 1000
+    current["chunking"]["target_content_tokens"] = 1000
     work = [item for item in source if not item["is_empty"]]
     plans = build_chunk_plans(
         work,
@@ -1040,12 +1049,12 @@ def test_chunk_builder_partitions_alternating_empty_lines_within_soft_target() -
         for plan in plans
         for item in plan.segments
     )
-    assert all(plan.estimated_input_tokens <= 1000 for plan in plans)
+    assert all(estimate_tokens(json.dumps([{"source": item["source"]} for item in plan.segments], ensure_ascii=False, separators=(",", ":"))) * current["execution"]["token_safety_factor"] <= 1000 for plan in plans)
 
 
 def test_single_segment_may_exceed_soft_target_but_not_input_limit() -> None:
     current = config()
-    current["execution"]["target_chunk_input_tokens"] = 50
+    current["chunking"]["target_content_tokens"] = 50
     source = [segments()[0]]
     plans = build_chunk_plans(
         source,
@@ -1066,7 +1075,7 @@ def test_single_segment_may_exceed_soft_target_but_not_input_limit() -> None:
 
 def test_chunk_builder_splits_without_duplicating_segments() -> None:
     current = config()
-    current["execution"]["target_chunk_input_tokens"] = 75
+    current["chunking"]["target_content_tokens"] = 75
     prompt = full_prompt("translation", "Translate.")
     work = [segments()[2], segments()[3], segments()[4]]
 
@@ -1180,6 +1189,7 @@ def test_previous_context_index_matches_sparse_and_probe_segments() -> None:
     ]
     index = PreviousContextIndex(source)
     probe = {**source[0], "segment_id": "S3-PROBE", "source": "probe"}
+    assert index.previous_ids(probe, 2) == ("S1",)
     resolver = lambda segment_id: f"translated:{segment_id}"
     assert index.previous(
         probe,
@@ -1250,7 +1260,7 @@ async def test_llm_client_retries_429_and_saves_debug(tmp_path: Path) -> None:
 async def test_llm_client_changes_key_after_auth_failure_without_retry_budget(
     tmp_path: Path,
 ) -> None:
-    current = load_global_config(ROOT)
+    current = config()
     current["retry"]["http_max_attempts"] = 1
     current["execution"]["max_parallel"] = 1
     current["execution"]["max_parallel_per_key"] = 1
@@ -1307,7 +1317,7 @@ async def test_llm_client_changes_key_after_auth_failure_without_retry_budget(
 async def test_llm_client_rotates_keys_on_429_without_consuming_round(
     tmp_path: Path,
 ) -> None:
-    current = load_global_config(ROOT)
+    current = config()
     current["retry"]["http_max_attempts"] = 1
     current["retry"]["base_delay_seconds"] = 0
     current["retry"]["jitter_seconds"] = 0
@@ -1387,7 +1397,7 @@ async def test_llm_client_rotates_keys_on_429_without_consuming_round(
 
 @pytest.mark.asyncio
 async def test_llm_client_bounds_all_key_429_by_retry_rounds(tmp_path: Path) -> None:
-    current = load_global_config(ROOT)
+    current = config()
     current["retry"]["http_max_attempts"] = 2
     current["retry"]["base_delay_seconds"] = 0
     current["retry"]["jitter_seconds"] = 0
@@ -1430,7 +1440,7 @@ async def test_llm_client_bounds_all_key_429_by_retry_rounds(tmp_path: Path) -> 
 async def test_llm_client_does_not_switch_key_for_configuration_error(
     tmp_path: Path,
 ) -> None:
-    current = load_global_config(ROOT)
+    current = config()
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1465,7 +1475,7 @@ async def test_llm_client_does_not_switch_key_for_configuration_error(
 async def test_llm_client_warns_and_uses_backoff_for_invalid_retry_after(
     tmp_path: Path,
 ) -> None:
-    current = load_global_config(ROOT)
+    current = config()
     current["retry"]["http_max_attempts"] = 1
     current["retry"]["base_delay_seconds"] = 0
     current["retry"]["jitter_seconds"] = 0
@@ -1694,7 +1704,7 @@ async def test_llm_client_clamps_max_tokens_to_remaining_context(
 ) -> None:
     current = config()
     current["llm"]["context_window_tokens"] = 1000
-    current["llm"]["context_safety_margin_tokens"] = 100
+    current["chunking"]["context_reserve_tokens"] = 100
     current["llm"]["max_output_tokens"] = 5000
     current["debug"]["enabled"] = False
     sent_payload: dict | None = None
@@ -1728,10 +1738,10 @@ async def test_llm_client_clamps_max_tokens_to_remaining_context(
         del os.environ["LLM_API_KEY"]
         await client.aclose()
     assert sent_payload is not None
-    assert sent_payload["max_tokens"] == 650
+    assert sent_payload["max_tokens"] == 750
     assert len(llm.warnings) == 1
     assert "5000" in llm.warnings[0]
-    assert "650" in llm.warnings[0]
+    assert "750" in llm.warnings[0]
 
 
 @pytest.mark.asyncio
@@ -2558,3 +2568,39 @@ def test_old_llm_run_requires_decline_and_preserves_snapshot(tmp_path: Path) -> 
         choose_running_run(project, "translation", action="resume", dry_run=False)
     assert choose_running_run(project, "translation", action="decline", dry_run=False)[0] is None
     assert path.read_bytes() == original
+
+
+def test_chunk_target_excludes_references_and_rebuilds_them_for_hard_limit() -> None:
+    current = config()
+    current["chunking"]["target_content_tokens"] = 20
+    work = [segments()[2], segments()[3], segments()[4]]
+
+    def payload(items: list[dict]) -> dict:
+        return {"segments": [{"source": item["source"]} for item in items],
+                "reference_context": [item["segment_id"] * 12 for item in items]}
+
+    kwargs = dict(all_segments=segments(), config=current, stage="translation", prompt="prompt", payload_builder=payload)
+    combined = build_chunk_plans(work, **kwargs)
+    assert len(combined) == 1
+    current["chunking"]["max_input_tokens"] = estimate_messages(render_messages("prompt", payload(work[:2])), current["execution"]["token_safety_factor"])
+    batches = build_chunk_plans(work, **kwargs)
+    assert [len(batch.segments) for batch in batches] == [2, 1]
+    assert batches[1].payload == payload([work[2]])
+
+
+@pytest.mark.asyncio
+async def test_llm_client_rejects_hard_overflow_before_sending(tmp_path: Path) -> None:
+    from app.errors import ContextLengthError
+    current = config()
+    current["chunking"]["max_input_tokens"] = 50
+    calls = []
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: calls.append(request)))
+    try:
+        async with LLMClient(current, SlidingWindowLimiter(0, 0), run_dir=tmp_path,
+                             project_id="P", run_id="R", stage="translation", client=client) as llm:
+            with pytest.raises(ContextLengthError, match="硬限制 50"):
+                await llm.chat(messages=render_messages("prompt", {}), temperature=0,
+                               estimated_input_tokens=51)
+    finally:
+        await client.aclose()
+    assert calls == []

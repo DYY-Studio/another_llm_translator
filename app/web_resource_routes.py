@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import ctypes
 import hmac
@@ -19,11 +20,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .config import (
-    LLM_MODEL_STAGES,
     dump_config,
-    load_config,
-    resolve_global_config,
-    resolve_project_config,
+    load_global_settings, load_project_settings, normalize_config, normalize_project_settings, builtin_settings, normalize_settings,
 )
 from .credentials import (
     credential_summaries,
@@ -43,9 +41,9 @@ from .errors import (
     UsageError,
 )
 from .execution import full_prompt
-from .decision import decision_preset_path, load_decision_preset, validate_decision_preset
+from .decision import decision_preset_path, load_decision_preset, normalize_decision_preset, missing_decision_fields
 from .llm_adapter import load_json_adapter
-from .llm_preset import LLMPreset, endpoint_url, load_llm_preset, preset_path
+from .llm_preset import LLMPreset, endpoint_url, load_llm_preset, preset_path, normalize_llm_preset, _parse_llm_preset, missing_preset_fields, validate_executable_preset
 from .locking import project_write_lock
 from .plugins import (
     document_adapter_summaries,
@@ -65,7 +63,7 @@ from .prompt_library import (
     read_prompt_library,
     save_prompt_library,
 )
-from .server_config import save_server_config
+from .server_config import save_server_config, default_server_config
 from .sqlite_storage import (
     atomic_write_json,
     atomic_write_text,
@@ -372,16 +370,16 @@ def register_resource_routes(
         return effective_path(f"llm_presets/{preset_id}.json", builtin_root=app_root)
 
     @app.get("/api/v1/welcome")
-    async def welcome() -> dict[str, Any]:
+    def welcome() -> dict[str, Any]:
         return {"first": not welcome_seen()}
 
     @app.post("/api/v1/welcome/dismiss")
-    async def dismiss_welcome() -> dict[str, bool]:
+    def dismiss_welcome() -> dict[str, bool]:
         mark_welcome_seen()
         return {"ok": True}
 
     @app.post("/api/v1/directories")
-    async def list_directories(payload: dict[str, Any]) -> dict[str, Any]:
+    def list_directories(payload: dict[str, Any]) -> dict[str, Any]:
         path = payload.get("path", "")
         if not isinstance(path, str):
             raise UsageError("目录路径必须是字符串")
@@ -446,36 +444,32 @@ def register_resource_routes(
         }
 
     @app.get("/api/v1/document-adapters")
-    async def document_adapters() -> dict[str, Any]:
+    def document_adapters() -> dict[str, Any]:
         return {"adapters": document_adapter_summaries()}
 
     @app.get("/api/v1/translation-validators")
-    async def translation_validators() -> dict[str, Any]:
+    def translation_validators() -> dict[str, Any]:
         bindings = resolve_translation_validators()
         return {"validators": [summary for _, summary in bindings]}
 
     @app.get("/api/v1/global/config")
-    async def get_global_config() -> dict[str, Any]:
-        return {
-            "config": load_config(
-                effective_path("config/config.toml", builtin_root=app_root)
-            )
-        }
+    def get_global_config() -> dict[str, Any]:
+        warnings: list[str] = []
+        config = load_global_settings(app_root, warnings=warnings)
+        return {"config": config, "warnings": warnings}
 
     @app.put("/api/v1/global/config")
-    async def put_global_config(payload: dict[str, Any]) -> dict[str, bool]:
+    def put_global_config(payload: dict[str, Any]) -> dict[str, Any]:
         config = payload.get("config")
         if not isinstance(config, dict):
             raise UsageError("config 必须是对象")
-        content = dump_config(config)
-        resolve_global_config(config, app_root)
-        for stage in LLM_MODEL_STAGES:
-            resolve_global_config(config, app_root, stage=stage)
-        atomic_write_text(write_user("config/config.toml"), content)
-        return {"saved": True}
+        warnings: list[str] = []
+        config = normalize_config(config, defaults=builtin_settings(), warnings=warnings)
+        atomic_write_text(write_user("config/config.toml"), dump_config(config))
+        return {"saved": True, "warnings": warnings}
 
     @app.get("/api/v1/prompts/{stage}/default")
-    async def get_builtin_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
+    def get_builtin_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
         if stage not in PROMPT_RESOURCE_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         validate_language(language)
@@ -490,7 +484,7 @@ def register_resource_routes(
         )
 
     @app.get("/api/v1/global/prompts/{stage}")
-    async def get_global_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
+    def get_global_prompt(stage: str, language: str = "zh-CN") -> dict[str, Any]:
         if stage not in PROMPT_RESOURCE_STAGES:
             raise UsageError(f"未知 Prompt 阶段：{stage}")
         validate_language(language)
@@ -508,7 +502,7 @@ def register_resource_routes(
         )
 
     @app.put("/api/v1/global/prompts/{stage}")
-    async def put_global_prompt(
+    def put_global_prompt(
         stage: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
         if stage not in PROMPT_RESOURCE_STAGES:
@@ -523,27 +517,27 @@ def register_resource_routes(
         return {"saved": True}
 
     @app.get("/api/v1/projects/{name}/config")
-    async def get_project_config(name: str) -> dict[str, Any]:
-        return {"config": load_config(project(name) / "config.toml")}
+    def get_project_config(name: str) -> dict[str, Any]:
+        warnings: list[str] = []
+        config = load_project_settings(project(name), root=app_root, warnings=warnings)
+        return {"config": config, "warnings": warnings}
 
     @app.put("/api/v1/projects/{name}/config")
-    async def put_project_config(
+    def put_project_config(
         name: str, payload: dict[str, Any]
-    ) -> dict[str, bool]:
+    ) -> dict[str, Any]:
         config = payload.get("config")
         if not isinstance(config, dict):
             raise UsageError("config 必须是对象")
-        content = dump_config(config)
+        warnings: list[str] = []
+        config = normalize_project_settings(config, root=app_root, warnings=warnings)
         root = project(name)
-        resolve_project_config(config, presets_root=app_root, project=root)
-        for stage in LLM_MODEL_STAGES:
-            resolve_project_config(config, stage=stage, presets_root=app_root, project=root)
         with project_write_lock(root):
-            atomic_write_text(root / "config.toml", content)
-        return {"saved": True}
+            atomic_write_text(root / "config.toml", dump_config(config))
+        return {"saved": True, "warnings": warnings}
 
     @app.get("/api/v1/projects/{name}/prompts/{stage}")
-    async def get_project_prompt(
+    def get_project_prompt(
         name: str, stage: str, language: str = "zh-CN", file_id: str | None = None
     ) -> dict[str, Any]:
         if stage not in PROMPT_RESOURCE_STAGES:
@@ -615,7 +609,7 @@ def register_resource_routes(
         return result
 
     @app.put("/api/v1/projects/{name}/prompts/{stage}")
-    async def put_project_prompt(
+    def put_project_prompt(
         name: str, stage: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
         if stage not in PROMPT_RESOURCE_STAGES:
@@ -630,7 +624,7 @@ def register_resource_routes(
         return {"saved": True}
 
     @app.delete("/api/v1/projects/{name}/prompts/{stage}")
-    async def restore_project_prompt(name: str, stage: str, payload: dict[str, Any]) -> dict[str, bool]:
+    def restore_project_prompt(name: str, stage: str, payload: dict[str, Any]) -> dict[str, bool]:
         if payload.get("confirm") is not True:
             raise UsageError("必须明确确认恢复 Prompt 继承")
         language = validate_language(payload.get("language", "zh-CN"))
@@ -640,7 +634,7 @@ def register_resource_routes(
         return {"saved": True}
 
     @app.get("/api/v1/prompt-library/{stage}/{language}")
-    async def get_prompt_library(stage: str, language: str) -> dict[str, Any]:
+    def get_prompt_library(stage: str, language: str) -> dict[str, Any]:
         return {
             "stage": stage,
             "language": language,
@@ -648,7 +642,7 @@ def register_resource_routes(
         }
 
     @app.get("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
-    async def get_prompt_library_entry(
+    def get_prompt_library_entry(
         stage: str, language: str, prompt_id: str
     ) -> dict[str, Any]:
         content, digest = read_prompt_library(stage, language, prompt_id)
@@ -750,7 +744,7 @@ def register_resource_routes(
         return result
 
     @app.put("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
-    async def put_prompt_library_entry(
+    def put_prompt_library_entry(
         stage: str, language: str, prompt_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         digest = save_prompt_library(
@@ -762,14 +756,14 @@ def register_resource_routes(
         return {"saved": True, "id": prompt_id, "digest": digest}
 
     @app.delete("/api/v1/prompt-library/{stage}/{language}/{prompt_id:path}")
-    async def delete_prompt_library_entry(
+    def delete_prompt_library_entry(
         stage: str, language: str, prompt_id: str
     ) -> dict[str, Any]:
         delete_prompt_library(stage, language, prompt_id)
         return {"deleted": True, "id": prompt_id}
 
     @app.get("/api/v1/global/decision-presets")
-    async def list_decision_presets() -> dict[str, Any]:
+    def list_decision_presets() -> dict[str, Any]:
         paths: dict[str, Path] = {}
         for root in (user_root(), app_root):
             for path in sorted((root / "decision_presets").glob("*.json")):
@@ -777,41 +771,44 @@ def register_resource_routes(
         values = []
         for preset_id, path in sorted(paths.items()):
             try:
-                value = load_decision_preset(path)
+                warnings: list[str] = []
+                value = load_decision_preset(path, warnings=warnings)
                 if value["preset_id"] != preset_id:
                     raise ConfigError("Decision Preset ID 与文件名不一致")
-                model = value["llm_preset"] if value["protocol"] == "llm" else value["model"]
-                values.append({"preset_id": preset_id, "protocol": value["protocol"], "model": model, "valid": True})
+                model = value.get("llm_preset", "") if value["protocol"] == "llm" else value.get("model", "")
+                missing = missing_decision_fields(value)
+                values.append({"preset_id": preset_id, "protocol": value["protocol"], "model": model,
+                               "valid": not missing, "warnings": warnings, "missing_fields": missing})
             except AppError as exc:
                 values.append({"preset_id": preset_id, "valid": False, "error": str(exc)})
         return {"presets": values}
 
     @app.get("/api/v1/global/decision-presets/{preset_id}")
-    async def get_decision_preset(preset_id: str) -> dict[str, Any]:
+    def get_decision_preset(preset_id: str) -> dict[str, Any]:
         relative = str(decision_preset_path(Path(), preset_id))
-        return load_decision_preset(effective_path(relative, builtin_root=app_root))
+        warnings: list[str] = []
+        definition = load_decision_preset(effective_path(relative, builtin_root=app_root), warnings=warnings)
+        return {"preset": definition, "warnings": warnings, "missing_fields": missing_decision_fields(definition)}
 
     @app.put("/api/v1/global/decision-presets/{preset_id}")
-    async def put_decision_preset(preset_id: str, payload: dict[str, Any]) -> dict[str, bool]:
+    def put_decision_preset(preset_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         relative = str(decision_preset_path(Path(), preset_id))
-        definition = validate_decision_preset(payload)
+        warnings: list[str] = []
+        definition = normalize_decision_preset(payload, preset_id=preset_id, warnings=warnings)
         if definition["preset_id"] != preset_id:
             raise ConfigError("Decision Preset ID 与请求不一致")
-        if definition["protocol"] == "llm":
-            from .decision_llm import resolve_llm_resources
-            resolve_llm_resources(definition, app_root)
         atomic_write_json(write_user(relative), definition)
-        return {"saved": True}
+        return {"saved": True, "warnings": warnings, "missing_fields": missing_decision_fields(definition)}
 
     @app.delete("/api/v1/global/decision-presets/{preset_id}")
-    async def delete_decision_preset(preset_id: str) -> dict[str, bool]:
+    def delete_decision_preset(preset_id: str) -> dict[str, bool]:
         relative = str(decision_preset_path(Path(), preset_id))
         configs = [effective_path("config/config.toml", builtin_root=app_root)]
         configs.extend(item / "config.toml" for item in (projects_root.iterdir() if projects_root.exists() else ())
                        if database_path(item).is_file())
         configs.extend(item / "config.toml" for item in app.state.external_projects)
         for path in configs:
-            config = load_config(path)
+            config = load_global_settings(app_root) if path == configs[0] else load_project_settings(path.parent, root=app_root)
             options = config["validation"]["translation"]
             if preset_id in {config["decision"]["preset"], options["decision_preset"],
                              options["alignment"]["decision_preset"]}:
@@ -823,11 +820,9 @@ def register_resource_routes(
         return {"deleted": True}
 
     @app.get("/api/v1/global/presets")
-    async def list_global_presets() -> dict[str, Any]:
+    def list_global_presets() -> dict[str, Any]:
         selected = str(
-            load_config(
-                effective_path("config/config.toml", builtin_root=app_root)
-            )["llm"].get("preset", "")
+            load_global_settings(app_root)["llm"].get("preset", "")
         )
         values = []
         paths: dict[str, Path] = {}
@@ -836,16 +831,23 @@ def register_resource_routes(
                 paths.setdefault(path.stem, path)
         for path in sorted(paths.values(), key=lambda value: value.stem):
             try:
-                preset = load_llm_preset(path)
+                warnings: list[str] = []
+                preset = load_llm_preset(path, warnings=warnings)
+                missing = missing_preset_fields(preset.definition)
+                temperature_supported = False
+                if preset.adapter_id:
+                    temperature_supported = load_json_adapter(effective_path(f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root)).capabilities["temperature"] and preset.definition["send_temperature"]
                 values.append(
                     {
                         "preset_id": preset.preset_id,
                         "adapter_id": preset.adapter_id,
                         "model": preset.definition["model"],
                         "stream": bool(preset.definition["stream"]),
-                        "temperature_supported": load_json_adapter(effective_path(f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root)).capabilities["temperature"] and preset.definition["send_temperature"],
+                        "temperature_supported": temperature_supported,
                         "selected": preset.preset_id == selected,
-                        "valid": True,
+                        "valid": not missing,
+                        "warnings": warnings,
+                        "missing_fields": missing,
                         "digest": preset.digest,
                     }
                 )
@@ -862,38 +864,41 @@ def register_resource_routes(
         return {"presets": values}
 
     @app.get("/api/v1/global/presets/{preset_id}")
-    async def get_global_preset(preset_id: str) -> dict[str, Any]:
-        return load_llm_preset(preset_file(preset_id)).definition
+    def get_global_preset(preset_id: str) -> dict[str, Any]:
+        warnings: list[str] = []
+        preset = load_llm_preset(preset_file(preset_id), warnings=warnings)
+        return {"preset": preset.definition, "warnings": warnings, "missing_fields": missing_preset_fields(preset.definition)}
 
     @app.put("/api/v1/global/presets/{preset_id}")
-    async def put_global_preset(
+    def put_global_preset(
         preset_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        preset = validate_preset_payload(preset_id, payload)
+        warnings: list[str] = []
+        if payload.get("preset_id", preset_id) != preset_id:
+            raise UsageError("URL 中的 Preset ID 必须与 preset_id 一致")
+        definition = normalize_llm_preset(payload, preset_id=preset_id, warnings=warnings)
+        preset = _parse_llm_preset(definition, editable=True)
         path = write_user(f"llm_presets/{preset_id}.json")
         atomic_write_json(path, preset.definition)
-        saved = load_llm_preset(path)
-        return {"saved": True, "digest": saved.digest}
+        return {"saved": True, "digest": preset.digest, "warnings": warnings, "missing_fields": missing_preset_fields(preset.definition)}
 
     @app.delete("/api/v1/global/presets/{preset_id}")
     async def delete_global_preset(preset_id: str) -> dict[str, bool]:
         preset_file(preset_id)
-        config = load_config(
-            effective_path("config/config.toml", builtin_root=app_root)
-        )
+        config = load_global_settings(app_root)
         if config["llm"].get("preset") == preset_id:
             raise UsageError("不能删除全局配置正在使用的 LLM Preset")
         for item in projects_root.iterdir() if projects_root.exists() else ():
             if not database_path(item).is_file():
                 continue
-            project_config = load_config(item / "config.toml")
+            project_config = load_project_settings(item, root=app_root)
             if project_config["llm"].get("preset") == preset_id:
                 raise UsageError(f"不能删除项目 {item.name} 正在使用的 LLM Preset")
-        decisions = await list_decision_presets()
+        decisions = (await run_blocking(list_decision_presets))
         for item in decisions["presets"]:
             if item.get("protocol") != "llm":
                 continue
-            definition = await get_decision_preset(item["preset_id"])
+            definition = (await run_blocking(get_decision_preset, item["preset_id"]))["preset"]
             if definition["protocol"] == "llm" and definition["llm_preset"] == preset_id:
                 raise UsageError(f"不能删除 Decision Preset {item['preset_id']} 正在使用的 LLM Preset")
         user_file = user_root() / "llm_presets" / f"{preset_id}.json"
@@ -906,8 +911,9 @@ def register_resource_routes(
         raise UsageError(f"LLM Preset 不存在：{preset_id}")
 
     @app.get("/api/v1/global/presets/{preset_id}/preview")
-    async def preview_global_preset(preset_id: str) -> dict[str, Any]:
+    def preview_global_preset(preset_id: str) -> dict[str, Any]:
         preset = load_llm_preset(preset_file(preset_id))
+        validate_executable_preset(preset.definition)
         adapter = load_json_adapter(
             effective_path(
                 f"llm_adapters/{preset.adapter_id}.json", builtin_root=app_root
@@ -965,9 +971,10 @@ def register_resource_routes(
             from .web_chatgpt_routes import require_plan_session
             require_plan_session(request)
             connection = ChatGPTConnection()
-            api_keys = (await connection.access_token(connection.identity()),)
+            identity = await run_blocking(connection.identity)
+            api_keys = (await connection.access_token(identity),)
         else:
-            api_keys = resolve_api_keys(preset.definition["credential"])
+            api_keys = await run_blocking(resolve_api_keys, preset.definition["credential"])
         if key_index > len(api_keys):
             raise UsageError("key_index 超出 API Key 范围")
         api_key = api_keys[key_index - 1]
@@ -1006,11 +1013,11 @@ def register_resource_routes(
         return {"models": models, "count": len(models)}
 
     @app.get("/api/v1/credentials")
-    async def list_credentials() -> dict[str, Any]:
+    def list_credentials() -> dict[str, Any]:
         return {"credentials": credential_summaries()}
 
     @app.post("/api/v1/credentials")
-    async def create_credential(payload: dict[str, Any]) -> dict[str, bool]:
+    def create_credential(payload: dict[str, Any]) -> dict[str, bool]:
         credential_id = payload.get("id")
         secret = payload.get("secret")
         if not isinstance(credential_id, str) or not isinstance(secret, str):
@@ -1019,7 +1026,7 @@ def register_resource_routes(
         return {"saved": True}
 
     @app.put("/api/v1/credentials/{credential_id}")
-    async def update_credential(
+    def update_credential(
         credential_id: str, payload: dict[str, Any]
     ) -> dict[str, bool]:
         secret = payload.get("secret")
@@ -1031,12 +1038,12 @@ def register_resource_routes(
         return {"saved": True}
 
     @app.delete("/api/v1/credentials/{credential_id}")
-    async def delete_credential_route(credential_id: str) -> dict[str, bool]:
+    def delete_credential_route(credential_id: str) -> dict[str, bool]:
         delete_credential(credential_id)
         return {"deleted": True}
 
     @app.post("/api/v1/credentials/{credential_id}/test")
-    async def test_credential_route(credential_id: str) -> dict[str, Any]:
+    def test_credential_route(credential_id: str) -> dict[str, Any]:
         secret = read_credential(credential_id)
         if secret is None:
             raise UsageError(f"凭据不存在：{credential_id}")
@@ -1047,7 +1054,7 @@ def register_resource_routes(
         return {"ok": True}
 
     @app.get("/api/v1/server/status")
-    async def server_status(request: Request) -> dict[str, Any]:
+    def server_status(request: Request) -> dict[str, Any]:
         config = app.state.server_config
         loopback = _is_loopback(request)
         return {
@@ -1058,19 +1065,29 @@ def register_resource_routes(
             },
             "tasks": {
                 "max_active_projects": app.state.tasks.max_active_projects,
+                "estimate_usage_before_run": config.get("tasks", {}).get("estimate_usage_before_run", False),
             },
             "authed": loopback
             or not config["auth"]["required"]
             or valid_session(request.cookies.get(SESSION_COOKIE)),
             "loopback": loopback,
+            "warnings": app.state.server_config_warnings,
         }
 
     @app.get("/api/v1/server/interfaces")
-    async def server_interfaces() -> dict[str, Any]:
+    def server_interfaces() -> dict[str, Any]:
         return {"interfaces": lan_interfaces()}
 
     @app.put("/api/v1/server/config")
     async def put_server_config(payload: dict[str, Any]) -> dict[str, Any]:
+        warnings: list[str] = []
+        auth_input = payload.get("auth")
+        password_input = auth_input.get("password") if isinstance(auth_input, dict) else None
+        settings = {**payload}
+        if isinstance(auth_input, dict):
+            settings["auth"] = {key: value for key, value in auth_input.items() if key != "password"}
+        payload = normalize_settings(settings, default_server_config(), warnings=warnings, path="server")
+        payload["auth"]["password"] = password_input
         config = app.state.server_config
         lan = payload.get("lan")
         auth = payload.get("auth")
@@ -1079,6 +1096,9 @@ def register_resource_routes(
         tasks = payload.get("tasks")
         if not isinstance(tasks, dict):
             raise UsageError("tasks 必须是对象")
+        estimate_usage = tasks.get("estimate_usage_before_run", False)
+        if not isinstance(estimate_usage, bool):
+            raise UsageError("tasks.estimate_usage_before_run 必须是布尔值")
         max_active_projects = tasks.get("max_active_projects")
         if (
             not isinstance(max_active_projects, int)
@@ -1103,10 +1123,10 @@ def register_resource_routes(
         password = auth.get("password")
         if password is not None and not isinstance(password, str):
             raise UsageError("auth.password 必须是字符串")
-        if required and not password and read_lan_password() is None:
+        if required and not password and (await run_blocking(read_lan_password)) is None:
             raise UsageError("开启认证时必须设置密码")
         if password:
-            save_lan_password(password)
+            await run_blocking(save_lan_password, password)
         if not enabled:
             app.state.sessions.clear()
         next_config = {
@@ -1124,18 +1144,20 @@ def register_resource_routes(
             "tasks": {
                 **config.get("tasks", {}),
                 "max_active_projects": max_active_projects,
+                "estimate_usage_before_run": estimate_usage,
             },
         }
-        save_server_config(next_config)
+        (await run_blocking(save_server_config, next_config))
         app.state.server_config = next_config
+        app.state.server_config_warnings = []
         await app.state.tasks.set_max_active_projects(max_active_projects)
         warning = (
             "同网段设备拥有完整项目和 LLM 操作权限" if enabled and not required else ""
         )
-        return {"saved": True, "warning": warning}
+        return {"saved": True, "warning": warning, "warnings": warnings}
 
     @app.post("/api/v1/auth/login")
-    async def auth_login(
+    def auth_login(
         request: Request, payload: dict[str, Any]
     ) -> dict[str, Any]:
         config = app.state.server_config
@@ -1164,14 +1186,14 @@ def register_resource_routes(
         return response
 
     @app.post("/api/v1/auth/logout")
-    async def auth_logout(request: Request) -> dict[str, bool]:
+    def auth_logout(request: Request) -> dict[str, bool]:
         token = request.cookies.get(SESSION_COOKIE)
         if token:
             app.state.sessions.pop(token, None)
         return {"logged_out": True}
 
     @app.get("/api/v1/global/adapters")
-    async def list_global_adapters() -> dict[str, Any]:
+    def list_global_adapters() -> dict[str, Any]:
         adapters = []
         paths: dict[str, Path] = {}
         for root in (user_root(), app_root):
@@ -1201,7 +1223,7 @@ def register_resource_routes(
         return {"adapters": adapters}
 
     @app.get("/api/v1/global/adapters/{adapter_id}")
-    async def get_global_adapter(adapter_id: str) -> dict[str, Any]:
+    def get_global_adapter(adapter_id: str) -> dict[str, Any]:
         adapter = load_json_adapter(
             effective_path(
                 f"llm_adapters/{adapter_id}.json", builtin_root=app_root
@@ -1210,7 +1232,7 @@ def register_resource_routes(
         return adapter.definition
 
     @app.put("/api/v1/global/adapters/{adapter_id}")
-    async def put_global_adapter(
+    def put_global_adapter(
         adapter_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         if payload.get("adapter_id") != adapter_id:
@@ -1236,7 +1258,7 @@ def register_resource_routes(
         return {"saved": True, "digest": adapter.digest}
 
     @app.get("/api/v1/global/adapters/{adapter_id}/preview")
-    async def adapter_preview(adapter_id: str) -> dict[str, Any]:
+    def adapter_preview(adapter_id: str) -> dict[str, Any]:
         adapter = load_json_adapter(
             effective_path(
                 f"llm_adapters/{adapter_id}.json", builtin_root=app_root

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import tomllib
@@ -7,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 
 from .errors import UsageError
 from .execution import Scope
@@ -19,7 +20,7 @@ from .sqlite_storage import (
     read_project_meta_read_only,
     read_run_record,
 )
-from .web_payloads import TaskStartPayload
+from .web_payloads import TaskStartPayload, TextTranslationPayload
 from .web_tasks import task_options
 
 
@@ -605,6 +606,40 @@ def register_task_routes(
     project: Callable[[str], Path],
     project_paths: Callable[[], list[Path]],
 ) -> None:
+    @app.get("/api/v1/projects/{name}/text-translation")
+    def text_translation_options(name: str) -> dict[str, Any]:
+        from .config import load_project_config
+
+        config = load_project_config(project(name), stage="translation")
+        return {"preset": {"id": config["_llm_preset_id"], "model": config["llm"]["model"]}}
+
+    @app.post("/api/v1/projects/{name}/text-translation")
+    async def translate_project_text(name: str, payload: TextTranslationPayload, request: Request) -> dict[str, Any]:
+        from .async_utils import run_blocking
+        from .config import load_project_config
+        from .text_translation import translate_text
+
+        root = await run_blocking(project, name)
+        config = await run_blocking(lambda: load_project_config(root, stage="translation"))
+        limiter, release = app.state.tasks.limiter_pool.acquire(config)
+
+        async def wait_for_disconnect() -> None:
+            while (await request.receive())["type"] != "http.disconnect":
+                pass
+
+        translation = asyncio.create_task(translate_text(root, payload.source, config=config, limiter=limiter))
+        disconnected = asyncio.create_task(wait_for_disconnect())
+        try:
+            done, _ = await asyncio.wait((translation, disconnected), return_when=asyncio.FIRST_COMPLETED)
+            if translation in done:
+                return await translation
+            raise HTTPException(status_code=499, detail="请求已取消")
+        finally:
+            translation.cancel()
+            disconnected.cancel()
+            await asyncio.gather(translation, disconnected, return_exceptions=True)
+            release()
+
     def validate_language(value: object) -> str:
         if value not in PROMPT_LANGUAGES:
             raise UsageError("language 必须是 zh-CN 或 en")
@@ -620,7 +655,7 @@ def register_task_routes(
         ).is_dir()
 
     @app.get("/api/v1/runs")
-    async def historical_runs(
+    def historical_runs(
         project_selector: str | None = Query(default=None, alias="project"),
         stage: str | None = None,
         status: str | None = None,
@@ -685,7 +720,7 @@ def register_task_routes(
         }
 
     @app.get("/api/v1/projects/{name}/runs/{run_id}")
-    async def historical_run_detail(name: str, run_id: str) -> dict[str, Any]:
+    def historical_run_detail(name: str, run_id: str) -> dict[str, Any]:
         root = project(name)
         safe_run_id = _safe_run_id(run_id)
         record = read_run_record(root, safe_run_id)
@@ -704,7 +739,7 @@ def register_task_routes(
         )
 
     @app.get("/api/v1/projects/{name}/runs/{run_id}/requests/{request_id}")
-    async def historical_request_detail(
+    def historical_request_detail(
         name: str, run_id: str, request_id: str, full: bool = False
     ) -> dict[str, Any]:
         root = project(name)
@@ -770,6 +805,7 @@ def register_task_routes(
             include_draft_translation=payload.include_draft_translation,
             aggregate_full_summaries=payload.aggregate_full_summaries,
             final_review=payload.final_review,
+            knowledge_only=payload.knowledge_only,
             summary_selection=summary_selection,
             continuous_stages=payload.stages,
             continuous_run_actions=payload.run_actions,
@@ -779,15 +815,17 @@ def register_task_routes(
         )
 
     @app.get("/api/v1/projects/{name}/task-options/{stage}")
-    async def get_task_options(
+    def get_task_options(
         request: Request,
         name: str,
         stage: str,
+        estimate_usage: bool = False,
         include_summaries: bool = False,
         include_draft_translation: bool = False,
         aggregate_full_summaries: bool = False,
         language: str | None = None,
         final_review: bool = False,
+        knowledge_only: bool = False,
         stages: list[str] = Query(default=[]),  # noqa: B008
         apply_terminology_decision: bool = False,
         include_repetition_consistency: bool = False,
@@ -808,6 +846,7 @@ def register_task_routes(
         return task_options(
             project(name),
             stage,
+            estimate_usage=estimate_usage and app.state.server_config.get("tasks", {}).get("estimate_usage_before_run", False),
             include_summaries=include_summaries,
             include_draft_translation=include_draft_translation,
             aggregate_full_summaries=aggregate_full_summaries,
@@ -815,6 +854,7 @@ def register_task_routes(
                 validate_language(language) if language is not None else None
             ),
             final_review=final_review,
+            knowledge_only=knowledge_only,
             continuous_stages=stages,
             apply_terminology_decision=apply_terminology_decision,
             include_repetition_consistency=include_repetition_consistency,
@@ -824,11 +864,11 @@ def register_task_routes(
         )
 
     @app.get("/api/v1/tasks/active")
-    async def active_tasks() -> dict[str, Any]:
+    def active_tasks() -> dict[str, Any]:
         return {"tasks": app.state.tasks.active_tasks()}
 
     @app.get("/api/v1/tasks/{task_id}")
-    async def task(task_id: str) -> dict[str, Any]:
+    def task(task_id: str) -> dict[str, Any]:
         return app.state.tasks.get(task_id)
 
     @app.post("/api/v1/tasks/{task_id}/cancel")
@@ -836,7 +876,7 @@ def register_task_routes(
         return await app.state.tasks.cancel(task_id)
 
     @app.post("/api/v1/diagnostics")
-    async def diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+    def diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
         values = {
             key: payload.get(key)
             for key in (
@@ -870,7 +910,7 @@ def register_task_routes(
             raise UsageError(str(exc)) from exc
 
     @app.get("/api/v1/diagnostics/requests/{request_id}")
-    async def diagnostic_request(request_id: str) -> dict[str, Any]:
+    def diagnostic_request(request_id: str) -> dict[str, Any]:
         try:
             return app.state.diagnostics.request_detail(request_id)
         except ValueError as exc:

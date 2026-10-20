@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.config import load_project_config
+from app.config import dump_config, load_config, load_project_config
 from app.errors import ConfigError, IncompleteError, UsageError
 from app.execution import Scope
 from app.main import run
@@ -259,6 +259,185 @@ async def test_review_missing_upstream_creates_no_run(tmp_path: Path) -> None:
     finally:
         del os.environ["LLM_API_KEY"]
     assert list((project / "runs").iterdir()) == before
+
+
+@pytest.mark.parametrize(
+    ("scheduling_mode", "stage", "expected_base_ids", "expected_context"),
+    [
+        ("parallel", "proofreading", ["F0001-S000004"], ["two", "three"]),
+        (
+            "ordered_by_file",
+            "proofreading",
+            ["F0001-S000004", "F0001-S000002", "F0001-S000003"],
+            [
+                {"source": "two", "translation": "译文 two"},
+                {"source": "three", "translation": "译文 three"},
+            ],
+        ),
+        (
+            "ordered_by_file",
+            "polishing",
+            ["F0001-S000004", "F0001-S000002", "F0001-S000003"],
+            [
+                {"source": "two", "translation": "译文 two"},
+                {"source": "three", "translation": "润色上下文 three"},
+            ],
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_review_limits_upstream_reads_to_scope_and_ordered_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scheduling_mode: str,
+    stage: str,
+    expected_base_ids: list[str],
+    expected_context: list[dict[str, str]] | list[str],
+) -> None:
+    project = await create_project(tmp_path, "one\ntwo\nthree\nselected")
+    from app import stage_review
+    from app.sqlite_storage import append_stage_results, read_json, read_segments, record_header
+
+    config_path = project / "config.toml"
+    config_text = config_path.read_text(encoding="utf-8").replace(
+        'scheduling_mode = "ordered_by_file"',
+        f'scheduling_mode = "{scheduling_mode}"',
+    )
+    context_start = config_text.index(f"[context.{stage}]")
+    context_end = config_text.find("[", context_start + 1)
+    if context_end < 0:
+        context_end = len(config_text)
+    config_text = (
+        config_text[:context_start]
+        + config_text[context_start:context_end].replace(
+            "previous_segments = 3", "previous_segments = 2", 1
+        )
+        + config_text[context_end:]
+    )
+    config_path.write_text(config_text, encoding="utf-8")
+    segments = read_segments(project)
+    metadata = read_json(project, project / "project.json")
+    records = [
+        record_header(
+            "stage_result",
+            metadata["project_id"],
+            record_id=f"translation-{index}",
+            stage="translation",
+            segment_id=f"F0001-S{index:06d}",
+            status="completed",
+            text=f"译文 {segments[index - 1]['source']}",
+            validation_status="passed",
+            findings=[],
+            terms_revision=None,
+            stage_fingerprint="translation",
+            run_id="BASE",
+            request_id="BASE",
+        )
+        for index in (2, 3, 4)
+    ]
+    if stage == "polishing":
+        records.extend(
+            [
+                record_header(
+                    "stage_result",
+                    metadata["project_id"],
+                    record_id="review-2",
+                    stage="proofreading",
+                    segment_id="F0001-S000002",
+                    status="completed",
+                    review_status="accepted",
+                    suggested_text=None,
+                    reason=None,
+                    base_result_id="translation-2",
+                ),
+                record_header(
+                    "stage_result",
+                    metadata["project_id"],
+                    record_id="applied-2",
+                    stage="proofreading_applied",
+                    segment_id="F0001-S000002",
+                    status="completed",
+                    base_result_id="translation-2",
+                    suggestion_result_id="review-2",
+                ),
+                record_header(
+                    "stage_result",
+                    metadata["project_id"],
+                    record_id="review-3",
+                    stage="proofreading",
+                    segment_id="F0001-S000003",
+                    status="completed",
+                    review_status="suggested",
+                    suggested_text="润色上下文 three",
+                    reason="test",
+                    base_result_id="translation-3",
+                ),
+                record_header(
+                    "stage_result",
+                    metadata["project_id"],
+                    record_id="applied-3",
+                    stage="proofreading_applied",
+                    segment_id="F0001-S000003",
+                    status="completed",
+                    base_result_id="translation-3",
+                    suggestion_result_id="review-3",
+                ),
+            ]
+        )
+    append_stage_results(project, records)
+
+    base_queries: list[list[str]] = []
+    history_queries: list[list[str]] = []
+    stage_name = stage
+    original_base_results = stage_review._base_results
+    original_latest_states = stage_review.latest_stage_states
+
+    def capture_bases(project_arg, stage, *, segment_ids=None):
+        base_queries.append(list(segment_ids))
+        return original_base_results(project_arg, stage, segment_ids=segment_ids)
+
+    def capture_history(project_arg, stage, segment_ids):
+        if stage == stage_name:
+            history_queries.append(list(segment_ids))
+        return original_latest_states(project_arg, stage, segment_ids)
+
+    monkeypatch.setattr(stage_review, "_base_results", capture_bases)
+    monkeypatch.setattr(stage_review, "latest_stage_states", capture_history)
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        seen.append(payload)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "message": {
+                        "content": llm_jsonl([
+                            {"type": "segment", "id": item["id"], "status": "accepted"}
+                            for item in payload["segments"]
+                        ])
+                    }
+                }],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await run_review(
+            project,
+            stage,
+            Scope(only_segment="F0001-S000004"),
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+        os.environ.pop("LLM_API_KEY", None)
+
+    assert result["completed"] == 1
+    assert base_queries == [expected_base_ids]
+    assert history_queries == [["F0001-S000004"]]
+    assert seen[0]["reference_context"] == expected_context
 
 
 @pytest.mark.asyncio
@@ -601,8 +780,11 @@ async def test_run_all_rejects_inconsistent_shared_limits_without_pool(
     ("translation", "unknown"),
     ("proofreading", "missing"),
     ("polishing", "missing"),
+    ("translation", "missing_end"),
+    ("proofreading", "missing_end"),
+    ("polishing", "missing_end"),
 ])
-async def test_complete_id_mismatch_retries_original_batch(
+async def test_invalid_complete_batch_retries_original_batch(
     tmp_path: Path, stage: str, mismatch: str,
 ) -> None:
     project = await create_project(tmp_path, "one\ntwo\nthree")
@@ -625,7 +807,7 @@ async def test_complete_id_mismatch_retries_original_batch(
                 ids = ids[:-1]
             elif mismatch == "duplicate":
                 ids = [ids[0], *ids]
-            else:
+            elif mismatch == "unknown":
                 ids = [*ids, "unknown"]
         records = [
             {"type": "segment", "id": segment_id, "translation": f"ok:{segment_id}"}
@@ -634,8 +816,11 @@ async def test_complete_id_mismatch_retries_original_batch(
              "suggested_text": None, "reason": None}
             for segment_id in ids
         ]
+        content = llm_jsonl(records)
+        if len(calls) == 1 and mismatch == "missing_end":
+            content = "\n".join(json.dumps(record) for record in records)
         return httpx.Response(
-            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
+            200, json={"choices": [{"message": {"content": content}}]},
         )
 
     try:
@@ -673,7 +858,7 @@ async def test_complete_id_mismatch_retries_original_batch(
 @pytest.mark.parametrize(
     ("error", "max_attempts", "succeeds"),
     [("missing", 2, True), ("duplicate", 2, True), ("field", 2, True),
-     ("missing", 0, False), ("missing", 1, False)],
+     ("missing", 0, False), ("missing", 1, False), ("missing_end", 0, False)],
 )
 async def test_chunk_retry_discards_partial_results(
     tmp_path: Path, stage: str, error: str, max_attempts: int, succeeds: bool,
@@ -703,11 +888,11 @@ async def test_chunk_retry_discards_partial_results(
                 records.pop()
             elif error == "duplicate":
                 records.append(records[-1].copy())
-            elif stage == "translation":
+            elif error == "field" and stage == "translation":
                 records[-1]["translation"] = None
-            else:
+            elif error == "field":
                 records[-1]["status"] = "invalid"
-            # No end: existing behavior would persist the valid rows and retry a subset.
+            # Omit end to exercise format retries without a complete-ID mismatch.
             content = "\n".join(json.dumps(record) for record in records)
         else:
             content = llm_jsonl(records)
@@ -886,9 +1071,10 @@ async def test_oversized_review_segment_is_combined_once(
             tmp_path,
             context_window_tokens=1200,
             max_output_tokens=300,
-            context_safety_margin_tokens=100,
-            target_chunk_input_tokens=700,
         )
+        config = load_config(project / "config.toml")
+        config["chunking"]["target_content_tokens"] = 700
+        (project / "config.toml").write_text(dump_config(config))
         summary = await run_review(
             project, "proofreading", Scope(), http_client=client
         )

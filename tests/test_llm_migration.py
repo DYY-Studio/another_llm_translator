@@ -34,7 +34,7 @@ def test_migration_previews_then_moves_effort_without_touching_snapshots(tmp_pat
     reports = migrate_llm_resources(root=tmp_path, builtin_root=ROOT, apply=True)
     assert reports[0]["status"] == "updated"
     upgraded = json.loads(path.read_text())
-    assert upgraded["schema_version"] == 8
+    assert upgraded["schema_version"] == 9
     assert upgraded["send_temperature"] is True
     assert upgraded["reasoning_effort"] == "high"
     assert upgraded["extra_body"] == {"reasoning": {"summary": "auto"}}

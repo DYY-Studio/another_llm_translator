@@ -572,6 +572,14 @@ async def test_translation_preflight_split_preserves_previous_part_summary(
         "estimate_single_segment_preflight",
         split_long_segments,
     )
+    from app import execution
+    original_validate = execution._validate_request_estimate
+
+    def validate(segment, estimated, **kwargs):
+        split_long_segments(segment)
+        return original_validate(segment, estimated, **kwargs)
+
+    monkeypatch.setattr(execution, "_validate_request_estimate", validate)
     payloads: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -963,6 +971,11 @@ async def test_terminology_cancel_records_completed_scans_and_retry_reuses_them(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "Alice")
+    first_saved = asyncio.Event()
+    def progress(completed, failed, total):
+        if completed >= 1:
+            first_saved.set()
+
     second = tmp_path / "second.txt"
     second.write_text("Bob", encoding="utf-8")
     add_project_files(project, [str(second)])
@@ -973,6 +986,7 @@ async def test_terminology_cancel_records_completed_scans_and_retry_reuses_them(
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         source = payload["source_segments"][0]
         if source == "Bob":
+            await first_saved.wait()
             second_started.set()
             await release_second.wait()
         return terminology_response(source)
@@ -981,7 +995,7 @@ async def test_terminology_cancel_records_completed_scans_and_retry_reuses_them(
         transport=httpx.MockTransport(interrupted_handler)
     )
     task = asyncio.create_task(
-        run_terminology(project, Scope(), http_client=interrupted_client)
+        run_terminology(project, Scope(), http_client=interrupted_client, on_progress=progress)
     )
     try:
         await asyncio.wait_for(second_started.wait(), timeout=5)
@@ -1029,21 +1043,27 @@ async def test_terminology_fatal_error_records_completed_and_remaining_counts(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "Alice")
+    first_saved = asyncio.Event()
+    def progress(completed, failed, total):
+        if completed >= 1:
+            first_saved.set()
+
     second = tmp_path / "second.txt"
     second.write_text("Bob", encoding="utf-8")
     add_project_files(project, [str(second)])
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         source = payload["source_segments"][0]
         if source == "Bob":
+            await first_saved.wait()
             return httpx.Response(401, text="unauthorized")
         return terminology_response(source)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         with pytest.raises(FatalExternalError, match="鉴权失败"):
-            await run_terminology(project, Scope(), http_client=client)
+            await run_terminology(project, Scope(), http_client=client, on_progress=progress)
     finally:
         await client.aclose()
         del os.environ["LLM_API_KEY"]
@@ -2077,7 +2097,6 @@ async def test_translation_reports_dynamic_output_budget_warning(
     use_llm_preset(
         tmp_path,
         context_window_tokens=1000,
-        context_safety_margin_tokens=100,
         max_output_tokens=5000,
     )
 
@@ -2168,9 +2187,10 @@ async def test_oversized_segment_is_split_and_saved_once(
         tmp_path,
         context_window_tokens=1200,
         max_output_tokens=300,
-        context_safety_margin_tokens=100,
-        target_chunk_input_tokens=700,
     )
+    config = load_config(project / "config.toml")
+    config["chunking"]["target_content_tokens"] = 700
+    (project / "config.toml").write_text(dump_config(config))
     requested_ids: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2545,7 +2565,9 @@ async def test_scan_resume_keeps_successful_results_and_original_scope(
     tmp_path: Path, crash: bool, include_draft: bool,
 ) -> None:
     project = await create_project(tmp_path, "Alice entered.\nBob waved.")
-    use_llm_preset(tmp_path, target_chunk_input_tokens=1)
+    config = load_config(project / "config.toml")
+    config["chunking"]["target_content_tokens"] = 1
+    (project / "config.toml").write_text(dump_config(config))
     requests: list[dict] = []
     cancel = True
 
@@ -2942,14 +2964,19 @@ async def test_translation_persists_nonrepairable_warning_before_run_finishes(
 
     monkeypatch.setattr(stage_translation, "_project_context", project_context)
     progress = []
+    saved = asyncio.Event()
+    def on_progress(*counts):
+        progress.append(counts)
+        if counts[0] == 2:
+            saved.set()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         task = asyncio.create_task(run_translation(
             project, Scope(), http_client=client,
-            on_progress=lambda *counts: progress.append(counts),
+            on_progress=on_progress,
         ))
         try:
             await asyncio.wait_for(validated.wait(), 5)
-            await asyncio.sleep(0)
+            await asyncio.wait_for(saved.wait(), 5)
             records = load_stage_history(project, "translation")
             assert len(records) == 2
             assert all(record["validation_status"] == "warning" for record in records)
@@ -2959,3 +2986,40 @@ async def test_translation_persists_nonrepairable_warning_before_run_finishes(
             with pytest.raises(asyncio.CancelledError):
                 await task
     assert len(load_stage_history(project, "translation")) == 2
+
+
+@pytest.mark.asyncio
+async def test_translation_plans_only_dispatch_window_off_event_loop(tmp_path, monkeypatch):
+    import threading
+    from app import stage_runtime, stage_translation
+
+    project = await create_project(tmp_path, "\n".join(f"source {i}" for i in range(200)))
+    original_context = stage_translation._project_context
+    original_plans = stage_runtime.iter_chunk_plans
+    payload_ids = set()
+    loop_thread = threading.get_ident()
+
+    def context(*args, **kwargs):
+        config, *rest = original_context(*args, **kwargs)
+        config["chunking"]["target_content_tokens"] = 1
+        config["execution"]["max_parallel"] = 2
+        return config, *rest
+
+    def plans(work, **kwargs):
+        build = kwargs["payload_builder"]
+        def payload(items):
+            assert threading.get_ident() != loop_thread
+            payload_ids.update(str(item["segment_id"]) for item in items)
+            return build(items)
+        kwargs["payload_builder"] = payload
+        yield from original_plans(work, **kwargs)
+
+    def handler(request):
+        assert 0 < len(payload_ids) < 20
+        return httpx.Response(401, text="stop after first request")
+
+    monkeypatch.setattr(stage_translation, "_project_context", context)
+    monkeypatch.setattr(stage_runtime, "iter_chunk_plans", plans)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(FatalExternalError):
+            await run_translation(project, Scope(), http_client=client)

@@ -17,6 +17,8 @@
 - `docs/`：产品、协议、模块、开发、使用和路线图文档；各自职责由根目录
   [`AGENTS.md`](../AGENTS.md) 定义。
 
+`app/async_utils.py` 负责将同步工作交给工作线程，并在取消时等待在途工作结束，避免提前释放调用方的写锁。纯同步 Web 路由使用 FastAPI 自带的工作线程池。同一阶段的规划、解析和保存共享串行工作锁；HTTP 客户端、调度器、KeyPool 和进度通知保留在事件循环。
+
 运行数据与构建产物不属于源码模块，不得作为模块间接口。
 
 ## 2. 依赖方向
@@ -110,6 +112,8 @@ Run 索引与镜像、终止草稿文件移除、术语说明的事务性升级�
 
 项目写锁和冲突检测。所有项目写入口复用同一锁语义，不由 CLI、Web 或单个阶段各自实现。
 
+概括与术语决策列表使用轻量投影，正文、单条建议和导航证据由详情入口读取；决策回滚快照只留在存储和应用逻辑中。术语字段保存只更新术语与人工覆盖，实体说明编辑只解析目标实体证据。
+
 ## 5. 执行与阶段
 
 ### `app/execution.py`
@@ -119,6 +123,10 @@ Run 索引与镜像、终止草稿文件移除、术语说明的事务性升级�
 
 各内容阶段及术语决策子阶段的 Prompt 在此按静态字段、任务和结果协议声明装配，联合模式声明参与阶段与附加协议，组装时按标识去重；设置预览与实际请求复用同一入口。术语决策输出约束由 `term_decision_protocol.py` 提供。
 
+### `app/request_budget.py`
+
+解析项目通用预算与稀疏阶段覆盖，并计算阶段请求的输入硬上限，供阶段规划器和发送前检查共同使用。该模块不负责分批、请求构造或持久化 Chunk 状态。
+
 ### `app/stage_runtime.py`
 
 模型阶段共享运行逻辑，包括前置检查、设置差异处理、Prompt 装配、请求执行、响应归属和结果提交。Document Adapter 状态、运行选项和 Prompt 要求的读取由运行及项目设置预览共享。
@@ -127,6 +135,7 @@ Run 索引与镜像、终止草稿文件移除、术语说明的事务性升级�
 ### 具体阶段模块
 
 - `stage_translation.py`：翻译 payload、完整候选批次验收、拆分 Segment 重组、组件内即时校验修复与预算耗尽处理。
+- `text_translation.py`：单个内存 Segment 的临时翻译，复用翻译 payload、校验器装配、请求循环和拆分工具，不创建 Run 或保存阶段结果。
 - `stage_review.py`：校对/润色的基准选择、accepted/suggested 结果，以及建议应用。
 - `stage_terminology.py`：术语扫描、候选任务、联合片段概括和发布，分别跟踪术语与概括的切片覆盖。
 - `stage_terminology_draft.py`：实验粗翻及联合概括的扫描状态、合并请求与独立结果恢复，分别跟踪各类结果的切片覆盖，按本次响应模式选择 Document Adapter 要求；复用翻译执行器进行译文校验和保存。
@@ -251,7 +260,9 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 
 `web/src/components/` 按页面或弹窗拆分。`AppShell.tsx` 只装配导航和全局状态；项目概览、
 创建、选择、替换、输入、导出、诊断、Segment、术语、自动决策、概括和设置分别由对应组件
-拥有。`InteractionProvider.tsx` 统一确认、输入弹窗与固定操作反馈，`Modal.tsx` 负责共享弹窗的焦点约束和恢复。共享 API 类型位于 `web/src/types.ts`，通用选择行为位于 `useClassicSelection.ts`。
+拥有。`InteractionProvider.tsx` 统一确认、输入弹窗与固定操作反馈，`Modal.tsx` 负责共享弹窗的焦点约束和恢复。`DraftReviewToolbar.tsx` 统一草案搜索布局、结果数和分页，具体筛选规则由各审核页面持有。共享 API 类型位于 `web/src/types.ts`，通用选择行为位于 `useClassicSelection.ts`。
+
+`TermScanFailuresDialog.tsx` 读取 `web_term_routes.py` 的失败查询和 Segment 顺序索引，`termScanFailures.ts` 合并相邻位置并按输出类型汇总错误，定位复用翻译工作区。失败查询由 `sqlite_storage.py` 只读读取最近一次术语 Run 的扫描、粗翻和概括错误元数据，`web_store.py` 按 Segment 去重并限制返回数量。
 
 `StorageView.tsx` 负责设置页中的存储汇总、数据位置设置、项目明细和逐项清理交互；它不复制后端
 扫描、迁移或安全判断，操作后重新读取服务端状态。`web_storage_routes.py` 暴露数据根状态和迁移

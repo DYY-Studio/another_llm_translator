@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import asyncio
 import json
@@ -181,7 +182,8 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
                 raise UsageError(f"不支持的输入文件：{name}") from None
             target = upload_root.joinpath(*PurePosixPath(name).parts)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(await upload.read())
+            content = await upload.read()
+            await run_blocking(target.write_bytes, content)
             inputs.append(str(target))
             original_names.append(name)
         for relative, source in server_entries:
@@ -327,7 +329,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         return root.resolve(), file_id
 
     @app.get("/api/v1/projects")
-    async def list_projects() -> dict[str, Any]:
+    def list_projects() -> dict[str, Any]:
         values = []
         selectors: set[str] = set()
         for item in project_paths():
@@ -357,7 +359,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
     @app.get(
         "/api/v1/projects/{name}/files/{file_id}/replacement-options"
     )
-    async def replacement_options(name: str, file_id: str) -> dict[str, Any]:
+    def replacement_options(name: str, file_id: str) -> dict[str, Any]:
         root = project(name)
         file_record = next(
             (
@@ -404,11 +406,11 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         return {"adapter": summary, "file_id": file_id, "values": file_run_options(root, file_id)}
 
     @app.get("/api/v1/projects/{name}/files/{file_id}/run-options")
-    async def get_file_run_options(name: str, file_id: str) -> dict[str, Any]:
+    def get_file_run_options(name: str, file_id: str) -> dict[str, Any]:
         return run_options_payload(project(name), file_id)
 
     @app.put("/api/v1/projects/{name}/files/{file_id}/run-options")
-    async def put_file_run_options(name: str, file_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def put_file_run_options(name: str, file_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         options = payload.get("options")
         if not isinstance(options, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in options.items()):
             raise UsageError("options 必须是字符串键值对象")
@@ -418,7 +420,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         return {**run_options_payload(root, file_id), "values": values}
 
     @app.get("/api/v1/projects/{name}/document-adapters/{adapter_id}/run-options")
-    async def get_adapter_run_options(name: str, adapter_id: str) -> dict[str, Any]:
+    def get_adapter_run_options(name: str, adapter_id: str) -> dict[str, Any]:
         root = project(name)
         files = [item for item in load_source_files(root) if str(item["document_adapter_id"]) == adapter_id]
         if not files:
@@ -426,7 +428,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         return {"adapter_id": adapter_id, "files": [{"file_id": str(item["file_id"]), "name": str(item["original_name"]), "values": file_run_options(root, str(item["file_id"]))} for item in files]}
 
     @app.put("/api/v1/projects/{name}/document-adapters/{adapter_id}/run-options")
-    async def put_adapter_run_options(name: str, adapter_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def put_adapter_run_options(name: str, adapter_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         options = payload.get("options")
         if not isinstance(options, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in options.items()):
             raise UsageError("options 必须是字符串键值对象")
@@ -488,7 +490,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         return summary
 
     @app.post("/api/v1/projects/register")
-    async def register_project(payload: dict[str, Any]) -> dict[str, Any]:
+    def register_project(payload: dict[str, Any]) -> dict[str, Any]:
         root = project_path_from_payload(payload)
         metadata = read_project_metadata_read_only(root)
         remember_project(root)
@@ -501,7 +503,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         }
 
     @app.post("/api/v1/projects/open")
-    async def open_project(payload: dict[str, Any]) -> dict[str, Any]:
+    def open_project(payload: dict[str, Any]) -> dict[str, Any]:
         root = project_path_from_payload(payload)
         if app.state.tasks.is_project_running(root):
             raise UsageError("项目存在运行中的任务，结束或取消任务后才能修复项目")
@@ -527,7 +529,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         }
 
     @app.delete("/api/v1/projects/{name}")
-    async def delete_project_route(
+    def delete_project_route(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         if payload.get("confirm") is not True:
@@ -571,7 +573,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             raise UsageError(str(exc)) from exc
 
     @app.post("/api/v1/projects/{name}/storage/compact")
-    async def compact_project_route(name: str) -> dict[str, int]:
+    def compact_project_route(name: str) -> dict[str, int]:
         root = project(name)
         if app.state.tasks.is_project_running(root):
             raise UsageError("项目存在运行中的任务，结束或取消后才能压缩存储")
@@ -676,7 +678,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             raise
 
     @app.post("/api/v1/projects/{name}/files/{file_id}/replacement-confirm")
-    async def replacement_confirm(
+    def replacement_confirm(
         name: str, file_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         preview_id = payload.get("preview_id")
@@ -696,7 +698,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
     @app.delete(
         "/api/v1/projects/{name}/files/{file_id}/replacement-preview/{preview_id}"
     )
-    async def replacement_cancel(
+    def replacement_cancel(
         name: str, file_id: str, preview_id: str
     ) -> dict[str, Any]:
         root = project(name)
@@ -709,7 +711,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         return {"cancelled": True}
 
     @app.post("/api/v1/projects/{name}/files/remove")
-    async def remove_files(
+    def remove_files(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         file_ids = payload.get("file_ids")
@@ -724,7 +726,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             return remove_project_files(root, file_ids)
 
     @app.post("/api/v1/projects/{name}/files/reorder")
-    async def reorder_files(
+    def reorder_files(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         file_ids = payload.get("file_ids")
@@ -739,5 +741,5 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             return reorder_project_files(root, file_ids)
 
     @app.post("/api/v1/projects/{name}/results/reset")
-    async def reset_results(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def reset_results(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).reset_results(payload)

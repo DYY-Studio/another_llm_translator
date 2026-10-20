@@ -16,6 +16,8 @@ def test_decision_diagnostics_retains_counts_after_detail_eviction(tmp_path, dia
     diagnostics = diagnostics_type(tmp_path / "app.log")
     with diagnostics.activate("project", "translation", task_id="TASK"):
         diagnostics.begin_request(request_id="LLM", model="generator", messages=[], max_attempts=1)
+        diagnostics.request_finished(request_id="LLM", attempt=1, latency_seconds=.01, status=200, error=False)
+        diagnostics.record_request_usage("LLM", {"input_tokens": 22, "output_tokens": 2, "total_tokens": 24}, attempt=1, complete=True)
         diagnostics.complete_request("LLM", content="translation", reasoning_content=None)
         for index in range(201):
             request_id = f"DEC-{index}"
@@ -24,6 +26,7 @@ def test_decision_diagnostics_retains_counts_after_detail_eviction(tmp_path, dia
             diagnostics.request_started(request_id)
             diagnostics.request_finished(request_id=request_id, attempt=1, latency_seconds=.01,
                                          status=200, error=False)
+            diagnostics.record_request_usage(request_id, {"input_tokens": 10, "output_tokens": 0, "total_tokens": 10}, attempt=1, complete=True, output_tokens_known=False)
             diagnostics.complete_request(request_id, content="{}", reasoning_content=None)
         snapshot = diagnostics.snapshot()
         assert snapshot["metrics"]["total_requests"] == 1
@@ -31,7 +34,10 @@ def test_decision_diagnostics_retains_counts_after_detail_eviction(tmp_path, dia
         assert snapshot["decision"]["activities"][0]["completed"] == 201
         assert snapshot["decision"]["activities"][0]["questions"] == 402
         assert len(snapshot["requests"]["items"]) == 201
+        assert snapshot["request_usage"]["decision"]["input_tokens"] == 2010
+        assert snapshot["request_usage"]["llm"] == {"input_tokens": 22, "output_tokens": 2, "total_tokens": 24, "available": True, "partial": False}
         assert diagnostics.request_detail("LLM")["response_content"] == "translation"
+        assert diagnostics.request_detail("DEC-200")["output_tokens_per_second"] is None
         with pytest.raises(ValueError):
             diagnostics.request_detail("DEC-0")
 
@@ -146,7 +152,7 @@ def test_preset_rejects_invalid_token_safety_factor(factor):
 
 
 @pytest.mark.parametrize("protocol", ["typesafe", "openai-decisions"])
-def test_choice_request_uses_full_url_and_maps_answers(protocol, monkeypatch):
+def test_choice_request_uses_full_url_and_maps_answers(protocol, monkeypatch, tmp_path):
     monkeypatch.setenv("DECISION_TEST_KEY", "secret")
     question = DecisionQuestion("term", "Use this name?", {"required": "Yes", "ordinary": "No"})
     def respond(request):
@@ -164,15 +170,22 @@ def test_choice_request_uses_full_url_and_maps_answers(protocol, monkeypatch):
             assert body["questions"][0]["name"] == "term"
             answer.update(name="term", probabilities=[dict(value="required", probability=0.95), dict(value="ordinary", probability=0.05)])
             answers = [answer]
-        return httpx.Response(200, json=dict(model="actual-model", answers=answers, usage=dict(input_tokens=10, output_tokens=0)))
+        return httpx.Response(200, json=dict(model="actual-model", answers=answers, usage=dict(input_tokens=10, output_tokens=85)))
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
-            client = DecisionClient(validate_decision_preset(preset(protocol)), http_client=http)
-            result = await client.choose({"source": "text"}, [question])
-            assert result["term"].choice == "required"
-            assert result["term"].confidence == 0.9
-            assert client.records[0]["model"] == "actual-model"
-            assert client.records[0]["usage"]["input_tokens"] == 10
+        diagnostics = Diagnostics(tmp_path / "app.log")
+        with diagnostics.activate("project", "translation"):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+                client = DecisionClient(validate_decision_preset(preset(protocol)), http_client=http)
+                result = await client.choose({"source": "text"}, [question])
+                assert result["term"].choice == "required"
+                assert result["term"].confidence == 0.9
+                assert client.records[0]["model"] == "actual-model"
+                assert client.records[0]["usage"]["input_tokens"] == 10
+                assert client.usage_summary()["output_tokens"] == 0
+                snapshot = diagnostics.snapshot()
+                assert snapshot["requests"]["items"][0]["usage"] == {"input_tokens": 10, "output_tokens": 0, "total_tokens": 10, "available": True, "partial": False}
+                assert snapshot["request_usage"]["decision"]["input_tokens"] == 10
+                assert snapshot["request_usage"]["llm"]["input_tokens"] == 0
     asyncio.run(run())
 
 
@@ -209,9 +222,9 @@ def test_invalid_decision_response_uses_retry_budget(tmp_path, monkeypatch, prot
             if invalid in {"empty", "json"}:
                 return httpx.Response(200, content=b"" if invalid == "empty" else b"not JSON")
             answers = [] if invalid == "missing" else [{"name": "term", "type": "choice"}]
-            return httpx.Response(200, json={"model": "test-model", "answers": answers})
+            return httpx.Response(200, json={"model": "test-model", "answers": answers, "usage": {"input_tokens": 10, "output_tokens": 99}})
         answers = {"term": {"type": "refusal"}} if protocol == "typesafe" else [{"name": "term", "type": "refusal"}]
-        return httpx.Response(200, json={"model": "test-model", "answers": answers})
+        return httpx.Response(200, json={"model": "test-model", "answers": answers, "usage": {"input_tokens": 20, "output_tokens": 85}})
 
     async def run():
         with diagnostics.activate("project", "translation"):
@@ -230,6 +243,11 @@ def test_invalid_decision_response_uses_retry_budget(tmp_path, monkeypatch, prot
             assert snapshot["decision"]["metrics"]["retry_count"] == 1
             item = snapshot["requests"]["items"][0]
             assert item["attempt_count"] == 2
+            expected_input = (0 if invalid in {"empty", "json"} else 10) * (2 if exhausted else 1) + (0 if exhausted else 20)
+            assert item["usage"]["input_tokens"] == expected_input
+            assert item["usage"]["output_tokens"] == 0
+            assert snapshot["request_usage"]["decision"] == item["usage"]
+            assert client.usage_summary()["input_tokens"] == expected_input
             detail = diagnostics.request_detail(item["request_id"])
             assert detail["attempts"][0]["outcome"] == "response_parse_error"
             attempts = [json.loads(line) for line in (tmp_path / "debug" / "attempts.jsonl").read_text().splitlines()]
@@ -404,10 +422,12 @@ def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path
             async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
                 retry = load_config(root / "config" / "config.toml")["retry"]
                 retry["http_max_attempts"] = 2
-                client = DecisionClient(frozen, http_client=http, retry=retry, debug_directory=tmp_path / "debug")
+                client = DecisionClient(frozen, context_reserve_tokens=512, http_client=http, retry=retry, debug_directory=tmp_path / "debug")
                 result = await client.choose({"text": "Evidence"}, [DecisionQuestion("term", "Choose", {"a": "A", "b": "B"})])
                 assert result["term"].choice == "a"
                 assert client.usage_summary()["total_tokens"] == 30
+                assert diagnostics.snapshot()["request_usage"]["decision"] == {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30, "available": True, "partial": False}
+                assert diagnostics.snapshot()["request_usage"]["llm"]["input_tokens"] == 0
                 assert len(client.records) == 2
                 assert client.records[-1]["model"] == "example-model"
                 assert diagnostics.snapshot()["decision"]["metrics"]["total_requests"] == 2
@@ -448,7 +468,7 @@ def test_llm_decision_http_and_parse_errors_share_send_budget(tmp_path, monkeypa
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
             retry = load_config(root / "config" / "config.toml")["retry"]
             retry["http_max_attempts"] = 2
-            client = DecisionClient(value, http_client=http, retry=retry)
+            client = DecisionClient(value, context_reserve_tokens=512, http_client=http, retry=retry)
             with pytest.raises(ExternalError, match="Decision 响应无效，重试预算耗尽"):
                 await client.choose("Evidence", [DecisionQuestion("term", "Choose", {"a": "A", "b": "B"})])
     asyncio.run(run())
@@ -474,7 +494,7 @@ def test_llm_decision_debug_records_final_outcome(tmp_path, monkeypatch, stream,
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
-            client = DecisionClient(preset, http_client=http, debug_directory=tmp_path / "debug")
+            client = DecisionClient(preset, context_reserve_tokens=512, http_client=http, debug_directory=tmp_path / "debug")
             question = DecisionQuestion("q", "Choose", {"a": "A", "b": "B"})
             if "refusal" in content:
                 assert (await client.choose("Evidence", [question]))["q"].refused
@@ -505,10 +525,10 @@ def test_llm_decision_schema_is_included_in_context_preflight(tmp_path):
     root = make_app_root(tmp_path)
     value = resolve_llm_resources(dict(preset_id='judge', protocol='llm', llm_preset='default', prompt_language='en'), root)
     questions = [DecisionQuestion(f'q_{i}', 'Choose', {'a':'A', 'b':'B'}) for i in range(10)]
-    plain = DecisionClient(value)
+    plain = DecisionClient(value, context_reserve_tokens=512)
     _, plain_estimate = plain.request_plan('Evidence', questions)
     value['_resources']['preset']['json_schema_enabled'] = True
-    client = DecisionClient(value)
+    client = DecisionClient(value, context_reserve_tokens=512)
     _, schema_estimate = client.request_plan('Evidence', questions)
     assert schema_estimate > plain_estimate
     client.preset['context_window_tokens'] = plain_estimate + client.preset['context_safety_margin_tokens']

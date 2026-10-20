@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from .errors import UsageError
 from .execution import Scope, find_running_runs
@@ -27,7 +27,7 @@ def register_repetition_routes(*, app: FastAPI, project: Callable[[str], Path]) 
         return value
 
     @app.get("/api/v1/projects/{name}/repetition/options")
-    def options(name: str, only_file: str | None = None, language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False, run_action: str | None = None) -> dict[str, Any]:
+    def options(request: Request, name: str, estimate_usage: bool = False, only_file: str | None = None, language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False, run_action: str | None = None) -> dict[str, Any]:
         if run_action not in {None, "resume", "decline"}:
             raise UsageError("Run 选择必须是 resume 或 decline")
         root = project(name)
@@ -37,8 +37,9 @@ def register_repetition_routes(*, app: FastAPI, project: Callable[[str], Path]) 
             only_file = original["scope"]["only_file"]
             exclude_punctuation_only = original["exclude_punctuation_only"]
             screening_enabled = original["screening_enabled"]
-        plan = repetition_plan(root, Scope(only_file=only_file), prompt_language=language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled)
-        running = repetition_resume(root, plan)
+        estimate_usage = estimate_usage and app.state.server_config.get("tasks", {}).get("estimate_usage_before_run", False)
+        plan = repetition_plan(root, Scope(only_file=only_file), prompt_language=language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, preview_only=not estimate_usage and not runs, estimate_usage=estimate_usage)
+        running = repetition_resume(root, plan, estimate_usage=estimate_usage) if runs else None
         if running:
             running = {**_running_run(root, STAGE, plan["config"]), **running}
         action = (run_action or ("resume" if running["resume_compatible"] else "decline")) if running else None
@@ -47,7 +48,7 @@ def register_repetition_routes(*, app: FastAPI, project: Callable[[str], Path]) 
                 "running_run": running, "run_action": action, "only_file": only_file, "screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only,
                 "completed": running["completed"] if resuming else 0,
                 "over_budget_groups": running["over_budget_groups"] if resuming else sum(g["over_budget"] for g in plan["groups"]),
-                "estimated_requests": running["estimated_requests"] if resuming else plan["estimated_requests"], "estimated_input_tokens": running["estimated_input_tokens"] if resuming else plan["estimated_input_tokens"],
+                "estimated_requests": (running["estimated_requests"] if resuming else plan["estimated_requests"]) if estimate_usage else None, "estimated_input_tokens": (running["estimated_input_tokens"] if resuming else plan["estimated_input_tokens"]) if estimate_usage else None, "estimate_error": None,
                 "preset": {"id": plan["config"]["_llm_preset_id"], "model": plan["config"]["llm"]["model"]},
                 "decision_model": (plan["decision_preset"]["_resources"]["preset"]["model"] if plan["decision_preset"]["protocol"] == "llm" else plan["decision_preset"]["model"]) if plan["decision_preset"] else None, "model": plan["config"]["llm"]["model"]}
 

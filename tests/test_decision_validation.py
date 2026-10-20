@@ -402,10 +402,10 @@ async def test_alignment_uses_complete_segments_in_split_and_joint_requests(tmp_
     config = load_config(project / "config.toml")
     config["decision"]["preset"] = "local"
     config["validation"]["translation"]["validators"] = ["segment_alignment"]
-    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
     if mode == "split":
-        use_llm_preset(tmp_path, context_window_tokens=1200, max_output_tokens=300,
-                       context_safety_margin_tokens=100, target_chunk_input_tokens=700)
+        config["chunking"]["target_content_tokens"] = 700
+        use_llm_preset(tmp_path, context_window_tokens=1200, max_output_tokens=300)
+    (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
     monkeypatch.setenv("DECISION_TEST_KEY", "test")
     decision_calls, llm_calls = [], []
     def respond(request):
@@ -590,7 +590,7 @@ def test_term_warning_threshold_rejects_invalid_config(value):
 
 
 @pytest.mark.asyncio
-async def test_validation_retry_missing_end_sends_no_empty_feedback(tmp_path):
+async def test_validation_retry_missing_end_retries_original_repair_request(tmp_path):
     project = await create_project(tmp_path, "One.")
     config = load_config(project / "config.toml")
     config["validation"]["translation"]["validators"] = ["japanese_kana"]
@@ -611,8 +611,7 @@ async def test_validation_retry_missing_end_sends_no_empty_feedback(tmp_path):
     assert result["completed"] == 1
     assert len(requests) == 3
     assert requests[1]["validation_repair"] == "将日语假名译为目标语言"
-    assert requests[2]["segments"] == []
-    assert "validation_repair" not in requests[2]
+    assert requests[2] == requests[1]
     assert all("format_correction" not in request for request in requests)
 
 

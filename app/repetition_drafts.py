@@ -151,10 +151,12 @@ async def apply_draft_locked(project: Path, *, confirm: bool, run_id: str | None
     library = load_terms(project)
     warnings: list[str] = []
     cache = _TermMatchCache(library, term_normalization(config), config["terminology"]["max_terms_per_segment"],
-                           segments=segments, warnings=warnings)
+                           segments=segments, warnings=warnings,
+        sourced_policy=config["terminology"]["sourced_description_injection"],
+        unsourced_policy=config["terminology"]["unsourced_description_injection"])
     options = config["validation"]["translation"]
     binding = config.get("_decision_validator_presets", {}).get("preferred_term_usage")
-    decision = DecisionClient(config["_decision_preset_definitions"][binding], retry=config["retry"]) if binding else None
+    decision = DecisionClient(config["_decision_preset_definitions"][binding], context_reserve_tokens=config["chunking"]["context_reserve_tokens"], retry=config["retry"]) if binding else None
     terms_revision = library["terms_revision"] if library else None
     fingerprint = stage_fingerprint(config, "translation", prompt_middle_digests(project, "translation"),
                                     terms_revision=terms_revision)

@@ -1,5 +1,7 @@
 """Source-backed entity explanations; scan candidates remain the evidence owner."""
 from __future__ import annotations
+import json
+from .async_utils import run_blocking
 
 from copy import deepcopy
 from pathlib import Path
@@ -7,12 +9,12 @@ from typing import Any, Callable
 
 from .errors import UsageError
 from .execution import segment_model_source
-from .sqlite_storage import new_record_id, read_segments, read_terminology_candidates
+from .sqlite_storage import new_record_id, read_files, read_segment_positions, read_terminology_candidates
 from .summary_provenance import digest
 
 
 def empty_knowledge() -> dict[str, Any]:
-    return {"version": 1, "fragments": {}, "entities": {}, "published_candidates": []}
+    return {"version": 2, "fragments": {}, "entities": {}, "published_candidates": []}
 
 
 def persistent_library(library: dict[str, Any]) -> dict[str, Any]:
@@ -31,9 +33,57 @@ def navigation_fragment(fragment: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def entity_detail_fragment(fragment: dict[str, Any]) -> dict[str, Any]:
+    value = {key: fragment[key] for key in ("id", "owner", "text", "state", "valid")}
+    if "source" in fragment:
+        value["source"] = fragment["source"]
+    source_ranges = fragment["source_range"]
+    compact = [] if source_ranges else None
+    positions = fragment["_positions"]
+    if compact is not None:
+        for item in source_ranges:
+            previous = compact[-1] if compact else None
+            position = positions.get(item["segment_id"], -1)
+            previous_position = (
+                positions.get(previous["last_segment_id"], -1)
+                if previous is not None
+                else -1
+            )
+            if (
+                previous is not None
+                and item["file_id"] == previous["file_id"]
+                and item["part_id"] == previous["part_id"]
+                and position >= 0
+                and previous_position >= 0
+                and position in {previous_position, previous_position + 1}
+            ):
+                previous["last_segment_id"] = item["segment_id"]
+                previous["end"] = item["end"]
+            else:
+                compact.append(
+                    {
+                        "segment_id": item["segment_id"],
+                        "last_segment_id": item["segment_id"],
+                        "start": item["start"],
+                        "end": item["end"],
+                        "file_id": item["file_id"],
+                        "part_id": item["part_id"],
+                    }
+                )
+    value["navigation_ranges"] = (
+        [
+            {key: item[key] for key in ("segment_id", "last_segment_id", "start", "end")}
+            for item in compact
+        ]
+        if compact is not None
+        else None
+    )
+    return value
+
+
 def require_knowledge(library: dict[str, Any]) -> dict[str, Any]:
     knowledge = library.get("knowledge")
-    if not isinstance(knowledge, dict) or knowledge.get("version") != 1:
+    if not isinstance(knowledge, dict) or knowledge.get("version") != 2:
         raise UsageError("术语库缺少有效的实体说明结构")
     return knowledge
 
@@ -54,7 +104,6 @@ def source_range(
             "source_digest": digest(str(original["source"])),
             "model_text_digest": digest(segment_model_source(original)),
             "slice_source_digest": digest(str(item["source"])),
-            "slice_model_text_digest": digest(segment_model_source(item)),
         })
     return values
 
@@ -72,17 +121,19 @@ def _overlap(left: list[dict[str, Any]], right: dict[str, list[dict[str, Any]]])
                for a in left for b in right.get(a["segment_id"], ()))
 
 
-def evidence(project: Path, library: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def evidence(project: Path, library: dict[str, Any], *, fragment_ids: set[str] | None = None,
+             positions: dict[str, int] | None = None) -> dict[str, dict[str, Any]]:
     fragments = require_knowledge(library)["fragments"]
+    if fragment_ids is not None:
+        fragments = {key: value for key, value in fragments.items() if key in fragment_ids}
     ids = {f["candidate_id"] for f in fragments.values() if f.get("candidate_id")}
     records = {r["record_id"]: r for r in read_terminology_candidates(project, ids)}
-    segments = {s["segment_id"]: s for s in read_segments(project)}
-    positions = {key: i for i, key in enumerate(segments)}
-    segment_digests = {}
+    positions = positions if positions is not None else read_segment_positions(project) if records else {}
+    file_orders = {f["file_id"]: f["file_order"] for f in read_files(project)} if records else {}
     record_sources = {}
     result = {}
     for key, fragment in fragments.items():
-        value = {**fragment, "id": key, "source_range": None, "valid": True, "_positions": {}}
+        value = {**fragment, "id": key, "source_range": None, "valid": True, "_positions": {}, "_file_orders": file_orders}
         if fragment.get("candidate_id"):
             record = records.get(fragment["candidate_id"])
             if record is None:
@@ -91,15 +142,9 @@ def evidence(project: Path, library: dict[str, Any]) -> dict[str, dict[str, Any]
             value["text"] = record["terms"][fragment["term_index"]]["description"]
             value["source_range"] = record["source_range"]
             if fragment["candidate_id"] not in record_sources:
-                for r in record["source_range"]:
-                    segment_id = r["segment_id"]
-                    if segment_id in segments and segment_id not in segment_digests:
-                        segment = segments[segment_id]
-                        segment_digests[segment_id] = (digest(str(segment["source"])), digest(segment_model_source(segment)))
                 record_sources[fragment["candidate_id"]] = (
                     {r["segment_id"]: positions.get(r["segment_id"], -1) for r in record["source_range"]},
-                    all(segment_digests.get(r["segment_id"]) == (r["source_digest"], r["model_text_digest"])
-                        for r in record["source_range"]),
+                    all(r["segment_id"] in positions for r in record["source_range"]),
                 )
             value["_positions"], value["valid"] = record_sources[fragment["candidate_id"]]
         result[key] = value
@@ -152,8 +197,8 @@ def entity_members(library: dict[str, Any]) -> dict[str, list[str]]:
 
 
 def _input_version(members: list[str], fragments: list[dict[str, Any]]) -> str:
-    return digest([members, [(f["id"], f["text"], f["source_range"])
-                             for f in fragments if f["state"] == "active"]])
+    active = sorted((f for f in fragments if f["state"] == "active"), key=lambda f: f["id"])
+    return digest([members, [(f["id"], f["text"], f["source_range"]) for f in active]])
 
 
 def _source_order(fragments: list[dict[str, Any]]) -> list[list[Any]]:
@@ -163,17 +208,97 @@ def _source_order(fragments: list[dict[str, Any]]) -> list[list[Any]]:
     return [list(r) for r in sorted(ranges, key=lambda r: (order.get(r[0], -1), r[1], r[2]))]
 
 
+def _migrate_knowledge_to_v2(
+    library: dict[str, Any], candidates: dict[str, dict[str, Any]], positions: dict[str, int],
+) -> None:
+    """Canonicalize only saved hashes that the v1 snapshot can prove current."""
+    knowledge = library.get("knowledge")
+    if not isinstance(knowledge, dict) or knowledge.get("version") != 1:
+        raise UsageError("术语库缺少有效的旧版实体说明结构")
+    groups = entity_members(library)
+    fragments_by_owner: dict[str, list[dict[str, Any]]] = {}
+    for key, fragment in knowledge["fragments"].items():
+        record_id = fragment.get("candidate_id")
+        if record_id:
+            record = candidates.get(record_id)
+            if record is None or not isinstance(fragment.get("term_index"), int):
+                continue
+            index = fragment["term_index"]
+            if index < 0 or index >= len(record["terms"]):
+                continue
+            term = record["terms"][index]
+            source_range = record.get("source_range")
+            if not isinstance(source_range, list):
+                continue
+            fragment_positions = {r["segment_id"]: positions.get(r["segment_id"], -1) for r in source_range}
+            text = str(term.get("description") or "")
+        else:
+            source_range = None
+            fragment_positions = {}
+            text = str(fragment.get("text") or "")
+        fragments_by_owner.setdefault(str(fragment["owner"]), []).append(
+            {**fragment, "id": key, "text": text, "source_range": source_range,
+             "_positions": fragment_positions})
+
+    for root, saved in knowledge["entities"].items():
+        members = groups.get(root)
+        if members is None:
+            continue
+        entity_fragments = [f for member in members for f in fragments_by_owner.get(member, ())]
+        current_order = _source_order(entity_fragments)
+        current_rank = {tuple(r): index for index, r in enumerate(current_order)}
+
+        def ordered(rank: dict[tuple[Any, ...], int]) -> list[dict[str, Any]]:
+            return sorted(entity_fragments, key=lambda f: (
+                min((rank.get((r["segment_id"], r["start"], r["end"]), -1)
+                     for r in (f["source_range"] or [])), default=-1), f["id"]))
+
+        def old_version(values: list[dict[str, Any]]) -> str:
+            return digest([members, [(f["id"], f["text"], f["source_range"])
+                                     for f in values if f["state"] == "active"]])
+
+        old_hash = saved.get("input_version")
+        if old_hash != old_version(ordered(current_rank)):
+            old_order = saved.get("source_order")
+            if isinstance(old_order, list):
+                try:
+                    previous_rank = {tuple(value): index for index, value in enumerate(old_order)}
+                except TypeError:
+                    previous_rank = {}
+                active_ranges = {(r["segment_id"], r["start"], r["end"])
+                                 for f in entity_fragments if f["state"] == "active"
+                                 for r in (f["source_range"] or [])}
+                if set(previous_rank) != active_ranges or old_hash != old_version(ordered(previous_rank)):
+                    continue
+            else:
+                continue
+        saved["input_version"] = _input_version(members, entity_fragments)
+    knowledge["version"] = 2
+
+
 def entity_view(
     project: Path, library: dict[str, Any], normalized: str, *, require_current: bool = False,
     all_evidence: dict[str, dict[str, Any]] | None = None,
+    positions: dict[str, int] | None = None,
+    include_unsaved_evidence: bool = True,
 ) -> dict[str, Any]:
     groups = entity_members(library)
     root = next((key for key, members in groups.items() if normalized in members), None)
     if root is None:
         raise UsageError("实体术语不存在")
     members = groups[root]
-    known = all_evidence if all_evidence is not None else evidence(project, library)
     member_names = set(members)
+    if all_evidence is None:
+        saved = require_knowledge(library)["entities"].get(root)
+        if not include_unsaved_evidence and saved is None:
+            known = {}
+        else:
+            refs = {key for item in saved["items"] for key in item["fragment_ids"]} if saved else set()
+            refs.update(saved.get("summary_fragment_ids", []) if saved else [])
+            refs.update(key for key, fragment in require_knowledge(library)["fragments"].items() if fragment["owner"] in member_names)
+            known = evidence(project, library, fragment_ids=refs, positions=positions)
+    else:
+        known = all_evidence
     fragments = [f for f in known.values() if f["owner"] in member_names]
     return _entity_view(library, root, members, known, fragments, require_current=require_current)
 
@@ -191,25 +316,23 @@ def _entity_view(
     saved = require_knowledge(library)["entities"].get(root)
     items = deepcopy(saved["items"]) if saved else []
     refs = {key for item in items for key in item["fragment_ids"]}
+    refs.update(saved.get("summary_fragment_ids", []) if saved else [])
     referenced = [known[key] for key in refs if key in known]
     active_order = _source_order([f for f in fragments if f["state"] == "active"])
-    previous_ranges = {tuple(r) for r in saved["source_order"]} if saved else set()
-    current_ranges = {tuple(r) for r in active_order}
     stale = bool(saved) and (
         saved["members"] != members or len(referenced) != len(refs)
         or any(f["owner"] not in member_names or f["state"] != "active" or not f["valid"] for f in referenced)
-        or [r for r in saved["source_order"] if tuple(r) in current_ranges]
-        != [r for r in active_order if tuple(r) in previous_ranges]
     )
     version = _input_version(members, fragments)
     status = "stale" if stale else "pending" if not saved or saved["input_version"] != version else "current"
     if require_current and stale:
         raise UsageError(f"实体说明已过期，请更新后再执行：{root}")
     for item in items:
-        item["sources"] = [known[key]["source_range"] for key in item["fragment_ids"] if key in known]
+        item["sources"] = [known[key]["source_range"] for key in item["fragment_ids"] if key in known] or [None]
     return {"entity_key": root, "members": members, "status": status, "items": items,
             "fragments": fragments, "input_version": version,
-            "source_order": active_order}
+            "source_order": active_order,
+            "description_generation": saved.get("description_generation", "sourced") if saved else "sourced"}
 
 
 def validate_items(view: dict[str, Any], items: Any, *, allow_manual: bool = False) -> list[dict[str, Any]]:
@@ -238,35 +361,50 @@ def add_unsourced(knowledge: dict[str, Any], owner: str, text: str, origin: str)
 
 
 def save_items(project: Path, library: dict[str, Any], normalized: str, items: Any, *,
-               all_evidence: dict[str, dict[str, Any]] | None = None) -> None:
-    known = all_evidence if all_evidence is not None else evidence(project, library)
-    view = entity_view(project, library, normalized, all_evidence=known)
+               all_evidence: dict[str, dict[str, Any]] | None = None,
+               description_generation: str | None = None) -> None:
+    view = entity_view(project, library, normalized, all_evidence=all_evidence)
+    known = all_evidence if all_evidence is not None else {fragment["id"]: fragment for fragment in view["fragments"]}
     clean = validate_items(view, items, allow_manual=True)
     knowledge = require_knowledge(library)
     for item in clean:
-        if not item["fragment_ids"]:
+        if not item["fragment_ids"] and description_generation is None:
             key = add_unsourced(knowledge, view["entity_key"], item["text"], "manual")
             item["fragment_ids"] = [key]
             known[key] = {**knowledge["fragments"][key], "id": key, "source_range": None, "valid": True, "_positions": {}}
     view = entity_view(project, library, normalized, all_evidence=known)
     knowledge["entities"][view["entity_key"]] = {
         "items": clean, "members": view["members"], "input_version": view["input_version"],
-        "source_order": view["source_order"],
     }
+    if description_generation is not None:
+        knowledge["entities"][view["entity_key"]]["description_generation"] = description_generation
+        if description_generation != "sourced":
+            knowledge["entities"][view["entity_key"]]["summary_fragment_ids"] = [
+                f["id"] for f in view["fragments"] if f["state"] == "active" and f["valid"]]
 
 
 def confirm_keep(project: Path, library: dict[str, Any], normalized: str, *,
-                 all_evidence: dict[str, dict[str, Any]] | None = None) -> None:
+                 all_evidence: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
     view = entity_view(project, library, normalized, require_current=True, all_evidence=all_evidence)
     saved = require_knowledge(library)["entities"].get(view["entity_key"])
     if saved is None:
         raise UsageError("尚无已应用说明，不能确认保持")
     saved["input_version"] = view["input_version"]
-    saved["source_order"] = view["source_order"]
+
+
+def applied_descriptions(library: dict[str, Any]) -> None:
+    knowledge = require_knowledge(library)
+    terms = {term["normalized"]: term for term in library["terms"]}
+    for root, members in entity_members(library).items():
+        saved = knowledge["entities"].get(root)
+        items = saved["items"] if saved else []
+        for member in members:
+            terms[member].update(description="；".join(item["text"] for item in items),
+                    entity_key=root, knowledge_status=None, description_items=items)
 
 
 def project_descriptions(project: Path, library: dict[str, Any], *,
-                         all_evidence: dict[str, dict[str, Any]] | None = None) -> None:
+                         all_evidence: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
     known = all_evidence if all_evidence is not None else evidence(project, library)
     terms = {term["normalized"]: term for term in library["terms"]}
     groups = entity_members(library)
@@ -276,14 +414,18 @@ def project_descriptions(project: Path, library: dict[str, Any], *,
         root = roots.get(fragment["owner"])
         if root is not None:
             fragments[root].append(fragment)
+    views = {}
     for root, members in groups.items():
         view = _entity_view(library, root, members, known, fragments[root])
+        views[root] = view
         for member in members:
             term = terms[member]
             term["description"] = "；".join(item["text"] for item in view["items"])
             term["entity_key"] = root
             term["knowledge_status"] = view["status"]
             term["description_items"] = view["items"]
+
+    return views
 
 
 def compact_source_ranges(ranges: list[dict[str, Any]] | None, positions: dict[str, int]) -> list[dict[str, Any]] | None:
@@ -305,9 +447,12 @@ def compact_source_ranges(ranges: list[dict[str, Any]] | None, positions: dict[s
     return groups or None
 
 
-def knowledge_payload(views: list[dict[str, Any]], target_language: str) -> tuple[dict[str, Any], dict[str, tuple[str, str]]]:
+def knowledge_payload(views: list[dict[str, Any]], target_language: str, description_generation: str = "sourced", *, range_cache: dict | None = None) -> tuple[dict[str, Any], dict[str, tuple[str, str]]]:
     refs: dict[str, tuple[str, str]] = {}
+    range_cache = {} if range_cache is None else range_cache
     entities = []
+    sources: dict[int, dict[str, Any]] = {}
+    source_ids: dict[tuple[int, str], str] = {}
     for view in views:
         fragments = []
         for f in view["fragments"]:
@@ -315,36 +460,55 @@ def knowledge_payload(views: list[dict[str, Any]], target_language: str) -> tupl
                 continue
             key = f"K{len(refs) + 1}"
             refs[key] = (view["entity_key"], f["id"])
+            cache_key = (id(f["source_range"]), id(f["_positions"]))
+            if cache_key not in range_cache:
+                range_cache[cache_key] = (f["source_range"], f["_positions"], compact_source_ranges(f["source_range"], f["_positions"]))
+            compact_ranges = range_cache[cache_key][2]
+            source_ranges = None if compact_ranges is None else []
+            for r in compact_ranges or []:
+                source_key = (f["_file_orders"][r["file_id"]], r["part_id"])
+                if source_key not in source_ids:
+                    source_id = f"S{len(source_ids) + 1}"
+                    source_ids[source_key] = source_id
+                    group = sources.setdefault(source_key[0], {"file_order": source_key[0], "parts": {}})
+                    group["parts"][source_id] = source_key[1]
+                source_ranges.append({"source": source_ids[source_key], "first": r["first"], "last": r["last"]})
             fragments.append({"id": key, "text": f["text"], "owner": f["owner"],
                               "original_source": f.get("source", f["original_owner"]),
-                              "origin": f["origin"], "source_range": compact_source_ranges(f["source_range"], f["_positions"])})
+                              "origin": f["origin"], "source_range": source_ranges})
         entities.append({"entity": view["entity_key"], "members": view["members"],
                          "current_items": [{"text": item["text"]} for item in view["items"]],
                          "fragments": fragments})
-    return {"phase": "knowledge", "target_language": target_language, "entities": entities}, refs
+    return {"phase": "knowledge", "target_language": target_language,
+            "description_generation": description_generation, "sources": list(sources.values()), "entities": entities}, refs
 
 
 def pack_knowledge_batches(views: list[dict[str, Any]], prompt: str, config: dict[str, Any], *,
                            feedback: str = "") -> tuple[list[list[dict[str, Any]]], int, dict[str, str]]:
     """Pack complete entities, isolating invalid/oversized evidence without trimming."""
     from .execution import estimate_messages, render_messages
-    from .term_decision_batches import _request_limits
-    soft, hard, _, _ = _request_limits(config)
-    overflow = config["terminology_decision"]["allow_soft_target_overflow"]
+    from .request_budget import resolve_request_budget, request_input_limit
+    from .execution import estimate_tokens
+    import math
+    budget = resolve_request_budget(config, "terminology_knowledge")
+    soft, hard = budget.target_content_tokens, request_input_limit(config, budget)
     batches, errors = [], {}
     current: list[dict[str, Any]] = []
     total = 0
+    range_cache: dict = {}
 
-    def estimate(group: list[dict[str, Any]]) -> int:
-        payload, _ = knowledge_payload(group, config["project"]["target_language"])
+    def estimate(group: list[dict[str, Any]]) -> tuple[int, int]:
+        payload, _ = knowledge_payload(group, config["project"]["target_language"], config["terminology_decision"]["description_generation"], range_cache=range_cache)
+        entities = [{key: value for key, value in entity.items() if key != "current_items"} for entity in payload["entities"]]
+        content = math.ceil(estimate_tokens(json.dumps({"sources": payload["sources"], "entities": entities}, ensure_ascii=False, separators=(",", ":"))) * float(config["execution"]["token_safety_factor"]))
         if feedback:
             payload["validation_feedback"] = feedback
-        return estimate_messages(render_messages(prompt, payload), float(config["execution"]["token_safety_factor"]))
+        return estimate_messages(render_messages(prompt, payload), float(config["execution"]["token_safety_factor"])), content
 
     def flush() -> None:
         nonlocal current, total
         if current:
-            total += estimate(current)
+            total += estimate(current)[0]
             batches.append(current)
             current = []
 
@@ -355,22 +519,26 @@ def pack_knowledge_batches(views: list[dict[str, Any]], prompt: str, config: dic
             continue
         if not active:
             continue
-        size = estimate([view])
-        if size > hard or (size > soft and not overflow):
-            limit = hard if size > hard else soft
-            errors[view["entity_key"]] = f"实体完整证据请求估算 {size} tokens，超过{'硬限制' if size > hard else '软预算'} {limit} tokens"
+        size, _ = estimate([view])
+        if size > hard:
+            errors[view["entity_key"]] = f"实体完整证据请求估算 {size} tokens，超过硬限制 {hard} tokens"
             continue
-        if current and estimate([*current, view]) > min(soft, hard):
-            flush()
+        if current:
+            full, content = estimate([*current, view])
+            if full > hard or content > soft:
+                flush()
         current.append(view)
-        if size > soft:
-            flush()
+
     flush()
     return batches, total, errors
 
 
-def _knowledge_result(view: dict[str, Any], record: dict[str, Any], refs: dict[str, tuple[str, str]]) -> dict[str, Any]:
-    if set(record) != {"type", "entity", "items", "reason"}:
+def _knowledge_result(view: dict[str, Any], record: dict[str, Any], refs: dict[str, tuple[str, str]],
+                      description_generation: str = "sourced") -> dict[str, Any]:
+    fields = {"type", "entity", "items", "reason"}
+    if description_generation != "sourced":
+        fields.add("summary")
+    if set(record) != fields:
         raise UsageError("实体说明响应字段错误")
     if not isinstance(record["reason"], str) or not record["reason"].strip():
         raise UsageError("实体说明响应缺少理由")
@@ -384,7 +552,15 @@ def _knowledge_result(view: dict[str, Any], record: dict[str, Any], refs: dict[s
                 or not all(isinstance(r, str) and r in refs for r in item["refs"])):
             raise UsageError("说明引用必须来自本次实体证据")
         items.append({"text": item["text"], "fragment_ids": [refs[r][1] for r in item["refs"]]})
-    return {"items": validate_items(view, items), "reason": record["reason"], "input_version": view["input_version"]}
+    items = validate_items(view, items)
+    if description_generation == "summary_only" and items:
+        raise UsageError("仅无来源总结模式的 items 必须为空")
+    if description_generation != "sourced":
+        summary = record["summary"]
+        if not isinstance(summary, str) or not summary.strip():
+            raise UsageError("实体总结必须是非空字符串")
+        items.append({"text": summary.strip(), "fragment_ids": []})
+    return {"items": items, "reason": record["reason"], "input_version": view["input_version"]}
 
 
 async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, config: dict[str, Any], *,
@@ -393,24 +569,27 @@ async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, co
     from .errors import AppError, FatalExternalError, StorageError
     from .execution import estimate_messages, render_messages
     from .llm_response import parse_jsonl_document
+    from .request_budget import resolve_request_budget
+    budget = resolve_request_budget(config, "terminology_knowledge")
     pending = list(views)
     errors: dict[str, str] = {}
     feedback = ""
     parent_request_id = None
     for attempt in range(int(config["retry"]["format_max_attempts"]) + 1):
-        batches, _, oversized = pack_knowledge_batches(pending, prompt, config, feedback=feedback)
+        batches, _, oversized = (await run_blocking(lambda: pack_knowledge_batches(pending, prompt, config, feedback=feedback)))
         errors.update(oversized)
         retry = []
         for batch in batches:
-            payload, refs = knowledge_payload(batch, config["project"]["target_language"])
+            payload, refs = (await run_blocking(lambda: knowledge_payload(batch, config["project"]["target_language"], config["terminology_decision"]["description_generation"])))
             if feedback:
                 payload["validation_feedback"] = feedback
-            messages = render_messages(prompt, payload)
-            estimate = estimate_messages(messages, float(config["execution"]["token_safety_factor"]))
+            messages = (await run_blocking(lambda: render_messages(prompt, payload)))
+            estimate = (await run_blocking(lambda: estimate_messages(messages, float(config["execution"]["token_safety_factor"]))))
             try:
                 response, request_id = await llm.chat(
                     messages=messages, temperature=float(config["llm"]["temperature_terminology_decision"]),
                     estimated_input_tokens=estimate, request_id=new_record_id("REQ"), parent_request_id=parent_request_id,
+                    request_budget=budget,
                 )
             except AppError as exc:
                 if isinstance(exc, (FatalExternalError, StorageError)):
@@ -418,7 +597,7 @@ async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, co
                 errors.update({v["entity_key"]: str(exc) for v in batch})
                 continue
             parent_request_id = request_id
-            document = parse_jsonl_document(response.content, record_type="entity_knowledge")
+            document = (await run_blocking(lambda: parse_jsonl_document(response.content, record_type="entity_knowledge")))
             requested = {v["entity_key"] for v in batch}
             if (document.errors or not document.complete
                     or any(not isinstance(r.get("entity"), str) or r["entity"] not in requested for r in document.records)):
@@ -431,12 +610,12 @@ async def aggregate_batch(llm: Any, views: list[dict[str, Any]], prompt: str, co
                 try:
                     if len(records) != 1:
                         raise UsageError("每个实体必须恰好返回一条 entity_knowledge")
-                    result = _knowledge_result(view, records[0], refs)
+                    result = (await run_blocking(lambda: _knowledge_result(view, records[0], refs, config["terminology_decision"]["description_generation"])))
                 except UsageError as exc:
                     errors[root] = str(exc)
                     retry.append(view)
                     continue
-                on_result(view, result)
+                await run_blocking(on_result, view, result)
                 errors.pop(root, None)
         if not retry:
             break
@@ -450,7 +629,7 @@ def update_entity(project: Path, payload: dict[str, Any]) -> dict[str, Any]:
     from .term_library import load_terms
     from .sqlite_storage import read_json, write_terminology_publication
     with project_write_lock(project):
-        library = load_terms(project)
+        library = load_terms(project, resolve_knowledge=False)
         if library is None:
             raise UsageError("没有已发布术语库")
         if type(payload.get("expected_revision")) is not int or payload["expected_revision"] != library["terms_revision"]:
@@ -458,8 +637,8 @@ def update_entity(project: Path, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = payload.get("normalized")
         if not isinstance(normalized, str):
             raise UsageError("实体术语标识必须是字符串")
-        known = evidence(project, library)
-        view = entity_view(project, library, normalized, all_evidence=known)
+        view = entity_view(project, library, normalized)
+        known = {fragment["id"]: fragment for fragment in view["fragments"]}
         action = payload.get("action")
         fields = {"save_items": {"items"}, "confirm_keep": set(), "set_fragment_enabled": {"fragment_id", "enabled"}}
         if not isinstance(action, str) or action not in fields:
@@ -485,7 +664,7 @@ def update_entity(project: Path, payload: dict[str, Any]) -> dict[str, Any]:
             raise UsageError("不支持的实体说明操作")
         library["terms_revision"] += 1
         library["record_id"] = f'TERMS-{library["terms_revision"]}'
-        project_descriptions(project, library, all_evidence=known)
+        applied_descriptions(library)
         overrides = read_json(project, project / "terminology" / "overrides.json")
         write_terminology_publication(project, terms=library, overrides=overrides)
         return library
@@ -520,7 +699,7 @@ def transfer_alias_evidence(library: dict[str, Any], spec: Any) -> dict[str, str
 
 def replacement_impacts(project: Path, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     from .term_library import load_terms
-    library = load_terms(project)
+    library = load_terms(project, resolve_knowledge=False)
     if library is None:
         return []
     coverage = _range_index(source_range(segments, {s["segment_id"]: s for s in segments}, {}))

@@ -1,3 +1,4 @@
+import { TermScanFailuresDialog } from "./TermScanFailuresDialog";
 import { Feedback } from "./InteractionProvider";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
@@ -95,7 +96,6 @@ export function TermsView({
   project,
   projectId,
   overview,
-  focusFailures = false,
   language,
   onFindSegment,
   pendingTermSource,
@@ -107,7 +107,6 @@ export function TermsView({
   project: string;
   projectId: string;
   overview: ProjectOverview;
-  focusFailures?: boolean;
   language: Language;
   onFindSegment: (source: string, segmentId: string) => void;
   pendingTermSource?: string | null;
@@ -290,10 +289,6 @@ export function TermsView({
     if (termListRef.current) termListRef.current.scrollTop = restoredScrollRef.current;
     restoredScrollRef.current = null;
   });
-
-  useEffect(() => {
-    if (focusFailures) setShowScanFailures(true);
-  }, [focusFailures]);
 
   const hitsPageSize = 50;
   const hitsEnabled = editorTab === "hits" && Boolean(selected) && !selectedIsDisabled;
@@ -885,6 +880,7 @@ export function TermsView({
           <div className="batch-toolbar segment-batch-toolbar term-actions-toolbar">
             <span>{translate("terms.selected", language, { count: selection.selectedKeys.size })}</span>
             <div className="segment-batch-actions">
+              <button className="quiet-button" onClick={() => setShowScanFailures(true)}>{translate("terms.viewFailures", language)}</button>
               <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
               <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
               {selectedActive.length > 0 && <button
@@ -936,22 +932,14 @@ export function TermsView({
               {Object.entries(data.scan.failure_counts).map(([key, count]) => <span key={key} className="scan-error-count">{key} {count}</span>)}
             </div>
             <div className="term-scan-actions">
-              {data.scan.failed > 0 && <button className="quiet-button" onClick={() => setShowScanFailures((value) => !value)}>{showScanFailures ? translate("terms.hideFailures", language) : translate("terms.viewFailures", language)}</button>}
               {data.scan.candidate_count > 0 && <button className="quiet-button" onClick={() => { setExportSource("scanned"); setExportOpen(true); }}>{translate("terms.exportCurrentScan", language)}</button>}
               {data.scan.candidate_count > 0 && <button className="primary-button" onClick={() => setPartialOpen(true)}>{translate("terms.publishAvailable", language)}</button>}
             </div>
-            {showScanFailures && data.scan.failed_segments.length > 0 && (
-              <div className="term-scan-failures">
-                {data.scan.failed_segments.map((item) => (
-                  <div key={item.segment_id}>
-                    <code>{item.segment_id}</code><span>{item.error_class} · {item.error_message}</span>
-                  </div>
-                ))}
-                {data.scan.failed_segments_truncated && <small>{translate("terms.first200Failures", language)}</small>}
-              </div>
-            )}
           </div>
         )}
+        {showScanFailures && <TermScanFailuresDialog project={project} projectId={projectId} files={overview.files} language={language}
+          onClose={() => setShowScanFailures(false)}
+          onLocate={(segmentId) => { setShowScanFailures(false); onFindSegment("", segmentId); }} />}
         <div className="term-list" ref={termListRef} onScroll={(event) => {
           const cached = termsCache.get(projectId);
           if (cached) cached.scrollTop = event.currentTarget.scrollTop;

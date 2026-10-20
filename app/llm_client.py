@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking
 import asyncio
 import hashlib
 import json
@@ -13,6 +14,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 import httpx
+from .request_budget import RequestBudget, resolve_request_budget, request_input_limit
 from .credentials import resolve_api_keys
 from .chatgpt_oauth import ChatGPTConnection, plan_error
 from .diagnostics import current_diagnostics
@@ -264,7 +266,7 @@ class LLMClient:
         config: dict[str, Any],
         limiter: SlidingWindowLimiter | KeyPool,
         *,
-        run_dir: Path,
+        run_dir: Path | None,
         project_id: str,
         run_id: str,
         stage: str,
@@ -287,6 +289,7 @@ class LLMClient:
         self.run_dir = run_dir
         self.project_id = project_id
         self.run_id = run_id
+        self.session_id = run_id or str(uuid.uuid4())
         self.stage = stage
         self.client = client
         self.owns_client = client is None
@@ -307,6 +310,7 @@ class LLMClient:
         self.adapter = adapter
         self.chatgpt = ChatGPTConnection() if config["llm"]["credential"]["kind"] == "chatgpt" else None
         self.chatgpt_identity: tuple[str, str] | None = config.get("_chatgpt_identity")
+        self._key_prepare_lock = asyncio.Lock()
 
     def _prepare_keys(self) -> None:
         if self._api_keys is not None:
@@ -314,14 +318,33 @@ class LLMClient:
         if self._key_resolution_error is not None:
             raise self._key_resolution_error
         try:
-            if self.chatgpt is not None:
-                self.chatgpt_identity = self.chatgpt_identity or self.chatgpt.identity()
-                self._api_keys = ("chatgpt:" + self.chatgpt_identity[0],)
-            else:
-                self._api_keys = resolve_api_keys(self.config["llm"]["credential"])
+            self._api_keys, self.chatgpt_identity = self._resolve_keys()
         except ExternalError as exc:
             self._key_resolution_error = FatalExternalError(str(exc))
             raise self._key_resolution_error from exc
+        self._initialize_keys()
+
+    def _resolve_keys(self) -> tuple[tuple[str, ...], tuple[str, str] | None]:
+        if self.chatgpt is not None:
+            identity = self.chatgpt_identity or self.chatgpt.identity()
+            return ("chatgpt:" + identity[0],), identity
+        return resolve_api_keys(self.config["llm"]["credential"]), None
+
+    async def prepare_keys(self) -> None:
+        async with self._key_prepare_lock:
+            if self._api_keys is not None:
+                return
+            if self._key_resolution_error is not None:
+                raise self._key_resolution_error
+            try:
+                keys, identity = await run_blocking(self._resolve_keys)
+            except ExternalError as exc:
+                self._key_resolution_error = FatalExternalError(str(exc))
+                raise self._key_resolution_error from exc
+            self._api_keys, self.chatgpt_identity = keys, identity
+            self._initialize_keys()
+
+    def _initialize_keys(self) -> None:
         self._key_ids = tuple(
             hashlib.sha256(value.encode("utf-8")).hexdigest()
             for value in self._api_keys
@@ -377,7 +400,10 @@ class LLMClient:
                 self.usage_complete = False
             self._key_audits[key_index]["usage_complete"] = False
 
-    def _record_usage(self, usage: Usage, key_index: int, *, request_id: str, complete: bool = True) -> None:
+    def _record_usage(
+        self, usage: Usage, key_index: int, *, request_id: str, attempt: int,
+        complete: bool = True,
+    ) -> None:
         self.usage = Usage(
             input_tokens=self.usage.input_tokens + usage.input_tokens,
             output_tokens=self.usage.output_tokens + usage.output_tokens,
@@ -388,7 +414,7 @@ class LLMClient:
             diagnostics.record_request_usage(request_id, {
                 "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
                 "total_tokens": usage.total_tokens,
-            }, complete=complete)
+            }, attempt=attempt, complete=complete)
         self.usage_observed = True
         entry = self._key_audits[key_index]
         previous = entry["usage"]
@@ -668,7 +694,8 @@ class LLMClient:
                         reasoning_content=(
                             "".join(reasoning_parts) if reasoning_parts else None
                         ),
-                    )
+                    ),
+                    warnings=self.warnings,
                 )
             except ExternalError as exc:
                 raise _StreamProtocolError(
@@ -717,7 +744,13 @@ class LLMClient:
         if self.owns_client and self.client is not None:
             await self.client.aclose()
 
-    async def _debug_attempt(
+    async def _debug_attempt(self, *args: Any, **kwargs: Any) -> None:
+        if self.run_dir is None or not self.config["debug"]["enabled"]:
+            return
+        async with self.log_lock:
+            await run_blocking(self._write_debug_attempt, *args, **kwargs)
+
+    def _write_debug_attempt(
         self,
         request_id: str,
         attempt: int,
@@ -736,7 +769,7 @@ class LLMClient:
         parent_request_id: str | None = None,
         overview: dict[str, Any] | None = None,
     ) -> None:
-        if not self.config["debug"]["enabled"]:
+        if self.run_dir is None or not self.config["debug"]["enabled"]:
             return
         payload_dir = self.run_dir / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
@@ -762,27 +795,26 @@ class LLMClient:
                     "stream_first_event_latency_ms": stream_first_event_latency_ms,
                 },
             )
-        async with self.log_lock:
-            append_jsonl_file(
-                self.run_dir / "attempts.jsonl",
-                record_header(
-                    "request_attempt",
-                    self.project_id,
-                    record_id=f"{base}",
-                    run_id=self.run_id,
-                    request_id=request_id,
-                    parent_request_id=parent_request_id,
-                    stage=self.stage,
-                    attempt=attempt,
-                    retry_round=retry_round,
-                    key_index=(key_index + 1 if key_index is not None else None),
-                    http_status=status,
-                    provider_error_status=provider_error_status,
-                    outcome=outcome,
-                    status="failed" if error is not None else "completed",
-                    error=error,
-                ),
-            )
+        append_jsonl_file(
+            self.run_dir / "attempts.jsonl",
+            record_header(
+                "request_attempt",
+                self.project_id,
+                record_id=f"{base}",
+                run_id=self.run_id,
+                request_id=request_id,
+                parent_request_id=parent_request_id,
+                stage=self.stage,
+                attempt=attempt,
+                retry_round=retry_round,
+                key_index=(key_index + 1 if key_index is not None else None),
+                http_status=status,
+                provider_error_status=provider_error_status,
+                outcome=outcome,
+                status="failed" if error is not None else "completed",
+                error=error,
+            ),
+        )
 
     async def finish_decision_debug(self, error: str | None = None) -> None:
         pending = self._decision_debug_attempt
@@ -805,6 +837,7 @@ class LLMClient:
         parent_request_id: str | None = None,
         segment_id_map: dict[str, str] | None = None,
         json_schema: dict[str, Any] | None = None,
+        request_budget: RequestBudget | None = None,
     ) -> tuple[LLMResponse, str]:
         retried = {"truncated": 0, "unknown": 0}
         while True:
@@ -816,6 +849,7 @@ class LLMClient:
                 parent_request_id=parent_request_id,
                 segment_id_map=segment_id_map,
                 json_schema=json_schema,
+                request_budget=request_budget,
             )
             diagnostics = current_diagnostics()
             if response.finish_reason in self.adapter.blocked_finish_reasons:
@@ -879,18 +913,26 @@ class LLMClient:
         parent_request_id: str | None = None,
         segment_id_map: dict[str, str] | None = None,
         json_schema: dict[str, Any] | None = None,
+        request_budget: RequestBudget | None = None,
     ) -> tuple[LLMResponse, str]:
         if self.client is None:
             raise RuntimeError("LLMClient must be used as an async context manager")
         json_schema = json_schema if self.config["llm"].get("json_schema_enabled", False) else None
-        self._prepare_keys()
+        input_limit = (
+            self.config["_request_input_limit"]
+            if "_request_input_limit" in self.config
+            else request_input_limit(self.config, request_budget or resolve_request_budget(
+                self.config, self.config["_request_budget_stage"]))
+        )
+        if estimated_input_tokens > input_limit:
+            raise ContextLengthError(f"请求估算 {estimated_input_tokens} tokens 超过完整输入硬限制 {input_limit}", request_id=request_id)
+        await self.prepare_keys()
         api_keys = self._api_keys
         request_id = request_id or f"REQ-{uuid.uuid4().hex[:12].upper()}"
         configured_output = int(self.config["llm"]["max_output_tokens"])
         available_output = max(
             1,
             int(self.config["llm"]["context_window_tokens"])
-            - int(self.config["llm"]["context_safety_margin_tokens"])
             - estimated_input_tokens,
         )
         effective_output = min(configured_output, available_output)
@@ -1020,7 +1062,7 @@ class LLMClient:
                     reasoning_effort=self.config["llm"]["reasoning_effort"],
                     extra_body=self.config.get("_llm_extra_body"),
                     extra_headers=self.config.get("_llm_extra_headers"),
-                    session_id=self.run_id,
+                    session_id=self.session_id,
                     request_id=request_id,
                     json_schema=json_schema,
                 )
@@ -1186,6 +1228,7 @@ class LLMClient:
                         exc.usage_values,
                         key_index,
                         request_id=request_id,
+                        attempt=send_attempt,
                         affects_global=True,
                     )
                 elapsed = time.monotonic() - started
@@ -1315,6 +1358,7 @@ class LLMClient:
                         exc.usage_values,
                         key_index,
                         request_id=request_id,
+                        attempt=send_attempt,
                         affects_global=True,
                     )
                 await debug_attempt(
@@ -1475,7 +1519,10 @@ class LLMClient:
                         self.config["debug"],
                         self.send_count,
                     )
-                    self._record_stream_usage(stream_usage, key_index, request_id=request_id)
+                    self._record_stream_usage(
+                        stream_usage, key_index, request_id=request_id,
+                        attempt=send_attempt,
+                    )
                     self.logger.info(
                         "stream complete request=%s key=%d attempt=%d retry_round=%d status=%d events=%d bytes=%d termination=%s elapsed=%.2fs",
                         request_id,
@@ -1498,7 +1545,9 @@ class LLMClient:
                 response_data = {"raw_text": response.text}
             extracted = self.adapter.extract_usage(response_data)
             if extracted is not None:
-                self._record_usage(extracted, key_index, request_id=request_id)
+                self._record_usage(
+                    extracted, key_index, request_id=request_id, attempt=send_attempt
+                )
             else:
                 self._audit_usage_missing(key_index, affects_global=True)
             if 200 <= response.status_code < 300:
@@ -1510,7 +1559,7 @@ class LLMClient:
                 try:
                     parsed = self.adapter.parse_response(response_data)
                     normalized = _apply_debug_content_injections(
-                        normalize_llm_response(parsed), self.config["debug"], self.send_count,
+                        normalize_llm_response(parsed, warnings=self.warnings), self.config["debug"], self.send_count,
                     )
                 except Exception:
                     if diagnostics is not None:
@@ -1767,6 +1816,7 @@ class LLMClient:
         key_index: int,
         *,
         request_id: str,
+        attempt: int,
         affects_global: bool = True,
     ) -> None:
         if not self.adapter.usage_supported:
@@ -1805,6 +1855,7 @@ class LLMClient:
                 ),
                 key_index,
                 request_id=request_id,
+                attempt=attempt,
                 complete=required.issubset(values),
             )
         if not required.issubset(values):

@@ -104,7 +104,11 @@ def test_server_status_reports_and_updates_project_limit() -> None:
             "auth": {"required": False, "username": ""},
         },
     )
-    assert missing_tasks.status_code == 400
+    assert missing_tasks.status_code == 200
+    assert missing_tasks.json()["warnings"] == []
+    assert client.get("/api/v1/server/status").json()["tasks"] == {
+        "max_active_projects": 2, "estimate_usage_before_run": False,
+    }
 
 
 @pytest.mark.parametrize("value", [True, 0, -1])

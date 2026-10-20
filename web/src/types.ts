@@ -62,6 +62,12 @@ export interface SummaryArtifact {
   updated_at?: string;
 }
 
+export type SummaryArtifactHeader = Omit<SummaryArtifact, "text" | "refs" | "source_range" | "provenance" | "source_digest" | "input_digest" | "prompt_digest" | "record_type"> & {
+  has_text: boolean;
+  covered_segment_count: number;
+  origin: string | null;
+};
+
 export interface SummariesResponse {
   participation: Array<{
     file_id: string;
@@ -69,7 +75,7 @@ export interface SummariesResponse {
     selected: boolean;
   }>;
   boundaries: SummaryBoundary[];
-  artifacts: SummaryArtifact[];
+  artifacts: SummaryArtifactHeader[];
 }
 
 export type SettingsField =
@@ -86,6 +92,21 @@ export type LLMStage =
 
 export type RunStage = LLMStage | "content_summary";
 export type TaskStage = RunStage | "continuous";
+export type BudgetStage =
+  | "terminology"
+  | "terminology_decision"
+  | "terminology_knowledge"
+  | "content_summary"
+  | "translation"
+  | "repetition_consistency"
+  | "proofreading"
+  | "polishing";
+
+export interface RequestBudget {
+  target_content_tokens: number;
+  max_input_tokens: number;
+  context_reserve_tokens: number;
+}
 
 export interface ResultView {
   record_id: string;
@@ -347,6 +368,7 @@ export interface TaskState {
   current_stage?: string | null;
   steps?: TaskStep[];
   final_review?: boolean;
+  knowledge_only?: boolean;
   status: string;
   include_summaries?: boolean;
   include_draft_translation?: boolean;
@@ -445,6 +467,7 @@ export interface DecisionActivity {
 }
 
 export interface DiagnosticsResponse {
+  request_usage: Record<"llm" | "decision", TaskUsage>;
   decision: {
     activities: DecisionActivity[];
     metrics: Pick<DecisionActivity, "total_requests" | "active_requests" | "http_errors" | "retry_count" | "rate_limit_waiting_requests" | "average_latency_ms" | "p95_latency_ms">;
@@ -452,6 +475,7 @@ export interface DiagnosticsResponse {
   metrics: {
     project: string | null;
     stage: string | null;
+    elapsed_seconds: number;
     active_requests: number;
     total_requests: number;
     http_errors: number;
@@ -519,6 +543,7 @@ export interface DiagnosticsRequestDetail {
     truncated: boolean;
   }>;
   response_content: string | null;
+  error_detail?: string | null;
   response_content_truncated: boolean;
   reasoning_content: string | null;
   reasoning_content_truncated: boolean;
@@ -694,6 +719,7 @@ export interface TaskOptions {
   draft_prompt_preflight?: { ok: boolean; language: string; missing: string[] };
   stage: RunStage;
   final_review?: boolean;
+  knowledge_only?: boolean;
   preset: {
     id: string;
     model: string;
@@ -706,8 +732,9 @@ export interface TaskOptions {
   mismatched_fingerprint_completed: number;
   protected?: number;
   has_pending_draft?: boolean;
-  estimated_requests?: number;
-  estimated_input_tokens?: number;
+  estimated_requests?: number | null;
+  estimated_input_tokens?: number | null;
+  estimate_error?: ErrorPayload | null;
   knowledge_replacement_impacts?: Array<{fragment_id: string; owner: string; text: string; source_range: KnowledgeSourceRange[]}>;
   summary_selected_boundaries?: number;
   summary_only_work?: boolean;
@@ -716,10 +743,6 @@ export interface TaskOptions {
     language: string;
     required_stages: string[];
     missing: string[];
-  };
-  overflow_policy?: {
-    allow_soft_target_overflow: boolean;
-    anchor_overflow_mode: "error" | "trim" | "compact";
   };
   document_adapter_run_options?: Array<{
     adapter_id: string;
@@ -757,6 +780,7 @@ export interface RunningRun {
   previous: { model: string; endpoint: string };
   current: { model: string; endpoint: string };
   final_review?: boolean | null;
+  knowledge_only?: boolean;
   final_review_target_count?: number;
   completed_steps?: number;
   total_steps?: number;
@@ -813,6 +837,7 @@ export interface RunDecision {
   reuse_mixed_fingerprints: boolean;
   run_action: "resume" | "decline" | null;
   final_review: boolean;
+  knowledge_only?: boolean;
 }
 
 export interface TermDecisionConflicts {
@@ -843,14 +868,22 @@ export interface KnowledgeFragment {
   source_range: KnowledgeSourceRange[] | null;
   _positions: Record<string, number>;
 }
+export interface EntityKnowledgeRange {
+  segment_id: string; last_segment_id: string; start: number; end: number;
+}
+export interface EntityKnowledgeFragment {
+  id: string; owner: string; source?: string; text: string;
+  state: "active" | "disabled" | "superseded"; valid: boolean;
+  navigation_ranges: EntityKnowledgeRange[] | null;
+}
 export interface EntityKnowledge {
   entity_key: string; members: string[]; status: "current" | "pending" | "stale";
-  items: KnowledgeItem[]; fragments: KnowledgeFragment[]; terms_revision: number;
+  items: KnowledgeItem[]; fragments: EntityKnowledgeFragment[]; terms_revision: number;
 }
 
 export interface Term {
   entity_key: string;
-  knowledge_status: "current" | "pending" | "stale";
+  knowledge_status: "current" | "pending" | "stale" | null;
   description_items: KnowledgeItem[];
   normalized: string;
   source: string;
@@ -905,6 +938,7 @@ export interface TermDecisionProposal {
 }
 
 export interface TermDecisionDraft {
+  knowledge_only?: boolean;
   warnings: string[];
   final_review_error?: { error: string; code: string; params: Record<string, unknown> };
   run_id: string;
@@ -990,6 +1024,21 @@ export interface RelatedTermsResponse {
   related: RelatedTerm[];
 }
 
+export interface TerminologyFailures {
+  run_id: string | null;
+  failed: number;
+  truncated: boolean;
+  segments: Array<{
+    segment_id: string;
+    errors: Array<{
+      stage: "terminology" | "translation" | "content_summary";
+      error_class: string;
+      error_message: string;
+      request_id: string | null;
+    }>;
+  }>;
+}
+
 export interface TerminologyScan {
   active_task_id: string | null;
   status: "none" | "active" | "completed" | "partial_published" | string;
@@ -1034,6 +1083,8 @@ export interface ProjectConfig {
     temperature_terminology_decision: number;
     temperature_content_summary: number;
     temperature_translation: number;
+    preset_repetition_consistency: string;
+    temperature_repetition_consistency: number;
     temperature_proofreading: number;
     temperature_polishing: number;
   };
@@ -1043,6 +1094,10 @@ export interface ProjectConfig {
   chunking: {
     allow_split_oversized_segment: boolean;
     cross_boundary_batching: Array<"terminology" | "translation" | "proofreading" | "polishing">;
+    target_content_tokens: number;
+    max_input_tokens: number;
+    context_reserve_tokens: number;
+    stage_overrides: Partial<Record<BudgetStage, Partial<RequestBudget>>>;
   };
   context: Record<"terminology" | "translation" | "proofreading" | "polishing", {
     enabled: boolean;
@@ -1059,10 +1114,11 @@ export interface ProjectConfig {
     case_insensitive: boolean;
     max_terms_per_segment: number;
     alias_primary_collision: "conflict" | "merge";
+    sourced_description_injection: "none" | "prefer_previous" | "all";
+    unsourced_description_injection: "none" | "when_no_sourced" | "all";
   };
   terminology_decision: {
-    allow_soft_target_overflow: boolean;
-    anchor_overflow_mode: "error" | "trim" | "compact";
+    description_generation: "sourced" | "sourced_and_summary" | "summary_only";
   };
   validation: {
     translation: {
@@ -1116,7 +1172,7 @@ export interface HTTPDecisionPreset {
   url: string;
   model: string;
   proxy_url: string;
-  credential: { kind: "environment" | "keychain"; name: string };
+  credential: { kind: "" | "environment" | "keychain"; name: string };
   context_window_tokens: number;
   context_safety_margin_tokens: number;
   token_safety_factor: number;
@@ -1132,7 +1188,12 @@ export interface LLMDecisionPreset {
   prompt_language: "zh-CN" | "en";
 }
 
-export type DecisionPreset = HTTPDecisionPreset | LLMDecisionPreset;
+export interface IncompleteDecisionPreset {
+  preset_id: string;
+  protocol: "";
+}
+
+export type DecisionPreset = HTTPDecisionPreset | LLMDecisionPreset | IncompleteDecisionPreset;
 
 export interface DecisionPresetSummary {
   preset_id: string;
@@ -1140,6 +1201,8 @@ export interface DecisionPresetSummary {
   model?: string;
   valid: boolean;
   error?: string;
+  warnings?: string[];
+  missing_fields?: string[];
 }
 
 export interface LLMPresetSummary {
@@ -1152,10 +1215,12 @@ export interface LLMPresetSummary {
   valid: boolean;
   digest?: string;
   error?: string;
+  warnings?: string[];
+  missing_fields?: string[];
 }
 
 export interface LLMPreset {
-  schema_version: 8;
+  schema_version: 9;
   preset_id: string;
   adapter_id: string;
   base_url: string;
@@ -1163,12 +1228,10 @@ export interface LLMPreset {
   credential: LLMCredential;
   proxy_url: string;
   context_window_tokens: number;
-  target_chunk_input_tokens: number;
   max_output_tokens: number;
   send_temperature: boolean;
   json_schema_enabled?: boolean;
   reasoning_effort: string | null;
-  context_safety_margin_tokens: number;
   token_safety_factor: number;
   requests_per_minute: number;
   input_tokens_per_minute: number;
@@ -1182,7 +1245,7 @@ export interface LLMPreset {
 }
 
 export interface LLMCredential {
-  kind: "environment" | "keychain" | "chatgpt";
+  kind: "" | "environment" | "keychain" | "chatgpt";
   name: string;
 }
 
@@ -1196,7 +1259,8 @@ export interface ServerStatus {
   auth: { required: boolean; username: string };
   authed: boolean;
   loopback: boolean;
-  tasks: { max_active_projects: number };
+  tasks: { max_active_projects: number; estimate_usage_before_run: boolean };
+  warnings?: string[];
 }
 
 export interface InterfaceEntry {

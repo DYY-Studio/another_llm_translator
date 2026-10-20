@@ -63,6 +63,7 @@ def stream_response(*values: object, line_ending: str = "\n") -> httpx.Response:
 
 def streaming_config(tmp_path: Path) -> dict:
     current = load_global_config(ROOT)
+    current["chunking"]["context_reserve_tokens"] = 512
     current["llm"]["stream"] = True
     current["llm"]["stream_endpoint"] = ""
     current["retry"]["http_max_attempts"] = 1
@@ -157,6 +158,23 @@ async def run_client(
         if context is not None:
             context.__exit__(None, None, None)
         os.environ.pop("LLM_API_KEY", None)
+
+
+@pytest.mark.asyncio
+async def test_stream_accepts_comma_separated_jsonl_and_records_warning(tmp_path: Path) -> None:
+    current = streaming_config(tmp_path)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return stream_response(
+            {"choices": [{"delta": {"content": '{"type":"segment","id":"S1","translation":"译文"},'}}]},
+            {"choices": [{"delta": {"content": '{"type":"end"}'}}]},
+            "[DONE]",
+        )
+
+    response, llm, client = await run_client(current, tmp_path, handler)
+    await client.aclose()
+    assert [json.loads(row)["type"] for row in response.content.splitlines()] == ["segment", "end"]
+    assert "已接受逗号分隔的 JSONL 响应" in llm.warnings
 
 
 @pytest.mark.asyncio
@@ -440,12 +458,20 @@ async def test_openai_stream_aggregates_split_utf8_reasoning_and_usage(
 
 
 @pytest.mark.asyncio
-async def test_openai_stream_accepts_reasoning_alias(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("delta", "expected"), [
+    ({"reasoning": "思考"}, "思考"),
+    ({"reasoning_content": "思考", "reasoning": "思考"}, "思考"),
+    ({"reasoning_content": "思考", "reasoning": "另一字段"}, "思考"),
+    ({"reasoning_content": None, "reasoning": "思考"}, None),
+])
+async def test_openai_stream_uses_first_present_reasoning_field(
+    tmp_path: Path, delta: dict, expected: str | None,
+) -> None:
     current = streaming_config(tmp_path)
 
     def handler(_: httpx.Request) -> httpx.Response:
         return stream_response(
-            {"choices": [{"delta": {"reasoning": "思考"}}]},
+            {"choices": [{"delta": delta}]},
             {"choices": [{"delta": {"content": "完成"}}]},
             "[DONE]",
         )
@@ -454,7 +480,7 @@ async def test_openai_stream_accepts_reasoning_alias(tmp_path: Path) -> None:
     await client.aclose()
 
     assert response.content == "完成"
-    assert response.reasoning_content == "思考"
+    assert response.reasoning_content == expected
 
 
 @pytest.mark.asyncio
@@ -689,6 +715,7 @@ async def test_stream_finish_reason_error_discards_partial_output_before_success
 ) -> None:
     current = streaming_config(tmp_path)
     current["retry"]["http_max_attempts"] = 2
+    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
     calls = 0
 
     def handler(_: httpx.Request) -> httpx.Response:
@@ -697,6 +724,7 @@ async def test_stream_finish_reason_error_discards_partial_output_before_success
         if calls == 1:
             return stream_response(
                 {"choices": [{"delta": {"content": "半成品"}}]},
+                {"usage": {"prompt_tokens": 90, "completion_tokens": 99, "total_tokens": 189}},
                 {
                     "choices": [{"delta": {}, "finish_reason": "error"}],
                     "error": {"status": 504, "message": "timeout"},
@@ -706,16 +734,24 @@ async def test_stream_finish_reason_error_discards_partial_output_before_success
         return stream_response(
             {"choices": [{"delta": {"content": "完成"}}]},
             {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            {"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}},
             "[DONE]",
         )
 
-    response, llm, client = await run_client(current, tmp_path, handler)
+    response, llm, client = await run_client(
+        current, tmp_path, handler, diagnostics=diagnostics
+    )
     await client.aclose()
 
     assert calls == 2
     assert response.content == "完成"
     assert "半成品" not in response.content
-    assert llm.usage_summary()["available"] is False
+    assert llm.usage_summary()["available"] is True
+    request = diagnostics.snapshot()["requests"]["items"][0]
+    assert request["usage"]["output_tokens"] == 104
+    assert request["output_tokens_per_second"] == round(
+        5 * 1000 / request["latest_latency_ms"], 2
+    )
 
 
 @pytest.mark.asyncio

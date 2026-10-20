@@ -1,5 +1,6 @@
 """Local ChatGPT plan authorization and renewable sessions."""
 from __future__ import annotations
+from .async_utils import run_blocking
 
 import asyncio
 import base64
@@ -182,20 +183,20 @@ class ChatGPTConnection:
         if self.summary()["pending"]:
             raise UsageError("请先结束当前 ChatGPT 登录")
         async with self.locked():
-            state = self.read()
+            state = (await run_blocking(lambda: self.read()))
             state["proxy_url"] = proxy_url
-            atomic_write_json(self.path, state)
+            (await run_blocking(lambda: atomic_write_json(self.path, state)))
             self._metadata = None
 
     async def dismiss_welcome(self) -> None:
         async with self.locked():
-            state = self.read()
+            state = (await run_blocking(lambda: self.read()))
             state["welcome_seen"] = True
-            atomic_write_json(self.path, state)
+            (await run_blocking(lambda: atomic_write_json(self.path, state)))
 
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         try:
-            async with httpx.AsyncClient(proxy=self.read()["proxy_url"] or None, timeout=30, trust_env=False) as client:
+            async with httpx.AsyncClient(proxy=(await run_blocking(lambda: self.read()))["proxy_url"] or None, timeout=30, trust_env=False) as client:
                 return await client.request(method, url, **kwargs)
         except httpx.HTTPError as exc:
             # Exception strings can contain URLs or credential-bearing headers.
@@ -256,7 +257,7 @@ class ChatGPTConnection:
         if not client_id or client_id == "dynamic_agent_client" or (expected_client and client_id != expected_client):
             raise ExternalError("ChatGPT 登录返回的 client ID 不匹配")
         async with self.locked():
-            state = self.read()
+            state = (await run_blocking(lambda: self.read()))
             if state["active"] != expected_client:
                 raise ExternalError("ChatGPT 连接已变更，请重新登录")
             value = self.response_json(await self.request("POST", ISSUER + "/api/accounts/oauth/token", data={"grant_type": "authorization_code", "client_id": client_id, "code": code, "code_verifier": verifier, "redirect_uri": redirect_uri, "resource": RESOURCE}))
@@ -281,20 +282,20 @@ class ChatGPTConnection:
             tokens = self.token_record(value)
             if not isinstance(tokens["id_token"], str):
                 raise ExternalError("ChatGPT 响应缺少 ID Token")
-            self.save_tokens(client_id, tokens)
+            (await run_blocking(lambda: self.save_tokens(client_id, tokens)))
             state["registrations"][client_id] = {"subject": identity["sub"], "email": identity.get("email", ""), "session": uuid.uuid4().hex}
             state["active"] = client_id
             try:
-                atomic_write_json(self.path, state)
+                (await run_blocking(lambda: atomic_write_json(self.path, state)))
             except OSError as exc:
-                self.clear_tokens(client_id)
+                (await run_blocking(lambda: self.clear_tokens(client_id)))
                 raise ConfigError("无法保存 ChatGPT 连接设置，请重新登录") from exc
 
     async def access_token(self, expected: tuple[str, str]) -> str:
         async with self.locked():
-            if self.identity() != expected:
+            if (await run_blocking(lambda: self.identity())) != expected:
                 raise FatalExternalError("ChatGPT 连接已变更，请重新启动任务")
-            tokens = self.tokens(expected[0])
+            tokens = (await run_blocking(lambda: self.tokens(expected[0])))
             if not tokens:
                 raise FatalExternalError("请在本机设置页重新登录 ChatGPT")
             if not {PLAN_SCOPE, "resource.invoke"}.issubset(tokens["scopes"]):
@@ -304,11 +305,11 @@ class ChatGPTConnection:
                     value = self.response_json(await self.request("POST", ISSUER + "/api/accounts/oauth/token", data={"grant_type": "refresh_token", "client_id": expected[0], "refresh_token": tokens["refresh_token"], "resource": RESOURCE}))
                 except ExternalError as exc:
                     if exc.params.get("oauth_code") in _TERMINAL_REFRESH:
-                        self.clear_tokens(expected[0])
+                        (await run_blocking(lambda: self.clear_tokens(expected[0])))
                         raise FatalExternalError("ChatGPT 会话已失效，请在本机设置页重新登录") from exc
                     raise
                 tokens = self.token_record(value, tokens)
-                self.save_tokens(expected[0], tokens)
+                (await run_blocking(lambda: self.save_tokens(expected[0], tokens)))
                 if not {PLAN_SCOPE, "resource.invoke"}.issubset(tokens["scopes"]):
                     raise FatalExternalError("ChatGPT Plan 授权已失效，请重新授权")
             return tokens["access_token"]
@@ -317,13 +318,13 @@ class ChatGPTConnection:
         await self.cancel()
         warning = ""
         async with self.locked():
-            state = self.read()
+            state = (await run_blocking(lambda: self.read()))
             active = state["active"]
             if active:
                 state["last_client"] = active
             state["active"] = None
-            atomic_write_json(self.path, state)
-            tokens = self.tokens(active) if active else None
+            (await run_blocking(lambda: atomic_write_json(self.path, state)))
+            tokens = (await run_blocking(lambda: self.tokens(active))) if active else None
             if tokens:
                 try:
                     endpoint = (await self.metadata())["revocation_endpoint"]
@@ -336,7 +337,7 @@ class ChatGPTConnection:
                         raise ExternalError("revocation failed")
                 except ExternalError:
                     warning = "已在本机退出；未确认远端撤销，请到 ChatGPT 设置中断开连接"
-                self.clear_tokens(active)
+                (await run_blocking(lambda: self.clear_tokens(active)))
         self.error = warning
         return warning
 
@@ -349,16 +350,16 @@ class ChatGPTConnection:
     async def _login(self, *, new_account: bool) -> None:
         self.error = ""
         async with self.locked():
-            state = self.read()
+            state = (await run_blocking(lambda: self.read()))
             if new_account and state["active"]:
                 raise UsageError("请先退出当前 ChatGPT 连接，再更换账户")
             if not new_account and not state["active"] and state.get("last_client"):
-                self.clear_tokens(state["last_client"])
+                (await run_blocking(lambda: self.clear_tokens(state["last_client"])))
                 state["active"] = state["last_client"]
-                atomic_write_json(self.path, state)
+                (await run_blocking(lambda: atomic_write_json(self.path, state)))
             if not state["host_id"]:
                 state["host_id"] = "urn:uuid:" + str(uuid.uuid4())
-                atomic_write_json(self.path, state)
+                (await run_blocking(lambda: atomic_write_json(self.path, state)))
         future: asyncio.Future[dict[str, str]] = asyncio.get_running_loop().create_future()
         verifier, nonce, oauth_state = (secrets.token_urlsafe(32) for _ in range(3))
         server = await asyncio.start_server(lambda r, w: self.callback(r, w, future, oauth_state), "127.0.0.1", 0, limit=8192)

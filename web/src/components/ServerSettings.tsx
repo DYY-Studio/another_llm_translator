@@ -47,6 +47,7 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
   const [required, setRequired] = useState(false);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [estimateUsage, setEstimateUsage] = useState(false);
   const [maxActiveProjects, setMaxActiveProjects] = useState(2);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -65,6 +66,7 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
     setUsername(statusResponse.auth.username);
     setPassword("");
     setMaxActiveProjects(statusResponse.tasks.max_active_projects);
+    setEstimateUsage(statusResponse.tasks.estimate_usage_before_run);
   }
 
   useEffect(() => {
@@ -88,7 +90,7 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
         body: JSON.stringify({
           lan: { enabled, bind_address: enabled ? bindAddress : "" },
           auth: { required, username, password },
-          tasks: { max_active_projects: maxActiveProjects },
+          tasks: { max_active_projects: maxActiveProjects, estimate_usage_before_run: estimateUsage },
         }),
       });
       setMessage(
@@ -113,6 +115,10 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
       </div>
       {error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}
       {message && <Feedback message={message} type="success" onDismiss={() => setMessage((current) => current === message ? "" : current)} />}
+      {status?.warnings?.length ? <div className="warning-banner config-warning-summary">
+        <strong>{translate("settings.normalizationWarnings", language, { count: status.warnings.length })}</strong>
+        <details><summary>{translate("settings.showWarnings", language)}</summary>{status.warnings.map((warning, index) => <p key={`${index}-${warning}`}>{warning}</p>)}</details>
+      </div> : null}
       {status && !status.loopback && <div className="warning-banner">{translate("server.lanViewHint", language)}</div>}
       <div className="config-form">
         <section className="config-section">
@@ -144,6 +150,10 @@ export function ServerSettings({ language, onChanged }: { language: Language; on
                 onChange={(event) => setMaxActiveProjects(Number(event.target.value))}
               />
               <small>{translate("server.maxActiveProjectsHint", language)}</small>
+            </label>
+            <label className="config-toggle">
+              <span><input type="checkbox" checked={estimateUsage} onChange={(event) => setEstimateUsage(event.target.checked)} />{translate("server.estimateUsage", language)}</span>
+              <small>{translate("server.estimateUsageHint", language)}</small>
             </label>
           </div>
         </section>

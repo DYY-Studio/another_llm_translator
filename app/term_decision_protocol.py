@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-DECISION_RULES_VERSION = 11
+DECISION_RULES_VERSION = 12
 DECISION_ACTIONS = frozenset({"keep", "update", "disable", "needs_review"})
 SIMPLE_ACTION_KEYS = frozenset({"type", "normalized", "action", "reason"})
 PATCH_FIELDS = frozenset(
@@ -113,8 +113,8 @@ _PHASE_PROTOCOL = {
 
 
 _KNOWLEDGE_PROTOCOL = {
-    "zh-CN": '为 entities 中每个实体恰好输出一条 {"type":"entity_knowledge","entity":"对应 entity","items":[{"text":"目标语说明","refs":["K1"]}],"reason":"更新理由"}。items 可以为空。允许实体结果乱序。每条说明必须引用对应实体 fragments 中至少一个 id，禁止跨实体引用，不得引用 current_items 或虚构引用。不修改名称、译名或分组。',
-    "en": 'Output exactly one record for each entity in entities: {"type":"entity_knowledge","entity":"input entity","items":[{"text":"target-language explanation","refs":["K1"]}],"reason":"reason"}. items may be empty. Entity records may be unordered. Each item must cite at least one id from its own fragments; cross-entity refs are forbidden; never cite current_items or invent refs. Do not change names, translations or groups.',
+    "zh-CN": '为 entities 中每个实体恰好输出一条 {"type":"entity_knowledge","entity":"对应 entity","items":[{"text":"目标语说明","refs":["K1"]}],"reason":"更新理由"}。items 可以为空。允许实体结果乱序。每条说明必须引用对应实体 fragments 中至少一个 id，禁止跨实体引用，不得引用 current_items 或虚构引用。description_generation 为 sourced 时保持上述格式；为 sourced_and_summary 时额外输出非空字符串 summary，概括该实体全部有效证据中的核心信息，不附来源引用；为 summary_only 时 items 必须为空，只在 summary 中输出一份精简总结。不修改名称、译名或分组。',
+    "en": 'Output exactly one record for each entity in entities: {"type":"entity_knowledge","entity":"input entity","items":[{"text":"target-language explanation","refs":["K1"]}],"reason":"reason"}. items may be empty. Entity records may be unordered. Each item must cite at least one id from its own fragments; cross-entity refs are forbidden; never cite current_items or invent refs. When description_generation is sourced, use the format above. For sourced_and_summary, also output a nonempty summary string condensing core information from all valid entity evidence without source refs. For summary_only, items must be empty and summary must contain one concise summary. Do not change names, translations or groups.',
 }
 
 
@@ -175,6 +175,9 @@ def terminology_decision_protocol(language: str, *, phase: str) -> str:
 
 _CONTENT_RETRY_GUIDANCE = {
     "zh-CN": {
+        "unknown_record": "仅为本次 terms[] 中每项输出一条决策，并逐字照录其 normalized（含大小写和全半角符号）",
+        "missing_record": "仅为本次 terms[] 中每项输出一条决策，并逐字照录其 normalized（含大小写和全半角符号）",
+        "duplicate_record": "仅为本次 terms[] 中每项输出一条决策，并逐字照录其 normalized（含大小写和全半角符号）",
         "unresolved_conflict": "对本阶段尚未裁决的类别或译名冲突给出非空决定",
         "invisible_alias": "aliases 仅使用本次 terms/anchors 中可见的 source/alias 原文",
         "invisible_group_primary": "group_primary 仅使用本次可见、启用的根术语 normalized",
@@ -183,6 +186,9 @@ _CONTENT_RETRY_GUIDANCE = {
         "invalid_relationship": "依据本次 terms/anchors 联合检查组关系和 alias 归属",
     },
     "en": {
+        "unknown_record": "Return exactly one decision for each item in this request's terms[]; copy normalized verbatim, including case and full-/half-width punctuation.",
+        "missing_record": "Return exactly one decision for each item in this request's terms[]; copy normalized verbatim, including case and full-/half-width punctuation.",
+        "duplicate_record": "Return exactly one decision for each item in this request's terms[]; copy normalized verbatim, including case and full-/half-width punctuation.",
         "unresolved_conflict": "Resolve this phase's pending category or translation conflicts with non-empty values.",
         "invisible_alias": "Use only source/alias spellings visible in this request's terms/anchors for aliases.",
         "invisible_group_primary": "Use only a visible, enabled root term's normalized for group_primary.",
@@ -202,6 +208,9 @@ def validation_feedback(
     codes = sorted({
         error["code"] for error in errors
         if error.get("code") in guidance
-        and error.get("normalized") in target_normalized
+        and (
+            error.get("code") == "unknown_record"
+            or error.get("normalized") in target_normalized
+        )
     })
-    return "\n".join(guidance[code] for code in codes)
+    return "\n".join(dict.fromkeys(guidance[code] for code in codes))

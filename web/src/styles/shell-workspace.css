@@ -18,7 +18,7 @@
 .task-panel-identity .task-panel-project { width: fit-content; max-width: 100%; height: auto; padding: 0; border: 0; background: transparent; color: var(--accent-text); text-align: left; }
 .task-panel-project strong { display: block; }
 .task-panel-project:hover, .task-panel-project:focus-visible { text-decoration: underline; }
-.task-panel-identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.task-panel-identity strong { white-space: normal; overflow-wrap: anywhere; font-size: 13px; }
 .task-panel-identity span, .task-panel-progress > span, .task-panel-tokens { color: var(--muted); font-size: 11px; }
 .task-panel-progress { display: grid; gap: 5px; }
 .task-panel-progress .progress-track { height: 6px; }

@@ -1,13 +1,9 @@
 import { Modal } from "./Modal";
 import { useEffect, useState, type ReactNode } from "react";
-import { translate, type Language } from "../i18n";
+import { errorMessage, translate, type Language } from "../i18n";
 import type { RunDecision, RunningRun, TaskOptions } from "../types";
 
 type ResultPolicy = "pending" | "reuse" | "force";
-
-function overflowModeLabel(mode: "error" | "trim" | "compact", language: Language) {
-  return translate(`terms.decisionOverflow${mode[0].toUpperCase()}${mode.slice(1)}`, language);
-}
 
 function stageLabelKey(stage: TaskOptions["stage"]): string {
   return stage === "content_summary" ? "stage.contentSummary" : `stage.${stage}`;
@@ -17,7 +13,7 @@ export interface RepetitionRunOptions {
   excluded_punctuation_groups: number; candidate_groups: number; selected: number; over_budget_groups: number;
   running_run: RunningRun | null; run_action: "resume" | "decline" | null; only_file: string | null; completed: number;
   screening_enabled: boolean; exclude_punctuation_only: boolean; preset: {id: string; model: string};
-  estimated_requests: number; estimated_input_tokens: number; decision_model: string | null; model: string;
+  estimated_requests: number | null; estimated_input_tokens: number | null; estimate_error?: import("../types").ErrorPayload | null; decision_model: string | null; model: string;
 }
 
 function RunDialogFrame({ title, subtitle, onClose, children }: {
@@ -106,7 +102,8 @@ export function RunDialog(props: StageRunDialogProps | {
     {options.running_run && <UnfinishedRunChoice run={options.running_run} action={options.run_action} onChange={onRunAction} selected={options.selected} language={language} busy={busy} />}
     {resuming && options.running_run && <p className="muted">{t("resumeSteps", {completed: options.running_run.completed_steps ?? 0, total: options.running_run.total_steps ?? 0})}</p>}
     <div className="run-decision-info"><span>{options.decision_model ? t("models", { decision: options.decision_model, model: options.model }) : t("comparisonModel", {model: options.model})}</span>
-      <span>{t("estimate", { groups: options.candidate_groups, count: options.selected, requests: options.estimated_requests, tokens: options.estimated_input_tokens })}</span>
+      <span>{options.estimated_requests != null && options.estimated_input_tokens != null ? t("estimate", { groups: options.candidate_groups, count: options.selected, requests: options.estimated_requests, tokens: options.estimated_input_tokens }) : t("candidateScope", { groups: options.candidate_groups, count: options.selected })}</span>
+      {options.estimate_error && <span className="warning-banner">{translate("runDialog.estimateFailed", language, { error: errorMessage(options.estimate_error, language) })}</span>}
       <span>{t("punctuationExcluded", { count: options.excluded_punctuation_groups })}</span>
       {!!options.over_budget_groups && <span>{t("overBudget", { count: options.over_budget_groups })}</span>}
     </div>
@@ -166,7 +163,7 @@ function StageRunDialog({
   const draftBlocked = draftEnabled && options.draft_prompt_preflight?.ok === false;
   const replacementNeeded = !resuming && resultPolicy === "force" && Boolean(options.knowledge_replacement_impacts?.length);
   const ready = (replacementNeeded && !knowledgeConfirmed) ? false : summaryConfigurationBlocked || draftBlocked || draftLoading ? false : decisionMode
-    ? !options.running_run || resuming || resultPolicy === "force"
+    ? options.selected > 0 && (!options.running_run || resuming || resultPolicy === "force")
     : resuming || resultPolicy !== null;
 
   async function changeDraft(enabled: boolean, summaries = false) {
@@ -196,19 +193,20 @@ function StageRunDialog({
   function submit() {
     if (!ready) return;
     onStart({
+      ...(decisionMode ? { knowledge_only: Boolean(options.knowledge_only) } : {}),
       force: !resuming && resultPolicy === "force",
       confirm_knowledge_replacement: replacementNeeded && knowledgeConfirmed,
       reuse_mixed_fingerprints: !resuming && resultPolicy === "reuse",
       run_action: options.running_run ? runAction : null,
-      final_review: decisionMode && finalReview,
+      final_review: decisionMode && !options.knowledge_only && finalReview,
       ...(options.stage === "terminology" ? { include_draft_translation: draftEnabled, include_summaries: hybridSummary } : {}),
     });
   }
 
   return (
     <RunDialogFrame
-      title={translate(decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(stageLabelKey(options.stage), language) })}
-      subtitle={decisionMode ? translate("terms.decisionHint", language) : translate("runDialog.subtitle", language)}
+      title={translate(options.knowledge_only ? "terms.knowledgeOnlyTitle" : decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(stageLabelKey(options.stage), language) })}
+      subtitle={decisionMode ? translate(options.knowledge_only ? "terms.knowledgeOnlyHint" : "terms.decisionHint", language) : translate("runDialog.subtitle", language)}
       onClose={onClose}>
         <div className="run-preset" aria-label={translate("runDialog.currentPreset", language)}>
           <span>{translate("runDialog.currentPreset", language)}</span>
@@ -235,13 +233,10 @@ function StageRunDialog({
           </section>
         )}
         {decisionMode && <div className="run-decision-info">
-          <span>{translate("terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
-          <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests ?? 0, tokens: options.estimated_input_tokens ?? 0 })}</span>
-          {options.overflow_policy && <span>{translate("terms.decisionOverflowPolicy", language, {
-            soft: translate(options.overflow_policy.allow_soft_target_overflow ? "terms.decisionSoftAllowed" : "terms.decisionSoftBlocked", language),
-            mode: overflowModeLabel(options.overflow_policy.anchor_overflow_mode, language),
-          })}</span>}
-          <label className="config-toggle">
+          <span>{translate(options.knowledge_only ? "terms.knowledgeOnlyScope" : "terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
+          {options.estimated_requests != null && options.estimated_input_tokens != null && <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests, tokens: options.estimated_input_tokens })}</span>}
+          {options.estimate_error && <span className="warning-banner">{translate("runDialog.estimateFailed", language, { error: errorMessage(options.estimate_error, language) })}</span>}
+          {!options.knowledge_only && <label className="config-toggle">
             <span>
               <input
                 type="checkbox"
@@ -259,7 +254,7 @@ function StageRunDialog({
             {finalReview && (
               <small>{translate("terms.decisionFinalReviewEstimateHint", language)}</small>
             )}
-          </label>
+          </label>}
         </div>}
 
         {options.stage === "terminology" && onDraftTranslationChange && <div className="run-decision-info run-generation-options">

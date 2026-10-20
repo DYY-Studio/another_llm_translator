@@ -39,7 +39,7 @@ def test_cannot_delete_referenced_decision_preset(tmp_path, scope, reference):
         path = "/api/v1/global/decision-presets/local"
         assert client.put(path, json=preset()).status_code == 200
         assert client.delete(path).status_code == 400
-        assert client.get(path).json() == preset()
+        assert client.get(path).json() == {"preset": preset(), "warnings": [], "missing_fields": []}
 
 
 def test_decision_preset_round_trip_and_invalid_url(tmp_path):
@@ -47,7 +47,7 @@ def test_decision_preset_round_trip_and_invalid_url(tmp_path):
         path = "/api/v1/global/decision-presets/local"
         value = preset()
         assert client.put(path, json=value).status_code == 200
-        assert client.get(path).json() == value
+        assert client.get(path).json() == {"preset": value, "warnings": [], "missing_fields": []}
         assert client.get("/api/v1/global/decision-presets").json()["presets"][0]["preset_id"] == "local"
         value["url"] = "https://example.com"
         assert client.put(path, json=value).status_code == 400
@@ -64,7 +64,7 @@ def test_builtin_examples_cover_both_protocols(tmp_path):
         for item in presets:
             response = client.get(f"/api/v1/global/decision-presets/{item['preset_id']}")
             assert response.status_code == 200
-            assert response.json()["credential"]["kind"] == "environment"
+            assert response.json()["preset"]["credential"]["kind"] == "environment"
 
 
 def test_llm_decision_preset_and_shared_prompt_resources(tmp_path):
@@ -73,8 +73,14 @@ def test_llm_decision_preset_and_shared_prompt_resources(tmp_path):
         path = "/api/v1/global/decision-presets/judge"
         value = dict(preset_id="judge", protocol="llm", llm_preset="default", prompt_language="en")
         assert client.put(path, json=value).status_code == 200
-        assert client.get(path).json() == value
-        assert client.put(path, json={**value, "llm_preset": "missing"}).status_code == 400
+        assert client.get(path).json() == {"preset": value, "warnings": [], "missing_fields": []}
+        incomplete = {**value, "llm_preset": "missing"}
+        assert client.put(path, json=incomplete).status_code == 200
+        assert client.get(path).json()["preset"] == incomplete
+        from app.decision_llm import resolve_llm_resources
+        from app.errors import ConfigError
+        with pytest.raises(ConfigError, match="无法读取 LLM Preset"):
+            resolve_llm_resources(incomplete, root)
         prompt = client.get("/api/v1/global/prompts/decision_llm?language=en")
         assert prompt.status_code == 200
         assert prompt.json()["content"] in prompt.json()["assembled"]

@@ -22,7 +22,6 @@
   .segment-batch-toolbar:not(.term-actions-toolbar) > span:first-child { margin-right: 0; }
   .segment-batch-toolbar:not(.term-actions-toolbar) .segment-batch-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .segment-batch-toolbar:not(.term-actions-toolbar) .segment-batch-actions button { min-width: 0; width: 100%; }
-  .segment-batch-actions .repetition-entry { grid-column: 1 / -1; }
   .term-actions-toolbar { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; }
   .term-actions-toolbar > span:first-child { margin-right: 0; padding-top: 8px; }
   .term-actions-toolbar .segment-batch-actions { display: flex; }
@@ -153,9 +152,6 @@
   .term-decision-action-heading .button-group button:last-child { grid-column: 1 / -1; white-space: normal; }
   .term-decision-content { overflow: visible; padding-bottom: 24px; }
   .term-decision-sticky { top: calc(58px + var(--mobile-run-status-height)); }
-  .term-decision-filters { grid-template-columns: 1fr 1fr; }
-  .term-decision-filters input { grid-column: 1 / -1; }
-  .term-decision-filters .term-decision-pages { grid-column: 1 / -1; }
   .term-decision-proposal-heading { align-items: stretch; flex-direction: column; }
   .decision-proposal-state { justify-content: space-between; }
   .decision-state-pair { grid-template-columns: 1fr; }
@@ -235,6 +231,7 @@
   .config-heading { position: static; margin: 0 -14px 20px; padding: 20px 14px; }
   .settings-sticky-heading { position: static; margin: 0 -14px 20px; padding: 20px 14px; }
   .config-grid { grid-template-columns: 1fr; }
+  .budget-stage-fields { grid-template-columns: 1fr; }
   .config-section { padding: 16px 14px; }
   .context-config-row { grid-template-columns: 1fr; gap: 6px; }
   .preset-layout { height: auto; display: flex; flex-direction: column; }

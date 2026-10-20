@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+from .async_utils import run_blocking
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -30,7 +30,7 @@ def register_segment_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         if bool(payload.file_id) != bool(payload.part_id):
             raise UsageError("file_id 与 part_id 必须同时提供")
         root = project(name)
-        return await asyncio.to_thread(lambda: WebStore(root).segment_query(
+        return (await run_blocking(lambda: WebStore(root).segment_query(
             offset=payload.offset,
             limit=payload.limit,
             file_id=payload.file_id or None,
@@ -38,7 +38,7 @@ def register_segment_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             status=payload.status or None,
             search=payload.q or None,
             stage=payload.stage,
-        ))
+        )))
 
     @app.post("/api/v1/projects/{name}/segments/ids")
     async def segment_index(
@@ -47,33 +47,33 @@ def register_segment_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         if bool(payload.file_id) != bool(payload.part_id):
             raise UsageError("file_id 与 part_id 必须同时提供")
         root = project(name)
-        return await asyncio.to_thread(lambda: WebStore(root).segment_index(
+        return (await run_blocking(lambda: WebStore(root).segment_index(
             file_id=payload.file_id or None,
             part_id=payload.part_id or None,
             status=payload.status or None,
             search=payload.q or None,
             stage=payload.stage,
-        ))
+        )))
 
     @app.get("/api/v1/projects/{name}/segments/{segment_id}")
     async def segment(name: str, segment_id: str) -> dict[str, Any]:
         root = project(name)
-        return await asyncio.to_thread(lambda: WebStore(root).segment_detail(segment_id))
+        return (await run_blocking(lambda: WebStore(root).segment_detail(segment_id)))
 
     @app.post("/api/v1/projects/{name}/translations")
     async def save_translation(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(WebStore(project(name)).save_translation, payload)
+        return (await run_blocking(lambda: WebStore(project(name)).save_translation(payload)))
 
     @app.post("/api/v1/projects/{name}/reviews")
-    async def save_review(
+    def save_review(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         return WebStore(project(name)).save_review(payload)
 
     @app.post("/api/v1/projects/{name}/apply")
-    async def apply_results(
+    def apply_results(
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         root = project(name)

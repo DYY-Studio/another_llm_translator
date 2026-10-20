@@ -161,6 +161,16 @@
 .config-field input, .config-field select { width: 100%; min-width: 0; }
 .config-field small, .config-toggle small { color: var(--muted); font-size: 11px; font-weight: 400; line-height: 1.45; }
 .config-field.grid-span { grid-column: 1 / -1; }
+.budget-stage-row { grid-column: 1 / -1; display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--border); }
+.budget-stage-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 22px; }
+.budget-override-control { display: flex; align-items: center; gap: 10px; }
+.budget-override-control > input { flex: 1; }
+.budget-override-control > input:disabled { border-color: var(--border); background: var(--disabled-bg); color: var(--disabled-text); opacity: .55; cursor: not-allowed; }
+.budget-override-toggle { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 11px; font-weight: 400; color: var(--muted); }
+.budget-override-toggle input { width: auto; }
+.config-warning-summary { margin: 0 0 18px; }
+.config-warning-summary details { margin-top: 4px; }
+.config-warning-summary details p { margin: 6px 0 0; }
 .config-toggle { min-width: 0; display: grid; align-content: start; gap: 7px; font-size: 13px; font-weight: 650; }
 .config-toggle > span { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; }
 .config-toggle input { margin: 0; }

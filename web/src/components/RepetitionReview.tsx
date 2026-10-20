@@ -1,4 +1,5 @@
 import { Feedback } from "./InteractionProvider";
+import { DraftReviewToolbar, ReviewPagination } from "./DraftReviewToolbar";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
@@ -38,7 +39,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   const t = (key: string, params: Record<string, string | number> = {}) => translate(`repetition.${key}`, language, params);
   const [state, setState] = useState<ReviewState | null>(null);
   const [task, setTask] = useState<TaskState | null>(null);
-  const [onlyFile, setOnlyFile] = useState("");
+  const [fileFilter, setFileFilter] = useState("");
   const [excludePunctuationOnly, setExcludePunctuationOnly] = useState(true);
   const [screeningEnabled, setScreeningEnabled] = useState(false);
   const [options, setOptions] = useState<RepetitionRunOptions | null>(null);
@@ -53,10 +54,11 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   const active = isRunning(task);
   const draft = state?.draft;
   const groups = useMemo(() => (draft?.groups ?? []).filter(g => (
-    (filter === "all" || (filter === "suggested" && g.proposals.some(p => !p.manual || draft?.choices[p.id]?.accepted))
+    (!fileFilter || g.occurrences.some(occurrence => occurrence.file_id === fileFilter))
+    && (filter === "all" || (filter === "suggested" && g.proposals.some(p => !p.manual || draft?.choices[p.id]?.accepted))
       || (filter === "uncertain" && g.uncertain.length > 0) || (filter === "skip" && g.screening === "skip"))
     && (!search || g.source.includes(search) || g.translations.some(text => text.includes(search)))
-  )), [draft, filter, search]);
+  )), [draft, fileFilter, filter, search]);
   const acceptedCount = draft?.groups.reduce((n, g) => n + g.proposals.filter(p => { const choice = proposalChoice(draft, p); return choice.accepted && choice.apply.length > 0; }).length, 0) ?? 0;
 
   useEffect(() => {
@@ -97,7 +99,7 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
     setExcludePunctuationOnly(exclude); setScreeningEnabled(screening); setOptions(null); setConfirm("generate");
     setBusy(true); setError(""); setMessage("");
     try {
-      const next = await api<RepetitionRunOptions>(`${base}/options?language=${language}&exclude_punctuation_only=${exclude}&screening_enabled=${screening}${action ? `&run_action=${action}` : ""}${onlyFile ? `&only_file=${encodeURIComponent(onlyFile)}` : ""}`);
+      const next = await api<RepetitionRunOptions>(`${base}/options?estimate_usage=true&language=${language}&exclude_punctuation_only=${exclude}&screening_enabled=${screening}${action ? `&run_action=${action}` : ""}`);
       setOptions(next); setExcludePunctuationOnly(next.exclude_punctuation_only); setScreeningEnabled(next.screening_enabled);
       setConfirm("generate");
     } catch (value) { setError(errorMessage(value, language)); }
@@ -145,7 +147,6 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
   }
 
   const proposalCount = draft?.groups.reduce((n, g) => n + g.proposals.length, 0) ?? 0;
-  const pageCount = Math.max(1, Math.ceil(groups.length / GROUP_PAGE_SIZE));
 
   return <section className="term-decision-workspace repetition-workspace">
     <header className="page-heading settings-action-heading term-decision-action-heading">
@@ -168,25 +169,20 @@ export function RepetitionReview({ project, files, language, onClose, onChanged 
       }}>{translate("common.cancel", language)}</button>}
     </div>}
     <div className="term-decision-content" ref={contentRef}>
-      <div className="term-decision-filters term-decision-sticky repetition-filters">
-        <select className="repetition-scope" aria-label={t("scope")} value={onlyFile} disabled={busy || active || !!confirm} onChange={e => { setOnlyFile(e.target.value); setOptions(null); }}>
-          <option value="">{translate("workspace.allFiles", language)}</option>
-          {files.map(f => <option value={f.file_id} key={f.file_id}>{f.name}</option>)}
-        </select>
-        {draft && <>
-        <select aria-label={t("filter")} value={filter} onChange={e => { setFilter(e.target.value); resetPages(); }}>
-          {["all", "suggested", "uncertain", "skip"].map(value => <option key={value} value={value}>{t(`filter.${value}`)}</option>)}
-        </select>
-        <input aria-label={t("search")} placeholder={t("search")} value={search} onChange={e => { setSearch(e.target.value); resetPages(); }} />
-        <nav className="term-decision-pages" aria-label={t("pagination")}>
-          <button disabled={groupPage === 0} onClick={() => changePage(groupPage - 1)}>‹</button>
-          <span>{groupPage + 1} / {pageCount}</span>
-          <button disabled={groupPage + 1 >= pageCount} onClick={() => changePage(groupPage + 1)}>›</button>
-        </nav>
-        <div className="term-decision-summary repetition-summary"><span>{t("groupCount", { count: draft.groups.length })}</span>
+      {draft && <>
+        <div className="term-decision-summary"><span>{t("groupCount", { count: draft.groups.length })}</span>
           <span>{t("acceptedCount", { count: acceptedCount })}</span><span>{t("rejectedCount", { count: proposalCount - acceptedCount })}</span></div>
-        </>}
-      </div>
+        <DraftReviewToolbar search={search} onSearch={value => { setSearch(value); resetPages(); }} placeholder={t("search")}
+          count={groups.length} page={groupPage} pageSize={GROUP_PAGE_SIZE} onPage={changePage} language={language}>
+          <select className="draft-review-file-filter" aria-label={t("fileFilter")} value={fileFilter} onChange={event => { setFileFilter(event.target.value); resetPages(); }}>
+            <option value="">{translate("workspace.allFiles", language)}</option>
+            {files.map(file => <option key={file.file_id} value={file.file_id}>{file.name}</option>)}
+          </select>
+          <select aria-label={t("filter")} value={filter} onChange={e => { setFilter(e.target.value); resetPages(); }}>
+            {["all", "suggested", "uncertain", "skip"].map(value => <option key={value} value={value}>{t(`filter.${value}`)}</option>)}
+          </select>
+        </DraftReviewToolbar>
+      </>}
     {!state ? <p>{translate("common.loading", language)}</p> : !draft ? <p>{t("noDraft")}</p> : <>
       <div className="term-decision-list">{groups.slice(groupPage * GROUP_PAGE_SIZE, (groupPage + 1) * GROUP_PAGE_SIZE).map(group =>
         <GroupCard key={`${draft.run_id}:${group.id}`} group={group} draft={draft} files={files} language={language}
@@ -228,13 +224,13 @@ function GroupCard({ group, draft, files, language, disabled, onChoose }: {
   })), [group, draft]);
   const uncertain = useMemo(() => new Set(group.uncertain), [group]);
   return <section className="term-decision-proposal repetition-group" key={group.id}>
-        <h3>{t("source")}</h3><pre className="repetition-text">{group.source}</pre>
-        <p>{t(`screening.${group.screening}`)}</p>
+        <header className="repetition-source-heading"><h3>{t("source")}</h3><small>{t(`screening.${group.screening}`)}</small></header>
+        <pre className="repetition-text repetition-source-text">{group.source}</pre>
         {group.proposals.map(proposal => {
           const choice = proposalChoice(draft, proposal);
           const members = proposal.members.map(id => occurrenceById.get(id)!);
           const variants = [...new Map(members.map(o => [o.variant, o])).values()];
-          return <article className={`term-decision-proposal ${choice.accepted ? "" : "rejected"}`} key={proposal.id}>
+          return <section className={`repetition-suggestion ${choice.accepted ? "" : "rejected"}`} key={proposal.id}>
             <div className="repetition-actions repetition-heading"><div><strong>{proposal.manual ? t("manualUnify") : t("unify", { count: members.length })}</strong>
               <small> {t("enabledCount", {count: choice.accepted ? choice.apply.length : 0, total: new Set([...proposal.members, ...choice.apply]).size})}</small></div>
               <button className="quiet-button" disabled={disabled} onClick={() => void onChoose(proposal, { ...choice, accepted: !choice.accepted,
@@ -244,15 +240,12 @@ function GroupCard({ group, draft, files, language, disabled, onChoose }: {
               onChange={e => { const member = variants.find(o => o.variant === Number(e.target.value)); if (member) void onChoose(proposal, { ...choice, target: member.id }); }}>
               {variants.map(o => <option key={o.variant} value={o.variant}>{group.translations[o.variant]}</option>)}
             </select></label>
-            {proposal.reason && <p>{proposal.reason}</p>}
-          </article>;
+            {proposal.reason && <p className="decision-reason">{proposal.reason}</p>}
+          </section>;
         })}
-        <div className="repetition-actions repetition-heading"><strong>{t("occurrences")}</strong>
-          <nav className="repetition-actions" aria-label={t("pagination")}>
-          <button className="quiet-button" disabled={page === 0} onClick={() => { setPage(n => n - 1); setOpenContexts({}); }}>{t("previous")}</button>
-          <span>{page + 1}/{Math.ceil(group.occurrences.length / PAGE_SIZE)}</span>
-          <button className="quiet-button" disabled={(page + 1) * PAGE_SIZE >= group.occurrences.length} onClick={() => { setPage(n => n + 1); setOpenContexts({}); }}>{t("next")}</button>
-          </nav>
+        <div className="repetition-actions repetition-occurrence-toolbar"><strong>{t("occurrences")} <span>{group.occurrences.length}</span></strong>
+          <ReviewPagination page={page} pageCount={Math.ceil(group.occurrences.length / PAGE_SIZE)} language={language}
+            onPage={next => { setPage(next); setOpenContexts({}); }} />
         </div>
         <div className="repetition-occurrences" key={page}>
         {group.occurrences.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map(o => {
@@ -262,7 +255,7 @@ function GroupCard({ group, draft, files, language, disabled, onChoose }: {
           const choice = proposal ? proposalChoice(draft, proposal) : null;
           const enabled = !!choice?.accepted && choice.apply.includes(o.id);
           const target = enabled && choice ? occurrenceById.get(choice.target) : null;
-          return <article className="term-decision-proposal" key={o.id}>
+          return <article className="repetition-occurrence" key={o.id}>
             <div className="repetition-actions repetition-occurrence-heading">
               <small>{files.find(f => f.file_id === o.file_id)?.name ?? o.file_id} / {o.part_id} / {o.segment_id}
                 {o.origin === "web" && ` (${t("manual")})`}</small>
@@ -277,7 +270,7 @@ function GroupCard({ group, draft, files, language, disabled, onChoose }: {
                   void onChoose(proposal, {...choice, accepted: selected.size > 0, apply: [...selected]}); }} />{t("applyOccurrence")}</label>
               </div>}
             </div>
-            <div className="decision-state-pair"><div><strong>{t("before")}</strong><pre className="repetition-text">{group.translations[o.variant]}</pre></div>
+            <div className="decision-state-pair"><div className="repetition-before"><strong>{t("before")}</strong><pre className="repetition-text">{group.translations[o.variant]}</pre></div>
               <div className={`repetition-result ${enabled ? "is-applied" : ""}`}><strong>{target ? t("after") : uncertain.has(o.id) ? t("needsReview") : t("keep")}</strong>
                 <pre className="repetition-text">{group.translations[target?.variant ?? o.variant]}</pre></div></div>
             <details className="overview-repetition-context" onToggle={e => { const open = e.currentTarget.open; setOpenContexts(current => ({ ...current, [o.id]: open })); }}>

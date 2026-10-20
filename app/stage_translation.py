@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .async_utils import run_blocking, blocking_scope
 import asyncio
 import time
 import uuid
@@ -48,9 +49,51 @@ from .translation_validation import (
     TranslationValidationContext,
     validate_translation_response,
     SegmentAlignmentValidator,
+    TranslationValidator,
 )
 
-from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _frozen_run_options, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _replace_with_runtime_parts, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _segment_model_payload_value, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests)
+from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnings, _create_or_continue_run, _document_prompt_requirement_helpers, _execute_stage_run, _frozen_run_options, _localized_request_loop, _project_context, _prompt_factory, _prompt_language, _replace_with_runtime_parts, _require_nonempty_segments, _restore_leading_whitespace, _resume_scope, _scope_record, _split_oversized_preflight, _split_segment_source, _split_source_once, prompt_middle_digests)
+
+
+def translation_validation_resources(
+    config: dict[str, Any], *, project_id: str,
+    http_client: httpx.AsyncClient | None = None, run_dir: Path | None = None,
+    run_id: str = "", stage: str = "translation",
+) -> tuple[dict[str, DecisionClient], DecisionClient | None, tuple[TranslationValidator, ...]]:
+    decision_clients = {
+        preset_id: DecisionClient(definition, context_reserve_tokens=config["chunking"]["context_reserve_tokens"], http_client=http_client, retry=config["retry"],
+            debug_directory=run_dir if config["debug"]["enabled"] else None,
+            project_id=project_id, run_id=run_id, stage=stage)
+        for preset_id, definition in config.get("_decision_preset_definitions", {}).items()
+    }
+    decision_bindings = config.get("_decision_validator_presets", {})
+    decision_client = decision_clients.get(decision_bindings.get("preferred_term_usage"))
+    alignment_options = config["validation"]["translation"]["alignment"]
+    translation_validators = tuple(
+        SegmentAlignmentValidator(decision_clients[decision_bindings["segment_alignment"]],
+            confidence_threshold=alignment_options["confidence_threshold"],
+            warning_threshold=alignment_options["warning_threshold"],
+            tail_segments=alignment_options["tail_segments"],
+            prompt=config["_decision_prompt_definitions"]["segment_alignment"]["content"])
+        if validator.validator_id == "segment_alignment" else validator
+        for validator in config["_translation_validator_instances"]
+    )
+
+    return decision_clients, decision_client, translation_validators
+
+
+def translation_payload(
+    target_language: str, items: list[dict[str, Any]], terms: list[dict[str, Any]], *,
+    reference_context: list[str | dict[str, Any]], summary_context: list[str], summary_context_relation: str | None,
+) -> dict[str, Any]:
+    return {
+        "target_language": target_language,
+        "reference_context": reference_context,
+        "summary_context": summary_context,
+        "summary_context_relation": summary_context_relation,
+        "terms": terms,
+        "segments": [{"id": item["segment_id"], "source": segment_model_source(item)} for item in items],
+    }
 
 
 def _summary_segment_id(item: dict[str, Any]) -> str:
@@ -80,8 +123,11 @@ def _parse_translation_items(
         if segment_id not in expected:
             errors.append(f"未知 ID：{segment_id}")
             continue
-        if counts[segment_id] != 1 or not isinstance(translation, str):
-            errors.append(f"重复或字段错误：{segment_id}")
+        if counts[segment_id] != 1:
+            errors.append(f"重复 ID：{segment_id}")
+            continue
+        if not isinstance(translation, str):
+            errors.append(f"translation 字段必须是字符串：{segment_id}")
             continue
         valid[segment_id] = translation
     unresolved = [segment_id for segment_id in expected_ids if segment_id not in valid]
@@ -288,6 +334,7 @@ def _translation_summary_context(
         fragments=fragments,
     )
 
+@blocking_scope
 async def run_translation(
     project: Path,
     scope: Scope,
@@ -306,19 +353,19 @@ async def run_translation(
     run_stage = "terminology" if _draft_terminology else "translation"
     logger = get_logger(run_stage)
     preparation_started_at = time.perf_counter()
-    scope, resume_arguments_ignored = _resume_scope(project, scope, resume_run_id)
+    scope, resume_arguments_ignored = (await run_blocking(lambda: _resume_scope(project, scope, resume_run_id)))
     context_kwargs: dict[str, object] = {"stage": run_stage}
-    frozen_run_options = _frozen_run_options(project, resume_run_id)
+    frozen_run_options = (await run_blocking(lambda: _frozen_run_options(project, resume_run_id)))
     if frozen_run_options is not None:
         context_kwargs["frozen_run_options"] = frozen_run_options
     if _draft_terminology:
         from .stage_terminology_draft import draft_run_context
 
-        config, metadata, files, segments = draft_run_context(
+        config, metadata, files, segments = (await run_blocking(lambda: draft_run_context(
             project, frozen_run_options, include_summaries=_include_summaries
-        )
+        )))
     else:
-        config, metadata, files, segments = _project_context(project, **context_kwargs)
+        config, metadata, files, segments = (await run_blocking(lambda: _project_context(project, **context_kwargs)))
     logger.info(
         "stage preparation context ready elapsed=%.3fs files=%d segments=%d",
         time.perf_counter() - preparation_started_at,
@@ -334,14 +381,14 @@ async def run_translation(
         _document_prompt_requirement_helpers(config, language)
     )
     prompt_for_items = lambda items: prompt_factory(requirements_for_items(items))
-    library = load_terms(project)
+    library = (await run_blocking(lambda: load_terms(project, resolve_knowledge=False)))
     terms_revision = int(library["terms_revision"]) if library else None
-    fingerprint = stage_fingerprint(
+    fingerprint = (await run_blocking(lambda: stage_fingerprint(
         config,
         "translation",
         prompt_middle_digests(project, "translation"),
         terms_revision=terms_revision,
-    )
+    )))
     if _draft_terminology:
         from .stage_terminology_draft import (
             DraftTerminologyScan,
@@ -359,27 +406,27 @@ async def run_translation(
     selected_segments = (
         [item for item in segments if not item["is_empty"]]
         if _draft_terminology and scope.force
-        else select_scope(segments, files, scope)
+        else (await run_blocking(lambda: select_scope(segments, files, scope)))
     )
     active_segment_ids = [
         str(segment["segment_id"])
         for segment in segments
         if not segment["is_empty"]
     ]
-    history_states = latest_stage_states(
+    history_states = (await run_blocking(lambda: latest_stage_states(
         project,
         "translation",
         active_segment_ids,
-    )
-    selection = classify_stage_states(
+    )))
+    selection = (await run_blocking(lambda: classify_stage_states(
         selected_segments,
         history_states,
         force=scope.force,
-    )
+    )))
     draft_scan = None
     translation_selection = selection
     if _draft_terminology:
-        draft_scan = DraftTerminologyScan(
+        draft_scan = (await run_blocking(lambda: DraftTerminologyScan(
             project,
             metadata,
             config,
@@ -390,7 +437,7 @@ async def run_translation(
             {str(item["segment_id"]) for item in selection.reusable}
             if not scope.force
             else set(),
-        )
+        )))
         work_ids = {str(item["segment_id"]) for item in draft_scan.work}
         selection = replace(
             selection,
@@ -466,19 +513,21 @@ async def run_translation(
         for segment_id, record in selection.latest_completed.items()
     }
     context_config = config["context"]["translation"]
-    context_index = PreviousContextIndex(segments)
+    context_index = (await run_blocking(lambda: PreviousContextIndex(segments)))
     summary_context_index = _TranslationSummaryContext.empty()
     if (
         context_config.get("previous_summaries", False)
         and "translation" not in config["chunking"]["cross_boundary_batching"]
     ):
-        summary_context_index = _translation_summary_context(project, segments)
-    term_match_cache = _TermMatchCache(
+        summary_context_index = (await run_blocking(lambda: _translation_summary_context(project, segments)))
+    term_match_cache = (await run_blocking(lambda: _TermMatchCache(
         library,
         term_normalization(config),
         int(config["terminology"]["max_terms_per_segment"]),
-        segments=segments, warnings=warnings,
-    )
+        project=project, segments=segments, warnings=warnings,
+        sourced_policy=config["terminology"]["sourced_description_injection"],
+        unsourced_policy=config["terminology"]["unsourced_description_injection"],
+    )))
 
     def payload_builder(items: list[dict[str, Any]]) -> dict[str, Any]:
         resolver = None
@@ -498,22 +547,11 @@ async def run_translation(
         if config["execution"]["scheduling_mode"] == "parallel":
             context = [item["source"] for item in context]
         summary_context, summary_context_relation = summary_context_index.for_items(items)
-        payload = {
-            "target_language": config["project"]["target_language"],
-            "reference_context": context,
-            "summary_context": summary_context,
-            "summary_context_relation": summary_context_relation,
-            "terms": _segment_model_payload_value(
-                items[0], term_match_cache.for_items(items)
-            ),
-            "segments": [
-                {
-                    "id": item["segment_id"],
-                    "source": segment_model_source(item),
-                }
-                for item in items
-            ],
-        }
+        payload = translation_payload(
+            config["project"]["target_language"], items, term_match_cache.for_items(items),
+            reference_context=context, summary_context=summary_context,
+            summary_context_relation=summary_context_relation,
+        )
 
         if draft_scan is not None:
             payload["response_mode"] = draft_scan.mode(items).value
@@ -531,7 +569,7 @@ async def run_translation(
                 del payload["segments"]
         return payload
 
-    run_id, run_dir, continuation_index, fail_planning = _create_or_continue_run(
+    run_id, run_dir, continuation_index, fail_planning = (await run_blocking(lambda: _create_or_continue_run(
         project,
         run_stage,
         scope=scope,
@@ -561,18 +599,19 @@ async def run_translation(
             "prompt_language": language,
         },
         warnings=warnings,
-    )
+    )))
 
     if draft_scan is not None and not scope.dry_run:
-        draft_scan.start(run_id)
+        (await run_blocking(lambda: draft_scan.start(run_id)))
 
-    preflight = _split_oversized_preflight(
+    preflight = (await run_blocking(lambda: _split_oversized_preflight(
         selection.work,
         config=config,
         prompt=prompt,
         payload_builder=payload_builder,
         prompt_builder=prompt_for_items,
         fail_planning=fail_planning,
+        lazy=not scope.dry_run,
         make_probe=lambda segment, part: {
             **_split_segment_source(
                 segment, f"{segment['segment_id']}-PROBE", part
@@ -582,7 +621,7 @@ async def run_translation(
         accept_part=lambda segment, part_id, part: _split_segment_source(
             segment, part_id, part
         ),
-    )
+    )))
     request_segments = preflight.request_segments
     part_original = preflight.part_original
     original_parts = preflight.original_parts
@@ -597,7 +636,7 @@ async def run_translation(
     )
 
     if scope.dry_run:
-        plans = build_chunk_plans(
+        plans = (await run_blocking(lambda: build_chunk_plans(
             request_segments,
             all_segments=segments,
             config=config,
@@ -606,7 +645,7 @@ async def run_translation(
             payload_builder=payload_builder,
             prompt_builder=prompt_for_items,
             partition_key=prompt_partition_key,
-        )
+        )))
         logger.info(
             "stage plan selected=%d requested=%d reused=%d chunks=%d",
             len(selection.selected),
@@ -629,23 +668,9 @@ async def run_translation(
         }
 
     assert run_id is not None and run_dir is not None
-    decision_clients = {
-        preset_id: DecisionClient(definition, http_client=http_client, retry=config["retry"],
-            debug_directory=run_dir if config["debug"]["enabled"] else None,
-            project_id=metadata["project_id"], run_id=run_id, stage=run_stage)
-        for preset_id, definition in config.get("_decision_preset_definitions", {}).items()
-    }
-    decision_bindings = config.get("_decision_validator_presets", {})
-    decision_client = decision_clients.get(decision_bindings.get("preferred_term_usage"))
-    alignment_options = config["validation"]["translation"]["alignment"]
-    translation_validators = tuple(
-        SegmentAlignmentValidator(decision_clients[decision_bindings["segment_alignment"]],
-            confidence_threshold=alignment_options["confidence_threshold"],
-            warning_threshold=alignment_options["warning_threshold"],
-            tail_segments=alignment_options["tail_segments"],
-            prompt=config["_decision_prompt_definitions"]["segment_alignment"]["content"])
-        if validator.validator_id == "segment_alignment" else validator
-        for validator in translation_validators
+    decision_clients, decision_client, translation_validators = translation_validation_resources(
+        config, project_id=metadata["project_id"], http_client=http_client,
+        run_dir=run_dir, run_id=run_id, stage=run_stage,
     )
 
     result_path = stage_result_path(project, "translation")
@@ -660,6 +685,7 @@ async def run_translation(
     by_id.update(
         {str(item["segment_id"]): item for item in request_segments}
     )
+    preflight.by_id = by_id
     part_results: dict[str, dict[str, tuple[str, str]]] = {}
 
     def validation_context(
@@ -722,7 +748,7 @@ async def run_translation(
             run_id=run_id, request_id=request_id,
         ) for segment_id, text, request_id in completions]
         async with write_lock:
-            append_stage_results(project, records)
+            (await run_blocking(lambda: append_stage_results(project, records)))
         for record in records:
             segment_id = record["segment_id"]
             completed_ids.add(segment_id)
@@ -746,7 +772,7 @@ async def run_translation(
             return
         failure_counts[error_class] += 1
         async with write_lock:
-            append_jsonl(
+            (await run_blocking(lambda: append_jsonl(
                 project,
                 result_path,
                 record_header(
@@ -768,7 +794,7 @@ async def run_translation(
                     run_id=run_id,
                     request_id=request_id,
                 ),
-            )
+            )))
         if draft_scan is not None:
             draft_scan.translation_failed.add(part_original.get(segment_id, segment_id))
         failed_ids.add(segment_id)
@@ -919,7 +945,7 @@ async def run_translation(
         exhausted = await _localized_request_loop(
             group,
             payload_builder=payload_builder,
-            prompt=prompt_for_items(group),
+            prompt=(await run_blocking(lambda: prompt_for_items(group))),
             prompt_language=language,
             config=config,
             llm=state.llm,
@@ -975,7 +1001,7 @@ async def run_translation(
                         )
                     )
                     if draft_scan
-                    else prompt_for_items(group)
+                    else (await run_blocking(lambda: prompt_for_items(group)))
                 ),
                 prompt_language=language,
                 config=config,
@@ -1049,18 +1075,18 @@ async def run_translation(
         failed: list[dict[str, Any]],
     ) -> None:
         if draft_scan is not None:
-            draft_scan.fail_terms(
+            (await run_blocking(lambda: draft_scan.fail_terms(
                 failed,
                 run_id,
                 "PRECHECK",
                 "context_error",
                 "单 Segment 超过模型限制且内部拆分已关闭",
                 part_original,
-            )
+            )))
         if draft_scan is not None:
             summary_items = [item for item in failed if item.get("_draft_summary")]
             for item in summary_items:
-                draft_scan.record_summary(
+                (await run_blocking(lambda: draft_scan.record_summary(
                     [item],
                     state=state,
                     request_id="PRECHECK",
@@ -1068,7 +1094,7 @@ async def run_translation(
                     original_parts=original_parts,
                     error="单 Segment 超过模型限制且内部拆分已关闭",
                     error_class="context_error",
-                )
+                )))
         for segment in failed:
             if draft_scan is not None and not segment.get("_draft_translation"):
                 continue
@@ -1094,16 +1120,16 @@ async def run_translation(
             else "context_error"
         )
         if draft_scan is not None:
-            draft_scan.fail_terms(
+            (await run_blocking(lambda: draft_scan.fail_terms(
                 items,
                 run_id,
                 "CONTEXT",
                 category,
                 message,
                 part_original,
-            )
+            )))
         if draft_scan is not None and items[0].get("_draft_summary"):
-            draft_scan.record_summary(
+            (await run_blocking(lambda: draft_scan.record_summary(
                 items,
                 state=state,
                 request_id="REQ-NONE",
@@ -1111,7 +1137,7 @@ async def run_translation(
                 original_parts=original_parts,
                 error=message,
                 error_class=category,
-            )
+            )))
         if draft_scan is not None and not items[0].get("_draft_translation"):
             report_progress()
             return
@@ -1270,7 +1296,7 @@ async def run_translation(
     async def before_finalize() -> None:
         await fail_incomplete_responses()
         if draft_scan is not None:
-            draft_scan.publish(run_id, segments)
+            (await run_blocking(lambda: draft_scan.publish(run_id, segments)))
             report_progress()
 
     def completed_count() -> int:
@@ -1291,6 +1317,7 @@ async def run_translation(
             part_original=part_original,
             original_parts=original_parts,
             preflight_failed=preflight_failed,
+            prepare_segment=preflight.prepare_segment,
             limiter=limiter,
             payload_builder=payload_builder,
             prompt_builder=prompt_for_items,
@@ -1320,9 +1347,9 @@ async def run_translation(
         if decision_clients:
             from .sqlite_storage import read_json, write_json
             path = run_dir / "manifest.json"
-            manifest = read_json(project, path)
+            manifest = (await run_blocking(lambda: read_json(project, path)))
             manifest["decision_validation"] = [*manifest.get("decision_validation", []), *(record for client in decision_clients.values() for record in client.records)]
-            write_json(project, path, manifest)
+            (await run_blocking(lambda: write_json(project, path, manifest)))
         if draft_scan is not None:
             draft_scan.finish_summary_run(run_id)
     failed_count = len(draft_scan.failed()) if draft_scan else len(failed_ids)

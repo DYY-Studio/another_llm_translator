@@ -34,10 +34,14 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
     def terms(name: str) -> dict[str, Any]:
         return WebStore(project(name)).terms()
 
+    @app.get("/api/v1/projects/{name}/terms/failures")
+    def terminology_failures(name: str) -> dict[str, Any]:
+        return WebStore(project(name)).terminology_failures()
+
     @app.get("/api/v1/projects/{name}/terms/knowledge")
     def get_knowledge(name: str, normalized: str) -> dict[str, Any]:
         from .sqlite_storage import read_json, record_exists
-        from .term_knowledge import entity_view, navigation_fragment
+        from .term_knowledge import entity_detail_fragment, entity_view
         root = project(name)
         path = root / "terminology" / "terms.json"
         if not record_exists(root, path):
@@ -46,7 +50,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
         view = entity_view(root, library, normalized)
         return {"entity_key": view["entity_key"], "members": view["members"], "status": view["status"],
                 "items": [{"text": item["text"], "fragment_ids": item["fragment_ids"]} for item in view["items"]],
-                "fragments": [navigation_fragment(f) for f in view["fragments"]],
+                "fragments": [entity_detail_fragment(f) for f in view["fragments"]],
                 "terms_revision": library["terms_revision"]}
 
     @app.put("/api/v1/projects/{name}/terms/knowledge")
@@ -135,8 +139,19 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
         return WebStore(project(name)).delete_terms(payload)
 
     @app.get("/api/v1/projects/{name}/terms/decision")
-    def get_term_decision(name: str) -> dict[str, Any]:
-        return decision_review_state(project(name))
+    def get_term_decision(name: str):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(decision_review_state(project(name)))
+
+    @app.get("/api/v1/projects/{name}/terms/decision/{run_id}/proposals/{proposal_id}")
+    def get_decision_proposal(name: str, run_id: str, proposal_id: str) -> dict[str, Any]:
+        from .term_decision_drafts import decision_proposal_detail
+        return decision_proposal_detail(project(name), run_id, proposal_id)
+
+    @app.get("/api/v1/projects/{name}/terms/decision/{run_id}/fragments/{fragment_id}")
+    def get_decision_fragment(name: str, run_id: str, fragment_id: str) -> dict[str, Any]:
+        from .term_decision_drafts import decision_fragment_detail
+        return decision_fragment_detail(project(name), run_id, fragment_id)
 
     @app.put("/api/v1/projects/{name}/terms/decision/rejections")
     def put_term_decision_rejections(

@@ -9,7 +9,8 @@ import httpx
 import pytest
 
 from app.execution import Scope
-from app.llm_response import parse_jsonl_document
+from app.llm_adapter import LLMResponse
+from app.llm_response import normalize_llm_response, parse_jsonl_document
 from app.logging_utils import attach_project_log, configure_cli_logging
 from app.main import run
 from app.sqlite_storage import read_json, read_jsonl
@@ -30,6 +31,40 @@ def test_jsonl_extraction_accepts_bom_crlf_blanks_and_supported_fence() -> None:
     assert document.complete is True
     assert document.records[0]["id"] == "S1"
     assert document.error_codes == ()
+
+
+@pytest.mark.parametrize("separator", [",", ",\n", "\n, "])
+def test_jsonl_comma_separator_preserves_record_content(separator: str) -> None:
+    record = {"type": "segment", "id": "S1", "translation": '逗号, }, 与引号 "', "refs": ["a", "b"]}
+    content = json.dumps(record, ensure_ascii=False) + separator + '{"type":"end"}'
+    warnings: list[str] = []
+    response = normalize_llm_response(LLMResponse(content, None), warnings=warnings)
+    document = parse_jsonl_document(content, record_type="segment")
+    assert document.complete
+    assert document.records == (record,)
+    assert json.loads(response.content.splitlines()[0]) == record
+    assert warnings == ["已接受逗号分隔的 JSONL 响应"]
+
+
+@pytest.mark.parametrize("content", [
+    '{"type":"segment"},{"type":"end"},',
+    '{"type":"segment"},,{"type":"end"}',
+    '{"type":"segment"}{"type":"end"}',
+    '{"type":"segment"}，{"type":"end"}',
+    '[{"type":"segment"},{"type":"end"}]',
+    '{"type":"segment"},{broken}\n{"type":"end"}',
+    '{"type":"end"},{"type":"segment"}',
+])
+def test_jsonl_comma_separator_does_not_hide_protocol_errors(content: str) -> None:
+    assert not parse_jsonl_document(content, record_type="segment").complete
+
+
+def test_jsonl_content_commas_do_not_trigger_repair_warning() -> None:
+    content = '{"type":"segment","translation":"},"}\n\n{"type":"end"}'
+    warnings: list[str] = []
+    response = normalize_llm_response(LLMResponse(content, None), warnings=warnings)
+    assert response.content == content
+    assert warnings == []
 
 
 @pytest.mark.parametrize("label", ["jsonl", "ndjson", "json", ""])
@@ -293,6 +328,7 @@ def test_terminology_rejects_malformed_end_without_discarding_valid_candidates()
         "<thinking>推理过程</thinking>\n{answer}",
         "<thought>推理过程</thought>\n{answer}",
         "<analysis>推理过程</analysis>\n{answer}",
+        "```jsonl\n{comma_answer}\n```",
     ],
 )
 async def test_translation_accepts_embedded_thought_content_without_retry(
@@ -320,7 +356,7 @@ async def test_translation_accepts_embedded_thought_content_without_retry(
             200,
             json={
                 "choices": [
-                    {"message": {"content": template.replace("{answer}", answer)}}
+                    {"message": {"content": template.replace("{answer}", answer).replace("{comma_answer}", answer.strip().replace("\n", ","))}}
                 ]
             },
         )
@@ -333,6 +369,10 @@ async def test_translation_accepts_embedded_thought_content_without_retry(
         del os.environ["LLM_API_KEY"]
     assert summary["completed"] == 1
     assert calls == 1
+    if "{comma_answer}" in template:
+        assert "已接受逗号分隔的 JSONL 响应" in summary["warnings"]
+        manifest = read_json(project, project / "runs" / summary["run_id"] / "manifest.json")
+        assert "已接受逗号分隔的 JSONL 响应" in manifest["warnings"]
 
 
 @pytest.mark.asyncio

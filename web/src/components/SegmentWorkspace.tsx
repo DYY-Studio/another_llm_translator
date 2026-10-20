@@ -16,6 +16,7 @@ import {
 } from "../segmentReadState";
 import { useClassicSelection } from "../useClassicSelection";
 import { Modal } from "./Modal";
+import { TextTranslationDialog } from "./TextTranslationDialog";
 const RepetitionReview = lazy(() => import("./RepetitionReview").then(module => ({ default: module.RepetitionReview })));
 
 interface WorkspaceCacheEntry {
@@ -146,6 +147,7 @@ export function SegmentWorkspace({
   );
   const selection = useClassicSelection();
   const [repetitionOpen, setRepetitionOpen] = useState(false);
+  const [textTranslationOpen, setTextTranslationOpen] = useState(false);
   const [boundary, setBoundary] = useState("all");
   const [status, setStatus] = useState("all");
   const [search, setSearch] = useState("");
@@ -163,7 +165,7 @@ export function SegmentWorkspace({
   const preserveFocusRef = useRef("");
   const scrollToFocusRef = useRef(false);
   const restoredScrollTopRef = useRef<number | null>(null);
-  const jumpConsumedRef = useRef(false);
+  const jumpConsumedRef = useRef<typeof pendingJump>(null);
   const jumpTargetRef = useRef("");
   const jumpSearchRef = useRef("");
   const pageCacheRef = useRef(new Set<string>());
@@ -184,14 +186,11 @@ export function SegmentWorkspace({
     if (focusFailures) setStatus("error");
   }, [focusFailures]);
 
-  // A term-hit jump arrives with the workspace (fresh mount): apply the
-  // prefilled search and keep the target segment focused once its window
-  // loads. Cached windows from previous visits are dropped so the cache
-  // restore cannot overwrite the jump focus. Consumed once per mount so
-  // re-renders and later visits never replay the navigation.
+  // Consume each jump once, including repeated navigation within this stage.
+  // Drop cached windows so restoration cannot overwrite the target focus.
   useEffect(() => {
-    if (!pendingJump || jumpConsumedRef.current) return;
-    jumpConsumedRef.current = true;
+    if (!pendingJump || jumpConsumedRef.current === pendingJump) return;
+    jumpConsumedRef.current = pendingJump;
     jumpTargetRef.current = pendingJump.segmentId;
     jumpSearchRef.current = pendingJump.search;
     const prefix = JSON.stringify([projectId, stage]);
@@ -620,7 +619,8 @@ export function SegmentWorkspace({
           <div className="batch-toolbar segment-batch-toolbar">
             <span>{translate("workspace.selectedCount", language, { selected: selectedVisibleIds.length, total })}</span>
             <div className="segment-batch-actions">
-              {stage === "translation" && <button className="quiet-button repetition-entry" onClick={() => setRepetitionOpen(true)}>{translate("repetition.title", language)}</button>}
+              {stage === "translation" && <button className="quiet-button" onClick={() => setTextTranslationOpen(true)}>{translate("textTranslation.title", language)}</button>}
+              {stage === "translation" && <button className="quiet-button" onClick={() => setRepetitionOpen(true)}>{translate("repetition.title", language)}</button>}
               {stage !== "translation" && (
                 <>
                   <button className="quiet-button" disabled={!selectedVisibleIds.length} onClick={() => setBatchAction({ kind: "apply", scope: "selected" })}>{translate("workspace.applySelected", language)}</button>
@@ -762,6 +762,7 @@ export function SegmentWorkspace({
           onConfirm={runBatch}
         />
       )}
+      {stage === "translation" && <TextTranslationDialog project={project} language={language} open={textTranslationOpen} onClose={() => setTextTranslationOpen(false)} />}
     </div>
   );
 }
@@ -781,7 +782,7 @@ function SegmentTermRow({ term, role, language, onFindTerm }: {
       </span>
       {term.aliases.length > 0 && <span className="segment-term-aliases"><span>{translate("workspace.matchedAliases", language)}</span>{term.aliases.map((alias) => <span className="segment-term-alias" key={alias}>{alias}</span>)}</span>}
       {term.group_claims?.map((claim) => <span className="segment-term-detail warning-text" key={JSON.stringify(claim)}>{translate("workspace.termClaim", language, { alias: claim.alias, entry: claim.entry, owner: claim.claimed_by })}</span>)}
-      {term.description && <span className="segment-term-description">{term.description}</span>}
+      {role !== "member" && term.description && <span className="segment-term-description">{term.description}</span>}
     </button>
   );
 }

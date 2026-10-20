@@ -485,7 +485,7 @@ def test_web_task_start_forwards_language(
     monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
     app = create_app(projects_root=projects_root)
     with TestClient(app) as client:
-        client.post(
+        started = client.post(
             "/api/v1/projects/sample/tasks",
             json={"stage": "translation", "language": "en", "force": True},
         )
@@ -493,6 +493,8 @@ def test_web_task_start_forwards_language(
             "/api/v1/projects/sample/tasks",
             json={"stage": "translation", "language": "fr", "force": True},
         )
+        from tests.helpers import wait_for_web_task
+        wait_for_web_task(client, started.json()["task_id"])
     assert rejected.status_code == 400
     assert calls and calls[0]["prompt_language"] == "en"
 
