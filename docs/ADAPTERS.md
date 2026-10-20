@@ -360,7 +360,7 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 Web 的任务启动与 task-options 接口在 `stage: "terminology_decision"` 下接受布尔 `knowledge_only`（默认 `false`）。`true` 只执行实体说明阶段，不能与 `final_review: true` 组合，Run、检查点及草案记录该标记。
 
-请求中的 `sources` 是批次共享来源表，以短 ID（如 `S1`）索引当前项目从 1 开始的 `file_order` 和文件内内容边界 `part_id`。来源短 ID 和 `part_id` 不表示顺序。`source_range` 将连续源文表示为区间，每项包含引用来源表的 `source`、`first: {position, start}` 和 `last: {position, end}`。`position` 是按当前项目文件顺序排列、从 0 开始的全局 Segment 位置，偏移是首尾 Segment 内的字符位置，`end` 为不包含端点。跨文件、分部、位置间断或切片空缺分别保留。无来源片段为 `null`。持久化来源和引用校验仍使用完整 Segment 范围。
+请求中的 `sources` 是按文件分组的批次共享来源数组，每组包含当前项目从 1 开始的 `file_order`，以及将全请求唯一短 ID（如 `S1`）映射到文件内内容边界 `part_id` 的 `parts` 表。来源短 ID 和 `part_id` 不表示顺序。`source_range` 将连续源文表示为区间，每项包含引用各文件 `parts` 表中短 ID 的 `source`、`first: {position, start}` 和 `last: {position, end}`。`position` 是按当前项目文件顺序排列、从 0 开始的全局 Segment 位置，偏移是首尾 Segment 内的字符位置，`end` 为不包含端点。跨文件、分部、位置间断或切片空缺分别保留。无来源片段为 `null`。持久化来源和引用校验仍使用完整 Segment 范围。
 
 每个请求实体恰好返回一条实体记录，允许乱序，最后返回终止记录：
 

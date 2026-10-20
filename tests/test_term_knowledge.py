@@ -47,8 +47,7 @@ def test_knowledge_payload_compacts_ranges_without_bridging_gaps_or_slices():
     payload, refs = knowledge_payload([view], "简体中文")
     assert refs == {"K1": ("alpha", "persistent")}
     assert payload["entities"][0]["fragments"][0]["text"] == "完整说明"
-    assert payload["sources"] == {"S1": {"file_order": 4, "part_id": "P1"},
-                                  "S2": {"file_order": 4, "part_id": "P2"}}
+    assert payload["sources"] == [{"file_order": 4, "parts": {"S1": "P1", "S2": "P2"}}]
     assert payload["entities"][0]["fragments"][0]["source_range"] == [
         {"source": "S1", "first": {"position": 0, "start": 0}, "last": {"position": 1, "end": 6}},
         {"source": "S1", "first": {"position": 3, "start": 0}, "last": {"position": 4, "end": 3}},
@@ -276,7 +275,7 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
         assert "NAME_RULE_SENTINEL" not in messages[0]["content"]
         assert "KNOWLEDGE_RULE_SENTINEL" in messages[0]["content"]
         scan = next(f for f in payload["entities"][0]["fragments"] if f["origin"] == "scan")
-        assert payload["sources"] == {"S1": {"file_order": 1, "part_id": "document"}}
+        assert payload["sources"] == [{"file_order": 1, "parts": {"S1": "document"}}]
         assert scan["source_range"] == [{"source": "S1",
                                         "first": {"position": 0, "start": 0}, "last": {"position": 0, "end": 14}}]
         attempts.append(payload)
@@ -1084,16 +1083,17 @@ def test_knowledge_sources_use_current_project_file_order(tmp_path: Path):
     reorder_files(project, reordered)
     view = entity_view(project, data, "alpha")
     payload, refs = knowledge_payload([view], "简体中文")
-    assert list(payload["sources"].values()) == [
-        {"file_order": 2, "part_id": "document"},
-        {"file_order": 3, "part_id": "document"},
-        {"file_order": 1, "part_id": "document"},
+    assert payload["sources"] == [
+        {"file_order": 2, "parts": {"S1": "document"}},
+        {"file_order": 3, "parts": {"S2": "document"}},
+        {"file_order": 1, "parts": {"S3": "document"}},
     ]
     ranges = payload["entities"][0]["fragments"][0]["source_range"]
-    assert [payload["sources"][r["source"]]["file_order"] for r in ranges] == [2, 3, 1]
+    source_files = {ref: group["file_order"] for group in payload["sources"] for ref in group["parts"]}
+    assert [source_files[r["source"]] for r in ranges] == [2, 3, 1]
     assert refs == {"K1": ("alpha", view["fragments"][0]["id"])}
     view["fragments"][0]["source_range"] = [
         r for r in view["fragments"][0]["source_range"] if r["file_id"] == files[1]["file_id"]
     ]
     subset, _ = knowledge_payload([view], "简体中文")
-    assert subset["sources"] == {"S1": {"file_order": 3, "part_id": "document"}}
+    assert subset["sources"] == [{"file_order": 3, "parts": {"S1": "document"}}]

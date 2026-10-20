@@ -451,7 +451,7 @@ def knowledge_payload(views: list[dict[str, Any]], target_language: str, descrip
     refs: dict[str, tuple[str, str]] = {}
     range_cache = {} if range_cache is None else range_cache
     entities = []
-    sources: dict[str, dict[str, Any]] = {}
+    sources: dict[int, dict[str, Any]] = {}
     source_ids: dict[tuple[int, str], str] = {}
     for view in views:
         fragments = []
@@ -468,9 +468,10 @@ def knowledge_payload(views: list[dict[str, Any]], target_language: str, descrip
             for r in compact_ranges or []:
                 source_key = (f["_file_orders"][r["file_id"]], r["part_id"])
                 if source_key not in source_ids:
-                    source_id = f"S{len(sources) + 1}"
+                    source_id = f"S{len(source_ids) + 1}"
                     source_ids[source_key] = source_id
-                    sources[source_id] = {"file_order": source_key[0], "part_id": source_key[1]}
+                    group = sources.setdefault(source_key[0], {"file_order": source_key[0], "parts": {}})
+                    group["parts"][source_id] = source_key[1]
                 source_ranges.append({"source": source_ids[source_key], "first": r["first"], "last": r["last"]})
             fragments.append({"id": key, "text": f["text"], "owner": f["owner"],
                               "original_source": f.get("source", f["original_owner"]),
@@ -479,7 +480,7 @@ def knowledge_payload(views: list[dict[str, Any]], target_language: str, descrip
                          "current_items": [{"text": item["text"]} for item in view["items"]],
                          "fragments": fragments})
     return {"phase": "knowledge", "target_language": target_language,
-            "description_generation": description_generation, "sources": sources, "entities": entities}, refs
+            "description_generation": description_generation, "sources": list(sources.values()), "entities": entities}, refs
 
 
 def pack_knowledge_batches(views: list[dict[str, Any]], prompt: str, config: dict[str, Any], *,
