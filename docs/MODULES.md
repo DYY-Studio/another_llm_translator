@@ -260,7 +260,7 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 
 `web/src/components/` 按页面或弹窗拆分。`AppShell.tsx` 只装配导航和全局状态；项目概览、
 创建、选择、替换、输入、导出、诊断、Segment、术语、自动决策、概括和设置分别由对应组件
-拥有。`InteractionProvider.tsx` 统一确认、输入弹窗与固定操作反馈，`Modal.tsx` 负责共享弹窗的焦点约束和恢复。共享 API 类型位于 `web/src/types.ts`，通用选择行为位于 `useClassicSelection.ts`。
+拥有。`InteractionProvider.tsx` 统一确认、输入弹窗与固定操作反馈，`Modal.tsx` 负责共享弹窗的焦点约束和恢复。`DraftReviewToolbar.tsx` 统一草案搜索布局、结果数和分页，具体筛选规则由各审核页面持有。共享 API 类型位于 `web/src/types.ts`，通用选择行为位于 `useClassicSelection.ts`。
 
 `TermScanFailuresDialog.tsx` 读取 `web_term_routes.py` 的失败查询和 Segment 顺序索引，`termScanFailures.ts` 合并相邻位置并按输出类型汇总错误，定位复用翻译工作区。失败查询由 `sqlite_storage.py` 只读读取最近一次术语 Run 的扫描、粗翻和概括错误元数据，`web_store.py` 按 Segment 去重并限制返回数量。
 
