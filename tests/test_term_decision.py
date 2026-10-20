@@ -613,7 +613,7 @@ async def test_decision_carries_fragment_descriptions_through_final_review(tmp_p
             anchors=[plan["states"]["bob"]], evidence=evidence,
         )
         assert payload["terms"][0]["description"] == expected
-        assert payload["terms"][0]["applied_description"] == "unhelpful"
+        assert payload["applied_descriptions"][payload["terms"][0]["applied_description_ref"]] == "unhelpful"
         assert payload["anchors"][0]["description"] is None
         assert "description" not in payload["terms"][0]["evidence"]
 
@@ -630,7 +630,7 @@ async def test_decision_carries_fragment_descriptions_through_final_review(tmp_p
         for term in payload["terms"]:
             if term["normalized"] == "alice":
                 assert term["description"] == expected
-                assert term["applied_description"] == "unhelpful"
+                assert payload["applied_descriptions"][term["applied_description_ref"]] == "unhelpful"
             record = dict(type="decision", normalized=term["normalized"], action="keep", reason="确认")
             if term["normalized"] == "alice":
                 if payload["phase"] != "final_review":
@@ -5964,3 +5964,27 @@ def test_previous_preset_protocol_cannot_resume_decision_run(tmp_path):
     assert not compatible
     assert "协议不兼容" in reason
     assert read_json(project, run_dir / "manifest.json")["run_id"] == run_id
+
+
+def test_payload_shares_applied_descriptions_without_regrouping_comparison_text():
+    first = _batch_state("first", "First")
+    member = _batch_state("member", "Member")
+    anchor = _batch_state("anchor", "Anchor")
+    empty = _batch_state("empty", "Empty")
+    first["description"] = anchor["description"] = "共享已应用说明"
+    member.update(group_primary="first", description="临时并组前的另一份说明")
+    empty["description"] = None
+    evidence = _batch_evidence(first, member, anchor, empty)
+    for item in evidence.values():
+        item["description"] = "原始证据说明"
+    before = deepcopy(evidence)
+    payload = _make_payload(phase="consistency", target_language="中文", focus=[first, member, empty],
+                            anchors=[anchor], evidence=evidence)
+    assert payload["applied_descriptions"] == {
+        "D1": "共享已应用说明", "D2": "临时并组前的另一份说明",
+    }
+    assert [term["applied_description_ref"] for term in payload["terms"]] == ["D1", "D2", None]
+    assert payload["anchors"][0]["applied_description_ref"] == "D1"
+    assert all(term["description"] == "原始证据说明" for term in payload["terms"])
+    assert all("applied_description" not in term for term in payload["terms"] + payload["anchors"])
+    assert evidence == before

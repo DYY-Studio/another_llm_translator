@@ -603,6 +603,19 @@ def _make_payload(
             for item in anchors
         ],
     }
+    applied_descriptions: dict[str, str] = {}
+    description_refs: dict[str, str] = {}
+    for term in [*payload["terms"], *payload["anchors"]]:
+        if "applied_description" not in term:
+            continue
+        text = term.pop("applied_description")
+        ref = None
+        if text is not None:
+            ref = description_refs.setdefault(text, f"D{len(description_refs) + 1}")
+            applied_descriptions[ref] = text
+        term["applied_description_ref"] = ref
+    if applied_descriptions:
+        payload["applied_descriptions"] = applied_descriptions
     if phase == "final_review":
         payload["context_segments"] = context_segments
     return payload
