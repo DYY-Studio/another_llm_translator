@@ -785,7 +785,7 @@ function SegmentTermRow({ term, role, language, onFindTerm }: {
       </span>
       {term.aliases.length > 0 && <span className="segment-term-aliases"><span>{translate("workspace.matchedAliases", language)}</span>{term.aliases.map((alias) => <span className="segment-term-alias" key={alias}>{alias}</span>)}</span>}
       {term.group_claims?.map((claim) => <span className="segment-term-detail warning-text" key={JSON.stringify(claim)}>{translate("workspace.termClaim", language, { alias: claim.alias, entry: claim.entry, owner: claim.claimed_by })}</span>)}
-      {term.description && <span className="segment-term-description">{term.description}</span>}
+      {role !== "member" && term.description && <span className="segment-term-description">{term.description}</span>}
     </button>
   );
 }
