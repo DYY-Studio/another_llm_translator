@@ -337,7 +337,9 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 ### 自动术语决策关系校验
 
-名称与关系决策各阶段的 `description` 为按术语当前归属拼接的全部有效、未停用说明片段，每段以方括号标明原术语归属；`applied_description` 单独提供已应用实体说明作对照。两者均只读。片段可能重复、存在分歧或描述不同位置，排列顺序不表示事实发生时间。拼接文本计入现有分批预算，不截断。
+终审请求通过共享 `context_segments` 表提供上下文 Segment，以请求内 `segment_ref` 索引，条目保留 `boundary_ref`、`source` 和 `is_empty`。各术语 `evidence.windows` 的 `segment_refs` 按原文顺序引用共享表，`hit_segment_refs` 保留该术语自己的命中位置，`window_ref` 仅在所属术语内有效。样本摘录和匹配视图仍按术语保留。
+
+名称与关系决策各阶段的 `description` 为按术语当前归属拼接的全部有效、未停用说明片段，同一原归属的片段归为一组，每组以方括号标明原术语归属。请求级 `applied_descriptions` 表按完整正文去重，目标术语和 Anchors 通过 `applied_description_ref` 引用各自原有的已应用说明作对照，无说明时引用为 `null`。临时分组变化不改变各术语的对照正文。两者均只读。片段可能重复、存在分歧或描述不同位置，排列顺序不表示事实发生时间。拼接文本计入现有分批预算，不截断。
 
 `changes` 按完整最终状态检查 [术语组规则](MINIMAL.md#51-术语)，覆盖新增 Alias、
 组关系变更和成员重新启用。新增非法关系返回 `invalid_relationship`；普通决策无法完整
@@ -352,7 +354,7 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 重复相同错误触发的隔离修正会在同一轮使用固定的已接受状态快照，并受现有 `max_parallel` 限制；各请求结果统一合并后检查组合关系。若组合引入关系冲突，会撤回受影响依赖组件并在既有格式修正轮数内重试。
 
-固定 Prefix 按阶段声明输入字段、只读参考与任务，固定 Suffix 按阶段声明输出协议；JSONL 响应追加一次结束约束。可编辑中段位于两者之间，负责信息取舍、详略与表达策略；来源边界、引用及输出覆盖要求由固定协议定义。联合模式声明参与阶段和附加输出协议；设置预览与实际请求共用组装入口，固定规则版本纳入 fingerprint。名称与关系阶段的 `description` 和 `applied_description` 均为只读。
+固定 Prefix 按阶段声明输入字段、只读参考与任务，固定 Suffix 按阶段声明输出协议；JSONL 响应追加一次结束约束。可编辑中段位于两者之间，负责信息取舍、详略与表达策略；来源边界、引用及输出覆盖要求由固定协议定义。联合模式声明参与阶段和附加输出协议；设置预览与实际请求共用组装入口，固定规则版本纳入 fingerprint。名称与关系阶段的 `description` 和共享已应用说明均为只读。
 
 ### 实体说明决策与接口
 
@@ -872,7 +874,7 @@ LLM Prompt 的 `/api/v1/prompts/{stage}/default?language=...` GET 直接读取�
 
 原始执行及每次 continuation 使用共享快照装配保存实际 LLM 与 Decision 资源；术语证据在 Run 中保存一次。失败和取消保持 Run 为 `running`，未完成出现不计为失败，`last_interruption` 记录错误、步骤进度及可取得的请求 ID。Run 收集去重的预检、续作和客户端警告，实际 LLM 调用保存带执行来源索引的密钥审计；使用共享用量累计，零请求续作保留已有用量。
 
-`repetition_consistency` 是独立 Prompt 资源，使用标准 Prefix、中段、Suffix 装配；模型连接沿用翻译 Preset。输入包含 `target_language`、请求内共享的 `context`、`terms`、`files`、`parts`，以及 `repetitions` 数组。每个重复组含稳定的短 `id`、`source`、`translations` 与 `occurrences`；出现短 ID 仅在所属重复组内有效，不得跨组引用。每次出现携带短 ID、File/part、位置、从零开始的译文索引、前后文引用和术语引用。`file` 是项目文件顺序中从 1 开始的索引，`files` 将本请求涉及的索引映射到文件名；`part` 是请求内 `parts` 表从 1 开始的索引，表中声明内容边界名称，每个 File/part 边界单独编号；`position` 是文件内从 0 开始的 Segment 序号，包含空片段。术语正文仅发送一次，命中的别名保存在各次出现的术语引用 `aliases` 中；术语引用的 `source_relations` 按顺序对应 `entity_knowledge.items`，关系以该次出现的局部上下文为基准。
+`repetition_consistency` 是独立 Prompt 资源，使用标准 Prefix、中段、Suffix 装配；模型连接使用重复译文一致性审查 Preset。当前请求协议版本为 2，旧协议 Run 不跨版本续作。输入包含 `target_language`、请求内共享的 `context`、`terms`、`entity_knowledge`、`files`、`parts`，以及 `repetitions` 数组。每个重复组含稳定的短 `id`、`source`、`translations` 与 `occurrences`；出现短 ID 仅在所属重复组内有效，不得跨组引用。每次出现携带短 ID、File/part、位置、从零开始的译文索引、前后文引用和术语引用。`file` 是项目文件顺序中从 1 开始的索引，`files` 将本请求涉及的索引映射到文件名；`part` 是请求内 `parts` 表从 1 开始的索引，表中声明内容边界名称，每个 File/part 边界单独编号；`position` 是文件内从 0 开始的 Segment 序号，包含空片段。术语正文仅发送一次，命中的别名保存在各次出现的术语引用 `aliases` 中；`entity_knowledge` 按实体组织说明条目，每条以全请求唯一的 `K` 短 ID 索引，保留 `text` 和 `unsourced`。术语基本信息独立于说明子集去重，每次出现的术语引用通过 `knowledge: [{id, source_relation}]` 选择适用说明并保留以该次局部上下文为基准的位置关系。不同实体及不同 `unsourced` 标记的条目分别索引。
 
 响应为单个 JSON 对象，仅含 `repetitions` 数组，每个输入重复组恰好对应一个结果，含原样组 `id`、`groups`、`keep`、`uncertain`。每个统一子组含 `members`、`target`、`apply`、`reason`；成员至少两个，`target` 必须是组内成员并选择其现有译文，`apply` 是 `members` 的无重复子集，可以为空，`reason` 使用目标语言。各次出现的短 ID 必须完整、不重复地划入子组或保留、待审列表。该协议不输出 JSONL 或结束记录。
 

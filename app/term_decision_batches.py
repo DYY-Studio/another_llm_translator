@@ -402,11 +402,12 @@ def _request_evidence(
     evidence: dict[str, dict[str, Any]],
     *,
     include_windows: bool = False,
-) -> dict[str, dict[str, Any]]:
-    """Project durable locations to request-local content-boundary references."""
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Project locations and share final-review Segment bodies within a request."""
     boundary_refs: dict[tuple[str, str], int] = {}
     segment_refs: dict[tuple[str, str, str], int] = {}
     projected: dict[str, dict[str, Any]] = {}
+    context_segments: dict[str, dict[str, Any]] = {}
 
     def project_segment(segment: dict[str, Any]) -> tuple[int, int]:
         boundary = (str(segment["file_id"]), str(segment["part_id"]))
@@ -428,14 +429,12 @@ def _request_evidence(
                 segments = []
                 for segment in window["segments"]:
                     boundary_ref, segment_ref = project_segment(segment)
-                    segments.append(
-                        {
-                            "segment_ref": segment_ref,
-                            "boundary_ref": boundary_ref,
-                            "source": segment["source"],
-                            "is_empty": bool(segment["is_empty"]),
-                        }
-                    )
+                    context_segments.setdefault(str(segment_ref), {
+                        "boundary_ref": boundary_ref,
+                        "source": segment["source"],
+                        "is_empty": bool(segment["is_empty"]),
+                    })
+                    segments.append(segment_ref)
                 hit_segment_refs = [
                     segment_refs[
                         (
@@ -451,7 +450,7 @@ def _request_evidence(
                     {
                         "window_ref": window_ref,
                         "hit_segment_refs": hit_segment_refs,
-                        "segments": segments,
+                        "segment_refs": segments,
                     }
                 )
         for sample in value["samples"]:
@@ -476,7 +475,7 @@ def _request_evidence(
         else:
             value.pop("windows", None)
         projected[normalized] = value
-    return projected
+    return projected, context_segments
 
 def _direct_group_anchors(
     focus: list[dict[str, Any]],
@@ -576,13 +575,13 @@ def _make_payload(
     conflicts: dict[str, dict[str, list[Any]]] | None = None,
 ) -> dict[str, Any]:
     include_disabled = phase in {"consistency", "final_review", "containment"}
-    request_evidence = _request_evidence(
+    request_evidence, context_segments = _request_evidence(
         focus,
         anchors,
         evidence,
         include_windows=phase == "final_review",
     )
-    return {
+    payload = {
         "phase": phase,
         "target_language": target_language,
         "terms": [
@@ -604,6 +603,23 @@ def _make_payload(
             for item in anchors
         ],
     }
+    applied_descriptions: dict[str, str] = {}
+    description_refs: dict[str, str] = {}
+    for term in [*payload["terms"], *payload["anchors"]]:
+        if "applied_description" not in term:
+            continue
+        text = term.pop("applied_description")
+        ref = None
+        if text is not None:
+            ref = description_refs.setdefault(text, f"D{len(description_refs) + 1}")
+            applied_descriptions[ref] = text
+        term["applied_description_ref"] = ref
+    if applied_descriptions:
+        payload["applied_descriptions"] = applied_descriptions
+    if phase == "final_review":
+        payload["context_segments"] = context_segments
+    return payload
+
 
 def _pack_batches(
     states: list[dict[str, Any]],
