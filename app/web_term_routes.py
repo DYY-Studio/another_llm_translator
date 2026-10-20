@@ -34,6 +34,10 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
     def terms(name: str) -> dict[str, Any]:
         return WebStore(project(name)).terms()
 
+    @app.get("/api/v1/projects/{name}/terms/failures")
+    def terminology_failures(name: str) -> dict[str, Any]:
+        return WebStore(project(name)).terminology_failures()
+
     @app.get("/api/v1/projects/{name}/terms/knowledge")
     def get_knowledge(name: str, normalized: str) -> dict[str, Any]:
         from .sqlite_storage import read_json, record_exists

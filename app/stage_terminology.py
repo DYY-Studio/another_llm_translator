@@ -1471,21 +1471,35 @@ async def run_terminology(
             error_message=error_message,
         )
 
-    def mark_failed(
+    async def mark_failed(
         items: list[dict[str, Any]],
         result_class: str,
         message: str,
         *,
+        request_id: str,
         failure_category: str = "format_error",
         count_failure: bool = True,
     ) -> None:
+        records = []
         for item in items:
             owner = original_id(item)
+            if owner in class_failed_originals[result_class]:
+                continue
+            if result_class == "term":
+                records.append(record_header(
+                    "terminology_scan", str(metadata["project_id"]), stage="terminology",
+                    segment_id=owner, status="failed", run_id=run_id, request_id=request_id,
+                    active_task_id=task_id, stage_fingerprint=fingerprint,
+                    error_class=failure_category, error_message=message,
+                ))
             class_failed_originals[result_class].add(owner)
             failed_originals.add(owner)
             if count_failure:
                 failure_counts[failure_category] += 1
             maybe_complete(owner)
+        if records:
+            async with write_lock:
+                await run_blocking(lambda: append_jsonl_records(project, project / "terminology" / "scans.jsonl", records))
         report_progress()
 
     async def process_summary_once(
@@ -1533,16 +1547,18 @@ async def run_terminology(
                 raise
             except ExternalError as exc:
                 if failed_class is TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY:
-                    mark_failed(
+                    await mark_failed(
                         unresolved,
                         "term",
                         str(exc),
+                        request_id=request_id,
                         failure_category="external_error",
                     )
-                    mark_failed(
+                    await mark_failed(
                         unresolved,
                         "summary",
                         str(exc),
+                        request_id=request_id,
                         failure_category="external_error",
                         count_failure=False,
                     )
@@ -1559,10 +1575,11 @@ async def run_terminology(
                         if failed_class is TerminologyResponseMode.SUMMARY_ONLY
                         else "term"
                     )
-                    mark_failed(
+                    await mark_failed(
                         unresolved,
                         result_class,
                         str(exc),
+                        request_id=request_id,
                         failure_category="external_error",
                     )
                     if result_class == "summary":
@@ -1665,7 +1682,7 @@ async def run_terminology(
                 next_class = "term" if not term_ok else "summary"
             if format_attempt >= config["retry"]["format_max_attempts"]:
                 result_class = "term" if not term_ok else "summary"
-                mark_failed(unresolved, result_class, "; ".join(parsed.errors[:3]))
+                await mark_failed(unresolved, result_class, "; ".join(parsed.errors[:3]), request_id=request_id)
                 return 0, len(unresolved)
             failed_class = (
                 response_mode

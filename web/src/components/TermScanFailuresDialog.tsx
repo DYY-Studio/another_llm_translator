@@ -1,9 +1,8 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { errorMessage, translate, type Language } from "../i18n";
-import { fetchTerms, queryKeys } from "../queries";
 import { compactScanFailures } from "../termScanFailures";
-import type { ProjectOverview } from "../types";
+import type { ProjectOverview, TerminologyFailures } from "../types";
 import { Modal } from "./Modal";
 
 export function TermScanFailuresDialog({ project, projectId, files, language, onClose, onLocate }: {
@@ -14,17 +13,16 @@ export function TermScanFailuresDialog({ project, projectId, files, language, on
   onClose: () => void;
   onLocate: (segmentId: string) => void;
 }) {
-  const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["term-scan-failures", projectId],
     queryFn: async ({ signal }) => {
-      const [terms, index] = await Promise.all([
-        queryClient.fetchQuery({ queryKey: queryKeys.terms({ projectId }), queryFn: ({ signal }) => fetchTerms(project, signal) }),
+      const [failures, index] = await Promise.all([
+        api<TerminologyFailures>(`/api/v1/projects/${project}/terms/failures`, { signal }),
         api<{ segment_ids: string[] }>(`/api/v1/projects/${project}/segments/ids`, {
           method: "POST", body: JSON.stringify({ stage: "translation" }), signal,
         }),
       ]);
-      return { scan: terms.scan, ranges: compactScanFailures(terms.scan.failed_segments, index.segment_ids) };
+      return { ...failures, ranges: compactScanFailures(failures.segments, index.segment_ids) };
     },
   });
   const data = query.data;
@@ -40,8 +38,8 @@ export function TermScanFailuresDialog({ project, projectId, files, language, on
       <button onClick={() => { void query.refetch(); }}>{translate("common.retry", language)}</button>
     </div>}
     {!query.isError && data && <>
-      <p className="muted">{translate("terms.scanFailureSummary", language, { count: data.scan.failed, ranges: data.ranges.length })}</p>
-      {data.scan.failed_segments_truncated && <p className="warning-banner">{translate("terms.first200Failures", language)}</p>}
+      <p className="muted">{translate("terms.scanFailureSummary", language, { count: data.failed, ranges: data.ranges.length })}</p>
+      {data.truncated && <p className="warning-banner">{translate("terms.first200Failures", language)}</p>}
       <div className="scan-failure-ranges">
         {data.ranges.map((range) => {
           const file = files.find((item) => range.first.startsWith(`${item.file_id}-S`));
@@ -53,8 +51,8 @@ export function TermScanFailuresDialog({ project, projectId, files, language, on
             <button className="scan-failure-range-link" title={translate("terms.locateFailureRange", language)} onClick={() => onLocate(range.first)}>
               <code>{range.first === range.last ? range.first : `${range.first} — ${range.last}`}</code>
             </button>
-            {range.errors.map((error) => <p key={`${error.error_class}:${error.error_message}`}>
-              <code>{error.error_class}</code> <span>{error.error_message}</span> <small>×{error.count}</small>
+            {range.errors.map((error) => <p key={`${error.stage}:${error.error_class}:${error.error_message}`}>
+              <strong>{translate(error.stage === "content_summary" ? "stage.contentSummary" : error.stage === "translation" ? "stage.draftTranslation" : "stage.terminology", language)}</strong> <code>{error.error_class}</code> <span>{error.error_message}</span> <small>×{error.count}</small>
             </p>)}
           </article>;
         })}

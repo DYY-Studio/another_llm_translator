@@ -3319,6 +3319,77 @@ def list_run_index(
         connection.close()
 
 
+def read_terminology_failures(project: Path) -> tuple[str | None, list[dict[str, Any]]]:
+    """Read output failures for the latest terminology Run without loading source text."""
+    connection = _read_only_connection(project)
+    try:
+        connection.execute("BEGIN")
+        run = connection.execute(
+            "SELECT run_id FROM runs WHERE stage = 'terminology' "
+            "ORDER BY started_at DESC, rowid DESC LIMIT 1"
+        ).fetchone()
+        if run is None:
+            return None, []
+        run_id = str(run[0])
+        failures: list[dict[str, Any]] = []
+        for table, stage in (("terminology_scans", "terminology"), ("stage_results", "translation")):
+            stage_filter = " AND r.stage = 'translation'" if table == "stage_results" else ""
+            rows = connection.execute(
+                f"""SELECT r.segment_id, r.status,
+                       CASE WHEN r.status = 'failed' THEN r.payload_json ELSE '{{}}' END AS payload_json,
+                       m.payload_json AS metadata_json
+                    FROM {table} r LEFT JOIN request_metadata m
+                      ON m.metadata_id = json_extract(r.payload_json, '$._request_meta')
+                    WHERE COALESCE(json_extract(r.payload_json, '$.run_id'),
+                                   json_extract(m.payload_json, '$.run_id')) = ?{stage_filter}
+                    ORDER BY r.sequence""", (run_id,),
+            )
+            latest: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                segment_id = str(row["segment_id"])
+                if row["status"] != "failed":
+                    latest.pop(segment_id, None)
+                    continue
+                value = _load(row["payload_json"])
+                metadata = _load(row["metadata_json"]) if row["metadata_json"] else {}
+                latest[segment_id] = {
+                    "segment_id": segment_id, "stage": stage,
+                    "error_class": value["error_class"], "error_message": value["error_message"][:240],
+                    "request_id": metadata.get("request_id", value.get("request_id")),
+                }
+            failures.extend(latest.values())
+        # A successful retry may cover only part of a failed summary request.
+        # Resolve each source slice before collecting the remaining failures.
+        slices: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in connection.execute(
+            "SELECT status, source_range_json, payload_json FROM content_summaries "
+            "WHERE run_id = ? AND kind = 'fragment' AND status IN ('completed', 'failed') "
+            "ORDER BY updated_at, rowid", (run_id,),
+        ):
+            source_range = _load(row["source_range_json"])
+            value = _load(row["payload_json"]) if row["status"] == "failed" else {}
+            for piece in source_range["segments"]:
+                owner = str(piece.get("original_segment_id", piece["segment_id"]))
+                slice_id = piece.get("slice_id")
+                if slice_id is None:
+                    slice_id = _summary_slice_id({**piece, "model_text_digest": piece.get("model_text_digest", piece["source_digest"])})
+                key = (owner, str(slice_id))
+                if row["status"] == "completed":
+                    slices.pop(key, None)
+                else:
+                    slices[key] = {
+                        "segment_id": owner, "stage": "content_summary",
+                        "error_class": value["error_class"], "error_message": value["error_message"][:240],
+                        "request_id": value.get("request_id"),
+                    }
+        failures.extend(slices.values())
+        return run_id, failures
+    except (sqlite3.Error, json.JSONDecodeError) as exc:
+        raise StorageError(f"无法读取术语 Run 失败明细：{project}: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def read_run_record(project: Path, run_id: str) -> dict[str, Any] | None:
     """Read one authoritative Run row without changing recovery behavior."""
     connection = _read_only_connection(project)

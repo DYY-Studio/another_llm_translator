@@ -280,6 +280,10 @@ test("removes only the task captured as missing when terminal fetch fails", () =
   assert.equal(merged.two.task_id, "T2");
 });
 
-test("draft scan translation failures open the translation results", () => {
-  assert.equal(displayableFailureStage({ stage: "terminology", draft_progress: { translation: { failed: 1 } } }), "translation");
+test("combined output failures open the terminology failure panel for standalone and continuous tasks", () => {
+  for (const stage of ["terminology", "continuous"]) {
+    assert.equal(displayableFailureStage({ stage, current_stage: "terminology", draft_progress: {
+      terminology: { failed: 1 }, translation: { failed: 1 }, content_summary: { failed: 1 },
+    } }), "terminology");
+  }
 });

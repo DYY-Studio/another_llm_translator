@@ -1,12 +1,13 @@
-import type { TerminologyScan } from "./types";
+import type { TerminologyFailures } from "./types";
 
-type ScanFailure = TerminologyScan["failed_segments"][number];
+type ScanFailure = TerminologyFailures["segments"][number];
+type OutputError = ScanFailure["errors"][number];
 
 export interface ScanFailureRange {
   first: string;
   last: string;
   count: number;
-  errors: Array<Pick<ScanFailure, "error_class" | "error_message"> & { count: number }>;
+  errors: Array<Pick<OutputError, "stage" | "error_class" | "error_message"> & { count: number }>;
 }
 
 export function compactScanFailures(failures: ScanFailure[], orderedIds: string[]): ScanFailureRange[] {
@@ -26,9 +27,12 @@ export function compactScanFailures(failures: ScanFailure[], orderedIds: string[
     if (!adjacent) ranges.push(range);
     range.last = id;
     range.count += 1;
-    const error = range.errors.find((item) => item.error_class === failure.error_class && item.error_message === failure.error_message);
-    if (error) error.count += 1;
-    else range.errors.push({ error_class: failure.error_class, error_message: failure.error_message, count: 1 });
+    for (const failureError of failure.errors) {
+      const error = range.errors.find((item) => item.stage === failureError.stage
+        && item.error_class === failureError.error_class && item.error_message === failureError.error_message);
+      if (error) error.count += 1;
+      else range.errors.push({ stage: failureError.stage, error_class: failureError.error_class, error_message: failureError.error_message, count: 1 });
+    }
   }
   return ranges;
 }

@@ -36,6 +36,7 @@ from .sqlite_storage import (
     read_json,
     read_jsonl,
     read_segment_sources,
+    read_terminology_failures,
     record_exists,
     record_header,
     segment_count,
@@ -308,6 +309,20 @@ class WebStore:
             }
             for segment_id, record in latest.items()
             if record.get("status") == "failed"
+        }
+
+    def terminology_failures(self) -> dict[str, Any]:
+        run_id, failures = read_terminology_failures(self.project)
+        segments: dict[str, list[dict[str, Any]]] = {}
+        for failure in failures:
+            segment_id = failure["segment_id"]
+            error = {key: value for key, value in failure.items() if key != "segment_id"}
+            errors = segments.setdefault(segment_id, [])
+            if not any(all(item[key] == error[key] for key in ("stage", "error_class", "error_message")) for item in errors):
+                errors.append(error)
+        return {
+            "run_id": run_id, "failed": len(segments), "truncated": len(segments) > 200,
+            "segments": [{"segment_id": key, "errors": segments[key]} for key in sorted(segments)[:200]],
         }
 
     def terminology_scan(self) -> dict[str, Any]:

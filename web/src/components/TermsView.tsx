@@ -880,6 +880,7 @@ export function TermsView({
           <div className="batch-toolbar segment-batch-toolbar term-actions-toolbar">
             <span>{translate("terms.selected", language, { count: selection.selectedKeys.size })}</span>
             <div className="segment-batch-actions">
+              <button className="quiet-button" onClick={() => setShowScanFailures(true)}>{translate("terms.viewFailures", language)}</button>
               <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
               <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
               {selectedActive.length > 0 && <button
@@ -931,15 +932,14 @@ export function TermsView({
               {Object.entries(data.scan.failure_counts).map(([key, count]) => <span key={key} className="scan-error-count">{key} {count}</span>)}
             </div>
             <div className="term-scan-actions">
-              {data.scan.failed > 0 && <button className="quiet-button" onClick={() => setShowScanFailures(true)}>{translate("terms.viewFailures", language)}</button>}
               {data.scan.candidate_count > 0 && <button className="quiet-button" onClick={() => { setExportSource("scanned"); setExportOpen(true); }}>{translate("terms.exportCurrentScan", language)}</button>}
               {data.scan.candidate_count > 0 && <button className="primary-button" onClick={() => setPartialOpen(true)}>{translate("terms.publishAvailable", language)}</button>}
             </div>
-            {showScanFailures && <TermScanFailuresDialog project={project} projectId={projectId} files={overview.files} language={language}
-              onClose={() => setShowScanFailures(false)}
-              onLocate={(segmentId) => { setShowScanFailures(false); onFindSegment("", segmentId); }} />}
           </div>
         )}
+        {showScanFailures && <TermScanFailuresDialog project={project} projectId={projectId} files={overview.files} language={language}
+          onClose={() => setShowScanFailures(false)}
+          onLocate={(segmentId) => { setShowScanFailures(false); onFindSegment("", segmentId); }} />}
         <div className="term-list" ref={termListRef} onScroll={(event) => {
           const cached = termsCache.get(projectId);
           if (cached) cached.scrollTop = event.currentTarget.scrollTop;

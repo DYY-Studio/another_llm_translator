@@ -1074,3 +1074,90 @@ async def test_draft_run_snapshot_preserves_effective_context_settings(tmp_path)
     }
     assert frozen['context']['terminology'] == {'enabled': False, 'previous_segments': 7}
     assert load_config(project / 'config.toml') == settings
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_draft,include_summaries", [(True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("failure_kind", ["external_error", "format_error"])
+async def test_combination_failures_expose_each_output_once_per_segment(
+    tmp_path: Path, include_draft: bool, include_summaries: bool, failure_kind: str,
+) -> None:
+    from app.web_store import WebStore
+
+    project = await create_project(tmp_path, "Alice entered.\nBob followed.")
+    if include_summaries:
+        write_summary_participation(project, [{"file_id": "F0001", "part_id": "document", "selected": True}])
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        if failure_kind == "format_error":
+            return httpx.Response(200, json={"choices": [{"message": {"content": "invalid jsonl"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "content_filter"}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_terminology(project, Scope(), http_client=client,
+            include_draft_translation=include_draft, include_summaries=include_summaries)
+    failures = WebStore(project).terminology_failures()
+    assert failures["run_id"] == result["run_id"]
+    assert failures["failed"] == 2
+    assert not failures["truncated"]
+    expected = {"terminology"} | ({"translation"} if include_draft else set()) | ({"content_summary"} if include_summaries else set())
+    for segment in failures["segments"]:
+        assert {error["stage"] for error in segment["errors"]} == expected
+        assert all(error["error_class"] == failure_kind for error in segment["errors"])
+        if failure_kind == "external_error":
+            assert all("content_filter" in error["error_message"] for error in segment["errors"])
+        assert all(error["request_id"] for error in segment["errors"])
+    assert WebStore(project).terminology_scan()["failed"] == 2
+
+    # The public endpoint must use the same bounded, deduplicated projection.
+    from fastapi.testclient import TestClient
+    from app.web import create_app
+    app = create_app(projects_root=project.parent)
+    response = TestClient(app).get(f"/api/v1/projects/{project.name}/terms/failures")
+    assert response.status_code == 200
+    assert response.json() == failures
+
+    def success_handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        records = [{"type": "term", "source": "Alice", "category": "人物"}]
+        if include_summaries:
+            records.insert(0, {"type": "summary", "text": "爱丽丝和鲍勃出现"})
+        if include_draft:
+            records.extend({"type": "segment", "id": item["id"], "translation": "测试译文"} for item in payload["segments"])
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(success_handler)) as client:
+        resumed = await run_terminology(project, Scope(), http_client=client,
+            include_draft_translation=include_draft, include_summaries=include_summaries)
+    assert resumed["failed"] == 0, WebStore(project).terminology_failures()
+    assert WebStore(project).terminology_failures()["segments"] == []
+
+
+@pytest.mark.asyncio
+async def test_successful_summary_slice_does_not_hide_a_failed_sibling(tmp_path: Path) -> None:
+    from copy import deepcopy
+    from app.sqlite_storage import write_content_summary
+    from app.summary_provenance import digest
+    from app.web_store import WebStore
+
+    project = await create_project(tmp_path, "ABCD")
+    write_summary_participation(project, [{"file_id": "F0001", "part_id": "document", "selected": True}])
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "content_filter"}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await run_terminology(project, Scope(), http_client=client, include_summaries=True)
+    record = read_content_summaries(project, kind="fragment", status="failed")[0]
+    record.update(status="completed", text="Earlier summary")
+    write_content_summary(project, record)
+    for offset, text, status in [(0, "AB", "failed"), (2, "CD", "completed")]:
+        sliced = deepcopy(record)
+        piece = sliced["source_range"]["segments"][0]
+        piece.update(source=text, model_text=text, source_digest=digest(text), model_text_digest=digest(text), slice_index=offset)
+        piece["slice_id"] = f"{piece['segment_id']}#slice-{offset:04d}-{digest(text)[7:15]}-{digest(text)[7:15]}"
+        sliced.update(record_id=f"SUMMARY-SLICE-{offset}", status=status, text="Slice summary" if status == "completed" else None,
+                      error_class="external_error", error_message="First slice failed")
+        write_content_summary(project, sliced)
+    failures = WebStore(project).terminology_failures()
+    assert failures["failed"] == 1
+    assert any(error["stage"] == "content_summary" and error["error_message"] == "First slice failed"
+               for segment in failures["segments"] for error in segment["errors"])

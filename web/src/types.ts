@@ -1024,6 +1024,21 @@ export interface RelatedTermsResponse {
   related: RelatedTerm[];
 }
 
+export interface TerminologyFailures {
+  run_id: string | null;
+  failed: number;
+  truncated: boolean;
+  segments: Array<{
+    segment_id: string;
+    errors: Array<{
+      stage: "terminology" | "translation" | "content_summary";
+      error_class: string;
+      error_message: string;
+      request_id: string | null;
+    }>;
+  }>;
+}
+
 export interface TerminologyScan {
   active_task_id: string | null;
   status: "none" | "active" | "completed" | "partial_published" | string;

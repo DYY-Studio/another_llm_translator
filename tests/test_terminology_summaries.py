@@ -2575,6 +2575,10 @@ async def test_summary_external_failure_is_counted_as_external_error(
         os.environ.pop("LLM_API_KEY", None)
     assert result["failed"] == 1
     assert result["failure_counts"] == {"external_error": 1}
+    from app.web_store import WebStore
+    failures = WebStore(project).terminology_failures()
+    assert failures["failed"] == 1
+    assert {error["stage"] for segment in failures["segments"] for error in segment["errors"]} == {"content_summary"}
 
 
 @pytest.mark.asyncio
