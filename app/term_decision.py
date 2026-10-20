@@ -586,11 +586,16 @@ def decision_plan(
         project, list(library.get("terms", [])), config
     ))
     if not knowledge_only and prepare_requests:
+        descriptions: dict[str, dict[str, list[str]]] = {}
+        for fragment in known_fragments.values():
+            if fragment["state"] != "active" or not fragment["valid"]:
+                continue
+            source = fragment.get("source", fragment["original_owner"])
+            descriptions.setdefault(fragment["owner"], {}).setdefault(source, []).append(fragment["text"])
         for key, item in evidence.items():
             item["description"] = "\n\n".join(
-                f"[{fragment.get('source', fragment['original_owner'])}] {fragment['text']}"
-                for fragment in known_fragments.values()
-                if fragment["owner"] == key and fragment["state"] == "active" and fragment["valid"]
+                f"[{source}]\n" + "\n\n".join(texts)
+                for source, texts in descriptions.get(key, {}).items()
             ) or None
     language = _prompt_language(project, prompt_language)
     prompts = _prompt(project, language, final_review=final_review, knowledge_only=knowledge_only)

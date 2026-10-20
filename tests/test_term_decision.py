@@ -597,11 +597,12 @@ async def test_decision_carries_fragment_descriptions_through_final_review(tmp_p
     add_unsourced(knowledge, "alice", "新身份线索", "import")
     moved = add_unsourced(knowledge, "bob", "原本描述 Bob", "import")
     knowledge["fragments"][moved]["owner"] = "alice"
+    add_unsourced(knowledge, "alice", "另一条身份线索", "import")
     disabled = add_unsourced(knowledge, "alice", "已停用内容", "import")
     knowledge["fragments"][disabled]["state"] = "inactive"
     write_json(project, path, library)
     plan = decision_plan(project, final_review=True)
-    expected = "[alice] unhelpful\n\n[alice] 新身份线索\n\n[bob] 原本描述 Bob"
+    expected = "[alice]\nunhelpful\n\n新身份线索\n\n另一条身份线索\n\n[bob]\n原本描述 Bob"
     for phase in ("adjudication", "consistency", "final_review", "containment"):
         evidence = deepcopy(plan["evidence"])
         if phase == "final_review":

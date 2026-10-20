@@ -337,8 +337,8 @@ _FIELD_PREFIX = {
         "en": "conflicts: Deduplicated historical candidates and relationship disputes, not vote totals or an allowed-value whitelist; new values are allowed when supported by full-work evidence.",
     },
     "description": {
-        "zh-CN": "description 是有效说明片段的只读拼接文本，方括号标明原术语归属；applied_description 是已应用实体说明，仅供对照。片段可能重复、存在分歧或描述不同位置的情况，须结合原文判断，不得把排列顺序当作事实发生时间。两者均不得修改，说明只能在最后的 knowledge 阶段更新。",
-        "en": "description joins valid explanation fragments as read-only text; brackets identify the original term. applied_description is the applied entity explanation for comparison. Fragments may repeat, disagree or describe different source positions; assess them against source evidence and do not treat their order as event chronology. Neither field may be changed; explanations may only be updated in the final knowledge phase.",
+        "zh-CN": "description 是按原术语归属分组的有效说明片段只读文本，方括号标明整组的原术语归属；applied_description 是已应用实体说明，仅供对照。片段可能重复、存在分歧或描述不同位置的情况，须结合原文判断，不得把排列顺序当作事实发生时间。两者均不得修改，说明只能在最后的 knowledge 阶段更新。",
+        "en": "description groups valid explanation fragments by original term as read-only text; each bracketed heading identifies the original term for its whole group. applied_description is the applied entity explanation for comparison. Fragments may repeat, disagree or describe different source positions; assess them against source evidence and do not treat their order as event chronology. Neither field may be changed; explanations may only be updated in the final knowledge phase.",
     },
     "entities": {
         "zh-CN": "entities: 待聚合实体，entity 是标识，members 是最终组成员。",
