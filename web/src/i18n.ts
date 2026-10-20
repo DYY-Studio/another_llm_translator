@@ -4,6 +4,13 @@ export type Language = "zh-CN" | "en";
 
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
+    "review.pagination": "草案分页",
+    "review.previousPage": "上一页",
+    "review.nextPage": "下一页",
+    "review.kind": "建议类型",
+    "review.status": "审核状态",
+    "review.resultRange": "显示 {start}–{end}，共 {count} 项",
+    "review.noResults": "共 0 项",
     "textTranslation.title": "临时翻译",
     "textTranslation.hint": "沿用项目的翻译模型、语言、Prompt 和术语库，输入和结果仅保留在当前页面",
     "textTranslation.termsHint": "命中术语使用全部已应用说明，不区分前后文",
@@ -1579,6 +1586,13 @@ const messages: Record<Language, Record<string, string>> = {
     "dialog.openHint": "只打开此目录，不扫描父目录，也不会移动项目。",
   },
   en: {
+    "review.pagination": "Draft pagination",
+    "review.previousPage": "Previous page",
+    "review.nextPage": "Next page",
+    "review.kind": "Proposal type",
+    "review.status": "Review status",
+    "review.resultRange": "Showing {start}–{end} of {count}",
+    "review.noResults": "0 results",
     "textTranslation.title": "Quick translation",
     "textTranslation.hint": "Uses this project’s translation model, language, prompt and terminology. Input and results stay on this page.",
     "textTranslation.termsHint": "Matched terms include all applied descriptions, without relative document positions.",
