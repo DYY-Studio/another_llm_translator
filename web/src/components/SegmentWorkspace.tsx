@@ -165,7 +165,7 @@ export function SegmentWorkspace({
   const preserveFocusRef = useRef("");
   const scrollToFocusRef = useRef(false);
   const restoredScrollTopRef = useRef<number | null>(null);
-  const jumpConsumedRef = useRef(false);
+  const jumpConsumedRef = useRef<typeof pendingJump>(null);
   const jumpTargetRef = useRef("");
   const jumpSearchRef = useRef("");
   const pageCacheRef = useRef(new Set<string>());
@@ -186,14 +186,11 @@ export function SegmentWorkspace({
     if (focusFailures) setStatus("error");
   }, [focusFailures]);
 
-  // A term-hit jump arrives with the workspace (fresh mount): apply the
-  // prefilled search and keep the target segment focused once its window
-  // loads. Cached windows from previous visits are dropped so the cache
-  // restore cannot overwrite the jump focus. Consumed once per mount so
-  // re-renders and later visits never replay the navigation.
+  // Consume each jump once, including repeated navigation within this stage.
+  // Drop cached windows so restoration cannot overwrite the target focus.
   useEffect(() => {
-    if (!pendingJump || jumpConsumedRef.current) return;
-    jumpConsumedRef.current = true;
+    if (!pendingJump || jumpConsumedRef.current === pendingJump) return;
+    jumpConsumedRef.current = pendingJump;
     jumpTargetRef.current = pendingJump.segmentId;
     jumpSearchRef.current = pendingJump.search;
     const prefix = JSON.stringify([projectId, stage]);

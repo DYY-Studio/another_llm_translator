@@ -262,6 +262,8 @@ EPUB 的 ZIP/XML 安全校验、文本流提取、Ruby/内联格式模型表示�
 创建、选择、替换、输入、导出、诊断、Segment、术语、自动决策、概括和设置分别由对应组件
 拥有。`InteractionProvider.tsx` 统一确认、输入弹窗与固定操作反馈，`Modal.tsx` 负责共享弹窗的焦点约束和恢复。共享 API 类型位于 `web/src/types.ts`，通用选择行为位于 `useClassicSelection.ts`。
 
+`TermScanFailuresDialog.tsx` 复用术语扫描明细和 Segment 顺序索引展示失败范围，`termScanFailures.ts` 负责合并相邻位置与汇总错误；定位复用翻译工作区。
+
 `StorageView.tsx` 负责设置页中的存储汇总、数据位置设置、项目明细和逐项清理交互；它不复制后端
 扫描、迁移或安全判断，操作后重新读取服务端状态。`web_storage_routes.py` 暴露数据根状态和迁移
 请求/取消，并拒绝活动任务期间的变更；实际迁移委托给 `data_root.py`。

@@ -40,11 +40,6 @@
 .term-scan-status .scan-error-count { color: var(--danger); }
 .term-scan-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .term-scan-actions button { min-height: 32px; padding-inline: 10px; }
-.term-scan-failures { max-height: 210px; overflow: auto; display: grid; gap: 6px; padding-top: 8px; border-top: 1px solid var(--warning-border); }
-.term-scan-failures > div { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; min-width: 0; }
-.term-scan-failures code { color: var(--text); }
-.term-scan-failures span { min-width: 0; overflow-wrap: anywhere; }
-.term-scan-failures small { color: var(--muted); }
 .term-row { width: 100%; display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 12px 16px; border: 0; border-bottom: 1px solid var(--row-border); background: var(--surface); text-align: left; }
 .term-row:hover { background: var(--sidebar); }
 .term-row.selected { background: var(--selected); }

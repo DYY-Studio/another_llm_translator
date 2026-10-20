@@ -287,3 +287,13 @@
 .continuous-run-footer .modal-actions { margin-top: 12px; }
 .continuous-run-footer .continuous-run-blocking { max-height: 140px; overflow: auto; font-size: 12px; }
 .continuous-run-footer .continuous-run-blocking p { margin: 4px 0; }
+
+.scan-failures-modal { width: min(760px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); display: flex; flex-direction: column; overflow: hidden; }
+.scan-failures-modal > .directory-picker-heading, .scan-failures-modal > p, .scan-failures-modal > .modal-actions { flex: none; }
+.scan-failure-ranges { min-height: 0; overflow: auto; }
+.scan-failure-range { padding: 14px 0; border-top: 1px solid var(--border); }
+.scan-failure-range-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; font-size: 12px; }
+.scan-failure-range-heading strong { overflow-wrap: anywhere; }
+.scan-failure-range-heading span, .scan-failure-range small { color: var(--muted); }
+.scan-failure-range-link { max-width: 100%; margin-top: 6px; padding: 4px 0; border: 0; background: transparent; color: var(--accent-text); text-align: left; overflow-wrap: anywhere; }
+.scan-failure-range p { margin: 6px 0 0; font-size: 12px; overflow-wrap: anywhere; }

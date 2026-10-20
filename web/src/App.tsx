@@ -2,6 +2,7 @@ import { Feedback } from "./components/InteractionProvider";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorPayloadFrom, onAuthRequired } from "./api";
+import { TermScanFailuresDialog } from "./components/TermScanFailuresDialog";
 import { AppShell } from "./components/AppShell";
 import { SegmentWorkspace, prefetchWorkspace } from "./components/SegmentWorkspace";
 import { TermsView, openTermsSubpage, prefetchTerms, type TermsSubpage } from "./components/TermsView";
@@ -94,6 +95,7 @@ export default function App() {
   } | null>(null);
   const [pendingTermSource, setPendingTermSource] = useState<string | null>(null);
   const [tasks, setTasks] = useState<Record<string, TaskState>>({});
+  const [scanFailuresProjectId, setScanFailuresProjectId] = useState<string | null>(null);
   const [failureFocus, setFailureFocus] = useState<LLMStage | null>(null);
   const [settingsField, setSettingsField] = useState<SettingsField | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -591,6 +593,10 @@ export default function App() {
 
   function showFailures() {
     const taskTarget = task ? displayableFailureStage(task) : null;
+    if (taskTarget === "terminology") {
+      setScanFailuresProjectId(selectedProjectId);
+      return;
+    }
     const target = task?.stage === "continuous" || task?.draft_progress
       ? taskTarget
       : runnable[stage] ?? taskTarget;
@@ -631,7 +637,7 @@ export default function App() {
     />
   );
   else if (project && overview) {
-    if (stage === "terminology") content = <TermsView key={`terms:${selectedProjectId}`} project={project} projectId={selectedProjectId} overview={overview} focusFailures={failureFocus === "terminology"} language={language} onFindSegment={jumpToSegment} pendingTermSource={pendingTermSource} onTermJumpConsumed={() => setPendingTermSource(null)} task={task} onTask={updateTask} onSubpageChange={setTermsSubpage} />;
+    if (stage === "terminology") content = <TermsView key={`terms:${selectedProjectId}`} project={project} projectId={selectedProjectId} overview={overview} language={language} onFindSegment={jumpToSegment} pendingTermSource={pendingTermSource} onTermJumpConsumed={() => setPendingTermSource(null)} task={task} onTask={updateTask} onSubpageChange={setTermsSubpage} />;
     else if (stage === "translation" || stage === "proofreading" || stage === "polishing") {
       content = <SegmentWorkspace key={`${stage}:${selectedProjectId}`} project={project} projectId={selectedProjectId} stage={stage} overview={overview} onRefresh={refresh} focusFailures={failureFocus === stage} language={language} pendingJump={pendingJump} onJumpConsumed={() => setPendingJump(null)} onFindTerm={jumpToTerm} />;
     } else if (stage === "export") content = <ExportView project={project} overview={overview} language={language} onNavigateStage={navigateStage} onOpenSettings={openSettingsField} />;
@@ -715,6 +721,15 @@ export default function App() {
         )}
         {content}
       </AppShell>
+      {scanFailuresProjectId === selectedProjectId && overview && <TermScanFailuresDialog
+        key={selectedProjectId}
+        project={project}
+        projectId={selectedProjectId}
+        files={overview.files}
+        language={language}
+        onClose={() => setScanFailuresProjectId(null)}
+        onLocate={(segmentId) => { setScanFailuresProjectId(null); jumpToSegment("", segmentId); }}
+      />}
       {createOpen && <CreateProjectDialog language={language} onClose={() => setCreateOpen(false)} onCreated={async (selector, path) => { setCreateOpen(false); if (path) rememberProjectPath(path); const available = await loadProjects(); const created = available.find((item) => item.selector === selector); if (created) selectProject(created); else setProject(selector); }} />}
       {welcomeOpen && (
         <div className="welcome-overlay" role="dialog" aria-modal="true">
