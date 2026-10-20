@@ -984,25 +984,13 @@ def test_final_review_payload_projects_windows_to_request_local_refs() -> None:
         }
     ]
     assert focus_evidence["windows"] == [
-        {
-            "window_ref": 1,
-            "hit_segment_refs": [2],
-            "segments": [
-                {
-                    "segment_ref": 1,
-                    "boundary_ref": 1,
-                    "source": "before",
-                    "is_empty": False,
-                },
-                {
-                    "segment_ref": 2,
-                    "boundary_ref": 1,
-                    "source": "focus hit",
-                    "is_empty": False,
-                },
-            ],
-        }
+        {"window_ref": 1, "hit_segment_refs": [2], "segment_refs": [1, 2]}
     ]
+    assert payload["anchors"][0]["evidence"]["windows"] == focus_evidence["windows"]
+    assert payload["context_segments"] == {
+        "1": {"boundary_ref": 1, "source": "before", "is_empty": False},
+        "2": {"boundary_ref": 1, "source": "focus hit", "is_empty": False},
+    }
     serialized = json.dumps(focus_evidence, ensure_ascii=False)
     assert all(value not in serialized for value in ("F1", "chapter-1", "S0", "S1"))
 
@@ -1062,7 +1050,8 @@ def test_final_review_request_estimation_includes_windows_and_rejects_hard_overf
         )
 
     assert observed[0]["phase"] == "final_review"
-    assert observed[0]["terms"][0]["evidence"]["windows"][0]["segments"]
+    assert observed[0]["terms"][0]["evidence"]["windows"][0]["segment_refs"]
+    assert observed[0]["context_segments"]["1"]["source"] == "x" * 500
 
 
 def test_final_review_rejects_needs_review_as_a_retry_error() -> None:

@@ -337,6 +337,8 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 ### 自动术语决策关系校验
 
+终审请求通过共享 `context_segments` 表提供上下文 Segment，以请求内 `segment_ref` 索引，条目保留 `boundary_ref`、`source` 和 `is_empty`。各术语 `evidence.windows` 的 `segment_refs` 按原文顺序引用共享表，`hit_segment_refs` 保留该术语自己的命中位置，`window_ref` 仅在所属术语内有效。样本摘录和匹配视图仍按术语保留。
+
 名称与关系决策各阶段的 `description` 为按术语当前归属拼接的全部有效、未停用说明片段，每段以方括号标明原术语归属；`applied_description` 单独提供已应用实体说明作对照。两者均只读。片段可能重复、存在分歧或描述不同位置，排列顺序不表示事实发生时间。拼接文本计入现有分批预算，不截断。
 
 `changes` 按完整最终状态检查 [术语组规则](MINIMAL.md#51-术语)，覆盖新增 Alias、
