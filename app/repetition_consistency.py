@@ -37,7 +37,7 @@ from .user_config import effective_path
 
 STAGE = "repetition_consistency"
 DRAFT_FILE = "repetition_draft.json"
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 def repetition_resume(project: Path, plan: dict[str, Any], *, estimate_usage: bool = True) -> dict[str, Any] | None:
@@ -344,15 +344,42 @@ def comparison_payload(groups: list[dict[str, Any]], evidence: dict[str, Any], s
     source_ids = {key: str(i) for i, key in enumerate(source_keys, 1)}
     short = {sid: source_ids[evidence[sid]["source_key"]] for sid in context_ids}
     used_terms = dict.fromkeys(ref["id"] for o in occurrences for ref in o["terms"])
-    short_terms = {tid: str(i) for i, tid in enumerate(used_terms, 1)}
+    shared_terms: dict[str, dict[str, Any]] = {}
+    term_ids: dict[str, str] = {}
+    short_terms: dict[str, str] = {}
+    entity_knowledge: dict[str, dict[str, Any]] = {}
+    item_ids: dict[tuple[str, str, bool], str] = {}
+    knowledge_refs: dict[str, list[str]] = {}
+    for tid in used_terms:
+        term = terms[tid]
+        base = {key: value for key, value in term.items() if key != "entity_knowledge"}
+        key = digest(base)
+        short_terms[tid] = term_ids.setdefault(key, str(len(term_ids) + 1))
+        shared_terms[short_terms[tid]] = base
+        knowledge_refs[tid] = []
+        knowledge = term.get("entity_knowledge")
+        if knowledge is not None:
+            entity = knowledge["entity"]
+            for item in knowledge["items"]:
+                item_key = (entity, item["text"], item["unsourced"])
+                item_id = item_ids.setdefault(item_key, f"K{len(item_ids) + 1}")
+                entity_knowledge.setdefault(entity, {})[item_id] = item
+                knowledge_refs[tid].append(item_id)
+
+    def term_reference(ref: dict[str, Any]) -> dict[str, Any]:
+        return {"id": short_terms[ref["id"]], "aliases": ref["aliases"],
+                "knowledge": [{"id": item_id, "source_relation": relation}
+                    for item_id, relation in zip(knowledge_refs[ref["id"]], ref["source_relations"], strict=True)]}
+
     return {"target_language": language,
             "files": {key: name for group in groups for key, name in group["files"].items()},
             "parts": {str(index): part for (_, part), index in part_ids.items()},
-            "terms": {short_terms[tid]: terms[tid] for tid in used_terms},
+            "terms": shared_terms,
+            "entity_knowledge": entity_knowledge,
             "context": {source_ids[key]: sources[key] for key in source_keys},
             "repetitions": [{"id": group["id"], "source": group["source"], "translations": group["translations"],
                 "occurrences": [{"id": o["id"], "file": o["file_index"], "part": part_ids[(o["file_index"], o["part_id"])],
-                    "position": o["line_index"], "variant": o["variant"], "terms": [{**ref, "id": short_terms[ref["id"]]} for ref in o["terms"]],
+                    "position": o["line_index"], "variant": o["variant"], "terms": [term_reference(ref) for ref in o["terms"]],
                     "previous": [short[sid] for sid in o["previous"]], "next": [short[sid] for sid in o["next"]]}
                     for o in group["occurrences"]]} for group in groups]}
 

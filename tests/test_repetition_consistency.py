@@ -424,8 +424,10 @@ def test_comparison_injects_context_terms_with_local_relations_and_shared_snapsh
     first_term = payload["terms"][first["terms"][0]["id"]]
     second_term = payload["terms"][second["terms"][0]["id"]]
     assert first_term["preferred_translation"] == "前文译文"
-    assert first["terms"][0]["source_relations"][0] == ["after 1"]
-    assert second["terms"][0]["source_relations"][0] == ["within"]
+    assert first["terms"][0]["knowledge"] == [{"id": "K1", "source_relation": ["after 1"]}]
+    assert second["terms"][0]["knowledge"] == [{"id": "K1", "source_relation": ["within"]}]
+    assert payload["entity_knowledge"] == {"前文": {"K1": {"text": "角色设定", "unsourced": False}}}
+    assert "entity_knowledge" not in first_term
     assert first["terms"][0]["aliases"] == []
     assert second["terms"][0]["aliases"] == aliases
     assert first_term == second_term
@@ -1595,3 +1597,46 @@ def test_repetition_uses_its_own_model_and_temperature(tmp_path, monkeypatch):
 
     assert asyncio.run(run())["completed"] == 3
     assert requests[0]["model"] == "repetition-model" and requests[0]["temperature"] == 0.23
+
+
+def test_comparison_shares_overlapping_knowledge_subsets_without_losing_local_relations():
+    from copy import deepcopy
+    from app.repetition_consistency import comparison_payload
+
+    common = {"text": "共享说明正文", "unsourced": False}
+    extra = {"text": "额外说明正文", "unsourced": False}
+    base = {"source": "Alpha", "preferred_translation": "阿尔法"}
+    terms = {
+        "a": {**base, "entity_knowledge": {"entity": "alpha", "items": [common, extra]}},
+        "b": {**base, "entity_knowledge": {"entity": "alpha", "items": [common]}},
+        "c": {"source": "Beta", "preferred_translation": "贝塔",
+              "entity_knowledge": {"entity": "beta", "items": [common]}},
+        "d": {**base, "entity_knowledge": {"entity": "alpha", "items": [{**common, "unsourced": True}]}},
+    }
+    relations = [[["before 1"], ["after 1"]], [["within"]], [["before 2"]], [[]]]
+    group = {"id": "1", "source": "重复原文", "translations": ["甲", "乙"], "files": {"1": "sample.txt"},
+             "occurrences": [{"id": str(i), "file_index": 1, "part_id": "document", "line_index": i,
+                 "variant": i % 2, "previous": [], "next": [],
+                 "terms": [{"id": tid, "aliases": [f"alias{i}"], "source_relations": relation}]}
+                 for i, (tid, relation) in enumerate(zip(terms, relations, strict=True), 1)]}
+    before = deepcopy((group, terms))
+    payload = comparison_payload([group], {}, {}, "中文", terms)
+    assert payload["terms"] == {"1": base, "2": {"source": "Beta", "preferred_translation": "贝塔"}}
+    assert payload["entity_knowledge"] == {
+        "alpha": {"K1": common, "K2": extra, "K4": {**common, "unsourced": True}},
+        "beta": {"K3": common},
+    }
+    references = [o["terms"][0] for o in payload["repetitions"][0]["occurrences"]]
+    assert [ref["id"] for ref in references] == ["1", "1", "2", "1"]
+    assert [ref["aliases"] for ref in references] == [[f"alias{i}"] for i in range(1, 5)]
+    assert [ref["knowledge"] for ref in references] == [
+        [{"id": "K1", "source_relation": ["before 1"]}, {"id": "K2", "source_relation": ["after 1"]}],
+        [{"id": "K1", "source_relation": ["within"]}],
+        [{"id": "K3", "source_relation": ["before 2"]}],
+        [{"id": "K4", "source_relation": []}],
+    ]
+    subset = {**group, "occurrences": group["occurrences"][1:2]}
+    repacked = comparison_payload([subset], {}, {}, "中文", terms)
+    assert repacked["entity_knowledge"] == {"alpha": {"K1": common}}
+    assert repacked["repetitions"][0]["occurrences"][0]["terms"][0]["knowledge"] == references[1]["knowledge"]
+    assert (group, terms) == before
