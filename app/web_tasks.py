@@ -1684,7 +1684,7 @@ class WebTaskManager:
                     limiter_stages = (state.stage,)
                 if state.stage in {CONTINUOUS_STAGE, "run-all"}:
                     for stage in limiter_stages:
-                        config = (await run_blocking(lambda: load_project_config(state.project, stage="translation" if stage == "repetition_consistency" else stage)))
+                        config = (await run_blocking(lambda: load_project_config(state.project, stage=stage)))
                         key = (
                             str(config["_llm_preset_id"]),
                             str(config["_llm_preset_hash"]),
@@ -1696,7 +1696,7 @@ class WebTaskManager:
                         shared_limiters[key] = limiter
                         limiter_releases.append(release)
                 else:
-                    config = (await run_blocking(lambda: load_project_config(state.project, stage="translation" if state.stage == "repetition_consistency" else state.stage)))
+                    config = (await run_blocking(lambda: load_project_config(state.project, stage=state.stage)))
                     limiter, release = self._acquire_limiter(config)
                     shared_limiters[
                         (

@@ -1477,6 +1477,50 @@ async def test_continuous_repetition_applies_or_stops_for_review(tmp_path, monke
     assert translations.count("我会去接你") == (2 if waiting else 1)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("screening", [False, True])
+async def test_continuous_repetition_kept_groups_do_not_require_manual_application(tmp_path, monkeypatch, screening):
+    from app.repetition_consistency import run_repetition
+    from app.web_tasks import WebTaskManager
+
+    project = repetition_project(tmp_path, monkeypatch)
+    events = []
+
+    async def translate(*args, **kwargs):
+        return {"selected": 8, "completed": 8, "failed": 0, "pending": 0}
+
+    async def review(*args, **kwargs):
+        events.append("proofreading")
+        return {"selected": 8, "completed": 8, "failed": 0, "pending": 0}
+
+    def respond(request):
+        response = transport(choice="skip").handler(request)
+        if not screening:
+            body = response.json()
+            result = json.loads(body["choices"][0]["message"]["content"])
+            result["repetitions"][0].update(groups=[], keep=["1", "2", "3"], uncertain=[])
+            body["choices"][0]["message"]["content"] = json.dumps(result)
+            return httpx.Response(200, json=body)
+        return response
+
+    async def repetition(*args, **kwargs):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await run_repetition(*args, **kwargs, http_client=client)
+
+    monkeypatch.setattr("app.web_continuous.run_translation", translate)
+    monkeypatch.setattr("app.web_continuous.run_review", review)
+    monkeypatch.setattr("app.web_continuous.run_repetition", repetition)
+    manager = WebTaskManager()
+    task = await manager.start(project, "continuous", scope=Scope(), run_action=None,
+        reuse_mixed_fingerprints=True, continuous_stages=("translation", "proofreading"),
+        include_repetition_consistency=True, screening_enabled=screening)
+    await manager.tasks[task["task_id"]].asyncio_task
+    result = manager.get(task["task_id"])
+    assert result["status"] == "completed", result.get("error")
+    assert not result["summary"]["waiting_review"]
+    assert events == ["proofreading"]
+
+
 def test_continuous_repetition_preflight_permissions_and_deferred_count(tmp_path, monkeypatch):
     from app.web_continuous import inspect_continuous
     project = repetition_project(tmp_path, monkeypatch)
@@ -1746,7 +1790,8 @@ def test_comparison_reference_context_affects_only_hard_budget(tmp_path, monkeyp
     assert all(tokens <= singleton_tokens and len(groups) == 1 for groups, tokens in batches)
 
 
-def test_repetition_uses_its_own_model_and_temperature(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["direct", "standalone", "continuous"])
+def test_repetition_uses_its_own_model_and_temperature(tmp_path, monkeypatch, mode):
     from app.repetition_consistency import repetition_plan, run_repetition
     project = repetition_project(tmp_path, monkeypatch)
     preset_path = config.APP_ROOT / "llm_presets" / "default.json"
@@ -1759,8 +1804,45 @@ def test_repetition_uses_its_own_model_and_temperature(tmp_path, monkeypatch):
     plan = repetition_plan(project, Scope())
     assert plan["config"]["_llm_preset_id"] == "repetition"
     requests = []
+    acquired = []
+
+    if mode != "direct":
+        from app.web_tasks import WebTaskManager
+        if mode == "continuous":
+            from app.web_continuous import inspect_continuous
+            options = inspect_continuous(project, ("translation",), include_repetition_consistency=True,
+                reuse_mixed_fingerprints=True)
+            assert options["presets"]["repetition_consistency"] == {"id": "repetition", "model": "repetition-model"}
+        manager = WebTaskManager()
+        acquire = manager._acquire_limiter
+
+        def capture(config):
+            acquired.append(config["_llm_preset_id"])
+            return acquire(config)
+
+        async def repetition(*args, **kwargs):
+            async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+                return await run_repetition(*args, **kwargs, http_client=client)
+
+        async def translate(*args, **kwargs):
+            return {"selected": 8, "completed": 8, "failed": 0, "pending": 0}
+
+        monkeypatch.setattr(manager, "_acquire_limiter", capture)
+        monkeypatch.setattr("app.repetition_consistency.run_repetition", repetition)
+        monkeypatch.setattr("app.web_continuous.run_repetition", repetition)
+        monkeypatch.setattr("app.web_continuous.run_translation", translate)
 
     async def run():
+        if mode != "direct":
+            task = await manager.start(project, "continuous" if mode == "continuous" else "repetition_consistency",
+                scope=Scope(), run_action=None, reuse_mixed_fingerprints=mode == "continuous",
+                continuous_stages=("translation",) if mode == "continuous" else (),
+                include_repetition_consistency=mode == "continuous")
+            await manager.tasks[task["task_id"]].asyncio_task
+            view = manager.get(task["task_id"])
+            assert view["status"] == "completed", view.get("error")
+            assert "repetition" in acquired
+            return view["summary"]["summaries"]["repetition_consistency"] if mode == "continuous" else view["summary"]
         async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
             return await run_repetition(project, Scope(), prepared_plan=plan, http_client=client)
 

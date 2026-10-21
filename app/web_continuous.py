@@ -397,7 +397,7 @@ def inspect_continuous(
         terms if terms is not None and bool(terms.get("terms")) else None
     )
     configs = {
-        stage: load_project_config(project, stage="translation" if stage == "repetition_consistency" else stage) for stage in execution_stages
+        stage: load_project_config(project, stage=stage) for stage in execution_stages
     }
     limiter_identities: dict[tuple[str, str], tuple[int, int, int, int]] = {}
     for stage, config in configs.items():
@@ -1065,7 +1065,7 @@ async def run_continuous(
     for stage in normalized:
         if stage == "translation" and include_draft_translation:
             continue
-        config = (await run_blocking(lambda: load_project_config(project, stage="translation" if stage == "repetition_consistency" else stage)))
+        config = (await run_blocking(lambda: load_project_config(project, stage=stage)))
         identity = _limiter_identity(config)
         try:
             stage_limiters[stage] = limiters[identity]
@@ -1168,7 +1168,8 @@ async def run_continuous(
                     needs_review = sum(len(group["uncertain"]) for group in draft["groups"])
                     summary = {**summary, "needs_review": needs_review}
                     step.update(_continuous_step_summary(stage, summary, run_id=summary["run_id"]))
-                    if needs_review or (not apply_repetition_consistency and stage != normalized[-1] and any(group["proposals"] for group in draft["groups"])):
+                    if needs_review or (not apply_repetition_consistency and stage != normalized[-1]
+                        and any(not proposal.get("manual") for group in draft["groups"] for proposal in group["proposals"])):
                         step["status"] = "waiting_review"
                         summaries[stage] = dict(summary)
                         emit(stage, "waiting_review", step)
