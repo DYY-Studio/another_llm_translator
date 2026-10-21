@@ -10,6 +10,7 @@ import unicodedata
 from collections import defaultdict
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,7 @@ from .decision import DecisionClient, DecisionQuestion, decision_preset_path, lo
 from .decision_prompt import get_declaration, resolve_prompt
 from .diagnostics import current_diagnostics
 from .stage_runtime import _prompt, _prompt_language
-from .errors import ContextLengthError, ExternalError, StorageError, UsageError
+from .errors import AppError, app_error_payload, ContextLengthError, ExternalError, StorageError, UsageError
 from .execution import (Scope, choose_running_run, combine_usage, continue_run, create_run, estimate_messages, estimate_tokens, finalize_run, find_running_runs,
                         render_messages, run_bounded, run_protocol_is_current, select_scope, unavailable_usage)
 from .llm_client import empty_response_split_scope, LLMClient, SlidingWindowLimiter
@@ -37,7 +38,7 @@ from .user_config import effective_path
 
 STAGE = "repetition_consistency"
 DRAFT_FILE = "repetition_draft.json"
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 
 def repetition_resume(project: Path, plan: dict[str, Any], *, estimate_usage: bool = True) -> dict[str, Any] | None:
@@ -46,6 +47,7 @@ def repetition_resume(project: Path, plan: dict[str, Any], *, estimate_usage: bo
         return None
     run = runs[0]
     compatible = (run_protocol_is_current(project, run["run_id"]) and run.get("repetition_checkpoint") == 2 and run.get("repetition_protocol") == PROTOCOL_VERSION
+                  and run.get("final_review") == plan["final_review"]
                   and run.get("repetition_input_fingerprint") == plan["input_fingerprint"])
     reason = None if compatible else "Run 检查点或协议不兼容，或原文、译文及术语证据已变化，请结束旧 Run 并新建"
     try:
@@ -57,6 +59,12 @@ def repetition_resume(project: Path, plan: dict[str, Any], *, estimate_usage: bo
     completed = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
     remaining = [g for g in plan["groups"] if "result" not in checkpoints.get(g["id"], {}) and not group_over_budget(g, plan, checkpoints.get(g["id"], {}))]
     comparison = [g for g in remaining if checkpoints.get(g["id"], {}).get("screening") != "skip"]
+    review_targets = [g for g in plan["groups"] if plan["final_review"]
+        and checkpoints.get(g["id"], {}).get("comparison_execution_index") is not None
+        and checkpoints[g["id"]]["result"]["uncertain"]]
+    review_estimates = [estimate_messages(final_review_messages(g, plan, checkpoints[g["id"]]["result"]),
+        plan["config"]["execution"]["token_safety_factor"]) for g in review_targets if "final_result" not in checkpoints[g["id"]]]
+    limit = request_input_limit(plan["config"], resolve_request_budget(plan["config"], STAGE))
     requests = tokens = None
     if estimate_usage:
         batches = comparison_batches(comparison, plan)
@@ -66,14 +74,16 @@ def repetition_resume(project: Path, plan: dict[str, Any], *, estimate_usage: bo
             unscreened = [g for g in remaining if "screening" not in checkpoints.get(g["id"], {})]
             requests += len(unscreened)
             tokens += sum(g["screening_input_tokens"] for g in unscreened)
+        requests += sum(estimate <= limit for estimate in review_estimates)
+        tokens += sum(estimate for estimate in review_estimates if estimate <= limit)
     latest_execution = (run.get("continuations") or [run])[-1]["stage_fingerprint"]
     return {"execution_changed": latest_execution != plan["fingerprint"], "run_id": run["run_id"], "scope": run["scope"], "prompt_language": run.get("prompt_language"),
-            "screening_enabled": run.get("screening_enabled"), "exclude_punctuation_only": run.get("exclude_punctuation_only"),
+            "screening_enabled": run.get("screening_enabled"), "exclude_punctuation_only": run.get("exclude_punctuation_only"), "final_review": run.get("final_review"),
             "resume_compatible": compatible, "resume_incompatibility_reason": reason,
-            "completed": completed, "completed_steps": sum((int("screening" in c) if plan["screening_enabled"] else 0) + int("result" in c) for c in checkpoints.values()),
+            "completed": completed, "completed_steps": sum((int("screening" in c) if plan["screening_enabled"] else 0) + int("result" in c) + int("final_result" in c) for c in checkpoints.values()),
             "estimated_requests": requests, "estimated_input_tokens": tokens,
-            "over_budget_groups": sum(group_over_budget(g, plan, checkpoints.get(g["id"], {})) for g in plan["groups"]),
-            "total_steps": len(plan["groups"]) * (2 if plan["screening_enabled"] else 1)}
+            "over_budget_groups": sum(group_over_budget(g, plan, checkpoints.get(g["id"], {})) for g in plan["groups"]) + sum(estimate > limit for estimate in review_estimates),
+            "total_steps": len(plan["groups"]) * (2 if plan["screening_enabled"] else 1) + len(review_targets)}
 
 
 def checkpoint_path(run_dir: Path, group_id: str) -> Path:
@@ -93,22 +103,30 @@ def load_checkpoints(run_dir: Path, plan: dict[str, Any]) -> dict[str, Any]:
         except (OSError, ValueError) as exc:
             raise StorageError("无法读取重复译文续作检查点") from exc
         fields = {"screening", "confidence", "screening_execution_index"}
-        if (not isinstance(value, dict) or set(value) not in (fields, fields | {"result", "comparison_execution_index"})
+        result_fields = fields | {"result", "comparison_execution_index"}
+        if (not isinstance(value, dict) or set(value) not in (fields, result_fields, result_fields | {"final_result", "final_execution_index"})
             or not isinstance(value["screening"], str) or value["screening"] not in {"compare", "skip", "refusal", "disabled", "over_budget"}
             or ("result" in value and (not isinstance(value["result"], dict) or set(value["result"]) != {"proposals", "keep", "uncertain"}))):
             raise StorageError("重复译文续作检查点无效")
         for field, invoked in (("screening_execution_index", value["screening"] in {"compare", "skip", "refusal"}),
-                               ("comparison_execution_index", value.get("comparison_execution_index") is not None)):
+                               ("comparison_execution_index", value.get("comparison_execution_index") is not None),
+                               ("final_execution_index", "final_result" in value)):
             index = value.get(field)
             if invoked:
                 if type(index) is not int or not 1 <= index <= last_index:
                     raise StorageError("重复译文检查点执行来源无效")
                 directory = run_dir if index == 1 else run_dir / "continuations" / f"{index - 1:04d}"
-                resource = directory / ("decision_prompts/repetition_screening.json" if field == "screening_execution_index" else "prompt.txt")
+                resource = directory / ({"screening_execution_index": "decision_prompts/repetition_screening.json",
+                    "comparison_execution_index": "prompt.txt", "final_execution_index": "final_review_prompt.txt"}[field])
                 if not resource.is_file():
                     raise StorageError("重复译文检查点执行快照缺失")
             elif index is not None:
                 raise StorageError("重复译文检查点执行来源无效")
+        if "final_result" in value:
+            try:
+                parse_final_review(value["final_result"], group, value["result"])
+            except ExternalError as exc:
+                raise StorageError("重复译文终审检查点无效") from exc
         if "result" in value and value["screening"] != "skip" and value["comparison_execution_index"] is None:
             if value["result"] != {"proposals": [], "keep": [], "uncertain": [o["id"] for o in group["occurrences"]]}:
                 raise StorageError("重复译文检查点缺少比较执行来源")
@@ -145,6 +163,8 @@ def read_draft(project: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         raise StorageError("无法读取重复译文审查草案") from exc
     if not isinstance(draft, dict) or draft.get("run_id") != manifest["run_id"]:
         raise StorageError("重复译文审查草案身份无效")
+    if "final_review_error" in manifest:
+        draft["final_review_error"] = manifest["final_review_error"]
     for group in draft["groups"]:
         if group["proposals"]:
             continue
@@ -163,11 +183,11 @@ def current_draft(project: Path) -> dict[str, Any] | None:
 
 
 def repetition_execution_fingerprint(config: dict[str, Any], prompt: str, screen_content: dict[str, Any] | None,
-                                     preset: dict[str, Any] | None, input_fingerprint: str | None = None) -> str:
+                                     preset: dict[str, Any] | None, input_fingerprint: str | None = None, *, final_prompt: str | None = None) -> str:
     return digest({"input": input_fingerprint, "protocol": PROTOCOL_VERSION,
         "llm": config["_llm_preset_hash"], "adapter": config["_llm_adapter_hash"],
         "temperature": config["llm"]["temperature_repetition_consistency"], "retry": config["retry"],
-        "execution": config["execution"], "budget": vars(resolve_request_budget(config, STAGE)), "decision": preset,
+        "execution": config["execution"], "budget": vars(resolve_request_budget(config, STAGE)), "decision": preset, "final_prompt": final_prompt,
         "decision_context_reserve_tokens": config["chunking"]["context_reserve_tokens"] if preset and preset["protocol"] == "llm" else None, "prompt": prompt, "screen": screen_content})
 
 
@@ -195,11 +215,12 @@ def repetition_resources(project: Path, prompt_language: str | None, screening_e
     return config, prompt, screen_content, screen, preset, language
 
 
-def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False, preview_only: bool = False, estimate_usage: bool = True) -> dict[str, Any]:
+def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False, final_review: bool = False, preview_only: bool = False, estimate_usage: bool = True) -> dict[str, Any]:
     scope.validate()
     if scope.from_file or scope.only_segment or scope.segment_ids is not None or scope.force or scope.dry_run:
         raise UsageError("重复译文审查只支持整个项目或单个 File")
     config, prompt, screen_content, screen, preset, language = repetition_resources(project, prompt_language, screening_enabled)
+    review_prompt = final_review_prompt(prompt, language) if final_review else None
     segments = load_segments(project)
     files = load_source_files(project)
     file_indices = {f["file_id"]: i for i, f in enumerate(files, 1)}
@@ -234,12 +255,12 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
         inputs = digest({"scope": {"only_file": scope.only_file},
             "segments": [(str(item["segment_id"]), segment_signature(item), bases[str(item["segment_id"])]["record_id"], bases[str(item["segment_id"])]["text"]) for item in selected],
             "library": library, "exclude_punctuation_only": exclude_punctuation_only,
-            "screening_enabled": screening_enabled})
+            "screening_enabled": screening_enabled, "final_review": final_review})
         return {"config": config, "language": language, "decision_preset": preset,
-            "screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only,
+            "screening_enabled": screening_enabled, "final_review": final_review, "final_prompt": review_prompt, "exclude_punctuation_only": exclude_punctuation_only,
             "excluded_punctuation_groups": excluded_punctuation_groups,
             "groups": [{"id": str(i), "over_budget": False, "occurrences": [{"segment_id": str(item["segment_id"])} for item in items]} for i, items in enumerate(candidates, 1)],
-            "selected": sum(map(len, candidates)), "fingerprint": repetition_execution_fingerprint(config, prompt, screen_content, preset, inputs),
+            "selected": sum(map(len, candidates)), "fingerprint": repetition_execution_fingerprint(config, prompt, screen_content, preset, inputs, final_prompt=review_prompt),
             "input_fingerprint": inputs, "estimated_requests": None, "estimated_input_tokens": None,
             "preview_only": True}
     by_part: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -270,7 +291,8 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
         for i, s in enumerate(items, 1):
             sid = str(s["segment_id"])
             neighbors, position = positions[sid]
-            context = [*neighbors[max(0, position - 3):position], *neighbors[position + 1:position + 4]]
+            context_count = 10 if final_review else 3
+            context = [*neighbors[max(0, position - context_count):position], *neighbors[position + 1:position + context_count + 1]]
             context_ids = []
             for neighbor in context:
                 nid = str(neighbor["segment_id"])
@@ -298,7 +320,7 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
                 "file_id": s["file_id"], "part_id": s["part_id"], "line_index": s["line_index"],
                 "signature": segment_signature(s), "base_result_id": bases[sid]["record_id"],
                 "origin": bases[sid].get("restored_origin", bases[sid].get("origin")), "variant": variant_indices[bases[sid]["text"]],
-                "previous": context_ids[:min(3, position)], "next": context_ids[min(3, position):]})
+                "previous": context_ids[:min(context_count, position)], "next": context_ids[min(context_count, position):]})
         group = {"id": str(number), "source": str(items[0]["source"]),
                  "files": {str(file_indices[s["file_id"]]): file_names[s["file_id"]] for s in items},
                  "translations": variants, "occurrences": occurrences}
@@ -310,13 +332,13 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
         group["over_budget"] = (screening_enabled and screening_tokens > decision_limit) or comparison_tokens > llm_limit
         groups.append(group)
     selected_count = sum(len(g["occurrences"]) for g in groups)
-    input_fingerprint = digest({"scope": {"only_file": scope.only_file}, "screening_enabled": screening_enabled,
+    input_fingerprint = digest({"scope": {"only_file": scope.only_file}, "screening_enabled": screening_enabled, "final_review": final_review,
         "exclude_punctuation_only": exclude_punctuation_only, "target_language": config["project"]["target_language"],
         "groups": [{key: value for key, value in group.items() if key not in {"screening_input_tokens", "comparison_input_tokens", "over_budget"}} for group in groups],
         "evidence": evidence, "terms": terms, "terms_revision": terms_revision})
-    fingerprint = repetition_execution_fingerprint(config, prompt, screen_content, preset, input_fingerprint)
-    plan = {"screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only, "excluded_punctuation_groups": excluded_punctuation_groups, "config": config, "prompt": prompt, "language": language, "screen": screen, "terms": terms, "terms_revision": terms_revision, "warnings": warnings, "decision_preset": preset, "groups": groups, "evidence": evidence, "sources": sources,
-            "selected": selected_count, "fingerprint": fingerprint, "input_fingerprint": input_fingerprint}
+    fingerprint = repetition_execution_fingerprint(config, prompt, screen_content, preset, input_fingerprint, final_prompt=review_prompt)
+    plan = {"screening_enabled": screening_enabled, "final_review": final_review, "exclude_punctuation_only": exclude_punctuation_only, "excluded_punctuation_groups": excluded_punctuation_groups, "config": config, "prompt": prompt, "language": language, "screen": screen, "terms": terms, "terms_revision": terms_revision, "warnings": warnings, "decision_preset": preset, "groups": groups, "evidence": evidence, "sources": sources,
+            "selected": selected_count, "fingerprint": fingerprint, "input_fingerprint": input_fingerprint, "final_prompt": review_prompt}
     eligible = [g for g in groups if not g["over_budget"]]
     batches = comparison_batches(eligible, plan) if estimate_usage else []
     plan["estimated_requests"] = len(batches) + (len(eligible) if screening_enabled else 0) if estimate_usage else None
@@ -336,10 +358,10 @@ def screening_payload(group: dict[str, Any]) -> dict[str, Any]:
     return {"source": group["source"], "translations": group["translations"], "counts": counts}
 
 
-def comparison_payload(groups: list[dict[str, Any]], evidence: dict[str, Any], sources: dict[str, str], language: str, terms: dict[str, Any]) -> dict[str, Any]:
+def comparison_payload(groups: list[dict[str, Any]], evidence: dict[str, Any], sources: dict[str, str], language: str, terms: dict[str, Any], *, context_count: int = 3) -> dict[str, Any]:
     occurrences = [o for group in groups for o in group["occurrences"]]
     part_ids = {key: i for i, key in enumerate(dict.fromkeys((o["file_index"], o["part_id"]) for o in occurrences), 1)}
-    context_ids = dict.fromkeys(n for o in occurrences for n in (*o["previous"], *o["next"]))
+    context_ids = dict.fromkeys(n for o in occurrences for n in (*o["previous"][-context_count:], *o["next"][:context_count]))
     source_keys = dict.fromkeys(evidence[sid]["source_key"] for sid in context_ids)
     source_ids = {key: str(i) for i, key in enumerate(source_keys, 1)}
     short = {sid: source_ids[evidence[sid]["source_key"]] for sid in context_ids}
@@ -380,7 +402,7 @@ def comparison_payload(groups: list[dict[str, Any]], evidence: dict[str, Any], s
             "repetitions": [{"id": group["id"], "source": group["source"], "translations": group["translations"],
                 "occurrences": [{"id": o["id"], "file": o["file_index"], "part": part_ids[(o["file_index"], o["part_id"])],
                     "position": o["line_index"], "variant": o["variant"], "terms": [term_reference(ref) for ref in o["terms"]],
-                    "previous": [short[sid] for sid in o["previous"]], "next": [short[sid] for sid in o["next"]]}
+                    "previous": [short[sid] for sid in o["previous"][-context_count:]], "next": [short[sid] for sid in o["next"][:context_count]]}
                     for o in group["occurrences"]]} for group in groups]}
 
 
@@ -469,17 +491,66 @@ def parse_comparison(value: Any, group: dict[str, Any]) -> dict[str, Any]:
         raise ExternalError(f"重复译文审查响应无效：{exc}") from exc
 
 
+def parse_final_review(value: Any, group: dict[str, Any], first: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"groups", "keep"}:
+        raise ExternalError("重复译文终审响应必须仅含 groups 和 keep")
+    result = parse_comparison({**value, "uncertain": []}, group)
+    if not set(first["keep"]) <= set(result["keep"]):
+        raise ExternalError("终审不能改变首轮保留项")
+    anchors = {member: proposal for proposal in first["proposals"] for member in proposal["members"]}
+    matched = set()
+    for index, proposal in enumerate(result["proposals"], 1):
+        related = {anchors[member]["id"]: anchors[member] for member in proposal["members"] if member in anchors}
+        if related:
+            if len(related) != 1:
+                raise ExternalError("终审不能合并首轮子组")
+            anchor = next(iter(related.values()))
+            if (not set(anchor["members"]) <= set(proposal["members"])
+                or proposal["target"] != anchor["target"]
+                or set(proposal["apply"]) & set(anchor["members"]) != set(anchor["apply"])):
+                raise ExternalError("终审不能改变首轮子组、目标或原应用选择")
+            proposal.update(id=anchor["id"], reason=anchor["reason"])
+            matched.add(anchor["id"])
+        else:
+            proposal["id"] = f"{group['id']}-final-{index}"
+    if matched != {p["id"] for p in first["proposals"]}:
+        raise ExternalError("终审遗漏首轮子组")
+    return result
+
+
+def final_review_prompt(prompt: str, language: str) -> str:
+    instructions = ("Final review: resolve ONLY uncertain occurrences using the expanded context. "
+        "Existing groups and keep are read-only anchors. An uncertain member may join an existing group, "
+        "but preserve its original members, target and original apply choices. Decide apply for added members. "
+        "Uncertain members may also form new groups or enter keep. Insufficient evidence means keep. "
+        "Cover every occurrence exactly once. Do not output uncertain. These final-review rules supersede first-pass output rules."
+        if language == "en" else
+        "终审：仅处置首轮 uncertain，使用扩大的原文上下文。已有 groups 和 keep 为只读锚点。待审出现可加入已有子组，"
+        "必须保留原成员、target 及原成员的 apply 选择，并判断新增成员是否应用；也可由待审出现另组或归入 keep。"
+        "证据不足时归入 keep。每次出现恰好覆盖一次，不得输出 uncertain。终审规则取代首轮输出规则。")
+    return prompt + "\n\n" + instructions + '\n{"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"..."}],"keep":["3"]}]}'
+
+
+def final_review_messages(group: dict[str, Any], plan: dict[str, Any], first: dict[str, Any]) -> list[dict[str, str]]:
+    payload = comparison_payload([group], plan["evidence"], plan["sources"],
+        plan["config"]["project"]["target_language"], plan["terms"], context_count=10)
+    payload["phase"] = "final_review"
+    payload["repetitions"][0].update(groups=[{k: p[k] for k in ("members", "target", "apply", "reason")} for p in first["proposals"]],
+        keep=first["keep"], uncertain=first["uncertain"])
+    return render_messages(plan["final_prompt"], payload)
+
+
 @blocking_scope
-async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False, replace_draft: bool = False, run_action: str | None = None,
+async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False, final_review: bool = False, replace_draft: bool = False, run_action: str | None = None,
                          http_client: httpx.AsyncClient | None = None,
                          limiter: SlidingWindowLimiter | KeyPool | None = None,
                          on_progress: Callable[[int, int, int], None] | None = None,
                          on_usage: Callable[[dict[str, Any] | None], None] | None = None,
                          prepared_plan: dict[str, Any] | None = None) -> dict[str, Any]:
     old = read_repetition_run(project, ("pending",))
-    if old and not replace_draft:
+    if old and not replace_draft and not (run_action == "resume" and "final_review_error" in old):
         raise UsageError("已有待审核草案，必须明确选择替换")
-    plan = prepared_plan if prepared_plan is not None else (await run_blocking(lambda: repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, estimate_usage=False)))
+    plan = prepared_plan if prepared_plan is not None else (await run_blocking(lambda: repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, final_review=final_review, estimate_usage=False)))
     config = plan["config"]
     prompt, screen = plan["prompt"], plan["screen"]
     total = plan["selected"]
@@ -498,13 +569,17 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
         checkpoints = {}
         run_id, run_dir = (await run_blocking(lambda: create_run(project, config=config, stage=STAGE, fingerprint=plan["fingerprint"],
             prompt=prompt, selected_count=total, requested_count=total, reused_count=0,
-            details={"screening_enabled": plan["screening_enabled"], "exclude_punctuation_only": plan["exclude_punctuation_only"], "excluded_punctuation_groups": plan["excluded_punctuation_groups"], "prompt_language": plan["language"], "terms_revision": plan["terms_revision"], "repetition_checkpoint": 2, "repetition_protocol": PROTOCOL_VERSION, "repetition_input_fingerprint": plan["input_fingerprint"], "usage_invocation_count": 0, "draft_status": "generating", "scope": {"only_file": scope.only_file}, "choices": {}})))
+            details={"final_review": plan["final_review"], "screening_enabled": plan["screening_enabled"], "exclude_punctuation_only": plan["exclude_punctuation_only"], "excluded_punctuation_groups": plan["excluded_punctuation_groups"], "prompt_language": plan["language"], "terms_revision": plan["terms_revision"], "repetition_checkpoint": 2, "repetition_protocol": PROTOCOL_VERSION, "repetition_input_fingerprint": plan["input_fingerprint"], "usage_invocation_count": 0, "draft_status": "generating", "scope": {"only_file": scope.only_file}, "choices": {}})))
         (await run_blocking(lambda: atomic_write_text(run_dir / "repetition_terms.json", json.dumps({
             "terms_revision": plan["terms_revision"], "terms": plan["terms"],
             "groups": {g["id"]: {o["id"]: o["terms"] for o in g["occurrences"]} for g in plan["groups"]},
         }, ensure_ascii=False, separators=(",", ":")) + "\n")))
+    if plan["final_review"]:
+        snapshot_dir = run_dir / "continuations" / f"{continuation_index:04d}" if continuation_index else run_dir
+        await run_blocking(atomic_write_text, snapshot_dir / "final_review_prompt.txt", plan["final_prompt"])
     active_llm: LLMClient | None = None
     usage_recorded = False
+    final_phase_started = False
     completed = sum(len(g["occurrences"]) for g in plan["groups"] if "result" in checkpoints.get(g["id"], {}))
     if on_progress:
         on_progress(completed, 0, total)
@@ -527,6 +602,39 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
             usage=usage, usage_invoked=bool(parts) and not usage_recorded, warnings=warnings, key_audit=key_audit)
         usage_recorded = True
         return usage, warnings
+
+    def publish_draft(failure: AppError | None = None):
+        draft_groups = deepcopy(groups)
+        for group in draft_groups:
+            saved = checkpoints[group["id"]]
+            if "final_result" in saved:
+                group.update(parse_final_review(saved["final_result"], group, saved["result"]))
+            for key in ("screening_execution_index", "screening_input_tokens", "comparison_input_tokens"):
+                group.pop(key, None)
+            for occurrence in group["occurrences"]:
+                occurrence.pop("terms")
+        draft = {"run_id": run_id, "groups": draft_groups, "evidence": plan["evidence"], "sources": plan["sources"],
+            "context_segments": 10 if plan["final_review"] else 3, "scope": {"only_file": scope.only_file}, "created_at": utc_now()}
+        atomic_write_text(draft_path(project, run_id), json.dumps(draft, ensure_ascii=False, separators=(",", ":")) + "\n")
+        manifest = read_json(project, run_dir / "manifest.json")
+        proposal_ids = {p["id"] for g in draft_groups for p in g["proposals"]}
+        manifest.update(draft_status="pending", choices={key: value for key, value in manifest.get("choices", {}).items() if key in proposal_ids})
+        if failure is None:
+            manifest.pop("final_review_error", None)
+            manifest.pop("last_interruption", None)
+        else:
+            manifest["final_review_error"] = app_error_payload(failure)
+        manifests = [manifest]
+        if old and old["run_id"] != run_id:
+            old["draft_status"] = "replaced"
+            if "final_review_error" in old:
+                old.update(status="completed", completed_at=utc_now())
+            manifests.append(old)
+        warnings = write_repetition_state(project, records=[], manifests=manifests)
+        if warnings:
+            manifest["warnings"] = list(dict.fromkeys([*manifest.get("warnings", []), *warnings]))
+            warnings.extend(write_json(project, run_dir / "manifest.json", manifest))
+        return warnings
 
     try:
         async with httpx.AsyncClient(proxy=plan["decision_preset"]["proxy_url"] or None) if decision and decision.llm_config is None and http_client is None else _borrow_client(http_client) as decision_http:
@@ -626,23 +734,53 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
                 screened = await run_bounded(groups, screen_group, max_parallel=config["execution"]["max_parallel"])
                 batches = (await run_blocking(lambda: comparison_batches([group for group in screened if group is not None], plan)))
                 await run_bounded(batches, compare_batch, max_parallel=config["execution"]["max_parallel"])
-        for group in groups:
-            group.pop("screening_execution_index", None)
-            group.pop("screening_input_tokens")
-            group.pop("comparison_input_tokens")
-            for occurrence in group["occurrences"]:
-                occurrence.pop("terms")
-        draft = {"run_id": run_id, "groups": groups, "evidence": plan["evidence"], "sources": plan["sources"], "scope": {"only_file": scope.only_file}, "created_at": utc_now()}
-        (await run_blocking(lambda: atomic_write_text(draft_path(project, run_id), json.dumps(draft, ensure_ascii=False, separators=(",", ":")) + "\n")))
+                if plan["final_review"]:
+                    final_phase_started = True
+                    async def review_group(group):
+                        saved = checkpoints[group["id"]]
+                        if "final_result" in saved:
+                            group.update(parse_final_review(saved["final_result"], group, saved["result"]))
+                            return
+                        if not group["uncertain"] or group["over_budget"] or saved["comparison_execution_index"] is None:
+                            return
+                        messages = await run_blocking(final_review_messages, group, plan, saved["result"])
+                        estimated = estimate_messages(messages, config["execution"]["token_safety_factor"])
+                        if estimated > request_input_limit(config, resolve_request_budget(config, STAGE)):
+                            group["over_budget"] = True
+                            return
+                        parent_request_id = None
+                        for attempt in range(config["retry"]["format_max_attempts"] + 1):
+                            response, request_id = await llm.chat(messages=messages,
+                                temperature=config["llm"]["temperature_repetition_consistency"],
+                                estimated_input_tokens=estimated, parent_request_id=parent_request_id)
+                            try:
+                                value = json.loads(response.content)
+                                if (not isinstance(value, dict) or set(value) != {"repetitions"}
+                                    or not isinstance(value["repetitions"], list) or len(value["repetitions"]) != 1
+                                    or not isinstance(value["repetitions"][0], dict) or value["repetitions"][0].get("id") != group["id"]):
+                                    raise ExternalError("终审重复组 ID 或响应字段无效")
+                                raw = {k: v for k, v in value["repetitions"][0].items() if k != "id"}
+                                result = parse_final_review(raw, group, saved["result"])
+                            except (ValueError, ExternalError) as exc:
+                                diagnostics = current_diagnostics()
+                                if diagnostics is not None:
+                                    diagnostics.fail_request(request_id, str(exc))
+                                if attempt >= config["retry"]["format_max_attempts"]:
+                                    failure = ExternalError(f"重复译文终审响应无效：{exc}")
+                                    failure.params = {"reason": "format_error", "request_id": request_id}
+                                    raise failure from exc
+                                if diagnostics is not None:
+                                    diagnostics.retried(request_id)
+                                llm.logger.warning("final review format correction request=%s error=%s", request_id, exc)
+                                parent_request_id = request_id
+                                continue
+                            saved.update(final_result=raw, final_execution_index=continuation_index + 1)
+                            await run_blocking(atomic_write_json, checkpoint_path(run_dir, group["id"]), saved, compact=True)
+                            group.update(result)
+                            return
+                    await run_bounded(groups, review_group, max_parallel=config["execution"]["max_parallel"])
         usage, warnings = finalize_execution("completed")
-        manifest = (await run_blocking(lambda: read_json(project, run_dir / "manifest.json")))
-        manifest.pop("last_interruption", None)
-        manifest["draft_status"] = "pending"
-        manifests = [manifest]
-        if old:
-            old["draft_status"] = "replaced"
-            manifests.append(old)
-        warnings = list(dict.fromkeys([*warnings, *write_repetition_state(project, records=[], manifests=manifests)]))
+        warnings = list(dict.fromkeys([*warnings, *(await run_blocking(publish_draft))]))
         return {"excluded_punctuation_groups": plan["excluded_punctuation_groups"], "stage": STAGE, "run_id": run_id, "selected": total, "completed": total,
                 "failed": 0, "pending": 0, "usage": usage, "warnings": warnings,
                 "proposal_count": sum(len(g["proposals"]) for g in groups)}
@@ -651,12 +789,14 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
         manifest = (await run_blocking(lambda: read_json(project, run_dir / "manifest.json")))
         manifest.update(completed_at=None, last_interruption={"at": utc_now(), "error_code": getattr(exc, "code", "cancelled" if isinstance(exc, asyncio.CancelledError) else "internal_error"),
             "reason": "cancelled" if isinstance(exc, asyncio.CancelledError) else getattr(exc, "params", {}).get("reason", str(exc)),
-            "completed_steps": sum((int("screening" in c) if plan["screening_enabled"] else 0) + int("result" in c) for c in checkpoints.values()),
-            "total_steps": len(plan["groups"]) * (2 if plan["screening_enabled"] else 1)})
+            "completed_steps": sum((int("screening" in c) if plan["screening_enabled"] else 0) + int("result" in c) + int("final_result" in c) for c in checkpoints.values()),
+            "total_steps": len(plan["groups"]) * (2 if plan["screening_enabled"] else 1) + sum(bool(c.get("result", {}).get("uncertain")) and c.get("comparison_execution_index") is not None for c in checkpoints.values()) * int(plan["final_review"])})
         request_id = getattr(exc, "request_id", None) or getattr(exc, "params", {}).get("request_id")
         if request_id:
             manifest["last_interruption"]["request_id"] = request_id
         (await run_blocking(lambda: write_json(project, run_dir / "manifest.json", manifest)))
+        if final_phase_started and isinstance(exc, AppError) and not isinstance(exc, StorageError):
+            await run_blocking(publish_draft, exc)
         raise
 
 

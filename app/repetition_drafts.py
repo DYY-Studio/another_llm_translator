@@ -77,6 +77,8 @@ def discard_draft(project: Path, *, confirm: bool, run_id: str | None = None) ->
     with project_write_lock(project):
         manifest, _ = _pending(project, run_id)
         manifest["draft_status"] = "discarded"
+        if "final_review_error" in manifest:
+            manifest.update(status="completed", completed_at=utc_now())
         warnings = write_repetition_state(project, records=[], manifests=[manifest])
         return {"discarded": True, "warnings": warnings}
 
@@ -107,8 +109,9 @@ def _verify_groups(draft: dict[str, Any], groups: list[dict[str, Any]],
                 or bases.get(sid, {}).get("record_id") != occurrence["base_result_id"]):
                 raise UsageError("重复组原文或译文基准已变化，草案已过期")
             neighbors, position = indices[sid]
-            previous = [str(s["segment_id"]) for s in neighbors[max(0, position - 3):position]]
-            following = [str(s["segment_id"]) for s in neighbors[position + 1:position + 4]]
+            count = draft.get("context_segments", 3)
+            previous = [str(s["segment_id"]) for s in neighbors[max(0, position - count):position]]
+            following = [str(s["segment_id"]) for s in neighbors[position + 1:position + count + 1]]
             if previous != occurrence["previous"] or following != occurrence["next"]:
                 raise UsageError("重复组上下文成员已变化，草案已过期")
             for nid in (*previous, *following):
@@ -201,6 +204,8 @@ async def apply_draft_locked(project: Path, *, confirm: bool, run_id: str | None
                             "before_metadata": {**{key: base[key] for key in _BEFORE_FIELDS if key in base},
                                                 "restored_origin": base.get("restored_origin", base.get("origin"))}})
     manifest.update(draft_status="applied" if records else "rejected", applied_at=utc_now(), changes=changes)
+    if "final_review_error" in manifest:
+        manifest.update(status="completed", completed_at=utc_now())
     warnings.extend(write_repetition_state(project, records=records, manifests=[manifest]))
     return {"changed": len(records), "warnings": warnings,
             "validation_warning_count": sum(r["validation_status"] == "warning" for r in records)}

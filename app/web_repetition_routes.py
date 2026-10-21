@@ -27,7 +27,7 @@ def register_repetition_routes(*, app: FastAPI, project: Callable[[str], Path]) 
         return value
 
     @app.get("/api/v1/projects/{name}/repetition/options")
-    def options(request: Request, name: str, estimate_usage: bool = False, only_file: str | None = None, language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False, run_action: str | None = None) -> dict[str, Any]:
+    def options(request: Request, name: str, estimate_usage: bool = False, only_file: str | None = None, language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False, final_review: bool = False, run_action: str | None = None) -> dict[str, Any]:
         if run_action not in {None, "resume", "decline"}:
             raise UsageError("Run 选择必须是 resume 或 decline")
         root = project(name)
@@ -37,15 +37,16 @@ def register_repetition_routes(*, app: FastAPI, project: Callable[[str], Path]) 
             only_file = original["scope"]["only_file"]
             exclude_punctuation_only = original["exclude_punctuation_only"]
             screening_enabled = original["screening_enabled"]
+            final_review = original.get("final_review", False)
         estimate_usage = estimate_usage and app.state.server_config.get("tasks", {}).get("estimate_usage_before_run", False)
-        plan = repetition_plan(root, Scope(only_file=only_file), prompt_language=language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, preview_only=not estimate_usage and not runs, estimate_usage=estimate_usage)
+        plan = repetition_plan(root, Scope(only_file=only_file), prompt_language=language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, final_review=final_review, preview_only=not estimate_usage and not runs, estimate_usage=estimate_usage)
         running = repetition_resume(root, plan, estimate_usage=estimate_usage) if runs else None
         if running:
             running = {**_running_run(root, STAGE, plan["config"]), **running}
         action = (run_action or ("resume" if running["resume_compatible"] else "decline")) if running else None
         resuming = bool(running and action == "resume" and running["resume_compatible"])
         return {"excluded_punctuation_groups": plan["excluded_punctuation_groups"], "candidate_groups": len(plan["groups"]), "selected": plan["selected"],
-                "running_run": running, "run_action": action, "only_file": only_file, "screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only,
+                "final_review": final_review, "running_run": running, "run_action": action, "only_file": only_file, "screening_enabled": screening_enabled, "exclude_punctuation_only": exclude_punctuation_only,
                 "completed": running["completed"] if resuming else 0,
                 "over_budget_groups": running["over_budget_groups"] if resuming else sum(g["over_budget"] for g in plan["groups"]),
                 "estimated_requests": (running["estimated_requests"] if resuming else plan["estimated_requests"]) if estimate_usage else None, "estimated_input_tokens": (running["estimated_input_tokens"] if resuming else plan["estimated_input_tokens"]) if estimate_usage else None, "estimate_error": None,

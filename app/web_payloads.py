@@ -75,6 +75,7 @@ class TaskStartPayload(_WebPayload):
     confirm_knowledge_replacement: StrictBool = False
     exclude_punctuation_only: StrictBool = True
     screening_enabled: StrictBool = False
+    repetition_final_review: StrictBool = False
     replace_draft: StrictBool = False
     acknowledge_manual_review: StrictBool = False
     include_summaries: StrictBool = False

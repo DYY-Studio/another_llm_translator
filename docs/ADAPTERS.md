@@ -860,22 +860,24 @@ LLM Prompt 的 `/api/v1/prompts/{stage}/default?language=...` GET 直接读取�
 
 ### 重复译文上下文比较
 
-连续运行预检与启动增加 `include_repetition_consistency`、`apply_repetition_consistency`，均默认 `false`，并传递上述两个筛选布尔值。请求的 `stages` 保持原规范连续区间；启用后返回的执行步骤在翻译后或校对起点前包含 `repetition_consistency`，其动作通过 `run_actions` 指定。续作仅接受整项目 Run 并恢复原筛选开关。上游翻译尚需执行时，审查步骤 `count_deferred: true`，`selected: 0` 不表示没有候选；未完成 Run 可返回 `compatibility_deferred: true`，证据兼容性在到达该阶段时再次检查。
+连续运行预检与启动接收 `include_repetition_consistency`、`apply_repetition_consistency` 和 `repetition_final_review`，均默认 `false`，并传递上述两个筛选布尔值。请求的 `stages` 保持原规范连续区间；审查仅在包含翻译或联合粗翻时可选，启用后返回的执行步骤在翻译后包含 `repetition_consistency`，仅联合粗翻时放在所选术语步骤之后，其动作通过 `run_actions` 指定。续作仅接受整项目 Run 并恢复原筛选与终审开关。上游翻译尚需执行时，审查步骤 `count_deferred: true`，`selected: 0` 不表示没有候选；未完成 Run 可返回 `compatibility_deferred: true`，证据兼容性在到达该阶段时再次检查。
 
-连续运行的 `apply_terminology_decision` 与 `apply_repetition_consistency` 在末尾步骤同样生效，默认 `false`；衔接后续阶段时必须授权自动应用，存在待审项时保留草案。一致性审查因上下文及超预算待审停止后，审查步骤状态为 `waiting_review`，保留 `run_id`，步骤 `summary.needs_review` 是待审出现数；连续任务摘要 `waiting_review: true`，后续步骤为 `not_executed`。该审查 Run 已成功生成草案，未应用，任务没有模型失败计数。连续任务累计实际调用用量，未执行步骤与零请求续作不新增未知用量。启用自动应用且无待审时应用限定本次 Run 的草案，保留正常应用和撤销契约。
+连续运行的 `apply_terminology_decision` 与 `apply_repetition_consistency` 在末尾步骤同样生效，默认 `false`。术语决策衔接后续阶段时必须授权自动应用；一致性审查未获自动应用授权时保留建议并等待人工处理。存在待审项时保留草案。一致性审查因上下文及超预算待审停止后，审查步骤状态为 `waiting_review`，保留 `run_id`，步骤 `summary.needs_review` 是待审出现数；连续任务摘要 `waiting_review: true`，后续步骤为 `not_executed`。该审查 Run 已成功生成草案，未应用，任务没有模型失败计数。连续任务累计实际调用用量，未执行步骤与零请求续作不新增未知用量。启用自动应用且无待审时应用限定本次 Run 的草案，保留正常应用和撤销契约。
 
-重复审查预检与任务启动接收布尔值 `exclude_punctuation_only` 和 `screening_enabled`，分别默认 `true` 和 `false`；预检返回 `excluded_punctuation_groups`，Run 保存本次选择与排除数量。关闭初筛时 `decision_model` 为 `null`，不读取初筛 Prompt 或 Preset，也不保存其快照。
+重复审查预检与任务启动接收布尔值 `exclude_punctuation_only`、`screening_enabled` 和 `final_review`，分别默认 `true`、`false` 和 `false`；预检返回 `excluded_punctuation_groups`，Run 保存本次选择与排除数量。关闭初筛时 `decision_model` 为 `null`，不读取初筛 Prompt 或 Preset，也不保存其快照。
 
-预检与启动支持 `run_action`：`resume` 续用、`decline` 结束旧 Run 并新建。预检的 `running_run` 沿用共享未完成 Run 描述，并包含已保存步骤数和总步骤数；`completed` 表示已完成审查的出现数，预检估算在续用模式下只统计未完成步骤。预检返回实际采用的 `only_file` 和两个筛选开关；续用模式恢复原值，启动时再次检查证据兼容性、当前执行指纹与 Run 身份。`running_run.execution_changed` 表示当前设置与最近一次执行不同，兼容时仍可显式 `resume`；超预算统计及剩余预算只针对尚未完成的工作。
+预检与启动支持 `run_action`：`resume` 续用、`decline` 结束旧 Run 并新建。预检的 `running_run` 沿用共享未完成 Run 描述，并包含已保存步骤数和总步骤数；`completed` 表示已完成审查的出现数，预检估算在续用模式下只统计未完成步骤。预检返回实际采用的 `only_file`、两个筛选开关及 `final_review`；续用模式恢复原值，启动时再次检查证据兼容性、当前执行指纹与 Run 身份。`running_run.execution_changed` 表示当前设置与最近一次执行不同，兼容时仍可显式 `resume`；超预算统计及剩余预算只针对尚未完成的工作。
 
 支持续作的 Run 保存 `repetition_checkpoint: 2`、独立的 `repetition_protocol` 版本和 `repetition_input_fingerprint`。输入指纹不包含 Prompt、模型或预算状态；`stage_fingerprint` 与 continuation 指纹记录实际执行设置，包含 LLM Adapter hash。旧版未完成 Run 明确要求新建，不迁移检查点。
 
-`repetition_checkpoints/{group_id}.json` 按组原子保存 `screening`、`confidence`、`screening_execution_index`，完成处置后增加 `result`（`proposals`、`keep`、`uncertain`）和 `comparison_execution_index`。来源索引从 1 开始：1 引用原始 Run，N 引用 `continuations/{N-1:04d}`；没有对应模型调用时为 null。初筛跳过结果引用初筛来源，超预算待审结果没有比较来源，续作时重新判定预算并保留已有初筛来源。检查点只保存结果和快照引用，不复制原文、上下文或资源正文。
+`repetition_checkpoints/{group_id}.json` 按组原子保存 `screening`、`confidence`、`screening_execution_index`，完成处置后增加 `result`（`proposals`、`keep`、`uncertain`）和 `comparison_execution_index`。来源索引从 1 开始：1 引用原始 Run，N 引用 `continuations/{N-1:04d}`；没有对应模型调用时为 null。初筛跳过结果引用初筛来源，超预算待审结果没有比较来源，续作时重新判定预算并保留已有初筛来源。终审完成后增加 `final_result`（原始 `groups` 和 `keep`）与 `final_execution_index`，保留首轮 `result` 供锚点校验；续作只请求尚未完成的终审。检查点只保存结果和快照引用，不复制原文、上下文或资源正文。
 
-原始执行及每次 continuation 使用共享快照装配保存实际 LLM 与 Decision 资源；术语证据在 Run 中保存一次。失败和取消保持 Run 为 `running`，未完成出现不计为失败，`last_interruption` 记录错误、步骤进度及可取得的请求 ID。Run 收集去重的预检、续作和客户端警告，实际 LLM 调用保存带执行来源索引的密钥审计；使用共享用量累计，零请求续作保留已有用量。
+原始执行及每次 continuation 使用共享快照装配保存实际 LLM 与 Decision 资源；启用终审时另存 `final_review_prompt.txt`，纳入执行指纹并由终审来源索引引用。术语证据在 Run 中保存一次。失败和取消保持 Run 为 `running`，未完成出现不计为失败，`last_interruption` 记录错误、步骤进度及可取得的请求 ID。Run 收集去重的预检、续作和客户端警告，实际 LLM 调用保存带执行来源索引的密钥审计；使用共享用量累计，零请求续作保留已有用量。
 
-`repetition_consistency` 是独立 Prompt 资源，使用标准 Prefix、中段、Suffix 装配；模型连接使用重复译文一致性审查 Preset。当前请求协议版本为 2，旧协议 Run 不跨版本续作。输入包含 `target_language`、请求内共享的 `context`、`terms`、`entity_knowledge`、`files`、`parts`，以及 `repetitions` 数组。每个重复组含稳定的短 `id`、`source`、`translations` 与 `occurrences`；出现短 ID 仅在所属重复组内有效，不得跨组引用。每次出现携带短 ID、File/part、位置、从零开始的译文索引、前后文引用和术语引用。`file` 是项目文件顺序中从 1 开始的索引，`files` 将本请求涉及的索引映射到文件名；`part` 是请求内 `parts` 表从 1 开始的索引，表中声明内容边界名称，每个 File/part 边界单独编号；`position` 是文件内从 0 开始的 Segment 序号，包含空片段。术语正文仅发送一次，命中的别名保存在各次出现的术语引用 `aliases` 中；`entity_knowledge` 按实体组织说明条目，每条以全请求唯一的 `K` 短 ID 索引，保留 `text` 和 `unsourced`。术语基本信息独立于说明子集去重，每次出现的术语引用通过 `knowledge: [{id, source_relation}]` 选择适用说明并保留以该次局部上下文为基准的位置关系。不同实体及不同 `unsourced` 标记的条目分别索引。
+`repetition_consistency` 是独立 Prompt 资源，使用标准 Prefix、中段、Suffix 装配；模型连接使用重复译文一致性审查 Preset。当前请求协议版本为 3，旧协议 Run 不跨版本续作，已有待审核草案仍可读取。输入包含 `target_language`、请求内共享的 `context`、`terms`、`entity_knowledge`、`files`、`parts`，以及 `repetitions` 数组。每个重复组含稳定的短 `id`、`source`、`translations` 与 `occurrences`；出现短 ID 仅在所属重复组内有效，不得跨组引用。每次出现携带短 ID、File/part、位置、从零开始的译文索引、前后文引用和术语引用。`file` 是项目文件顺序中从 1 开始的索引，`files` 将本请求涉及的索引映射到文件名；`part` 是请求内 `parts` 表从 1 开始的索引，表中声明内容边界名称，每个 File/part 边界单独编号；`position` 是文件内从 0 开始的 Segment 序号，包含空片段。术语正文仅发送一次，命中的别名保存在各次出现的术语引用 `aliases` 中；`entity_knowledge` 按实体组织说明条目，每条以全请求唯一的 `K` 短 ID 索引，保留 `text` 和 `unsourced`。术语基本信息独立于说明子集去重，每次出现的术语引用通过 `knowledge: [{id, source_relation}]` 选择适用说明并保留以该次局部上下文为基准的位置关系。不同实体及不同 `unsourced` 标记的条目分别索引。
 
 响应为单个 JSON 对象，仅含 `repetitions` 数组，每个输入重复组恰好对应一个结果，含原样组 `id`、`groups`、`keep`、`uncertain`。每个统一子组含 `members`、`target`、`apply`、`reason`；成员至少两个，`target` 必须是组内成员并选择其现有译文，`apply` 是 `members` 的无重复子集，可以为空，`reason` 使用目标语言。各次出现的短 ID 必须完整、不重复地划入子组或保留、待审列表。该协议不输出 JSONL 或结束记录。
+
+终审复用重复审查 Prompt 中段、Preset、温度及重试配置，每个请求保留一个完整重复组。输入额外含 `phase: "final_review"`，该组附带首轮 `groups`、`keep`、`uncertain`，原文上下文扩大到前后各 10 个非空 Segment；响应组仅含 `id`、`groups`、`keep`，不允许 `uncertain`。首轮子组的原成员、目标和原应用选择及保留项不可改变。终审请求或格式校验失败时 Run 保持 `running`，发布可审核草案并在 manifest 与草案读取结果中返回 `final_review_error`；应用或丢弃这份草案会结束 Run，续作成功后清除该错误。取消仅保存检查点。
 
 草案审核选择以建议 ID 索引，含 `accepted`、`target` 及可选 `apply`；应用成员遵守相同子集规则。未提供 `apply` 时使用建议默认值；已有建议缺少该字段时使用全部成员。初筛跳过组由读取接口提供默认关闭的人工建议，ID 为 `{group_id}-manual`，成员为该重复组全部出现，选择仍保存于 Run；不可变草案正文保持原样。

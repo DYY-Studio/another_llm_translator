@@ -92,6 +92,159 @@ def test_generation_detects_groups_and_sends_shared_evidence(tmp_path, monkeypat
     assert all("source" not in item and "translation" not in item for item in group["occurrences"])
 
 
+def test_final_review_joins_uncertain_without_changing_anchor(tmp_path, monkeypatch):
+    from app.repetition_consistency import current_draft, run_repetition
+    project = repetition_project(tmp_path, monkeypatch)
+    requests = []
+    first = transport(uncertain=True, apply_members=["2"], requests=requests)
+    def respond(request):
+        if not requests:
+            return first.handle_request(request)
+        body = json.loads(request.content)
+        requests.append(body)
+        payload = json.loads(body["messages"][-1]["content"])
+        assert payload["phase"] == "final_review"
+        assert payload["repetitions"][0]["uncertain"] == ["3"]
+        result = {"repetitions": [{"id": "1", "groups": [{"members": ["1", "2", "3"],
+            "target": "1", "apply": ["2", "3"], "reason": "相同承诺"}], "keep": []}]}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}, "finish_reason": "stop"}]})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await run_repetition(project, Scope(), http_client=client, final_review=True)
+    asyncio.run(run())
+    group = current_draft(project)["groups"][0]
+    assert group["uncertain"] == []
+    assert group["proposals"][0]["apply"] == ["2", "3"]
+    assert group["proposals"][0]["target"] == "1"
+    assert len(requests) == 2
+
+
+def test_final_review_can_form_new_groups_and_preserve_keep():
+    from app.repetition_consistency import parse_final_review
+    group = {"id": "1", "occurrences": [{"id": str(i)} for i in range(1, 6)]}
+    anchor = {"id": "1-1", "members": ["1", "2"], "target": "1", "apply": ["2"], "reason": "锚点"}
+    first = {"proposals": [anchor], "keep": ["5"], "uncertain": ["3", "4"]}
+    result = parse_final_review({"groups": [
+        {key: value for key, value in anchor.items() if key != "id"},
+        {"members": ["3", "4"], "target": "3", "apply": ["4"], "reason": "另一语境"}], "keep": ["5"]}, group, first)
+    assert result["proposals"][0] == anchor
+    assert result["proposals"][1]["id"] == "1-final-2"
+    assert result["uncertain"] == []
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_final_review_failure_and_cancel_preserve_resumable_results(tmp_path, monkeypatch, cancel):
+    from app.repetition_consistency import current_draft, repetition_plan, repetition_resume, run_repetition
+    project = repetition_project(tmp_path, monkeypatch)
+    async def initial():
+        async with httpx.AsyncClient(transport=transport()) as client:
+            await run_repetition(project, Scope(), http_client=client)
+    asyncio.run(initial())
+    old_id = current_draft(project)["run_id"]
+    plan = repetition_plan(project, Scope(), final_review=True)
+    plan["config"]["retry"]["format_max_attempts"] = 0
+    first = transport(uncertain=True)
+    count = 0
+    def respond(request):
+        nonlocal count
+        count += 1
+        if count == 1:
+            return first.handle_request(request)
+        if cancel:
+            raise asyncio.CancelledError()
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await run_repetition(project, Scope(), http_client=client, prepared_plan=plan, replace_draft=True, final_review=True)
+    with pytest.raises(asyncio.CancelledError if cancel else ExternalError):
+        asyncio.run(run())
+    draft = current_draft(project)
+    assert (draft["run_id"] == old_id) is cancel
+    assert repetition_resume(project, plan)["resume_compatible"]
+    if not cancel:
+        assert draft["final_review_error"]
+        assert draft["groups"][0]["uncertain"] == ["3"]
+        from app.repetition_drafts import discard_draft
+        discard_draft(project, confirm=True, run_id=draft["run_id"])
+        assert repetition_resume(project, plan) is None
+
+
+@pytest.mark.parametrize("change", ["target", "apply", "uncertain"])
+def test_final_review_rejects_anchor_changes_and_resumes_only_final_phase(tmp_path, monkeypatch, change):
+    from app.repetition_consistency import current_draft, repetition_plan, run_repetition
+    project = repetition_project(tmp_path, monkeypatch)
+    plan = repetition_plan(project, Scope(), final_review=True)
+    plan["config"]["retry"]["format_max_attempts"] = 0
+    first = transport(uncertain=True, apply_members=["2"])
+    requests = []
+    def respond(request):
+        payload = json.loads(json.loads(request.content)["messages"][-1]["content"])
+        requests.append(payload)
+        if "phase" not in payload:
+            return first.handle_request(request)
+        group = {"id": "1", "groups": [{"members": ["1", "2"], "target": "1", "apply": ["2"], "reason": "锚点"}], "keep": ["3"]}
+        if len(requests) == 2:
+            if change == "uncertain":
+                group["uncertain"] = []
+            else:
+                group["groups"][0][change] = "2" if change == "target" else ["1", "2"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"repetitions": [group]})}, "finish_reason": "stop"}]})
+    async def run(action=None):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await run_repetition(project, Scope(), http_client=client, prepared_plan=plan, run_action=action)
+    with pytest.raises(ExternalError):
+        asyncio.run(run())
+    draft_id = current_draft(project)["run_id"]
+    from app.repetition_drafts import save_choices
+    choice = {"accepted": False, "target": "2", "apply": ["2"]}
+    save_choices(project, {"1-1": choice}, run_id=draft_id)
+    asyncio.run(run("resume"))
+    draft = current_draft(project)
+    assert draft["run_id"] == draft_id
+    assert "final_review_error" not in draft
+    assert draft["choices"] == {"1-1": choice}
+    assert draft["groups"][0]["keep"] == ["3"]
+    assert len(requests) == 3
+    assert requests[1] == requests[2]
+
+
+@pytest.mark.parametrize("over_budget", [False, True])
+def test_final_review_expands_context_and_keeps_full_group_when_over_budget(tmp_path, monkeypatch, over_budget):
+    from app.repetition_consistency import current_draft, final_review_messages, repetition_plan, run_repetition
+    from app.execution import estimate_messages
+    lines = [f"上下文{i}" for i in range(27)]
+    for i in (10, 12, 15):
+        lines[i] = "承诺"
+    texts = [f"译文{i}" for i in range(27)]
+    texts[10], texts[12], texts[15] = "我会来接你", "我会去接你", "我会去接你"
+    project = repetition_project(tmp_path, monkeypatch, source_text="\n".join(lines), texts=texts)
+    plan = repetition_plan(project, Scope(), final_review=True)
+    if over_budget:
+        first_result = {"proposals": [{"members": ["1", "2"], "target": "1", "apply": ["1", "2"], "reason": "承诺"}], "keep": [], "uncertain": ["3"]}
+        estimate = estimate_messages(final_review_messages(plan["groups"][0], plan, first_result), plan["config"]["execution"]["token_safety_factor"])
+        plan["config"]["chunking"]["stage_overrides"]["repetition_consistency"] = {"max_input_tokens": estimate - 1}
+    requests = []
+    first = transport(uncertain=True)
+    def respond(request):
+        payload = json.loads(json.loads(request.content)["messages"][-1]["content"])
+        requests.append(payload)
+        occurrence = payload["repetitions"][0]["occurrences"][1]
+        if "phase" not in payload:
+            assert len(occurrence["previous"]) == len(occurrence["next"]) == 3
+            return first.handle_request(request)
+        assert len(occurrence["previous"]) == len(occurrence["next"]) == 10
+        group = payload["repetitions"][0]
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"repetitions": [{"id": "1", "groups": group["groups"], "keep": ["3"]}]})}, "finish_reason": "stop"}]})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await run_repetition(project, Scope(), http_client=client, prepared_plan=plan)
+    asyncio.run(run())
+    group = current_draft(project)["groups"][0]
+    assert len(requests) == (1 if over_budget else 2)
+    assert group["uncertain"] == (["3"] if over_budget else [])
+    assert group["over_budget"] is over_budget
+
+
 @pytest.mark.parametrize("choice", ["skip", "refusal"])
 def test_screening_preserves_skip_and_refusal(tmp_path, monkeypatch, choice):
     from app.repetition_consistency import current_draft, run_repetition
@@ -1324,13 +1477,15 @@ def test_continuous_repetition_preflight_permissions_and_deferred_count(tmp_path
     options = inspect_continuous(project, ("translation", "proofreading"), include_repetition_consistency=True,
         reuse_mixed_fingerprints=True)
     assert options["stages"] == ["translation", "repetition_consistency", "proofreading"]
-    assert any(b["code"] == "apply_repetition_consistency_required" for b in options["blocking"])
+    assert not any(b["code"] == "apply_repetition_consistency_required" for b in options["blocking"])
+    with pytest.raises(UsageError, match="翻译阶段"):
+        inspect_continuous(project, ("proofreading",), include_repetition_consistency=True)
     from app.repetition_consistency import run_repetition
     async def generate():
         async with httpx.AsyncClient(transport=transport()) as client:
             await run_repetition(project, Scope(), http_client=client)
     asyncio.run(generate())
-    options = inspect_continuous(project, ("proofreading",), include_repetition_consistency=True,
+    options = inspect_continuous(project, ("translation",), include_repetition_consistency=True,
         apply_repetition_consistency=True, reuse_mixed_fingerprints=True)
     assert any(b["code"] == "pending_repetition_draft" for b in options["blocking"])
 
@@ -1344,6 +1499,10 @@ async def test_continuous_repetition_resume_restores_filters_and_screening(tmp_p
         with pytest.raises(ExternalError):
             await run_repetition(project, Scope(), screening_enabled=True, exclude_punctuation_only=False, http_client=client)
     use_llm_preset(tmp_path, model="changed")
+    from app import web_continuous
+    original_fingerprint = web_continuous.stage_fingerprint
+    monkeypatch.setattr(web_continuous, "stage_fingerprint", lambda cfg, stage, *args, **kwargs:
+        "test" if stage == "translation" else original_fingerprint(cfg, stage, *args, **kwargs))
     requests = []
     async def resume(*args, **kwargs):
         assert kwargs["prepared_plan"]["screening_enabled"] is True
@@ -1354,9 +1513,10 @@ async def test_continuous_repetition_resume_restores_filters_and_screening(tmp_p
         return {"selected": 8, "completed": 8, "failed": 0, "pending": 0}
     monkeypatch.setattr("app.web_continuous.run_repetition", resume)
     monkeypatch.setattr("app.web_continuous.run_review", review)
+    monkeypatch.setattr("app.web_continuous.run_translation", review)
     manager = WebTaskManager()
     task = await manager.start(project, "continuous", scope=Scope(), run_action=None, reuse_mixed_fingerprints=False,
-        continuous_stages=("proofreading",), continuous_run_actions={"repetition_consistency": "resume"},
+        continuous_stages=("translation",), continuous_run_actions={"repetition_consistency": "resume"},
         include_repetition_consistency=True, apply_repetition_consistency=True)
     await manager.tasks[task["task_id"]].asyncio_task
     view = manager.get(task["task_id"])
@@ -1394,9 +1554,12 @@ async def test_continuous_repetition_empty_or_apply_failure(tmp_path, monkeypatc
     monkeypatch.setattr("app.web_continuous.run_repetition", repetition)
     monkeypatch.setattr("app.web_continuous.apply_draft_locked", apply)
     monkeypatch.setattr("app.web_continuous.run_review", review)
+    async def translate(*args, **kwargs):
+        return {"selected": 8, "completed": 8, "failed": 0, "pending": 0}
+    monkeypatch.setattr("app.web_continuous.run_translation", translate)
     manager = WebTaskManager()
-    task = await manager.start(project, "continuous", scope=Scope(), run_action=None, reuse_mixed_fingerprints=False,
-        continuous_stages=("proofreading",), include_repetition_consistency=True, apply_repetition_consistency=True)
+    task = await manager.start(project, "continuous", scope=Scope(), run_action=None, reuse_mixed_fingerprints=True,
+        continuous_stages=("translation", "proofreading"), include_repetition_consistency=True, apply_repetition_consistency=True)
     await manager.tasks[task["task_id"]].asyncio_task
     view = manager.get(task["task_id"])
     assert view["status"] == ("failed" if failure else "completed")
@@ -1405,7 +1568,7 @@ async def test_continuous_repetition_empty_or_apply_failure(tmp_path, monkeypatc
     if failure:
         assert "application failure" in view["error"]["error"]
     else:
-        assert view["steps"][0]["status"] == "skipped"
+        assert view["steps"][1]["status"] == "skipped"
 
 
 def test_continuous_term_application_checks_only_downstream_segment_stages(tmp_path, monkeypatch):

@@ -181,6 +181,7 @@ def task_options(
     estimate_usage: bool = False,
     exclude_punctuation_only: bool = True,
     screening_enabled: bool = False,
+    repetition_final_review: bool = False,
     include_summaries: bool = False,
     include_draft_translation: bool = False,
     aggregate_full_summaries: bool = False,
@@ -198,9 +199,12 @@ def task_options(
         raise UsageError("粗翻开关仅支持术语扫描")
     if final_review and stage not in {
         TERMINOLOGY_DECISION_STAGE,
+        "repetition_consistency",
         CONTINUOUS_STAGE,
     }:
-        raise UsageError("final_review 只允许自动术语决策")
+        raise UsageError("final_review 只允许自动术语决策或重复译文审查")
+    if repetition_final_review and stage != CONTINUOUS_STAGE:
+        raise UsageError("repetition_final_review 只允许连续运行")
     if aggregate_full_summaries and stage != CONTINUOUS_STAGE:
         raise UsageError("完整聚合选项只允许连续运行")
     if stage == "continuous":
@@ -222,6 +226,7 @@ def task_options(
             apply_repetition_consistency=apply_repetition_consistency,
             exclude_punctuation_only=exclude_punctuation_only,
             screening_enabled=screening_enabled,
+            repetition_final_review=repetition_final_review,
             final_review=final_review,
         )
     if stage == TERMINOLOGY_DECISION_STAGE:
@@ -645,6 +650,7 @@ class WebTask:
     _prompt_language: str | None = field(default=None, repr=False)
     _exclude_punctuation_only: bool = field(default=True, repr=False)
     _screening_enabled: bool = field(default=False, repr=False)
+    _repetition_final_review: bool = field(default=False, repr=False)
     _replace_draft: bool = field(default=False, repr=False)
     _acknowledge_manual_review: bool = field(default=False, repr=False)
     _include_summaries: bool = field(default=False, repr=False)
@@ -925,6 +931,7 @@ class WebTaskManager:
         prompt_language: str | None,
         exclude_punctuation_only: bool = True,
         screening_enabled: bool = False,
+        repetition_final_review: bool = False,
         include_summaries: bool = False,
         include_draft_translation: bool = False,
         aggregate_full_summaries: bool = False,
@@ -970,6 +977,8 @@ class WebTaskManager:
             raise UsageError(
                 "include_summaries 要求完整项目范围，不支持部分 Scope"
             )
+        if repetition_final_review and stage != CONTINUOUS_STAGE:
+            raise UsageError("repetition_final_review 只允许连续运行")
         if aggregate_full_summaries and stage != CONTINUOUS_STAGE:
             raise UsageError("完整聚合选项只允许连续运行")
         force = scope.force
@@ -981,9 +990,10 @@ class WebTaskManager:
             raise UsageError("run-all 不支持 run_action")
         if final_review and stage not in {
             TERMINOLOGY_DECISION_STAGE,
+            "repetition_consistency",
             CONTINUOUS_STAGE,
         }:
-            raise UsageError("final_review 只允许自动术语决策")
+            raise UsageError("final_review 只允许自动术语决策或重复译文审查")
         if stage != CONTINUOUS_STAGE and (
             tuple(continuous_stages)
             or continuous_run_actions
@@ -1004,13 +1014,13 @@ class WebTaskManager:
             from .repetition_consistency import repetition_plan, repetition_resume
             if reuse_mixed_fingerprints:
                 raise UsageError("重复译文审查不支持跨 Run 复用结果")
-            plan = repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, preview_only=not find_running_runs(project, stage), estimate_usage=False)
+            plan = repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, final_review=final_review, preview_only=not find_running_runs(project, stage), estimate_usage=False)
             running = repetition_resume(project, plan, estimate_usage=False) if not plan.get("preview_only") else None
             if running and run_action is None:
                 raise UsageError("发现未完成 Run，必须选择续用或结束旧 Run 并新建")
             if run_action == "resume" and (not running or not running["resume_compatible"]):
                 raise UsageError(running["resume_incompatibility_reason"] if running else "没有可续作的重复译文 Run")
-            return _StartDecision(selected_count=plan["selected"], running_run_id=running["run_id"] if running else None,
+            return _StartDecision(final_review=final_review, selected_count=plan["selected"], running_run_id=running["run_id"] if running else None,
                 fingerprints=((stage, plan["fingerprint"]),), selection_snapshots=(), running_runs=_running_runs_snapshot(project, (stage,)),
                 plan=None if ensure_unique or plan.get("preview_only") else plan)
         selected_count = 0
@@ -1057,6 +1067,7 @@ class WebTaskManager:
                 apply_repetition_consistency=apply_repetition_consistency,
                 exclude_punctuation_only=exclude_punctuation_only,
                 screening_enabled=screening_enabled,
+                repetition_final_review=repetition_final_review,
                 final_review=final_review,
             )
             require_continuous_ready(inspection)
@@ -1377,6 +1388,7 @@ class WebTaskManager:
                     replace_draft=state._replace_draft,
                     exclude_punctuation_only=state._exclude_punctuation_only,
                     screening_enabled=state._screening_enabled,
+                    repetition_final_review=state._repetition_final_review,
                     acknowledge_manual_review=state._acknowledge_manual_review,
                     include_summaries=state._include_summaries,
                     include_draft_translation=state._include_draft_translation,
@@ -1415,6 +1427,7 @@ class WebTaskManager:
         prompt_language: str | None = None,
         exclude_punctuation_only: bool = True,
         screening_enabled: bool = False,
+        repetition_final_review: bool = False,
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
@@ -1454,6 +1467,7 @@ class WebTaskManager:
             prompt_language=prompt_language,
             exclude_punctuation_only=exclude_punctuation_only,
             screening_enabled=screening_enabled,
+            repetition_final_review=repetition_final_review,
             include_summaries=include_summaries,
             include_draft_translation=include_draft_translation,
             aggregate_full_summaries=aggregate_full_summaries,
@@ -1495,6 +1509,7 @@ class WebTaskManager:
             state._replace_draft = replace_draft
             state._exclude_punctuation_only = exclude_punctuation_only
             state._screening_enabled = screening_enabled
+            state._repetition_final_review = repetition_final_review
             state._acknowledge_manual_review = acknowledge_manual_review
             state._include_summaries = include_summaries
             state._include_draft_translation = include_draft_translation
@@ -1524,6 +1539,7 @@ class WebTaskManager:
         prompt_language: str | None = None,
         exclude_punctuation_only: bool = True,
         screening_enabled: bool = False,
+        repetition_final_review: bool = False,
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
@@ -1636,6 +1652,7 @@ class WebTaskManager:
                     prompt_language=prompt_language,
                     exclude_punctuation_only=exclude_punctuation_only,
                     screening_enabled=screening_enabled,
+                    repetition_final_review=repetition_final_review,
                     include_summaries=include_summaries,
                     include_draft_translation=include_draft_translation,
                     aggregate_full_summaries=aggregate_full_summaries,
@@ -1723,6 +1740,7 @@ class WebTaskManager:
                         apply_repetition_consistency=apply_repetition_consistency,
                         exclude_punctuation_only=exclude_punctuation_only,
                         screening_enabled=screening_enabled,
+                        repetition_final_review=repetition_final_review,
                         final_review=final_review,
                         prompt_language=prompt_language,
                         include_draft_translation=include_draft_translation,
@@ -1777,7 +1795,7 @@ class WebTaskManager:
                 elif state.stage == "repetition_consistency":
                     from .repetition_consistency import run_repetition
                     summary = await run_repetition(state.project, scope, replace_draft=replace_draft, run_action=run_action,
-                        prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled,
+                        prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, final_review=final_review,
                         on_progress=progress, on_usage=usage_changed,
                         limiter=next(iter(shared_limiters.values())), prepared_plan=decision.plan)
                 elif state.stage == "translation":
