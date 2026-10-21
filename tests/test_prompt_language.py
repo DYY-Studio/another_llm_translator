@@ -179,6 +179,32 @@ async def test_run_translation_uses_requested_language_and_records_it(
     assert manifest["prompt_language"] == "en"
 
 
+@pytest.mark.parametrize("language", ["zh-CN", "en"])
+def test_repetition_prompt_previews_use_execution_prompts(tmp_path: Path, language: str) -> None:
+    from app.repetition_consistency import final_review_prompt
+
+    projects_root, _ = make_project(tmp_path)
+    client = TestClient(create_app(projects_root=projects_root, app_root=tmp_path / "app-root"))
+    stage = "repetition_consistency"
+    library = f"/api/v1/prompt-library/{stage}/{language}/policy"
+    assert client.put(library, json={"content": "Custom review policy"}).status_code == 200
+    for path in (
+        f"/api/v1/global/prompts/{stage}",
+        f"/api/v1/projects/sample/prompts/{stage}",
+        f"/api/v1/prompts/{stage}/default",
+        library,
+    ):
+        response = client.get(path, params={"language": language})
+        assert response.status_code == 200
+        view = response.json()
+        comparison = full_prompt(stage, view["content"], language)
+        assert view["assembled_phases"] == {
+            "comparison": comparison,
+            "final_review": final_review_prompt(comparison, language),
+        }
+        assert view["assembled"] == comparison
+
+
 def test_cli_language_follows_another_llm_language(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -41,6 +41,7 @@ from .errors import (
     UsageError,
 )
 from .execution import full_prompt
+from .repetition_consistency import final_review_prompt
 from .decision import decision_preset_path, load_decision_preset, normalize_decision_preset, missing_decision_fields
 from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, endpoint_url, load_llm_preset, preset_path, normalize_llm_preset, _parse_llm_preset, missing_preset_fields, validate_executable_preset
@@ -291,6 +292,11 @@ def register_resource_routes(
             }
             result["assembled_phases"] = assembled_phases
             result["assembled"] = assembled_phases["adjudication"]
+        elif stage == "repetition_consistency":
+            result["assembled_phases"] = {
+                "comparison": result["assembled"],
+                "final_review": final_review_prompt(result["assembled"], resolved),
+            }
         if stage == "fragment_summary":
             result["assembled_modes"] = {"summary-only": result["assembled"]}
             result["assembled_mode_languages"] = {"summary-only": resolved}
@@ -661,6 +667,11 @@ def register_resource_routes(
             }
             result["assembled_phases"] = assembled_phases
             result["assembled"] = assembled_phases["adjudication"]
+        elif stage == "repetition_consistency":
+            result["assembled_phases"] = {
+                "comparison": result["assembled"],
+                "final_review": final_review_prompt(result["assembled"], language),
+            }
         if stage == "fragment_summary":
             result["assembled_modes"] = {"summary-only": result["assembled"]}
             result["assembled_mode_languages"] = {"summary-only": language}
