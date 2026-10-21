@@ -1133,8 +1133,8 @@ def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
     return digests
 
 
-def _prompt(project: Path, stage: str, language: str | None = None) -> str:
-    factory = _prompt_factory(project, stage, language)
+def _prompt(project: Path, stage: str, language: str | None = None, *, phase: str | None = None) -> str:
+    factory = _prompt_factory(project, stage, language, phase=phase)
     return factory(())
 
 
@@ -1166,6 +1166,7 @@ def _prompt_factory(
     language: str | None = None,
     response_mode: TerminologyResponseMode | str | None = None,
     require_term_declaration: bool = False,
+    phase: str | None = None,
 ) -> Callable[[Iterable[str]], str]:
     try:
         parsed_mode = (
@@ -1213,6 +1214,7 @@ def _prompt_factory(
             fragment_summary_middle=fragment_summary_middle,
             translation_middle=translation_middle,
             require_term_declaration=require_term_declaration,
+            phase=phase,
         )
 
     return build

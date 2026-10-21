@@ -821,6 +821,7 @@ export interface ContinuousRunDecision {
   final_review: boolean;
   include_repetition_consistency: boolean;
   apply_repetition_consistency: boolean;
+  repetition_final_review: boolean;
   exclude_punctuation_only: boolean;
   screening_enabled: boolean;
   apply_terminology_decision: boolean;

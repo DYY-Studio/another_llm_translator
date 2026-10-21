@@ -55,7 +55,9 @@ function TaskSteps({
     const currentCompleted = currentStep?.completed ?? 0;
     const currentFailed = currentStep?.failed ?? 0;
     const currentProgress = currentStep
-      ? translate("run.stepProgressCompact", language, {
+      ? currentStep.status === "waiting_review"
+        ? translate("run.waiting_review", language)
+        : translate("run.stepProgressCompact", language, {
           completed: currentCompleted,
           total: currentTotal,
         })
@@ -65,7 +67,8 @@ function TaskSteps({
         <div className="task-step-track-stages">
           {steps.filter((step) => step.reason !== "joint_draft_translation").map((step) => {
             const status = displayableTaskStepStatus(step, steps, { current_stage: currentStage, status: taskStatus });
-            const current = step.stage === currentStage;
+            const current = step.stage === currentStage && !isTerminalTaskStatus(taskStatus)
+              && ["running", "cancelling"].includes(status);
             const empty = status === "queued" || status === "skipped" || status === "not_executed";
             const failedPercent = empty || !step.selected ? 0 : step.failed / step.selected * 100;
             const completedPercent = status === "completed"
@@ -98,7 +101,7 @@ function TaskSteps({
         </div>
         {currentStep && currentProgress && (
           <div
-            className="task-step-track-progress"
+            className={`task-step-track-progress status-${currentStep.status}`}
             role="progressbar"
             aria-label={translate("shell.taskProgress", language)}
             aria-valuemin={0}
@@ -119,14 +122,17 @@ function TaskSteps({
   }
   return (
     <div className={`task-steps${compact ? " compact" : ""}`} aria-label={translate("run.steps", language)}>
-      {steps.map((step) => (
-        <div className={`task-step${step.stage === currentStage ? " current" : ""}`} key={step.stage}>
+      {steps.map((step) => {
+        const status = displayableTaskStepStatus(step, steps, { current_stage: currentStage, status: taskStatus });
+        const current = step.stage === currentStage && !isTerminalTaskStatus(taskStatus)
+          && ["running", "cancelling"].includes(status);
+        return <div className={`task-step status-${status}${current ? " current" : ""}`} key={step.stage}>
           <span>{translate(taskStageLabelKey(step.stage), language)}</span>
-          <strong>{translate(`run.${displayableTaskStepStatus(step, steps, { current_stage: currentStage, status: taskStatus })}`, language)}</strong>
+          <strong>{translate(`run.${status}`, language)}</strong>
           <small>{translate("run.stepProgress", language, { completed: step.completed, failed: step.failed, pending: step.pending, total: step.selected })}</small>
           {step.reason === "joint_draft_translation" && <small>{translate("continuousRun.jointDraftSkipped", language)}</small>}
-        </div>
-      ))}
+        </div>;
+      })}
     </div>
   );
 }

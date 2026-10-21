@@ -583,14 +583,30 @@ _FIELD_PREFIX.update({
         "zh-CN": "repetitions[].occurrences: 该重复组各次出现的短 id、文件、章节、位置、译文索引、上下文及术语引用。file 是项目文件顺序中从 1 开始的索引，files 将索引映射到文件名。part 是请求内 parts 表从 1 开始的索引，对应文件内的内容边界名称；每个 File/part 边界单独编号。position 是文件内从 0 开始的 Segment 序号，包含空片段，不是章节内序号或字符偏移。",
         "en": "repetitions[].occurrences: Short id, file, part, position, translation index, context, and terminology references for each occurrence. file is the one-based index in project file order; files maps indices to filenames. part is a one-based index into the request's parts table of content boundary names; each File/part boundary receives its own index. position is the zero-based Segment index within the file, counting empty segments, not an index within the part or a character offset.",
     },
+    "repetition.final_review": {
+        "zh-CN": "phase 为 final_review。repetitions[].groups、keep、uncertain 是首轮结果。groups 的既有成员、target 及既有成员的 apply 选择和 keep 均为只读锚点；uncertain 是本阶段唯一待裁决的出现。",
+        "en": "phase is final_review. repetitions[].groups, keep, and uncertain contain first-pass results. Existing group members, target, original members' apply choices, and keep are read-only anchors; uncertain contains the only occurrences to resolve.",
+    },
 })
 _TASK_PREFIX["repetition_consistency"] = {
     "zh-CN": "你负责重复译文一致性审查。",
     "en": "You perform repeated translation consistency review.",
 }
+_TASK_PREFIX["repetition_final_review"] = {
+    "zh-CN": "你负责重复译文终审。仅裁决首轮待审出现，结合扩大的原文上下文判断其与其他出现的关联。",
+    "en": "You perform final review of repeated translations. Resolve only first-pass uncertain occurrences, using expanded source context to assess their relationships to other occurrences.",
+}
 _RESULT_PROTOCOLS["repetition_consistency"] = {
-    "zh-CN": '只返回一个 JSON 对象，无 Markdown 或额外字段：{"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"依据"}],"keep":["3"],"uncertain":[]}]}。每个输入重复组恰好返回一个结果，id 原样使用 repetitions 的组 id。成员及 target 必须使用该重复组 occurrences 中的短 id。每个成员恰好属于一个子组、keep 或 uncertain；子组至少两个成员且不可重叠。target 必须是该子组成员，选用其现有译文，不生成新译文。apply 是本次建议应用的成员短 id 数组，必须是 members 的无重复子集，可以为空；成员关联与应用选择独立。reason 使用 target_language 简述依据。没有可统一子组时 groups 为空。',
-    "en": 'Return only one JSON object, without Markdown or extra fields: {"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"evidence"}],"keep":["3"],"uncertain":[]}]}. Return exactly one result per input repeated group, copying its repetitions id verbatim. Use only that group\'s occurrence short ids for members and target. Every occurrence must belong exactly once to a subgroup, keep, or uncertain; subgroups must have at least two members and cannot overlap. target must be a subgroup member selecting its existing translation; do not generate a new translation. apply lists occurrence short ids to update, a unique subset of members that may be empty. Group membership and application are separate. Write a brief reason in target_language. Use an empty groups array if no subgroup can be unified.',
+    "zh-CN": '只返回一个 JSON 对象，无 Markdown 或额外字段：{"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"依据"}],"keep":["3"],"uncertain":[]}]}。每个成员恰好属于一个子组、keep 或 uncertain。无法确认是否统一的出现归入 uncertain。',
+    "en": 'Return only one JSON object, without Markdown or extra fields: {"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"evidence"}],"keep":["3"],"uncertain":[]}]}. Every occurrence must belong exactly once to a subgroup, keep, or uncertain. Put occurrences whose unification cannot be confirmed in uncertain.',
+}
+_RESULT_PROTOCOLS["repetition_final_review"] = {
+    "zh-CN": '只返回一个 JSON 对象，无 Markdown 或额外字段：{"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"依据"}],"keep":["3"]}]}。每个成员恰好属于一个子组或 keep，不得输出 uncertain。首轮待审出现可加入已有子组、与其他待审出现另组或归入 keep；加入已有子组时保留全部原成员、target 及原成员的 apply 选择，仅决定新增成员是否加入 apply。首轮 keep 原样保留。证据不足的待审出现归入 keep，保留其现有译文。',
+    "en": 'Return only one JSON object, without Markdown or extra fields: {"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"evidence"}],"keep":["3"]}]}. Every occurrence must belong exactly once to a subgroup or keep. Do not output uncertain. First-pass uncertain occurrences may join an existing group, form new groups with other uncertain occurrences, or enter keep. Preserve all original group members, target, and original apply choices; decide apply only for added members. Preserve first-pass keep. Put uncertain occurrences with insufficient evidence in keep, retaining their current translations.',
+}
+_RESULT_PROTOCOLS["repetition_groups"] = {
+    "zh-CN": "每个输入重复组恰好返回一个结果，id 原样使用 repetitions 的组 id。成员及 target 必须使用该重复组 occurrences 中的短 id。子组至少两个成员且不可重叠。target 必须是该子组成员，选用其现有译文，不生成新译文。apply 是本次建议应用的成员短 id 数组，必须是 members 的无重复子集，可以为空；成员关联与应用选择独立。reason 使用 target_language 简述依据。没有可统一子组时 groups 为空。",
+    "en": "Return exactly one result per input repeated group, copying its repetitions id verbatim. Use only that group's occurrence short ids for members and target. Subgroups must have at least two members and cannot overlap. target must be a subgroup member selecting its existing translation; do not generate a new translation. apply lists occurrence short ids to update, a unique subset of members that may be empty. Group membership and application are separate. Write a brief reason in target_language. Use an empty groups array if no subgroup can be unified.",
 }
 
 # Each declaration selects input fields, a task, and output contracts.
@@ -676,7 +692,7 @@ _PROMPT_DECLARATIONS = {
     },
     ("repetition_consistency", None): {
         "fields": ("target_language", "repetition.groups", "repetition.source", "repetition.translations", "repetition.context", "repetition.terms", "repetition.occurrences"),
-        "task": "repetition_consistency", "protocols": ("repetition_consistency",),
+        "task": "repetition_consistency", "protocols": ("repetition_consistency", "repetition_groups"),
     },
     ("terminology", None): {
         "fields": ("target_language", "source_segments", "reference_context"),
@@ -705,6 +721,10 @@ _PROMPT_DECLARATIONS = {
         "fields": ("target_language", "summaries"),
         "task": "content_summary", "protocols": ("content_summary",),
     },
+}
+_PROMPT_DECLARATIONS[("repetition_consistency", "final_review")] = {
+    "fields": (*_PROMPT_DECLARATIONS[("repetition_consistency", None)]["fields"], "repetition.final_review"),
+    "task": "repetition_final_review", "protocols": ("repetition_final_review", "repetition_groups"),
 }
 for _phase in ("adjudication", "consistency", "containment", "final_review", "knowledge"):
     _PROMPT_DECLARATIONS[("terminology_decision", _phase)] = {
@@ -784,10 +804,7 @@ def full_prompt(
         phase = "adjudication"
     if stage != "terminology_decision" and (stage, None) not in _PROMPT_DECLARATIONS:
         raise UsageError(f"阶段没有 LLM Prompt：{stage}")
-    if phase is not None and (
-        stage != "terminology_decision"
-        or (stage, phase) not in _PROMPT_DECLARATIONS
-    ):
+    if phase is not None and (stage, phase) not in _PROMPT_DECLARATIONS:
         raise UsageError(f"阶段不支持 Prompt phase：{stage}/{phase}")
     if response_mode is not None:
         if stage != "terminology" or phase is not None:
@@ -815,7 +832,7 @@ def full_prompt(
     else:
         effective_middle = middle.strip()
     declarations = [
-        _PROMPT_DECLARATIONS[(name, phase if name == "terminology_decision" else None)]
+        _PROMPT_DECLARATIONS[(name, phase if name == stage else None)]
         for name in active_stages
     ]
     field_ids = dict.fromkeys(

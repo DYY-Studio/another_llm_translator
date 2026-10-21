@@ -1359,6 +1359,18 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
     : previewModes[0]?.[0] ?? "";
   const modeError = activeMode ? assembledModeErrors[activeMode] : undefined;
   const modePreview = activeMode ? assembledModes[activeMode] : undefined;
+  const previewPhases = stage === "terminology_decision"
+    ? [
+      ["adjudication", "settings.promptPhaseAdjudication"],
+      ["consistency", "settings.promptPhaseConsistency"],
+      ["final_review", "settings.promptPhaseFinalReview"],
+      ["containment", "settings.promptPhaseContainment"],
+    ]
+    : stage === "repetition_consistency"
+      ? [["comparison", "settings.promptPhaseRepetitionComparison"], ["final_review", "settings.promptPhaseRepetitionFinalReview"]]
+      : [];
+  const activePhase = previewPhases.some(([phase]) => phase === previewPhase)
+    ? previewPhase : previewPhases[0]?.[0];
   return <section className="text-settings">
     <div className="page-heading config-heading settings-action-heading">
       <div><h1>{scope === "global" ? translate("settings.globalPromptTitle", language) : translate("settings.projectPromptTitle", language)}</h1><p>{scope === "global" ? translate("settings.globalConfigHint", language) : translate("settings.projectPromptHint", language)}</p></div>
@@ -1388,16 +1400,13 @@ function LLMPromptSettings({ project, scope, language, stage, stageControl }: { 
         {assembledModeLanguages[activeMode] && <p className="prompt-preview-hint">{translate("settings.promptModeLanguage", language, { language: assembledModeLanguages[activeMode] })}</p>}
         {modeError && <p className="error-text">{translate("settings.promptModeError", language, { error: modeError })}</p>}
       </>}
-      {stage === "terminology_decision" && Object.keys(assembledPhases).length > 0 && <>
-        <p className="prompt-preview-hint">{translate("settings.promptPhaseHint", language)}</p>
-        <div className="prompt-phase-tabs" role="tablist" aria-label={translate("settings.promptPhaseHint", language)}>
-          <button type="button" role="tab" aria-selected={previewPhase === "adjudication"} className={previewPhase === "adjudication" ? "active" : ""} onClick={() => setPreviewPhase("adjudication")}>{translate("settings.promptPhaseAdjudication", language)}</button>
-          <button type="button" role="tab" aria-selected={previewPhase === "consistency"} className={previewPhase === "consistency" ? "active" : ""} onClick={() => setPreviewPhase("consistency")}>{translate("settings.promptPhaseConsistency", language)}</button>
-          <button type="button" role="tab" aria-selected={previewPhase === "final_review"} className={previewPhase === "final_review" ? "active" : ""} onClick={() => setPreviewPhase("final_review")}>{translate("settings.promptPhaseFinalReview", language)}</button>
-          <button type="button" role="tab" aria-selected={previewPhase === "containment"} className={previewPhase === "containment" ? "active" : ""} onClick={() => setPreviewPhase("containment")}>{translate("settings.promptPhaseContainment", language)}</button>
+      {previewPhases.length > 0 && Object.keys(assembledPhases).length > 0 && <>
+        {stage === "terminology_decision" && <p className="prompt-preview-hint">{translate("settings.promptPhaseHint", language)}</p>}
+        <div className="prompt-phase-tabs" role="tablist" aria-label={translate("settings.promptAssembled", language)}>
+          {previewPhases.map(([phase, label]) => <button key={phase} type="button" role="tab" aria-selected={activePhase === phase} className={activePhase === phase ? "active" : ""} onClick={() => setPreviewPhase(phase)}>{translate(label, language)}</button>)}
         </div>
       </>}
-      <pre>{(assembledPhases[previewPhase] ?? modePreview ?? assembled) || translate("settings.promptAssembledEmpty", language)}</pre>
+      <pre>{((activePhase ? assembledPhases[activePhase] : undefined) ?? modePreview ?? assembled) || translate("settings.promptAssembledEmpty", language)}</pre>
     </div>
   </section>;
 }

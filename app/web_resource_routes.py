@@ -291,6 +291,11 @@ def register_resource_routes(
             }
             result["assembled_phases"] = assembled_phases
             result["assembled"] = assembled_phases["adjudication"]
+        elif stage == "repetition_consistency":
+            result["assembled_phases"] = {
+                "comparison": result["assembled"],
+                "final_review": full_prompt(stage, content, resolved, requirements_for(stage), phase="final_review"),
+            }
         if stage == "fragment_summary":
             result["assembled_modes"] = {"summary-only": result["assembled"]}
             result["assembled_mode_languages"] = {"summary-only": resolved}
@@ -661,6 +666,11 @@ def register_resource_routes(
             }
             result["assembled_phases"] = assembled_phases
             result["assembled"] = assembled_phases["adjudication"]
+        elif stage == "repetition_consistency":
+            result["assembled_phases"] = {
+                "comparison": result["assembled"],
+                "final_review": full_prompt(stage, content, language, phase="final_review"),
+            }
         if stage == "fragment_summary":
             result["assembled_modes"] = {"summary-only": result["assembled"]}
             result["assembled_mode_languages"] = {"summary-only": language}
