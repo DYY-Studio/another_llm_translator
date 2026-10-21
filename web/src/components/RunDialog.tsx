@@ -12,7 +12,7 @@ function stageLabelKey(stage: TaskOptions["stage"]): string {
 export interface RepetitionRunOptions {
   excluded_punctuation_groups: number; candidate_groups: number; selected: number; over_budget_groups: number;
   running_run: RunningRun | null; run_action: "resume" | "decline" | null; only_file: string | null; completed: number;
-  screening_enabled: boolean; exclude_punctuation_only: boolean; preset: {id: string; model: string};
+  screening_enabled: boolean; final_review: boolean; exclude_punctuation_only: boolean; preset: {id: string; model: string};
   estimated_requests: number | null; estimated_input_tokens: number | null; estimate_error?: import("../types").ErrorPayload | null; decision_model: string | null; model: string;
 }
 
@@ -80,13 +80,15 @@ export function RunDialog(props: StageRunDialogProps | {
   excludePunctuationOnly: boolean; onExcludePunctuationOnly: (enabled: boolean) => void; replaceDraft: boolean; busy: boolean; error: string;
   onRunAction: (action: "resume" | "decline") => void;
   screeningEnabled: boolean; onScreeningEnabled: (enabled: boolean) => void;
+  finalReview: boolean; onFinalReview: (enabled: boolean) => void;
   language: Language; onClose: () => void; onStart: () => void;
 }) {
   if (!("repetitionOptions" in props)) return <StageRunDialog {...props} />;
-  const { repetitionOptions: options, language, replaceDraft, busy, error, onClose, onStart, excludePunctuationOnly, onExcludePunctuationOnly, screeningEnabled, onScreeningEnabled, onRunAction } = props;
+  const { repetitionOptions: options, language, replaceDraft, busy, error, onClose, onStart, excludePunctuationOnly, onExcludePunctuationOnly, screeningEnabled, onScreeningEnabled, finalReview, onFinalReview, onRunAction } = props;
   const t = (key: string, params: Record<string, string | number> = {}) => translate(`repetition.${key}`, language, params);
   const resuming = options?.run_action === "resume";
   const generationOptions = <>
+    <label className="config-toggle"><span><input type="checkbox" checked={finalReview} disabled={busy || resuming} onChange={e => onFinalReview(e.target.checked)} />{t("finalReview")}</span><small>{t("finalReviewHint")}</small></label>
     <label className="config-toggle"><span><input type="checkbox" checked={screeningEnabled} disabled={busy || resuming} onChange={e => onScreeningEnabled(e.target.checked)} />{t("screeningEnabled")}</span></label>
     <label className="config-toggle"><span><input type="checkbox" checked={excludePunctuationOnly} disabled={busy || resuming} onChange={e => onExcludePunctuationOnly(e.target.checked)} />{t("excludePunctuationOnly")}</span><small>{t("punctuationFilterHint")}</small></label>
   </>;
@@ -103,13 +105,14 @@ export function RunDialog(props: StageRunDialogProps | {
     {resuming && options.running_run && <p className="muted">{t("resumeSteps", {completed: options.running_run.completed_steps ?? 0, total: options.running_run.total_steps ?? 0})}</p>}
     <div className="run-decision-info"><span>{options.decision_model ? t("models", { decision: options.decision_model, model: options.model }) : t("comparisonModel", {model: options.model})}</span>
       <span>{options.estimated_requests != null && options.estimated_input_tokens != null ? t("estimate", { groups: options.candidate_groups, count: options.selected, requests: options.estimated_requests, tokens: options.estimated_input_tokens }) : t("candidateScope", { groups: options.candidate_groups, count: options.selected })}</span>
+      {finalReview && options.estimated_requests != null && (!resuming || options.completed < options.selected) && <span>{t("finalReviewEstimateHint")}</span>}
       {options.estimate_error && <span className="warning-banner">{translate("runDialog.estimateFailed", language, { error: errorMessage(options.estimate_error, language) })}</span>}
       <span>{t("punctuationExcluded", { count: options.excluded_punctuation_groups })}</span>
       {!!options.over_budget_groups && <span>{t("overBudget", { count: options.over_budget_groups })}</span>}
     </div>
     </> : busy ? <p>{translate("common.loading", language)}</p> : null}
     {error && <p className="error-text" role="alert">{error}</p>}
-    {replaceDraft && <div className="warning-banner run-warning">{t("confirmReplace")}</div>}
+    {replaceDraft && <div className="warning-banner run-warning">{t(finalReview ? "confirmReplaceWithFinalReview" : "confirmReplace")}</div>}
     <div className="modal-actions">
       <button className="quiet-button" disabled={busy} onClick={onClose}>{translate("common.cancel", language)}</button>
       <button className="primary-button" disabled={busy || !options?.candidate_groups || (resuming && options.running_run?.resume_compatible === false)} onClick={onStart}>{translate("runDialog.run", language)}</button>

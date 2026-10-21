@@ -46,6 +46,7 @@ test("continuous payload forces middle decision review and explicit apply", () =
       apply_repetition_consistency: false,
       exclude_punctuation_only: true,
       screening_enabled: false,
+      repetition_final_review: false,
       stages: ["terminology", "terminology_decision", "translation"],
       final_review: true,
       apply_terminology_decision: true,
@@ -77,6 +78,7 @@ test("terminal decision keeps optional final review and automatic application", 
       apply_repetition_consistency: false,
       exclude_punctuation_only: true,
       screening_enabled: false,
+      repetition_final_review: false,
       stages: ["terminology", "terminology_decision"],
       final_review: true,
       apply_terminology_decision: true,
@@ -159,12 +161,16 @@ test("repetition review is optional and applies only with explicit authorization
   };
   const enabled = continuousPayload(["translation", "proofreading"], {
     ...defaults, includeRepetitionConsistency: true, applyRepetitionConsistency: true,
-    excludePunctuationOnly: false, screeningEnabled: true,
+    excludePunctuationOnly: false, screeningEnabled: true, repetitionFinalReview: true,
   });
   assert.equal(enabled.include_repetition_consistency, true);
   assert.equal(enabled.apply_repetition_consistency, true);
   assert.equal(enabled.exclude_punctuation_only, false);
   assert.equal(enabled.screening_enabled, true);
+  assert.equal(enabled.repetition_final_review, true);
+  assert.equal(continuousPayload(["proofreading"], { ...defaults, includeRepetitionConsistency: true }).include_repetition_consistency, false);
+  assert.equal(continuousPayload(["terminology"], { ...defaults, includeDraftTranslation: true, includeRepetitionConsistency: true }).include_repetition_consistency, true);
+  assert.equal(continuousPayload(["terminology", "terminology_decision"], { ...defaults, includeDraftTranslation: true, includeRepetitionConsistency: true }).final_review, true);
   const terminal = continuousPayload(["translation"], { ...defaults, includeRepetitionConsistency: true, applyRepetitionConsistency: true });
   assert.equal(terminal.apply_repetition_consistency, true);
   const disabled = continuousPayload(["translation"], { ...defaults, applyRepetitionConsistency: true });

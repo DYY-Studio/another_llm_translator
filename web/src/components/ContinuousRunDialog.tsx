@@ -49,6 +49,7 @@ export function ContinuousRunDialog({
   const [applyRepetitionConsistency, setApplyRepetitionConsistency] = useState(false);
   const [excludePunctuationOnly, setExcludePunctuationOnly] = useState(true);
   const [screeningEnabled, setScreeningEnabled] = useState(false);
+  const [repetitionFinalReview, setRepetitionFinalReview] = useState(false);
   const [startStage, setStartStage] = useState<ContinuousStartStage>("translation");
   const [endIndex, setEndIndex] = useState(CONTINUOUS_ORDER.indexOf("translation"));
   const [preflight, setPreflight] = useState<{ request: string; options: ContinuousTaskOptions } | null>(null);
@@ -70,10 +71,10 @@ export function ContinuousRunDialog({
   const [submitting, setSubmitting] = useState(false);
 
   const stages = useMemo(() => chainFor(startStage, endIndex), [endIndex, startStage]);
-  const repetitionAvailable = stages.includes("translation") || startStage === "proofreading";
+  const repetitionAvailable = stages.includes("translation") || (stages.includes("terminology") && includeDraftTranslation);
   const repetitionEnabled = repetitionAvailable && includeRepetitionConsistency;
   const repetitionLocked = submitting || runActions.repetition_consistency?.action === "resume";
-  const terminalDecision = stages.at(-1) === "terminology_decision";
+  const terminalDecision = stages.at(-1) === "terminology_decision" && !repetitionEnabled;
   const hasDecision = stages.includes("terminology_decision");
   const decisionInMiddle = hasDecision && !terminalDecision;
   const params = new URLSearchParams();
@@ -82,6 +83,7 @@ export function ContinuousRunDialog({
   params.set("include_repetition_consistency", String(repetitionEnabled));
   params.set("apply_repetition_consistency", String(repetitionEnabled && applyRepetitionConsistency));
   params.set("exclude_punctuation_only", String(excludePunctuationOnly));
+  params.set("repetition_final_review", String(repetitionEnabled && repetitionFinalReview));
   params.set("screening_enabled", String(screeningEnabled));
   params.set("final_review", String(hasDecision && (terminalDecision ? finalReview : true)));
   params.set("apply_terminology_decision", String(hasDecision && applyTerminologyDecision));
@@ -159,7 +161,7 @@ export function ContinuousRunDialog({
     setRunActions((current) => Object.fromEntries(
       Object.entries(current).filter(([stage]) => {
         if (stage === "content_summary") return aggregateFullSummaries;
-        if (stage === "repetition_consistency") return includeRepetitionConsistency && (startStage === "proofreading" || nextEndIndex >= CONTINUOUS_ORDER.indexOf("translation"));
+        if (stage === "repetition_consistency") return includeRepetitionConsistency && (includeDraftTranslation || nextEndIndex >= CONTINUOUS_ORDER.indexOf("translation"));
         const index = CONTINUOUS_ORDER.indexOf(stage as LLMStage);
         return index >= CONTINUOUS_ORDER.indexOf(startStage) && index <= nextEndIndex;
       }),
@@ -173,6 +175,7 @@ export function ContinuousRunDialog({
     if (stage === "repetition_consistency" && action === "resume") {
       setExcludePunctuationOnly(run.exclude_punctuation_only!);
       setScreeningEnabled(run.screening_enabled!);
+      setRepetitionFinalReview(run.final_review ?? false);
     }
     setResultPolicy((current) => resultPolicyAfterRunAction(current, stage, action));
   }
@@ -243,6 +246,7 @@ export function ContinuousRunDialog({
         applyRepetitionConsistency,
         excludePunctuationOnly,
         screeningEnabled,
+        repetitionFinalReview,
         finalReview,
         applyTerminologyDecision,
         force: resultPolicy === "force",
@@ -260,8 +264,8 @@ export function ContinuousRunDialog({
   }
 
   const repetitionStep = stepFor(options, "repetition_consistency");
-  const repetitionControl = <label className={`continuous-run-stage ${repetitionEnabled ? "selected" : repetitionAvailable ? "next" : "disabled"}`}>
-    <input type="checkbox" checked={repetitionEnabled} disabled={submitting || !repetitionAvailable} onChange={(event) => { setIncludeRepetitionConsistency(event.target.checked); setApplyRepetitionConsistency(false); }} />
+  const repetitionControl = <label className="continuous-run-stage selected">
+    <input type="checkbox" checked disabled />
     <span className="continuous-run-stage-main">
       <strong>{translate("repetition.title", language)}</strong>
       {repetitionEnabled && <>
@@ -309,7 +313,6 @@ export function ContinuousRunDialog({
               const stageBlocking = blocking.filter((item) => item.stage === stage);
               return (
                 <Fragment key={stage}>
-                  {stage === "proofreading" && startStage === "proofreading" && repetitionControl}
                   <label className={`continuous-run-stage ${stageState}`}>
                     <input
                       type="checkbox"
@@ -335,7 +338,6 @@ export function ContinuousRunDialog({
                       ))}
                     </span>
                   </label>
-                  {stage === "translation" && repetitionControl}
                   {stage === "terminology" && aggregateFullSummaries && <label className="continuous-run-stage selected">
                     <input type="checkbox" checked disabled />
                     <span className="continuous-run-stage-main">
@@ -344,6 +346,7 @@ export function ContinuousRunDialog({
                       {blocking.filter((item) => item.stage === "content_summary").map((item) => <small className="error-text" key={item.code}>{item.message}</small>)}
                     </span>
                   </label>}
+                  {repetitionEnabled && (stage === "translation" || (!stages.includes("translation") && stage === stages.at(-1))) && repetitionControl}
                 </Fragment>
               );
             })}
@@ -366,6 +369,10 @@ export function ContinuousRunDialog({
               </label>
             </>}
           </div>}
+
+          {repetitionAvailable && <label className="config-toggle run-generation-options">
+            <span><input type="checkbox" checked={repetitionEnabled} disabled={submitting} onChange={event => { setIncludeRepetitionConsistency(event.target.checked); setApplyRepetitionConsistency(false); setRepetitionFinalReview(false); }} />{translate("repetition.title", language)}</span>
+          </label>}
 
           {hasDecision && (
             <section className="continuous-run-section">
@@ -390,6 +397,11 @@ export function ContinuousRunDialog({
 
           {repetitionEnabled && <section className="continuous-run-section">
             <h3>{translate("repetition.title", language)}</h3>
+            <label className="check-row">
+              <input type="checkbox" checked={repetitionFinalReview} disabled={repetitionLocked} onChange={event => setRepetitionFinalReview(event.target.checked)} />
+              <span>{translate("repetition.finalReview", language)}</span>
+            </label>
+            <p className="muted">{translate("repetition.finalReviewHint", language)}</p>
             <label className="check-row">
               <input type="checkbox" checked={excludePunctuationOnly} disabled={repetitionLocked} onChange={(event) => setExcludePunctuationOnly(event.target.checked)} />
               <span>{translate("repetition.excludePunctuationOnly", language)}</span>
