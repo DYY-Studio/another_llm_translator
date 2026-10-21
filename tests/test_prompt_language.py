@@ -181,9 +181,9 @@ async def test_run_translation_uses_requested_language_and_records_it(
 
 @pytest.mark.parametrize("language", ["zh-CN", "en"])
 def test_repetition_prompt_previews_use_execution_prompts(tmp_path: Path, language: str) -> None:
-    from app.repetition_consistency import final_review_prompt
+    from app.stage_runtime import _prompt
 
-    projects_root, _ = make_project(tmp_path)
+    projects_root, project = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root, app_root=tmp_path / "app-root"))
     stage = "repetition_consistency"
     library = f"/api/v1/prompt-library/{stage}/{language}/policy"
@@ -200,9 +200,20 @@ def test_repetition_prompt_previews_use_execution_prompts(tmp_path: Path, langua
         comparison = full_prompt(stage, view["content"], language)
         assert view["assembled_phases"] == {
             "comparison": comparison,
-            "final_review": final_review_prompt(comparison, language),
+            "final_review": full_prompt(stage, view["content"], language, phase="final_review"),
         }
         assert view["assembled"] == comparison
+        if path == f"/api/v1/projects/sample/prompts/{stage}":
+            assert view["assembled_phases"]["final_review"] == _prompt(project, stage, language, phase="final_review")
+
+    comparison = full_prompt(stage, "CUSTOM_POLICY", language)
+    final = full_prompt(stage, "CUSTOM_POLICY", language, phase="final_review")
+    comparison_prefix, comparison_suffix = comparison.split("\n\nCUSTOM_POLICY\n\n")
+    final_prefix, final_suffix = final.split("\n\nCUSTOM_POLICY\n\n")
+    assert comparison_prefix != final_prefix
+    assert "final_review" not in comparison_prefix and "final_review" in final_prefix
+    assert '"uncertain":[]' in comparison_suffix and '"uncertain":' not in final_suffix
+    assert "target" in comparison_suffix and "target" in final_suffix
 
 
 def test_cli_language_follows_another_llm_language(

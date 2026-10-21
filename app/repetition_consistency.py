@@ -220,7 +220,7 @@ def repetition_plan(project: Path, scope: Scope, *, prompt_language: str | None 
     if scope.from_file or scope.only_segment or scope.segment_ids is not None or scope.force or scope.dry_run:
         raise UsageError("重复译文审查只支持整个项目或单个 File")
     config, prompt, screen_content, screen, preset, language = repetition_resources(project, prompt_language, screening_enabled)
-    review_prompt = final_review_prompt(prompt, language) if final_review else None
+    review_prompt = _prompt(project, STAGE, language, phase="final_review") if final_review else None
     segments = load_segments(project)
     files = load_source_files(project)
     file_indices = {f["file_id"]: i for i, f in enumerate(files, 1)}
@@ -516,19 +516,6 @@ def parse_final_review(value: Any, group: dict[str, Any], first: dict[str, Any])
     if matched != {p["id"] for p in first["proposals"]}:
         raise ExternalError("终审遗漏首轮子组")
     return result
-
-
-def final_review_prompt(prompt: str, language: str) -> str:
-    instructions = ("Final review: resolve ONLY uncertain occurrences using the expanded context. "
-        "Existing groups and keep are read-only anchors. An uncertain member may join an existing group, "
-        "but preserve its original members, target and original apply choices. Decide apply for added members. "
-        "Uncertain members may also form new groups or enter keep. Insufficient evidence means keep. "
-        "Cover every occurrence exactly once. Do not output uncertain. These final-review rules supersede first-pass output rules."
-        if language == "en" else
-        "终审：仅处置首轮 uncertain，使用扩大的原文上下文。已有 groups 和 keep 为只读锚点。待审出现可加入已有子组，"
-        "必须保留原成员、target 及原成员的 apply 选择，并判断新增成员是否应用；也可由待审出现另组或归入 keep。"
-        "证据不足时归入 keep。每次出现恰好覆盖一次，不得输出 uncertain。终审规则取代首轮输出规则。")
-    return prompt + "\n\n" + instructions + '\n{"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"..."}],"keep":["3"]}]}'
 
 
 def final_review_messages(group: dict[str, Any], plan: dict[str, Any], first: dict[str, Any]) -> list[dict[str, str]]:

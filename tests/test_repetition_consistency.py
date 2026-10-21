@@ -94,7 +94,11 @@ def test_generation_detects_groups_and_sends_shared_evidence(tmp_path, monkeypat
 
 def test_final_review_joins_uncertain_without_changing_anchor(tmp_path, monkeypatch):
     from app.repetition_consistency import current_draft, run_repetition
+    from app.web import create_app
+    from fastapi.testclient import TestClient
     project = repetition_project(tmp_path, monkeypatch)
+    with TestClient(create_app(projects_root=project.parent, app_root=config.APP_ROOT)) as client:
+        previews = client.get(f"/api/v1/projects/{project.name}/prompts/repetition_consistency").json()["assembled_phases"]
     requests = []
     first = transport(uncertain=True, apply_members=["2"], requests=requests)
     def respond(request):
@@ -117,6 +121,8 @@ def test_final_review_joins_uncertain_without_changing_anchor(tmp_path, monkeypa
     assert group["proposals"][0]["apply"] == ["2", "3"]
     assert group["proposals"][0]["target"] == "1"
     assert len(requests) == 2
+    assert requests[0]["messages"][0]["content"] == previews["comparison"]
+    assert requests[1]["messages"][0]["content"] == previews["final_review"]
 
 
 def test_final_review_can_form_new_groups_and_preserve_keep():

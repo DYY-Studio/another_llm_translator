@@ -41,7 +41,6 @@ from .errors import (
     UsageError,
 )
 from .execution import full_prompt
-from .repetition_consistency import final_review_prompt
 from .decision import decision_preset_path, load_decision_preset, normalize_decision_preset, missing_decision_fields
 from .llm_adapter import load_json_adapter
 from .llm_preset import LLMPreset, endpoint_url, load_llm_preset, preset_path, normalize_llm_preset, _parse_llm_preset, missing_preset_fields, validate_executable_preset
@@ -295,7 +294,7 @@ def register_resource_routes(
         elif stage == "repetition_consistency":
             result["assembled_phases"] = {
                 "comparison": result["assembled"],
-                "final_review": final_review_prompt(result["assembled"], resolved),
+                "final_review": full_prompt(stage, content, resolved, requirements_for(stage), phase="final_review"),
             }
         if stage == "fragment_summary":
             result["assembled_modes"] = {"summary-only": result["assembled"]}
@@ -670,7 +669,7 @@ def register_resource_routes(
         elif stage == "repetition_consistency":
             result["assembled_phases"] = {
                 "comparison": result["assembled"],
-                "final_review": final_review_prompt(result["assembled"], language),
+                "final_review": full_prompt(stage, content, language, phase="final_review"),
             }
         if stage == "fragment_summary":
             result["assembled_modes"] = {"summary-only": result["assembled"]}

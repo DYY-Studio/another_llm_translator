@@ -878,6 +878,6 @@ LLM Prompt 的 `/api/v1/prompts/{stage}/default?language=...` GET 直接读取�
 
 响应为单个 JSON 对象，仅含 `repetitions` 数组，每个输入重复组恰好对应一个结果，含原样组 `id`、`groups`、`keep`、`uncertain`。每个统一子组含 `members`、`target`、`apply`、`reason`；成员至少两个，`target` 必须是组内成员并选择其现有译文，`apply` 是 `members` 的无重复子集，可以为空，`reason` 使用目标语言。各次出现的短 ID 必须完整、不重复地划入子组或保留、待审列表。该协议不输出 JSONL 或结束记录。
 
-终审复用重复审查 Prompt 中段、Preset、温度及重试配置，每个请求保留一个完整重复组。输入额外含 `phase: "final_review"`，该组附带首轮 `groups`、`keep`、`uncertain`，原文上下文扩大到前后各 10 个非空 Segment；响应组仅含 `id`、`groups`、`keep`，不允许 `uncertain`。首轮子组的原成员、目标和原应用选择及保留项不可改变。终审请求或格式校验失败时 Run 保持 `running`，发布可审核草案并在 manifest 与草案读取结果中返回 `final_review_error`；应用或丢弃这份草案会结束 Run，续作成功后清除该错误。取消仅保存检查点。
+比较与终审各自装配 Prefix 和 Suffix，共用可编辑中段。Prefix 声明该阶段的输入、只读证据和任务，Suffix 声明该阶段的输出契约；中段定义语义判断策略。终审复用重复审查的 Preset、温度及重试配置，每个请求保留一个完整重复组。输入额外含 `phase: "final_review"`，该组附带首轮 `groups`、`keep`、`uncertain`，原文上下文扩大到前后各 10 个非空 Segment；响应组仅含 `id`、`groups`、`keep`，不允许 `uncertain`。首轮子组的原成员、目标和原应用选择及保留项不可改变。终审请求或格式校验失败时 Run 保持 `running`，发布可审核草案并在 manifest 与草案读取结果中返回 `final_review_error`；应用或丢弃这份草案会结束 Run，续作成功后清除该错误。取消仅保存检查点。
 
 草案审核选择以建议 ID 索引，含 `accepted`、`target` 及可选 `apply`；应用成员遵守相同子集规则。未提供 `apply` 时使用建议默认值；已有建议缺少该字段时使用全部成员。初筛跳过组由读取接口提供默认关闭的人工建议，ID 为 `{group_id}-manual`，成员为该重复组全部出现，选择仍保存于 Run；不可变草案正文保持原样。

@@ -32,7 +32,7 @@ from .sqlite_storage import (
     read_repetition_run,
 )
 from .stage_review import run_apply, run_review
-from .stage_runtime import prompt_middle_digests, prompt_preflight
+from .stage_runtime import _prompt, prompt_middle_digests, prompt_preflight
 from .summary_aggregation import aggregate_summaries
 from .stage_terminology import run_terminology
 from .stage_translation import run_translation
@@ -50,7 +50,7 @@ from .term_decision_drafts import (
     manual_review_state,
 )
 from .term_library import load_terms
-from .repetition_consistency import repetition_plan, repetition_resume, repetition_resources, repetition_execution_fingerprint, final_review_prompt, PROTOCOL_VERSION, run_repetition, read_draft
+from .repetition_consistency import repetition_plan, repetition_resume, repetition_resources, repetition_execution_fingerprint, PROTOCOL_VERSION, run_repetition, read_draft
 from .repetition_drafts import apply_draft_locked
 
 CONTINUOUS_STAGE = "continuous"
@@ -451,7 +451,7 @@ def inspect_continuous(
                 manifest = read_json(project, project / "runs" / run["run_id"] / "manifest.json")
                 resources = repetition_resources(project, prompt_language, manifest["screening_enabled"]) if manifest["screening_enabled"] != screening_enabled else (repetition_config, repetition_prompt, repetition_screen, None, repetition_preset, repetition_language)
                 execution = repetition_execution_fingerprint(resources[0], resources[1], resources[2], resources[4], manifest.get("repetition_input_fingerprint"),
-                    final_prompt=final_review_prompt(resources[1], resources[5]) if manifest.get("final_review") else None)
+                    final_prompt=_prompt(project, "repetition_consistency", resources[5], phase="final_review") if manifest.get("final_review") else None)
                 repetition_running_executions[run["run_id"]] = execution
                 run["execution_changed"] = execution != (manifest.get("continuations") or [manifest])[-1]["stage_fingerprint"]
                 run.update(exclude_punctuation_only=manifest.get("exclude_punctuation_only"),
@@ -529,7 +529,7 @@ def inspect_continuous(
     for stage in execution_stages:
         if stage == "repetition_consistency":
             fingerprints[stage] = _stable_digest({"execution": repetition_execution_fingerprint(repetition_config, repetition_prompt, repetition_screen, repetition_preset,
-                final_prompt=final_review_prompt(repetition_prompt, repetition_language) if repetition_final_review else None), "running_executions": repetition_running_executions})
+                final_prompt=_prompt(project, "repetition_consistency", repetition_language, phase="final_review") if repetition_final_review else None), "running_executions": repetition_running_executions})
         elif stage == "terminology_decision":
             fingerprints[stage] = _stable_digest(
                 {
