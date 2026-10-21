@@ -401,7 +401,6 @@ export function ContinuousRunDialog({
               <input type="checkbox" checked={repetitionFinalReview} disabled={repetitionLocked} onChange={event => setRepetitionFinalReview(event.target.checked)} />
               <span>{translate("repetition.finalReview", language)}</span>
             </label>
-            <p className="muted">{translate("repetition.finalReviewHint", language)}</p>
             <label className="check-row">
               <input type="checkbox" checked={excludePunctuationOnly} disabled={repetitionLocked} onChange={(event) => setExcludePunctuationOnly(event.target.checked)} />
               <span>{translate("repetition.excludePunctuationOnly", language)}</span>
