@@ -222,7 +222,12 @@ async def test_triple_scan_retries_missing_summary_and_preserves_draft(
         kinds = response_record_types(payload["response_mode"])
         assert "source_refs" not in payload
         assert ("segments" in payload) == ("segment" in kinds)
-        if "segment" not in kinds:
+        if "segment" in kinds:
+            assert "source_segments" not in payload
+            assert payload["segments"] == [
+                {"id": "1", "source": "Alice entered."}
+            ]
+        else:
             assert all(
                 "id" in item and "text" in item for item in payload["source_segments"]
             )
@@ -295,7 +300,7 @@ async def test_triple_scan_preserves_independent_results_and_force(
                 {
                     "type": "summary",
                     "text": "人物进出。",
-                    "refs": [item["id"] for item in payload["source_segments"]],
+                    "refs": [item["id"] for item in payload["segments"]],
                 }
             )
         if "term" in kinds:
@@ -382,11 +387,12 @@ async def test_supplement_adapter_requirements_follow_active_tasks(
         assert "source_refs" not in payload
         assert ("segments" in payload) == ("segment" in kinds)
         if "segment" in kinds:
+            assert "source_segments" not in payload
             assert payload["segments"] == [
                 {"id": "1", "source": "A"},
                 {"id": "2", "source": "B"},
             ]
-        if "summary" in kinds or ("segment" in kinds and "term" in kinds):
+        elif "summary" in kinds:
             assert payload["source_segments"] == [
                 {"id": "1", "text": "A"},
                 {"id": "2", "text": "B"},
@@ -401,7 +407,10 @@ async def test_supplement_adapter_requirements_follow_active_tasks(
                 {
                     "type": "summary",
                     "text": "甲",
-                    "refs": [item["id"] for item in payload["source_segments"]],
+                    "refs": [
+                        item["id"]
+                        for item in payload.get("segments", payload.get("source_segments", []))
+                    ],
                 }
                 if "summary" not in missing
                 else {"type": "summary", "text": 1}
@@ -437,6 +446,12 @@ async def test_supplement_adapter_requirements_follow_active_tasks(
                 include_summaries=True,
                 include_draft_translation=True,
             )
+    for mode, prompt in seen:
+        if "translation" in mode:
+            assert "segments[].source" in prompt
+            assert "source_segments:" not in prompt
+            if "fragment-summary" in mode:
+                assert "segments[].id" in prompt
     from app.llm_response import TerminologyResponseMode
 
     assert {mode for mode, _ in seen} == {

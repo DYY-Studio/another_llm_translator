@@ -291,6 +291,10 @@ _FIELD_PREFIX = {
         "zh-CN": "segments[].source: 对应短 id 的本次待处理源文。",
         "en": "segments[].source: The pending source for the corresponding short id.",
     },
+    "segments[].id": {
+        "zh-CN": "segments[].id: 本次请求的短引用 id。",
+        "en": "segments[].id: The request-local short reference id.",
+    },
     "segments[].current_text": {
         "zh-CN": "segments[].current_text: 对应源文的当前译文。",
         "en": "segments[].current_text: The current translation of the corresponding source.",
@@ -373,7 +377,7 @@ _FIELD_PREFIX = {
 _TASK_PREFIX = {
     "terminology": {
         "zh-CN": "提取术语候选。Description 只记录本次待扫描源文支持的信息，参考上下文只用于理解指代，不得把参考知识当成本次源文揭示的事实。",
-        "en": "Extract terminology candidates. Description must contain only information supported by the current source_segments. Reference context may resolve references but must not be copied as facts revealed by the current source.",
+        "en": "Extract terminology candidates. Description must contain only information supported by the current pending source. Reference context may resolve references but must not be copied as facts revealed by the current source.",
     },
     "fragment_summary": {
         "zh-CN": "概括本次源文内容。",
@@ -466,13 +470,13 @@ _RESULT_PROTOCOLS: dict[str, dict[str, str]] = {
         "zh-CN": (
             '输出一条或多条 type="summary" 记录。'
             "每条 summary 必须有非空 text。单条 summary 可以省略 refs；如果输出多条，"
-            "每条都必须包含 refs，refs 之间不能重复且合并后必须覆盖全部 source_segments 中的 id。"
+            "每条都必须包含 refs，refs 之间不能重复且合并后必须覆盖本次源文中的全部请求短 id。"
         ),
         "en": (
             'Output one or more type="summary" '
             "records. A summary contains type and non-empty text. A single summary may "
             "omit refs. If outputting multiple summaries, each must include refs; refs "
-            "must not overlap and must collectively cover all ids in source_segments."
+            "must not overlap and must collectively cover all request-local short ids in the current sources."
         ),
     },
 }
@@ -838,6 +842,14 @@ def full_prompt(
     field_ids = dict.fromkeys(
         field for declaration in declarations for field in declaration["fields"]
     )
+    if stage == "terminology" and "translation" in active_stages:
+        field_ids = dict.fromkeys(
+            {
+                "source_segments": "segments[].source",
+                "source_segments[].id": "segments[].id",
+            }.get(field, field)
+            for field in field_ids
+        )
     task_ids = dict.fromkeys(declaration["task"] for declaration in declarations if declaration["task"] is not None)
     feedback = "validation_feedback" if "validation_feedback" in field_ids else "validation_repair"
     prefix = "\n".join((

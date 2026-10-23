@@ -828,9 +828,9 @@ def test_combined_prefix_explains_only_active_fields_once(language, mode):
         translation_middle="translation middle",
     ).split("\n\n", 1)[0]
     fields = {"target_language", "reference_context"}
-    if "term" in types or "summary" in types:
+    if ("term" in types or "summary" in types) and "segment" not in types:
         fields.add("source_segments")
-    if "summary" in types:
+    if "summary" in types and "segment" not in types:
         fields.add("source_segments[].id")
     if "segment" in types:
         fields |= {
@@ -840,6 +840,8 @@ def test_combined_prefix_explains_only_active_fields_once(language, mode):
             "summary_context_relation",
             "validation_repair",
         }
+        if "summary" in types:
+            fields.add("segments[].id")
     for field in fields:
         assert prefix.count(field + ":") == 1
     for field in {"segments[].current_text", "summaries"}:
