@@ -333,12 +333,12 @@ _FIELD_PREFIX = {
         "en": "anchors: Read-only relationship references; never modify them or output decisions for them.",
     },
     "evidence": {
-        "zh-CN": "evidence: 源文命中证据。hit_count 是命中的源文片段数，不是字符出现次数；samples 是包含术语的源文样本。boundary_ref 是只读的请求内内容边界引用，相同值表示样本属于同一边界，不表示全局 ID、顺序或权重。",
-        "en": "evidence: Source-text occurrences. hit_count counts matching source passages, not substring occurrences; samples contains passages with the term. boundary_ref is a read-only request-local content-boundary reference: equal values indicate a shared boundary, not a global ID, order, or weight.",
+        "zh-CN": "evidence: 源文命中证据。hit_count 是命中的源文片段数，不是字符出现次数；samples 是包含术语的源文样本。普通阶段的 source_ref 引用请求级 evidence_sources 表中的摘录，可在 terms 和 anchors 间共享；boundary_ref 是只读的请求内内容边界引用，相同值表示样本属于同一边界，不表示全局 ID、顺序或权重。",
+        "en": "evidence: Source-text occurrences. hit_count counts matching source passages, not substring occurrences; samples contains passages with the term. In ordinary phases, source_ref points to an excerpt in the request-wide evidence_sources table and may be shared across terms and anchors. boundary_ref is a read-only request-local content-boundary reference: equal values indicate a shared boundary, not a global ID, order, or weight.",
     },
     "decision_context": {
-        "zh-CN": "context_segments: 终审请求共享的原文 Segment 表，以 segment_ref 索引，含 boundary_ref、source 和 is_empty。各术语 evidence.windows 的 segment_refs 按原文顺序引用此表，hit_segment_refs 标明该术语的命中片段；window_ref 仅在所属术语内有效。",
-        "en": "context_segments: Shared source Segment table for final review, keyed by segment_ref, containing boundary_ref, source, and is_empty. Each term's evidence.windows lists ordered segment_refs into this table and its own hit_segment_refs. window_ref is local to its term.",
+        "zh-CN": "context_segments: 终审请求共享的原文 Segment 表，以 segment_ref 索引，含 boundary_ref、source 和 is_empty。各术语 evidence.windows 的 segment_refs 按原文顺序引用此表，hit_segment_refs 标明该术语的命中片段；终审 samples 通过 segment_ref 引用命中 Segment，不重复携带 source；window_ref 仅在所属术语内有效。",
+        "en": "context_segments: Shared source Segment table for final review, keyed by segment_ref, containing boundary_ref, source, and is_empty. Each term's evidence.windows lists ordered segment_refs into this table and its own hit_segment_refs. Final-review samples use segment_ref to reference the hit Segment without repeating source; window_ref is local to its term.",
     },
     "conflicts": {
         "zh-CN": "conflicts: 去重后的历史候选和关系争用证据，不是投票结果或可选值白名单；可依据整部作品证据提出候选之外的新值。",

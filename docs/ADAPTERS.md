@@ -337,7 +337,7 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 ### 自动术语决策关系校验
 
-终审请求通过共享 `context_segments` 表提供上下文 Segment，以请求内 `segment_ref` 索引，条目保留 `boundary_ref`、`source` 和 `is_empty`。各术语 `evidence.windows` 的 `segment_refs` 按原文顺序引用共享表，`hit_segment_refs` 保留该术语自己的命中位置，`window_ref` 仅在所属术语内有效。样本摘录和匹配视图仍按术语保留。
+普通阶段的样本摘录在请求级 `evidence_sources` 表中按完全相同的字符串去重，以 `source_ref` 引用；不同或重叠的摘录保持独立。各样本仍按术语保留 `match_view`、`matched_forms` 和 `boundary_ref`。终审样本通过 `segment_ref` 引用命中 Segment，不重复携带 `source`。终审请求通过共享 `context_segments` 表提供上下文 Segment，以请求内 `segment_ref` 索引，条目保留 `boundary_ref`、`source` 和 `is_empty`。各术语 `evidence.windows` 的 `segment_refs` 按原文顺序引用共享表，`hit_segment_refs` 保留该术语自己的命中位置，`window_ref` 仅在所属术语内有效。
 
 名称与关系决策各阶段的 `description` 为按术语当前归属拼接的全部有效、未停用说明片段，同一原归属的片段归为一组，每组以方括号标明原术语归属。请求级 `applied_descriptions` 表按完整正文去重，目标术语和 Anchors 通过 `applied_description_ref` 引用各自原有的已应用说明作对照，无说明时引用为 `null`。临时分组变化不改变各术语的对照正文。两者均只读。片段可能重复、存在分歧或描述不同位置，排列顺序不表示事实发生时间。拼接文本计入现有分批预算，不截断。
 

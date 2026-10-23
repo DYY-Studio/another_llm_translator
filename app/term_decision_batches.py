@@ -402,12 +402,18 @@ def _request_evidence(
     evidence: dict[str, dict[str, Any]],
     *,
     include_windows: bool = False,
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Project locations and share final-review Segment bodies within a request."""
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, str],
+]:
+    """Project evidence and share repeated source text within a request."""
     boundary_refs: dict[tuple[str, str], int] = {}
     segment_refs: dict[tuple[str, str, str], int] = {}
+    source_refs: dict[str, int] = {}
     projected: dict[str, dict[str, Any]] = {}
     context_segments: dict[str, dict[str, Any]] = {}
+    evidence_sources: dict[str, str] = {}
 
     def project_segment(segment: dict[str, Any]) -> tuple[int, int]:
         boundary = (str(segment["file_id"]), str(segment["part_id"]))
@@ -457,7 +463,6 @@ def _request_evidence(
             boundary_ref, segment_ref = project_segment(sample)
             sample_value = {
                 "boundary_ref": boundary_ref,
-                "source": sample["source"],
                 "match_view": sample["match_view"],
                 "matched_forms": deepcopy(sample["matched_forms"]),
             }
@@ -468,6 +473,11 @@ def _request_evidence(
                     segment_ref=segment_ref,
                     window_ref=window_ref,
                 )
+            else:
+                source = str(sample["source"])
+                source_ref = source_refs.setdefault(source, len(source_refs) + 1)
+                evidence_sources[str(source_ref)] = source
+                sample_value["source_ref"] = source_ref
             samples.append(sample_value)
         value["samples"] = samples
         if include_windows:
@@ -475,7 +485,7 @@ def _request_evidence(
         else:
             value.pop("windows", None)
         projected[normalized] = value
-    return projected, context_segments
+    return projected, context_segments, evidence_sources
 
 def _direct_group_anchors(
     focus: list[dict[str, Any]],
@@ -575,7 +585,7 @@ def _make_payload(
     conflicts: dict[str, dict[str, list[Any]]] | None = None,
 ) -> dict[str, Any]:
     include_disabled = phase in {"consistency", "final_review", "containment"}
-    request_evidence, context_segments = _request_evidence(
+    request_evidence, context_segments, evidence_sources = _request_evidence(
         focus,
         anchors,
         evidence,
@@ -616,6 +626,8 @@ def _make_payload(
         term["applied_description_ref"] = ref
     if applied_descriptions:
         payload["applied_descriptions"] = applied_descriptions
+    if evidence_sources:
+        payload["evidence_sources"] = evidence_sources
     if phase == "final_review":
         payload["context_segments"] = context_segments
     return payload

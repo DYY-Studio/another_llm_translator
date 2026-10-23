@@ -745,9 +745,66 @@ def test_decision_payload_reuses_request_local_boundary_refs_across_terms() -> N
     assert [sample["boundary_ref"] for sample in focus_samples] == [1, 2]
     assert [sample["boundary_ref"] for sample in anchor_samples] == [1, 3]
     assert all(
-        set(sample) == {"boundary_ref", "source", "match_view", "matched_forms"}
+        set(sample) == {"boundary_ref", "source_ref", "match_view", "matched_forms"}
         for sample in [*focus_samples, *anchor_samples]
     )
+    assert payload["evidence_sources"] == {
+        "1": "focus one",
+        "2": "focus two",
+        "3": "anchor one",
+        "4": "anchor two",
+    }
+
+
+def test_decision_payload_reuses_only_exact_sample_sources() -> None:
+    focus = _batch_state("focus", "Focus")
+    anchor = _batch_state("anchor", "Anchor")
+    evidence = _batch_evidence(focus, anchor)
+    evidence["focus"]["samples"] = [
+        {
+            "file_id": "F1",
+            "part_id": "chapter-1",
+            "segment_id": "S1",
+            "source": "same repeated excerpt",
+            "match_view": "source",
+            "matched_forms": [{"kind": "source", "value": "Focus"}],
+        },
+        {
+            "file_id": "F1",
+            "part_id": "chapter-2",
+            "segment_id": "S2",
+            "source": "same repeated excerpt plus context",
+            "match_view": "source",
+            "matched_forms": [{"kind": "source", "value": "Focus"}],
+        },
+    ]
+    evidence["anchor"]["samples"] = [
+        {
+            "file_id": "F2",
+            "part_id": "chapter-1",
+            "segment_id": "S3",
+            "source": "same repeated excerpt",
+            "match_view": "source",
+            "matched_forms": [{"kind": "source", "value": "Anchor"}],
+        }
+    ]
+
+    payload = _make_payload(
+        phase="adjudication",
+        target_language="简体中文",
+        focus=[focus],
+        anchors=[anchor],
+        evidence=evidence,
+    )
+
+    focus_samples = payload["terms"][0]["evidence"]["samples"]
+    anchor_samples = payload["anchors"][0]["evidence"]["samples"]
+    assert [sample["source_ref"] for sample in focus_samples] == [1, 2]
+    assert anchor_samples[0]["source_ref"] == 1
+    assert payload["evidence_sources"] == {
+        "1": "same repeated excerpt",
+        "2": "same repeated excerpt plus context",
+    }
 
 
 def test_final_review_prompt_forbids_unresolved_decisions() -> None:
@@ -764,6 +821,8 @@ def test_final_review_prompt_forbids_unresolved_decisions() -> None:
     assert "第一阶段存在" not in prompt
     assert "第二阶段只有" not in prompt
     assert "无法可靠决定时使用 needs_review" not in prompt
+    assert "segment_ref" in prompt and "context_segments" in prompt
+    assert "不重复携带 source" in prompt
 
     ordinary_prompt = full_prompt(
         "terminology_decision",
@@ -772,6 +831,7 @@ def test_final_review_prompt_forbids_unresolved_decisions() -> None:
         phase="consistency",
     )
     assert "第二阶段只有显式 update、disable、needs_review 才覆盖第一阶段" in ordinary_prompt
+    assert "evidence_sources" in ordinary_prompt and "source_ref" in ordinary_prompt
 
 
 def test_final_review_actions_settle_prior_review_and_disabled_terms() -> None:
@@ -978,7 +1038,6 @@ def test_final_review_payload_projects_windows_to_request_local_refs() -> None:
             "boundary_ref": 1,
             "segment_ref": 2,
             "window_ref": 1,
-            "source": "focus hit",
             "match_view": "source",
             "matched_forms": [{"kind": "source", "value": "Focus"}],
         }
@@ -991,6 +1050,7 @@ def test_final_review_payload_projects_windows_to_request_local_refs() -> None:
         "1": {"boundary_ref": 1, "source": "before", "is_empty": False},
         "2": {"boundary_ref": 1, "source": "focus hit", "is_empty": False},
     }
+    assert "evidence_sources" not in payload
     serialized = json.dumps(focus_evidence, ensure_ascii=False)
     assert all(value not in serialized for value in ("F1", "chapter-1", "S0", "S1"))
 
@@ -2851,7 +2911,7 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
     assert phases == ["adjudication", "consistency"]
     assert request_samples
     assert all(
-        set(sample) == {"boundary_ref", "source", "match_view", "matched_forms"}
+        set(sample) == {"boundary_ref", "source_ref", "match_view", "matched_forms"}
         for sample in request_samples
     )
     assert summary["proposals"] == 1
@@ -5620,8 +5680,18 @@ async def test_isolated_content_retries_send_only_current_guidance(tmp_path: Pat
     ]
     assert [[term["normalized"] for term in payload["terms"]]
             for payload in llm.payloads] == [["alice", "bob"], ["alice", "bob"], ["alice"], ["bob"]]
-    assert all(set(payload) <= {"phase", "target_language", "terms", "anchors", "validation_repair"}
-               for payload in llm.payloads)
+    assert all(
+        set(payload)
+        <= {
+            "phase",
+            "target_language",
+            "terms",
+            "anchors",
+            "evidence_sources",
+            "validation_repair",
+        }
+        for payload in llm.payloads
+    )
 
 
 @pytest.mark.asyncio
