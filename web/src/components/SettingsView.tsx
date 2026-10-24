@@ -812,7 +812,6 @@ function PresetSettings({ language }: { language: Language }) {
       <WarningsSummary warnings={[...new Set([
         ...warnings,
         ...missingFields.map((field) => translate("preset.missingField", language, { field })),
-        ...presets.flatMap((item) => item.warnings ?? []),
       ])]} language={language} />
         {!preset ? (
           <>{error && <Feedback message={error} onDismiss={() => setError((current) => current === error ? "" : current)} />}<p className="muted">{presetLoading ? translate("preset.loadingPreset", language) : translate("preset.selectHint", language)}</p></>
