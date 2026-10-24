@@ -659,16 +659,17 @@ def decision_plan(
         )
         if not review_focus:
             raise UsageError("当前草案没有可终审的术语待审项")
+        target_ids = {item["normalized"] for item in review_focus}
+        review_anchors = [state for key, state in draft_final.items() if key not in target_ids]
         if prepare_requests:
-            for key, item in _batches.collect_term_review_evidence(project, review_focus, config).items():
+            for key, item in _batches.collect_term_review_evidence(project, review_focus, config, anchors=review_anchors).items():
                 evidence[key].update(item)
         knowledge_batches, knowledge_tokens = [], 0
         if estimate_usage:
             phase_one, phase_one_tokens = _batches._pack_batches(
                 review_focus, phase="final_review",
                 target_language=str(config["project"]["target_language"]),
-                anchors=[state for key, state in draft_final.items()
-                         if key not in {item["normalized"] for item in review_focus}],
+                anchors=review_anchors,
                 evidence=evidence, prompt=prompts["final_review"], config=config,
                 spec=spec, conflicts=source_conflicts,
             )
@@ -1260,9 +1261,11 @@ async def run_terminology_decision(
                             + ", ".join(sorted(unexpected_review)[:10])
                         )
                     final_review_target_count = len(review_focus)
+                    review_anchors = ([state for key, state in final.items() if key not in review_target_ids]
+                                      if source_draft is not None else protected_states)
                     if review_focus:
                         review_evidence = (await run_blocking(lambda: _batches.collect_term_review_evidence(
-                            project, review_focus, config
+                            project, review_focus, config, anchors=review_anchors
                         )))
                         for key, item in review_evidence.items():
                             evidence[key].update(item)
@@ -1286,8 +1289,7 @@ async def run_terminology_decision(
                             remaining_review,
                             phase=_FINAL_REVIEW_PHASE,
                             target_language=str(config["project"]["target_language"]),
-                            anchors=([state for key, state in final.items() if key not in review_target_ids]
-                                     if source_draft is not None else protected_states),
+                            anchors=review_anchors,
                             evidence=evidence,
                             prompt=prompts[_FINAL_REVIEW_PHASE],
                             config=config,

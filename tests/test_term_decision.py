@@ -6170,3 +6170,41 @@ async def test_web_starts_final_review_for_current_draft(tmp_path, monkeypatch):
         assert finished["status"] == "completed", finished
         assert finished["total_segments"] == finished["completed_segments"] == 1
     assert phases == ["final_review"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("standalone", [False, True])
+async def test_final_review_includes_windows_for_readonly_related_anchors(tmp_path, standalone):
+    project = create_decision_project(tmp_path)
+    library_path = project / "terminology" / "terms.json"
+    library = read_json(project, library_path)
+    library["terms"][0]["group_primary"] = "bob"
+    write_term_library(project, library_path, library)
+    overrides_path = project / "terminology" / "overrides.json"
+    overrides = read_json(project, overrides_path)
+    overrides["overrides"] = [{"normalized": "bob", "preferred_translation": "鲍勃"}]
+    write_json(project, overrides_path, overrides)
+    final_requests = []
+
+    def handler(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if payload["phase"] == "final_review":
+            final_requests.append(payload)
+            assert {term["normalized"] for term in payload["anchors"]} == {"bob"}
+            samples = payload["anchors"][0]["evidence"]["samples"]
+            assert samples
+            assert all(str(sample["segment_ref"]) in payload["context_segments"] for sample in samples)
+            assert all("source" not in sample for sample in samples)
+        records = [{"type": "decision", "normalized": term["normalized"],
+                    "action": "keep" if payload["phase"] == "final_review" else "needs_review",
+                    "reason": "确认"} for term in payload["terms"]]
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        run_id = None
+        if standalone:
+            await run_terminology_decision(project, http_client=client)
+            run_id = current_decision_draft(project)["run_id"]
+        await run_terminology_decision(project, final_review=True, review_draft_run_id=run_id, http_client=client)
+    assert len(final_requests) == 1
+    assert current_decision_draft(project)["needs_review"] == []

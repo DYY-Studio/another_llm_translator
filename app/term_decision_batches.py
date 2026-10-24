@@ -257,10 +257,18 @@ def collect_term_review_evidence(
     project: Path,
     terms: list[dict[str, Any]],
     config: dict[str, Any] | None = None,
+    *,
+    anchors: list[dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Collect bounded full-Segment evidence for a later terminology review."""
     config = config or load_project_config(project)
     spec = term_normalization(config)
+    if anchors:
+        selected = {str(term["normalized"]): term for term in terms}
+        for term in terms:
+            for anchor in _related_anchors([term], anchors, spec):
+                selected[str(anchor["normalized"])] = anchor
+        terms = list(selected.values())
     forms_by_term = {
         str(term["normalized"]): _normalized_forms(term, spec) for term in terms
     }
