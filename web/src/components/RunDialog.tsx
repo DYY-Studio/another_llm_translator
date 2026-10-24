@@ -151,7 +151,7 @@ function StageRunDialog({
   }, [options.include_draft_translation, options.include_summaries, options.mismatched_fingerprint_completed]);
   const decisionMode = options.stage === "terminology_decision";
   const [finalReview, setFinalReview] = useState(
-    options.running_run?.final_review ?? options.final_review ?? false,
+    options.review_draft_run_id ? true : options.running_run?.final_review ?? options.final_review ?? false,
   );
   const hybridSummary = options.stage === "terminology" && Boolean(options.include_summaries);
   const summaryPromptBlocked = Boolean(options.summary_prompt_preflight && !options.summary_prompt_preflight.ok);
@@ -201,15 +201,15 @@ function StageRunDialog({
       confirm_knowledge_replacement: replacementNeeded && knowledgeConfirmed,
       reuse_mixed_fingerprints: !resuming && resultPolicy === "reuse",
       run_action: options.running_run ? runAction : null,
-      final_review: decisionMode && !options.knowledge_only && finalReview,
+      final_review: decisionMode && !options.knowledge_only && (Boolean(options.review_draft_run_id) || finalReview),
       ...(options.stage === "terminology" ? { include_draft_translation: draftEnabled, include_summaries: hybridSummary } : {}),
     });
   }
 
   return (
     <RunDialogFrame
-      title={translate(options.knowledge_only ? "terms.knowledgeOnlyTitle" : decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(stageLabelKey(options.stage), language) })}
-      subtitle={decisionMode ? translate(options.knowledge_only ? "terms.knowledgeOnlyHint" : "terms.decisionHint", language) : translate("runDialog.subtitle", language)}
+      title={translate(options.review_draft_run_id ? "terms.decisionStartFinalReview" : options.knowledge_only ? "terms.knowledgeOnlyTitle" : decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(stageLabelKey(options.stage), language) })}
+      subtitle={decisionMode ? translate(options.review_draft_run_id ? "terms.decisionDraftFinalReviewHint" : options.knowledge_only ? "terms.knowledgeOnlyHint" : "terms.decisionHint", language) : translate("runDialog.subtitle", language)}
       onClose={onClose}>
         <div className="run-preset" aria-label={translate("runDialog.currentPreset", language)}>
           <span>{translate("runDialog.currentPreset", language)}</span>
@@ -236,10 +236,10 @@ function StageRunDialog({
           </section>
         )}
         {decisionMode && <div className="run-decision-info">
-          <span>{translate(options.knowledge_only ? "terms.knowledgeOnlyScope" : "terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
+          <span>{translate(options.review_draft_run_id ? "terms.decisionDraftFinalReviewScope" : options.knowledge_only ? "terms.knowledgeOnlyScope" : "terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
           {options.estimated_requests != null && options.estimated_input_tokens != null && <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests, tokens: options.estimated_input_tokens })}</span>}
           {options.estimate_error && <span className="warning-banner">{translate("runDialog.estimateFailed", language, { error: errorMessage(options.estimate_error, language) })}</span>}
-          {!options.knowledge_only && <label className="config-toggle">
+          {!options.knowledge_only && !options.review_draft_run_id && <label className="config-toggle">
             <span>
               <input
                 type="checkbox"
