@@ -333,11 +333,11 @@ Anthropic 输入 token 包含未缓存、缓存创建和缓存读取，total 由
 
 组合实验与标准术语扫描共用字段校验：`source`、`category` 为非空字符串，`description`、`preferred_translation` 为可选字符串，`aliases` 为字符串数组。宿主不额外检查候选及别名是否在源文中连续出现，也不额外拒绝重复候选或术语记录的未知字段。
 
-合并请求使用规范的 Prefix 和 Suffix 包围当前语言的对应 Prompt。需要返回片段引用时，输入在对应文本对象中携带请求内短 `id`，不另发 ID 数组。仅术语请求不携带片段 ID。粗翻为每个请求 Segment 返回一条完整 `segment` 译文记录；概括返回覆盖 `source_segments` 中 `id` 的 `summary` 记录，且出现在 `term` 或 `no_terms` 之前。三项合并时同时返回这些结果，末行只输出一条 `end`。仅补译与概括时返回 `segment` 和 `summary`，不声明术语结果。响应均遵循严格 JSONL。
+合并请求使用规范的 Prefix 和 Suffix 包围当前语言的对应 Prompt。需要返回片段引用时，输入在对应文本对象中携带请求内短 `id`，不另发 ID 数组。仅术语请求不携带片段 ID。包含粗翻的组合请求统一通过 `segments` 提供带短 `id` 和 `source` 的源文；不重复发送 `source_segments`。粗翻为每个请求 Segment 返回一条完整 `segment` 译文记录；概括返回覆盖当前源文短 `id` 的 `summary` 记录，且出现在 `term` 或 `no_terms` 之前。三项合并时同时返回这些结果，末行只输出一条 `end`。仅补译与概括时返回 `segment` 和 `summary`，不声明术语结果。响应均遵循严格 JSONL。
 
 ### 自动术语决策关系校验
 
-终审请求通过共享 `context_segments` 表提供上下文 Segment，以请求内 `segment_ref` 索引，条目保留 `boundary_ref`、`source` 和 `is_empty`。各术语 `evidence.windows` 的 `segment_refs` 按原文顺序引用共享表，`hit_segment_refs` 保留该术语自己的命中位置，`window_ref` 仅在所属术语内有效。样本摘录和匹配视图仍按术语保留。
+普通阶段的样本摘录在请求级 `evidence_sources` 表中按完全相同的字符串去重，以 `source_ref` 引用；不同或重叠的摘录保持独立。各样本仍按术语保留 `match_view`、`matched_forms` 和 `boundary_ref`。终审样本通过 `segment_ref` 引用命中 Segment，不重复携带 `source`。终审请求通过共享 `context_segments` 表提供上下文 Segment，以请求内 `segment_ref` 索引，条目保留 `boundary_ref`、`source` 和 `is_empty`。各术语 `evidence.windows` 的 `segment_refs` 按原文顺序引用共享表，`hit_segment_refs` 保留该术语自己的命中位置，`window_ref` 仅在所属术语内有效。
 
 名称与关系决策各阶段的 `description` 为按术语当前归属拼接的全部有效、未停用说明片段，同一原归属的片段归为一组，每组以方括号标明原术语归属。请求级 `applied_descriptions` 表按完整正文去重，目标术语和 Anchors 通过 `applied_description_ref` 引用各自原有的已应用说明作对照，无说明时引用为 `null`。临时分组变化不改变各术语的对照正文。两者均只读。片段可能重复、存在分歧或描述不同位置，排列顺序不表示事实发生时间。拼接文本计入现有分批预算，不截断。
 

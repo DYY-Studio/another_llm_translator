@@ -194,6 +194,7 @@ def decision_resume_compatibility(
     source_terms_revision: int,
     final_review: bool = False,
     knowledge_only: bool = False,
+    review_draft_run_id: str | None = None,
 ) -> tuple[bool, str | None]:
     from .execution import run_protocol_is_current
     if not run_protocol_is_current(project, run_id):
@@ -204,6 +205,8 @@ def decision_resume_compatibility(
         )
     except StorageError:
         return False, "旧 Run 的 manifest 不可读"
+    if manifest.get("review_draft_run_id") != review_draft_run_id:
+        return False, "旧 Run 的草案终审对象与当前运行不一致"
     if manifest.get("status") != "running":
         return False, "旧 Run 已结束，不能续跑；请新建 Run"
     try:
@@ -519,11 +522,13 @@ def _decision_fingerprint(
     *,
     final_review: bool = False,
     knowledge_only: bool = False,
+    review_draft_run_id: str | None = None,
 ) -> str:
     data = {
         "stage": STAGE,
         "rules_version": DECISION_RULES_VERSION,
         "final_review": final_review,
+        **({"review_draft_run_id": review_draft_run_id} if review_draft_run_id is not None else {}),
         "knowledge_only": knowledge_only,
         "target_language": config["project"]["target_language"],
         "model": config["llm"]["model"],
@@ -549,6 +554,7 @@ def decision_plan(
     *,
     final_review: bool = False,
     knowledge_only: bool = False,
+    review_draft_run_id: str | None = None,
     prepare_requests: bool = True,
     estimate_usage: bool = True,
 ) -> dict[str, Any]:
@@ -579,6 +585,19 @@ def decision_plan(
         # targets at the actual phase boundary, rather than during UI/queue inspection.
         knowledge_pending = len(entity_members(library)) if knowledge_only else 0
     states = {str(item["normalized"]): _term_state(item) for item in library.get("terms", [])}
+    source_draft = None
+    if review_draft_run_id is not None:
+        if not final_review or knowledge_only:
+            raise UsageError("草案终审必须启用终审，且不能使用仅实体说明模式")
+        source_draft = _drafts.current_decision_draft(project)
+        if source_draft is None or source_draft["run_id"] != review_draft_run_id:
+            raise UsageError("术语决策草案已变化，请刷新后重试")
+        if source_draft["source_terms_revision"] != library["terms_revision"]:
+            raise UsageError("术语库已变化，当前决策草案已过期")
+        if source_draft.get("decision_rules_version") != DECISION_RULES_VERSION:
+            raise UsageError("当前决策草案规则版本不一致，请重新生成草案")
+        if source_draft.get("knowledge_only") or not source_draft["needs_review"]:
+            raise UsageError("当前草案没有可终审的术语待审项")
     eligible = [state for key, state in states.items() if not knowledge_only and key not in protected and not state["disabled"]]
     if not eligible and not knowledge_pending:
         raise UsageError("已发布术语全部受到人工 override 保护")
@@ -603,7 +622,7 @@ def decision_plan(
     protected_states = [states[key] for key in sorted(protected & set(states))]
     phase_one, phase_two = [], []
     phase_one_tokens = phase_two_tokens = 0
-    if not knowledge_only and prepare_requests and estimate_usage:
+    if source_draft is None and not knowledge_only and prepare_requests and estimate_usage:
         phase_one, phase_one_tokens = _batches._pack_batches(
             eligible,
             phase="adjudication",
@@ -615,7 +634,7 @@ def decision_plan(
             spec=spec,
             conflicts=source_conflicts,
         )
-    if estimate_usage:
+    if estimate_usage and source_draft is None:
         if not knowledge_only:
             simulated_focus = [
                 {**deepcopy(state), "_prior_decision": {"action": "keep", "reason": "estimate"}}
@@ -631,6 +650,29 @@ def decision_plan(
         knowledge_batches, knowledge_tokens, _ = pack_knowledge_batches(knowledge_views, prompts["knowledge"], config)
     else:
         knowledge_batches, knowledge_tokens = [], 0
+    review_focus = []
+    if source_draft is not None:
+        draft_final, draft_decisions, _ = _draft_review_states(states, source_draft)
+        review_focus = _final_review_targets(
+            eligible=eligible, protected=protected, original=states,
+            final=draft_final, decisions=draft_decisions, spec=spec,
+        )
+        if not review_focus:
+            raise UsageError("当前草案没有可终审的术语待审项")
+        target_ids = {item["normalized"] for item in review_focus}
+        review_anchors = [state for key, state in draft_final.items() if key not in target_ids]
+        if prepare_requests:
+            for key, item in _batches.collect_term_review_evidence(project, review_focus, config, anchors=review_anchors).items():
+                evidence[key].update(item)
+        knowledge_batches, knowledge_tokens = [], 0
+        if estimate_usage:
+            phase_one, phase_one_tokens = _batches._pack_batches(
+                review_focus, phase="final_review",
+                target_language=str(config["project"]["target_language"]),
+                anchors=review_anchors,
+                evidence=evidence, prompt=prompts["final_review"], config=config,
+                spec=spec, conflicts=source_conflicts,
+            )
     return {
         "library": library,
         "config": config,
@@ -641,6 +683,7 @@ def decision_plan(
         "eligible": eligible,
         "final_review": final_review,
         "knowledge_only": knowledge_only,
+        "source_draft": source_draft,
         "evidence": evidence,
         "language": language,
         "prompts": prompts,
@@ -650,9 +693,33 @@ def decision_plan(
         "requests_prepared": prepare_requests,
         "estimated_requests": len(phase_one) + len(phase_two) + len(knowledge_batches) if estimate_usage else None,
         "estimated_input_tokens": phase_one_tokens + phase_two_tokens + knowledge_tokens if estimate_usage else None,
-        "total_steps": len(eligible) * 2 + knowledge_pending,
+        "total_steps": len(review_focus) if source_draft is not None else len(eligible) * 2 + knowledge_pending,
         "knowledge_pending": knowledge_pending,
     }
+
+
+def _draft_review_states(
+    states: dict[str, dict[str, Any]], draft: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any]]:
+    final = deepcopy(states)
+    decisions = {key: {"action": "keep", "reason": "已有草案决定"} for key in states}
+    updates = {}
+    for proposal in draft["proposals"]:
+        for state in proposal["after"]:
+            key = state["normalized"]
+            final[key] = deepcopy(state)
+            decisions[key] = {"action": "update", "after": deepcopy(state), "reason": proposal["reason"]}
+        for root, aggregate in proposal.get("knowledge_after", {}).items():
+            updates[root] = {
+                "aggregate": deepcopy(aggregate),
+                "members": [key for key in proposal["normalized"]
+                            if (final[key].get("group_primary") or key) == root],
+                "reason": proposal["reason"],
+                "owner_moves": deepcopy(proposal.get("knowledge_owner_moves", {})),
+            }
+    for item in draft["needs_review"]:
+        decisions[item["normalized"]] = {"action": "needs_review", "reason": item["reason"]}
+    return final, decisions, updates
 
 @blocking_scope
 async def run_terminology_decision(
@@ -669,16 +736,18 @@ async def run_terminology_decision(
     plan: dict[str, Any] | None = None,
     final_review: bool = False,
     knowledge_only: bool = False,
+    review_draft_run_id: str | None = None,
 ) -> dict[str, Any]:
     existing = (await run_blocking(lambda: _drafts._read_pending_draft(project)))
-    if existing is not None and existing["run_id"] != resume_run_id and not replace_draft:
+    if existing is not None and existing["run_id"] != resume_run_id and not replace_draft and review_draft_run_id is None:
         raise UsageError("已有待处理术语决策草案；必须明确替换")
     if plan is None or not plan.get("requests_prepared", True):
-        plan = (await run_blocking(lambda: decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, estimate_usage=dry_run)))
+        plan = (await run_blocking(lambda: decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, review_draft_run_id=review_draft_run_id, estimate_usage=dry_run)))
     elif bool(plan.get("final_review", False)) != final_review:
         raise UsageError("术语决策计划的终审选项与当前运行不一致")
     if bool(plan.get("knowledge_only", False)) != knowledge_only:
         raise UsageError("术语决策计划的实体说明执行模式与当前运行不一致")
+    source_draft = plan.get("source_draft")
     library = plan["library"]
     config = plan["config"]
     metadata = (await run_blocking(lambda: read_json(project, project / "project.json")))
@@ -691,7 +760,7 @@ async def run_terminology_decision(
     language = plan["language"]
     prompts = plan["prompts"]
     fingerprint = _decision_fingerprint(
-        config, prompts, library, final_review=final_review, knowledge_only=knowledge_only
+        config, prompts, library, final_review=final_review, knowledge_only=knowledge_only, review_draft_run_id=review_draft_run_id
     )
     model_fingerprint = (
         "sha256:"
@@ -722,6 +791,7 @@ async def run_terminology_decision(
             source_terms_revision=revision,
             final_review=final_review,
             knowledge_only=knowledge_only,
+            review_draft_run_id=review_draft_run_id,
         )
         if not compatible:
             raise UsageError(f"{incompatibility_reason}；请显式结束旧 Run 并强制新建")
@@ -747,8 +817,8 @@ async def run_terminology_decision(
             stage=STAGE,
             fingerprint=fingerprint,
             prompt=prompt_snapshot,
-            selected_count=plan["knowledge_pending"] if knowledge_only else len(eligible),
-            requested_count=plan["knowledge_pending"] if knowledge_only else len(eligible),
+            selected_count=plan["total_steps"] if source_draft is not None else plan["knowledge_pending"] if knowledge_only else len(eligible),
+            requested_count=plan["total_steps"] if source_draft is not None else plan["knowledge_pending"] if knowledge_only else len(eligible),
             reused_count=0,
             details={
                 "source_terms_revision": revision,
@@ -757,6 +827,7 @@ async def run_terminology_decision(
                 "prompt_language": language,
                 "final_review": final_review,
                 "knowledge_only": knowledge_only,
+                "review_draft_run_id": review_draft_run_id,
             },
         )))
     else:
@@ -768,8 +839,8 @@ async def run_terminology_decision(
             fingerprint=fingerprint,
             prompt=prompt_snapshot,
             scope=Scope(),
-            selected_count=plan["knowledge_pending"] if knowledge_only else len(eligible),
-            requested_count=plan["knowledge_pending"] if knowledge_only else len(eligible),
+            selected_count=plan["total_steps"] if source_draft is not None else plan["knowledge_pending"] if knowledge_only else len(eligible),
+            requested_count=plan["total_steps"] if source_draft is not None else plan["knowledge_pending"] if knowledge_only else len(eligible),
             reused_count=0,
         )))
     if limiter is None:
@@ -808,7 +879,8 @@ async def run_terminology_decision(
         raise StorageError("术语决策检查点在第一阶段完成前包含第二阶段结果")
     containment_decisions = _checkpoint_decisions(checkpoint, "containment")
     completed = len(decisions) + len(consistency_decisions) + len(review_decisions) + len(containment_decisions) + len(checkpoint["phases"]["knowledge"])
-    total = len(eligible) * 2 + len(containment_decisions) + len(checkpoint["phases"]["knowledge"])
+    initial_steps = 0 if source_draft is not None else len(eligible) * 2
+    total = initial_steps + len(containment_decisions) + len(checkpoint["phases"]["knowledge"])
     if knowledge_only:
         total = plan["total_steps"]
     final_review_target_count = 0
@@ -822,6 +894,8 @@ async def run_terminology_decision(
     review_target_ids: set[str] = set()
     final_responses_complete = False
     knowledge_updates: dict[str, Any] = {}
+    if source_draft is not None:
+        _, _, knowledge_updates = _draft_review_states(states, source_draft)
     knowledge_errors: dict[str, str] = {}
     cleanup_warnings: list[str] = []
 
@@ -852,11 +926,22 @@ async def run_terminology_decision(
             knowledge_errors=knowledge_errors,
             knowledge_only=knowledge_only,
         )
+        if source_draft is not None:
+            affected = review_target_ids | {item["normalized"] for item in containment_focus}
+            preserved = [deepcopy(item) for item in source_draft["proposals"]
+                         if not set(item["normalized"]) & affected]
+            draft["proposals"] = preserved + [item for item in draft["proposals"]
+                                             if set(item["normalized"]) & affected]
+            rejected_terms = {key for item in source_draft["proposals"]
+                              if item["proposal_id"] in source_draft["rejected_proposal_ids"]
+                              for key in item["normalized"]}
+            draft["rejected_proposal_ids"] = [item["proposal_id"] for item in draft["proposals"]
+                                               if set(item["normalized"]) & rejected_terms]
         atomic_write_json(_drafts._draft_path(project, run_id), draft, compact=True)
         manifest = read_json(project, run_dir / "manifest.json")
         manifest.update(
             decision_status="pending",
-            rejected_proposal_ids=[value for value in manifest.get("rejected_proposal_ids", [])
+            rejected_proposal_ids=[value for value in (draft["rejected_proposal_ids"] if source_draft is not None else manifest.get("rejected_proposal_ids", []))
                                    if value in {proposal["proposal_id"] for proposal in draft["proposals"]}],
             proposal_count=len(draft["proposals"]),
             needs_review_count=len(draft["needs_review"]),
@@ -966,171 +1051,174 @@ async def run_terminology_decision(
             containment_focus = []
             final_conflicts = source_conflicts
             if not knowledge_only:
-                remaining_phase_one = [
-                    item for item in eligible if str(item["normalized"]) not in decisions
-                ]
-                phase_one, _ = (await run_blocking(lambda: _batches._pack_batches(
-                    remaining_phase_one,
-                    phase="adjudication",
-                    target_language=str(config["project"]["target_language"]),
-                    anchors=protected_states,
-                    evidence=evidence,
-                    prompt=prompts["adjudication"],
-                    config=config,
-                    spec=spec,
-                    conflicts=source_conflicts,
-                )))
-
-                async def adjudicate(
-                    batch: tuple[list[dict[str, Any]], list[dict[str, Any]]],
-                ) -> None:
-                    focus, anchors = batch
-                    nonlocal completed
-                    result = await _batches._request_batch(
-                        llm,
-                        focus=focus,
-                        anchors=anchors,
+                if source_draft is not None:
+                    final, decisions, _ = _draft_review_states(states, source_draft)
+                else:
+                    remaining_phase_one = [
+                        item for item in eligible if str(item["normalized"]) not in decisions
+                    ]
+                    phase_one, _ = (await run_blocking(lambda: _batches._pack_batches(
+                        remaining_phase_one,
                         phase="adjudication",
+                        target_language=str(config["project"]["target_language"]),
+                        anchors=protected_states,
+                        evidence=evidence,
                         prompt=prompts["adjudication"],
                         config=config,
-                        evidence=evidence,
-                        known_states=states,
-                        read_only_terms={str(item["normalized"]) for item in anchors},
-                        prompt_language=language,
-                        review_states=states,
                         spec=spec,
                         conflicts=source_conflicts,
-                    )
-                    def commit_result() -> None:
+                    )))
+
+                    async def adjudicate(
+                        batch: tuple[list[dict[str, Any]], list[dict[str, Any]]],
+                    ) -> None:
+                        focus, anchors = batch
                         nonlocal completed
-                        decisions.update(result)
-                        records = checkpoint["phases"]["adjudication"]
-                        for normalized, decision in result.items():
-                            records[normalized] = {
-                                "decision": deepcopy(decision),
-                                "decision_fingerprint": fingerprint,
-                                "model_fingerprint": model_fingerprint,
-                                "prompt_fingerprint": prompt_fingerprints["adjudication"],
-                            }
-                        (atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True))
-                        completed += len(focus)
-                    await run_blocking(commit_result)
-                    if on_progress:
-                        on_progress(completed, 0, total)
+                        result = await _batches._request_batch(
+                            llm,
+                            focus=focus,
+                            anchors=anchors,
+                            phase="adjudication",
+                            prompt=prompts["adjudication"],
+                            config=config,
+                            evidence=evidence,
+                            known_states=states,
+                            read_only_terms={str(item["normalized"]) for item in anchors},
+                            prompt_language=language,
+                            review_states=states,
+                            spec=spec,
+                            conflicts=source_conflicts,
+                        )
+                        def commit_result() -> None:
+                            nonlocal completed
+                            decisions.update(result)
+                            records = checkpoint["phases"]["adjudication"]
+                            for normalized, decision in result.items():
+                                records[normalized] = {
+                                    "decision": deepcopy(decision),
+                                    "decision_fingerprint": fingerprint,
+                                    "model_fingerprint": model_fingerprint,
+                                    "prompt_fingerprint": prompt_fingerprints["adjudication"],
+                                }
+                            (atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True))
+                            completed += len(focus)
+                        await run_blocking(commit_result)
+                        if on_progress:
+                            on_progress(completed, 0, total)
 
-                await run_bounded(
-                    phase_one,
-                    adjudicate,
-                    max_parallel=int(config["execution"]["max_parallel"]),
-                )
-                tentative = deepcopy(states)
-                _apply_tentative(tentative, decisions)
-                phase_two_state = (await run_blocking(lambda: _consistency_states(
-                    states, tentative, consistency_decisions
-                )))
-                unresolved_phase_two_conflicts = (await run_blocking(lambda: _effective_conflicts(
-                    project, phase_two_state, source_conflicts
-                )))
-                phase_two_conflicts = deepcopy(unresolved_phase_two_conflicts)
-                for normalized, conflicts in phase_two_conflicts.items():
-                    source = source_conflicts[normalized]
-                    conflicts["categories"] = deepcopy(source["categories"])
-                    conflicts["preferred_translations"] = deepcopy(
-                        source["preferred_translations"]
+                    await run_bounded(
+                        phase_one,
+                        adjudicate,
+                        max_parallel=int(config["execution"]["max_parallel"]),
                     )
-                phase_two_focus = [
-                    {
-                        **deepcopy(phase_two_state[item["normalized"]]),
-                        "_prior_decision": deepcopy(decisions[item["normalized"]]),
-                    }
-                    for item in eligible
-                ]
-                phase_two_anchors = [
-                    *protected_states,
-                    *_automatic_phase_two_anchors(
-                        eligible,
-                        phase_two_state,
-                        decisions,
-                        consistency_decisions,
-                        unresolved_phase_two_conflicts,
-                        spec,
-                    ),
-                ]
-                remaining_phase_two = [
-                    item
-                    for item in phase_two_focus
-                    if str(item["normalized"]) not in consistency_decisions
-                ]
-                phase_two, _ = (await run_blocking(lambda: _batches._pack_batches(
-                    remaining_phase_two,
-                    phase="consistency",
-                    target_language=str(config["project"]["target_language"]),
-                    anchors=phase_two_anchors,
-                    evidence=evidence,
-                    prompt=prompts["consistency"],
-                    config=config,
-                    spec=spec,
-                    conflicts=phase_two_conflicts,
-                )))
-
-                async def review_consistency(
-                    batch: tuple[list[dict[str, Any]], list[dict[str, Any]]],
-                ) -> None:
-                    focus, anchors = batch
-                    nonlocal completed
-                    result = await _batches._request_batch(
-                        llm,
-                        focus=focus,
-                        anchors=anchors,
+                    tentative = deepcopy(states)
+                    _apply_tentative(tentative, decisions)
+                    phase_two_state = (await run_blocking(lambda: _consistency_states(
+                        states, tentative, consistency_decisions
+                    )))
+                    unresolved_phase_two_conflicts = (await run_blocking(lambda: _effective_conflicts(
+                        project, phase_two_state, source_conflicts
+                    )))
+                    phase_two_conflicts = deepcopy(unresolved_phase_two_conflicts)
+                    for normalized, conflicts in phase_two_conflicts.items():
+                        source = source_conflicts[normalized]
+                        conflicts["categories"] = deepcopy(source["categories"])
+                        conflicts["preferred_translations"] = deepcopy(
+                            source["preferred_translations"]
+                        )
+                    phase_two_focus = [
+                        {
+                            **deepcopy(phase_two_state[item["normalized"]]),
+                            "_prior_decision": deepcopy(decisions[item["normalized"]]),
+                        }
+                        for item in eligible
+                    ]
+                    phase_two_anchors = [
+                        *protected_states,
+                        *_automatic_phase_two_anchors(
+                            eligible,
+                            phase_two_state,
+                            decisions,
+                            consistency_decisions,
+                            unresolved_phase_two_conflicts,
+                            spec,
+                        ),
+                    ]
+                    remaining_phase_two = [
+                        item
+                        for item in phase_two_focus
+                        if str(item["normalized"]) not in consistency_decisions
+                    ]
+                    phase_two, _ = (await run_blocking(lambda: _batches._pack_batches(
+                        remaining_phase_two,
                         phase="consistency",
+                        target_language=str(config["project"]["target_language"]),
+                        anchors=phase_two_anchors,
+                        evidence=evidence,
                         prompt=prompts["consistency"],
                         config=config,
-                        evidence=evidence,
-                        known_states=phase_two_state,
-                        read_only_terms={str(item["normalized"]) for item in anchors},
-                        prompt_language=language,
-                        review_states=states,
                         spec=spec,
                         conflicts=phase_two_conflicts,
-                    )
-                    def commit_result() -> None:
-                        nonlocal completed
-                        consistency_decisions.update(result)
-                        records = checkpoint["phases"]["consistency"]
-                        for normalized, decision in result.items():
-                            records[normalized] = {
-                                "decision": deepcopy(decision),
-                                "decision_fingerprint": fingerprint,
-                                "model_fingerprint": model_fingerprint,
-                                "prompt_fingerprint": prompt_fingerprints["consistency"],
-                            }
-                        (atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True))
-                        completed += len(focus)
-                    await run_blocking(commit_result)
-                    if on_progress:
-                        on_progress(completed, 0, total)
+                    )))
 
-                await run_bounded(
-                    phase_two,
-                    review_consistency,
-                    max_parallel=int(config["execution"]["max_parallel"]),
-                )
-                phase_two_final = (await run_blocking(lambda: _consistency_states(
-                    states, tentative, consistency_decisions
-                )))
-                final = (
-                    (await run_blocking(lambda: _final_review_base_states(tentative, consistency_decisions)))
-                    if final_review
-                    else phase_two_final
-                )
-                decisions = _merge_phase_decisions(
-                    original=states,
-                    tentative=tentative,
-                    final=final,
-                    adjudication=decisions,
-                    consistency=consistency_decisions,
-                    language=language,
-                )
+                    async def review_consistency(
+                        batch: tuple[list[dict[str, Any]], list[dict[str, Any]]],
+                    ) -> None:
+                        focus, anchors = batch
+                        nonlocal completed
+                        result = await _batches._request_batch(
+                            llm,
+                            focus=focus,
+                            anchors=anchors,
+                            phase="consistency",
+                            prompt=prompts["consistency"],
+                            config=config,
+                            evidence=evidence,
+                            known_states=phase_two_state,
+                            read_only_terms={str(item["normalized"]) for item in anchors},
+                            prompt_language=language,
+                            review_states=states,
+                            spec=spec,
+                            conflicts=phase_two_conflicts,
+                        )
+                        def commit_result() -> None:
+                            nonlocal completed
+                            consistency_decisions.update(result)
+                            records = checkpoint["phases"]["consistency"]
+                            for normalized, decision in result.items():
+                                records[normalized] = {
+                                    "decision": deepcopy(decision),
+                                    "decision_fingerprint": fingerprint,
+                                    "model_fingerprint": model_fingerprint,
+                                    "prompt_fingerprint": prompt_fingerprints["consistency"],
+                                }
+                            (atomic_write_json(_checkpoint_path(project, run_id), checkpoint, compact=True))
+                            completed += len(focus)
+                        await run_blocking(commit_result)
+                        if on_progress:
+                            on_progress(completed, 0, total)
+
+                    await run_bounded(
+                        phase_two,
+                        review_consistency,
+                        max_parallel=int(config["execution"]["max_parallel"]),
+                    )
+                    phase_two_final = (await run_blocking(lambda: _consistency_states(
+                        states, tentative, consistency_decisions
+                    )))
+                    final = (
+                        (await run_blocking(lambda: _final_review_base_states(tentative, consistency_decisions)))
+                        if final_review
+                        else phase_two_final
+                    )
+                    decisions = _merge_phase_decisions(
+                        original=states,
+                        tentative=tentative,
+                        final=final,
+                        adjudication=decisions,
+                        consistency=consistency_decisions,
+                        language=language,
+                    )
                 if final_review:
                     review_base = deepcopy(final)
                     (await run_blocking(lambda: _recover_invalid_relationship_components(
@@ -1173,13 +1261,15 @@ async def run_terminology_decision(
                             + ", ".join(sorted(unexpected_review)[:10])
                         )
                     final_review_target_count = len(review_focus)
+                    review_anchors = ([state for key, state in final.items() if key not in review_target_ids]
+                                      if source_draft is not None else protected_states)
                     if review_focus:
                         review_evidence = (await run_blocking(lambda: _batches.collect_term_review_evidence(
-                            project, review_focus, config
+                            project, review_focus, config, anchors=review_anchors
                         )))
                         for key, item in review_evidence.items():
                             evidence[key].update(item)
-                    total = len(eligible) * 2 + final_review_target_count + len(containment_decisions)
+                    total = initial_steps + final_review_target_count + len(containment_decisions)
                     usage_invoked = completed < total
                     manifest = (await run_blocking(lambda: read_json(project, run_dir / "manifest.json")))
                     manifest.update(
@@ -1199,7 +1289,7 @@ async def run_terminology_decision(
                             remaining_review,
                             phase=_FINAL_REVIEW_PHASE,
                             target_language=str(config["project"]["target_language"]),
-                            anchors=protected_states,
+                            anchors=review_anchors,
                             evidence=evidence,
                             prompt=prompts[_FINAL_REVIEW_PHASE],
                             config=config,
@@ -1261,6 +1351,9 @@ async def run_terminology_decision(
                     decisions = _merge_final_review_decisions(
                         decisions, review_decisions
                     )
+                    if source_draft is not None:
+                        graph = _decision_dependency_graph(states, final, spec)
+                        review_target_ids = set().union(*_dependency_components(graph, review_target_ids))
                 # Review only suspect combinations, using the completed states rather than phase-one anchors.
                 containment_base = deepcopy(final)
                 pairs = _containment_pairs(containment_base, spec)
@@ -1275,10 +1368,15 @@ async def run_terminology_decision(
                     if key not in protected and key in eligible_terms
                     and decisions[key]["action"] != "needs_review" and not containment_base[key].get("disabled")
                 ]
+                if source_draft is not None:
+                    containment_components = [component for component in containment_components
+                                              if component & review_target_ids]
+                    affected = set().union(*containment_components) if containment_components else set()
+                    containment_focus = [item for item in containment_focus if item["normalized"] in affected]
                 target_ids = {str(item["normalized"]) for item in containment_focus}
                 if set(containment_decisions) - target_ids:
                     raise StorageError("包含关系复核检查点包含非当前目标术语")
-                total = len(eligible) * 2 + final_review_target_count + len(containment_focus) + len(checkpoint["phases"]["knowledge"])
+                total = initial_steps + final_review_target_count + len(containment_focus) + len(checkpoint["phases"]["knowledge"])
                 usage_invoked = usage_invoked or completed < total
                 remaining = [item for item in containment_focus if item["normalized"] not in containment_decisions]
                 if containment_focus:
@@ -1389,6 +1487,8 @@ async def run_terminology_decision(
             from .term_knowledge import aggregate_batch, pack_knowledge_batches, entity_members, entity_view, save_items, transfer_alias_evidence, evidence as knowledge_evidence
             def prepare_knowledge():
                 knowledge_library = deepcopy(library)
+                for root, update in knowledge_updates.items():
+                    knowledge_library["knowledge"]["entities"][root] = deepcopy(update["aggregate"])
                 knowledge_library["terms"] = [deepcopy(state) for state in final.values() if not state.get("disabled")]
                 owner_moves = {} if knowledge_only else transfer_alias_evidence(knowledge_library, spec)
                 known_fragments = knowledge_evidence(project, knowledge_library)
@@ -1401,7 +1501,10 @@ async def run_terminology_decision(
             targets = [view for view in views
                        if (knowledge_only or view["status"] != "current" or view["description_generation"] != generation)
                        and not set(view["members"]) & unresolved_names]
-            total = len(eligible) * 2 + final_review_target_count + len(containment_focus) + len(targets)
+            if source_draft is not None:
+                affected = review_target_ids | {item["normalized"] for item in containment_focus}
+                targets = [view for view in targets if set(view["members"]) & affected]
+            total = initial_steps + final_review_target_count + len(containment_focus) + len(targets)
             cached = checkpoint["phases"]["knowledge"]
             already_cached = set(cached)
 
@@ -1492,6 +1595,8 @@ async def run_terminology_decision(
         if active_llm is not None:
             usage = active_llm.usage_summary()
         (await run_blocking(lambda: record_resumable_interruption(usage, exc)))
+        if source_draft is not None:
+            raise
         if knowledge_errors and completed and isinstance(exc, AppError):
             (await run_blocking(lambda: save_draft(exc)))
         elif final_review and review_base is not None and isinstance(exc, AppError) and not isinstance(exc, StorageError):

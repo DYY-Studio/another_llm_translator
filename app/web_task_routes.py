@@ -807,6 +807,7 @@ def register_task_routes(
             aggregate_full_summaries=payload.aggregate_full_summaries,
             final_review=payload.final_review,
             knowledge_only=payload.knowledge_only,
+            review_draft_run_id=payload.review_draft_run_id,
             summary_selection=summary_selection,
             continuous_stages=payload.stages,
             continuous_run_actions=payload.run_actions,
@@ -827,6 +828,7 @@ def register_task_routes(
         language: str | None = None,
         final_review: bool = False,
         knowledge_only: bool = False,
+        review_draft_run_id: str | None = None,
         stages: list[str] = Query(default=[]),  # noqa: B008
         apply_terminology_decision: bool = False,
         include_repetition_consistency: bool = False,
@@ -857,6 +859,7 @@ def register_task_routes(
             ),
             final_review=final_review,
             knowledge_only=knowledge_only,
+            review_draft_run_id=review_draft_run_id,
             continuous_stages=stages,
             apply_terminology_decision=apply_terminology_decision,
             include_repetition_consistency=include_repetition_consistency,

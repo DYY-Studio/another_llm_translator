@@ -720,6 +720,7 @@ export interface TaskOptions {
   stage: RunStage;
   final_review?: boolean;
   knowledge_only?: boolean;
+  review_draft_run_id?: string | null;
   preset: {
     id: string;
     model: string;

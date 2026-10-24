@@ -555,14 +555,15 @@ async def run_translation(
 
         if draft_scan is not None:
             payload["response_mode"] = draft_scan.mode(items).value
-            if items[0].get("_draft_terms") or items[0].get("_draft_summary"):
+            if not items[0].get("_draft_translation") and (
+                items[0].get("_draft_terms") or items[0].get("_draft_summary")
+            ):
                 payload["source_segments"] = (
                     [
                         {"id": str(index), "text": segment_model_source(item)}
                         for index, item in enumerate(items, 1)
                     ]
-                    if items[0].get("_draft_translation")
-                    or items[0].get("_draft_summary")
+                    if items[0].get("_draft_summary")
                     else [segment_model_source(item) for item in items]
                 )
             if not items[0].get("_draft_translation"):

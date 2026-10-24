@@ -291,6 +291,10 @@ _FIELD_PREFIX = {
         "zh-CN": "segments[].source: 对应短 id 的本次待处理源文。",
         "en": "segments[].source: The pending source for the corresponding short id.",
     },
+    "segments[].id": {
+        "zh-CN": "segments[].id: 本次请求的短引用 id。",
+        "en": "segments[].id: The request-local short reference id.",
+    },
     "segments[].current_text": {
         "zh-CN": "segments[].current_text: 对应源文的当前译文。",
         "en": "segments[].current_text: The current translation of the corresponding source.",
@@ -329,12 +333,12 @@ _FIELD_PREFIX = {
         "en": "anchors: Read-only relationship references; never modify them or output decisions for them.",
     },
     "evidence": {
-        "zh-CN": "evidence: 源文命中证据。hit_count 是命中的源文片段数，不是字符出现次数；samples 是包含术语的源文样本。boundary_ref 是只读的请求内内容边界引用，相同值表示样本属于同一边界，不表示全局 ID、顺序或权重。",
-        "en": "evidence: Source-text occurrences. hit_count counts matching source passages, not substring occurrences; samples contains passages with the term. boundary_ref is a read-only request-local content-boundary reference: equal values indicate a shared boundary, not a global ID, order, or weight.",
+        "zh-CN": "evidence: 源文命中证据。hit_count 是命中的源文片段数，不是字符出现次数；samples 是包含术语的源文样本。普通阶段的 source_ref 引用请求级 evidence_sources 表中的摘录，可在 terms 和 anchors 间共享；boundary_ref 是只读的请求内内容边界引用，相同值表示样本属于同一边界，不表示全局 ID、顺序或权重。",
+        "en": "evidence: Source-text occurrences. hit_count counts matching source passages, not substring occurrences; samples contains passages with the term. In ordinary phases, source_ref points to an excerpt in the request-wide evidence_sources table and may be shared across terms and anchors. boundary_ref is a read-only request-local content-boundary reference: equal values indicate a shared boundary, not a global ID, order, or weight.",
     },
     "decision_context": {
-        "zh-CN": "context_segments: 终审请求共享的原文 Segment 表，以 segment_ref 索引，含 boundary_ref、source 和 is_empty。各术语 evidence.windows 的 segment_refs 按原文顺序引用此表，hit_segment_refs 标明该术语的命中片段；window_ref 仅在所属术语内有效。",
-        "en": "context_segments: Shared source Segment table for final review, keyed by segment_ref, containing boundary_ref, source, and is_empty. Each term's evidence.windows lists ordered segment_refs into this table and its own hit_segment_refs. window_ref is local to its term.",
+        "zh-CN": "context_segments: 终审请求共享的原文 Segment 表，以 segment_ref 索引，含 boundary_ref、source 和 is_empty。各术语 evidence.windows 的 segment_refs 按原文顺序引用此表，hit_segment_refs 标明该术语的命中片段；终审 samples 通过 segment_ref 引用命中 Segment，不重复携带 source；window_ref 仅在所属术语内有效。",
+        "en": "context_segments: Shared source Segment table for final review, keyed by segment_ref, containing boundary_ref, source, and is_empty. Each term's evidence.windows lists ordered segment_refs into this table and its own hit_segment_refs. Final-review samples use segment_ref to reference the hit Segment without repeating source; window_ref is local to its term.",
     },
     "conflicts": {
         "zh-CN": "conflicts: 去重后的历史候选和关系争用证据，不是投票结果或可选值白名单；可依据整部作品证据提出候选之外的新值。",
@@ -373,7 +377,7 @@ _FIELD_PREFIX = {
 _TASK_PREFIX = {
     "terminology": {
         "zh-CN": "提取术语候选。Description 只记录本次待扫描源文支持的信息，参考上下文只用于理解指代，不得把参考知识当成本次源文揭示的事实。",
-        "en": "Extract terminology candidates. Description must contain only information supported by the current source_segments. Reference context may resolve references but must not be copied as facts revealed by the current source.",
+        "en": "Extract terminology candidates. Description must contain only information supported by the current pending source. Reference context may resolve references but must not be copied as facts revealed by the current source.",
     },
     "fragment_summary": {
         "zh-CN": "概括本次源文内容。",
@@ -466,13 +470,13 @@ _RESULT_PROTOCOLS: dict[str, dict[str, str]] = {
         "zh-CN": (
             '输出一条或多条 type="summary" 记录。'
             "每条 summary 必须有非空 text。单条 summary 可以省略 refs；如果输出多条，"
-            "每条都必须包含 refs，refs 之间不能重复且合并后必须覆盖全部 source_segments 中的 id。"
+            "每条都必须包含 refs，refs 之间不能重复且合并后必须覆盖本次源文中的全部请求短 id。"
         ),
         "en": (
             'Output one or more type="summary" '
             "records. A summary contains type and non-empty text. A single summary may "
             "omit refs. If outputting multiple summaries, each must include refs; refs "
-            "must not overlap and must collectively cover all ids in source_segments."
+            "must not overlap and must collectively cover all request-local short ids in the current sources."
         ),
     },
 }
@@ -838,6 +842,14 @@ def full_prompt(
     field_ids = dict.fromkeys(
         field for declaration in declarations for field in declaration["fields"]
     )
+    if stage == "terminology" and "translation" in active_stages:
+        field_ids = dict.fromkeys(
+            {
+                "source_segments": "segments[].source",
+                "source_segments[].id": "segments[].id",
+            }.get(field, field)
+            for field in field_ids
+        )
     task_ids = dict.fromkeys(declaration["task"] for declaration in declarations if declaration["task"] is not None)
     feedback = "validation_feedback" if "validation_feedback" in field_ids else "validation_repair"
     prefix = "\n".join((

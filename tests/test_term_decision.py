@@ -587,7 +587,8 @@ def test_decision_payload_exposes_read_only_disabled_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_decision_carries_fragment_descriptions_through_final_review(tmp_path, monkeypatch):
+@pytest.mark.parametrize("standalone", [False, True])
+async def test_decision_carries_fragment_descriptions_through_final_review(tmp_path, monkeypatch, standalone):
     from app.term_knowledge import add_unsourced
 
     project = create_decision_project(tmp_path)
@@ -643,7 +644,11 @@ async def test_decision_carries_fragment_descriptions_through_final_review(tmp_p
 
     monkeypatch.setenv("LLM_API_KEY", "test")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await run_terminology_decision(project, final_review=True, http_client=client)
+        review_run_id = None
+        if standalone:
+            await run_terminology_decision(project, http_client=client)
+            review_run_id = current_decision_draft(project)["run_id"]
+        await run_terminology_decision(project, final_review=True, review_draft_run_id=review_run_id, http_client=client)
     assert phases == ["adjudication", "consistency", "final_review"]
     assert read_json(project, path)["terms"][0]["description"] == "unhelpful"
 
@@ -745,9 +750,66 @@ def test_decision_payload_reuses_request_local_boundary_refs_across_terms() -> N
     assert [sample["boundary_ref"] for sample in focus_samples] == [1, 2]
     assert [sample["boundary_ref"] for sample in anchor_samples] == [1, 3]
     assert all(
-        set(sample) == {"boundary_ref", "source", "match_view", "matched_forms"}
+        set(sample) == {"boundary_ref", "source_ref", "match_view", "matched_forms"}
         for sample in [*focus_samples, *anchor_samples]
     )
+    assert payload["evidence_sources"] == {
+        "1": "focus one",
+        "2": "focus two",
+        "3": "anchor one",
+        "4": "anchor two",
+    }
+
+
+def test_decision_payload_reuses_only_exact_sample_sources() -> None:
+    focus = _batch_state("focus", "Focus")
+    anchor = _batch_state("anchor", "Anchor")
+    evidence = _batch_evidence(focus, anchor)
+    evidence["focus"]["samples"] = [
+        {
+            "file_id": "F1",
+            "part_id": "chapter-1",
+            "segment_id": "S1",
+            "source": "same repeated excerpt",
+            "match_view": "source",
+            "matched_forms": [{"kind": "source", "value": "Focus"}],
+        },
+        {
+            "file_id": "F1",
+            "part_id": "chapter-2",
+            "segment_id": "S2",
+            "source": "same repeated excerpt plus context",
+            "match_view": "source",
+            "matched_forms": [{"kind": "source", "value": "Focus"}],
+        },
+    ]
+    evidence["anchor"]["samples"] = [
+        {
+            "file_id": "F2",
+            "part_id": "chapter-1",
+            "segment_id": "S3",
+            "source": "same repeated excerpt",
+            "match_view": "source",
+            "matched_forms": [{"kind": "source", "value": "Anchor"}],
+        }
+    ]
+
+    payload = _make_payload(
+        phase="adjudication",
+        target_language="简体中文",
+        focus=[focus],
+        anchors=[anchor],
+        evidence=evidence,
+    )
+
+    focus_samples = payload["terms"][0]["evidence"]["samples"]
+    anchor_samples = payload["anchors"][0]["evidence"]["samples"]
+    assert [sample["source_ref"] for sample in focus_samples] == [1, 2]
+    assert anchor_samples[0]["source_ref"] == 1
+    assert payload["evidence_sources"] == {
+        "1": "same repeated excerpt",
+        "2": "same repeated excerpt plus context",
+    }
 
 
 def test_final_review_prompt_forbids_unresolved_decisions() -> None:
@@ -764,6 +826,8 @@ def test_final_review_prompt_forbids_unresolved_decisions() -> None:
     assert "第一阶段存在" not in prompt
     assert "第二阶段只有" not in prompt
     assert "无法可靠决定时使用 needs_review" not in prompt
+    assert "segment_ref" in prompt and "context_segments" in prompt
+    assert "不重复携带 source" in prompt
 
     ordinary_prompt = full_prompt(
         "terminology_decision",
@@ -772,6 +836,7 @@ def test_final_review_prompt_forbids_unresolved_decisions() -> None:
         phase="consistency",
     )
     assert "第二阶段只有显式 update、disable、needs_review 才覆盖第一阶段" in ordinary_prompt
+    assert "evidence_sources" in ordinary_prompt and "source_ref" in ordinary_prompt
 
 
 def test_final_review_actions_settle_prior_review_and_disabled_terms() -> None:
@@ -978,7 +1043,6 @@ def test_final_review_payload_projects_windows_to_request_local_refs() -> None:
             "boundary_ref": 1,
             "segment_ref": 2,
             "window_ref": 1,
-            "source": "focus hit",
             "match_view": "source",
             "matched_forms": [{"kind": "source", "value": "Focus"}],
         }
@@ -991,6 +1055,7 @@ def test_final_review_payload_projects_windows_to_request_local_refs() -> None:
         "1": {"boundary_ref": 1, "source": "before", "is_empty": False},
         "2": {"boundary_ref": 1, "source": "focus hit", "is_empty": False},
     }
+    assert "evidence_sources" not in payload
     serialized = json.dumps(focus_evidence, ensure_ascii=False)
     assert all(value not in serialized for value in ("F1", "chapter-1", "S0", "S1"))
 
@@ -2851,7 +2916,7 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
     assert phases == ["adjudication", "consistency"]
     assert request_samples
     assert all(
-        set(sample) == {"boundary_ref", "source", "match_view", "matched_forms"}
+        set(sample) == {"boundary_ref", "source_ref", "match_view", "matched_forms"}
         for sample in request_samples
     )
     assert summary["proposals"] == 1
@@ -5620,8 +5685,18 @@ async def test_isolated_content_retries_send_only_current_guidance(tmp_path: Pat
     ]
     assert [[term["normalized"] for term in payload["terms"]]
             for payload in llm.payloads] == [["alice", "bob"], ["alice", "bob"], ["alice"], ["bob"]]
-    assert all(set(payload) <= {"phase", "target_language", "terms", "anchors", "validation_repair"}
-               for payload in llm.payloads)
+    assert all(
+        set(payload)
+        <= {
+            "phase",
+            "target_language",
+            "terms",
+            "anchors",
+            "evidence_sources",
+            "validation_repair",
+        }
+        for payload in llm.payloads
+    )
 
 
 @pytest.mark.asyncio
@@ -5988,3 +6063,148 @@ def test_payload_shares_applied_descriptions_without_regrouping_comparison_text(
     assert all(term["description"] == "原始证据说明" for term in payload["terms"])
     assert all("applied_description" not in term for term in payload["terms"] + payload["anchors"])
     assert evidence == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "related", "failure", "cancel"])
+async def test_standalone_draft_final_review_preserves_existing_choices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    project = create_decision_project(tmp_path)
+    phases = []
+    standalone = False
+
+    async def request_batch(*_, **kwargs):
+        phase = kwargs["phase"]
+        phases.append(phase)
+        if standalone:
+            assert phase == "final_review"
+            assert {item["normalized"] for item in kwargs["focus"]} == {"alice"}
+            if outcome == "failure":
+                raise UsageError("终审请求失败")
+            if outcome == "cancel":
+                raise asyncio.CancelledError()
+            if outcome == "related":
+                return {item["normalized"]: {"action": "update", "reason": "关联主条目",
+                        "after": {**item, "group_primary": "bob"}} for item in kwargs["focus"]}
+        return {
+            item["normalized"]: (
+                {"action": "needs_review", "reason": "证据不足"}
+                if item["normalized"] == "alice" and not standalone else
+                {"action": "update", "reason": "修订", "after": {**item, "preferred_translation": "新鲍勃"}}
+                if item["normalized"] == "bob" and phase == "adjudication" else
+                {"action": "keep", "reason": "保持"}
+            ) for item in kwargs["focus"]
+        }
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
+    await run_terminology_decision(project)
+    original = current_decision_draft(project)
+    bob = next(item for item in original["proposals"] if item["normalized"] == ["bob"])
+    save_decision_rejections(project, [bob["proposal_id"]])
+    original = current_decision_draft(project)
+    standalone = True
+    phases.clear()
+    run_id = original["run_id"]
+    plan = decision_plan(project, final_review=True, review_draft_run_id=run_id)
+    assert plan["total_steps"] < len(plan["eligible"]) * 2
+    if outcome in {"success", "related"}:
+        result = await run_terminology_decision(
+            project, final_review=True, review_draft_run_id=run_id,
+        )
+        updated = current_decision_draft(project)
+        assert updated["needs_review"] == []
+        if outcome == "success":
+            assert next(item for item in updated["proposals"] if item["normalized"] == ["bob"]) == bob
+            assert updated["rejected_proposal_ids"] == [bob["proposal_id"]]
+            assert result["completed"] == 1
+        else:
+            assert len(updated["proposals"]) == 1
+            assert updated["proposals"][0]["normalized"] == ["alice", "bob"]
+            assert updated["rejected_proposal_ids"] == [updated["proposals"][0]["proposal_id"]]
+        assert load_terms(project)["terms_revision"] == 1
+    else:
+        error = UsageError if outcome == "failure" else asyncio.CancelledError
+        with pytest.raises(error):
+            await run_terminology_decision(
+                project, final_review=True, review_draft_run_id=run_id,
+            )
+        assert current_decision_draft(project) == original
+    assert phases == ["final_review"]
+    with pytest.raises(UsageError, match="草案"):
+        decision_plan(project, final_review=True, review_draft_run_id="changed")
+
+
+@pytest.mark.asyncio
+async def test_web_starts_final_review_for_current_draft(tmp_path, monkeypatch):
+    project = create_decision_project(tmp_path)
+    reviewing = False
+    phases = []
+
+    async def request_batch(*_, **kwargs):
+        phase = kwargs["phase"]
+        phases.append(phase)
+        return {item["normalized"]: {
+            "action": "keep" if reviewing or item["normalized"] != "alice" else "needs_review",
+            "reason": "判断",
+        } for item in kwargs["focus"]}
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
+    await run_terminology_decision(project)
+    run_id = current_decision_draft(project)["run_id"]
+    reviewing = True
+    phases.clear()
+    with TestClient(create_app(projects_root=project.parent)) as client:
+        options = client.get(
+            "/api/v1/projects/decision-demo/task-options/terminology_decision",
+            params={"final_review": "true", "review_draft_run_id": run_id},
+        )
+        assert options.status_code == 200, options.text
+        assert options.json()["selected"] == 1
+        started = client.post("/api/v1/projects/decision-demo/tasks", json={
+            "stage": "terminology_decision", "final_review": True,
+            "review_draft_run_id": run_id,
+        })
+        assert started.status_code == 200, started.text
+        finished = wait_for_web_task(client, started.json()["task_id"])
+        assert finished["status"] == "completed", finished
+        assert finished["total_segments"] == finished["completed_segments"] == 1
+    assert phases == ["final_review"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("standalone", [False, True])
+async def test_final_review_includes_windows_for_readonly_related_anchors(tmp_path, standalone):
+    project = create_decision_project(tmp_path)
+    library_path = project / "terminology" / "terms.json"
+    library = read_json(project, library_path)
+    library["terms"][0]["group_primary"] = "bob"
+    write_term_library(project, library_path, library)
+    overrides_path = project / "terminology" / "overrides.json"
+    overrides = read_json(project, overrides_path)
+    overrides["overrides"] = [{"normalized": "bob", "preferred_translation": "鲍勃"}]
+    write_json(project, overrides_path, overrides)
+    final_requests = []
+
+    def handler(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if payload["phase"] == "final_review":
+            final_requests.append(payload)
+            assert {term["normalized"] for term in payload["anchors"]} == {"bob"}
+            samples = payload["anchors"][0]["evidence"]["samples"]
+            assert samples
+            assert all(str(sample["segment_ref"]) in payload["context_segments"] for sample in samples)
+            assert all("source" not in sample for sample in samples)
+        records = [{"type": "decision", "normalized": term["normalized"],
+                    "action": "keep" if payload["phase"] == "final_review" else "needs_review",
+                    "reason": "确认"} for term in payload["terms"]]
+        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        run_id = None
+        if standalone:
+            await run_terminology_decision(project, http_client=client)
+            run_id = current_decision_draft(project)["run_id"]
+        await run_terminology_decision(project, final_review=True, review_draft_run_id=run_id, http_client=client)
+    assert len(final_requests) == 1
+    assert current_decision_draft(project)["needs_review"] == []
