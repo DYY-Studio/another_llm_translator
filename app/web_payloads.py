@@ -84,6 +84,7 @@ class TaskStartPayload(_WebPayload):
     reuse_mixed_fingerprints: StrictBool = False
     final_review: StrictBool = False
     knowledge_only: StrictBool = False
+    review_draft_run_id: StrictStr | None = None
     run_action: str | None = None
     stages: list[StrictStr] = Field(default_factory=list)
     run_actions: dict[StrictStr, StrictStr] = Field(default_factory=dict)

@@ -587,7 +587,8 @@ def test_decision_payload_exposes_read_only_disabled_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_decision_carries_fragment_descriptions_through_final_review(tmp_path, monkeypatch):
+@pytest.mark.parametrize("standalone", [False, True])
+async def test_decision_carries_fragment_descriptions_through_final_review(tmp_path, monkeypatch, standalone):
     from app.term_knowledge import add_unsourced
 
     project = create_decision_project(tmp_path)
@@ -643,7 +644,11 @@ async def test_decision_carries_fragment_descriptions_through_final_review(tmp_p
 
     monkeypatch.setenv("LLM_API_KEY", "test")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await run_terminology_decision(project, final_review=True, http_client=client)
+        review_run_id = None
+        if standalone:
+            await run_terminology_decision(project, http_client=client)
+            review_run_id = current_decision_draft(project)["run_id"]
+        await run_terminology_decision(project, final_review=True, review_draft_run_id=review_run_id, http_client=client)
     assert phases == ["adjudication", "consistency", "final_review"]
     assert read_json(project, path)["terms"][0]["description"] == "unhelpful"
 
@@ -6058,3 +6063,110 @@ def test_payload_shares_applied_descriptions_without_regrouping_comparison_text(
     assert all(term["description"] == "原始证据说明" for term in payload["terms"])
     assert all("applied_description" not in term for term in payload["terms"] + payload["anchors"])
     assert evidence == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "related", "failure", "cancel"])
+async def test_standalone_draft_final_review_preserves_existing_choices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    project = create_decision_project(tmp_path)
+    phases = []
+    standalone = False
+
+    async def request_batch(*_, **kwargs):
+        phase = kwargs["phase"]
+        phases.append(phase)
+        if standalone:
+            assert phase == "final_review"
+            assert {item["normalized"] for item in kwargs["focus"]} == {"alice"}
+            if outcome == "failure":
+                raise UsageError("终审请求失败")
+            if outcome == "cancel":
+                raise asyncio.CancelledError()
+            if outcome == "related":
+                return {item["normalized"]: {"action": "update", "reason": "关联主条目",
+                        "after": {**item, "group_primary": "bob"}} for item in kwargs["focus"]}
+        return {
+            item["normalized"]: (
+                {"action": "needs_review", "reason": "证据不足"}
+                if item["normalized"] == "alice" and not standalone else
+                {"action": "update", "reason": "修订", "after": {**item, "preferred_translation": "新鲍勃"}}
+                if item["normalized"] == "bob" and phase == "adjudication" else
+                {"action": "keep", "reason": "保持"}
+            ) for item in kwargs["focus"]
+        }
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
+    await run_terminology_decision(project)
+    original = current_decision_draft(project)
+    bob = next(item for item in original["proposals"] if item["normalized"] == ["bob"])
+    save_decision_rejections(project, [bob["proposal_id"]])
+    original = current_decision_draft(project)
+    standalone = True
+    phases.clear()
+    run_id = original["run_id"]
+    plan = decision_plan(project, final_review=True, review_draft_run_id=run_id)
+    assert plan["total_steps"] < len(plan["eligible"]) * 2
+    if outcome in {"success", "related"}:
+        result = await run_terminology_decision(
+            project, final_review=True, review_draft_run_id=run_id,
+        )
+        updated = current_decision_draft(project)
+        assert updated["needs_review"] == []
+        if outcome == "success":
+            assert next(item for item in updated["proposals"] if item["normalized"] == ["bob"]) == bob
+            assert updated["rejected_proposal_ids"] == [bob["proposal_id"]]
+            assert result["completed"] == 1
+        else:
+            assert len(updated["proposals"]) == 1
+            assert updated["proposals"][0]["normalized"] == ["alice", "bob"]
+            assert updated["rejected_proposal_ids"] == [updated["proposals"][0]["proposal_id"]]
+        assert load_terms(project)["terms_revision"] == 1
+    else:
+        error = UsageError if outcome == "failure" else asyncio.CancelledError
+        with pytest.raises(error):
+            await run_terminology_decision(
+                project, final_review=True, review_draft_run_id=run_id,
+            )
+        assert current_decision_draft(project) == original
+    assert phases == ["final_review"]
+    with pytest.raises(UsageError, match="草案"):
+        decision_plan(project, final_review=True, review_draft_run_id="changed")
+
+
+@pytest.mark.asyncio
+async def test_web_starts_final_review_for_current_draft(tmp_path, monkeypatch):
+    project = create_decision_project(tmp_path)
+    reviewing = False
+    phases = []
+
+    async def request_batch(*_, **kwargs):
+        phase = kwargs["phase"]
+        phases.append(phase)
+        return {item["normalized"]: {
+            "action": "keep" if reviewing or item["normalized"] != "alice" else "needs_review",
+            "reason": "判断",
+        } for item in kwargs["focus"]}
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
+    await run_terminology_decision(project)
+    run_id = current_decision_draft(project)["run_id"]
+    reviewing = True
+    phases.clear()
+    with TestClient(create_app(projects_root=project.parent)) as client:
+        options = client.get(
+            "/api/v1/projects/decision-demo/task-options/terminology_decision",
+            params={"final_review": "true", "review_draft_run_id": run_id},
+        )
+        assert options.status_code == 200, options.text
+        assert options.json()["selected"] == 1
+        started = client.post("/api/v1/projects/decision-demo/tasks", json={
+            "stage": "terminology_decision", "final_review": True,
+            "review_draft_run_id": run_id,
+        })
+        assert started.status_code == 200, started.text
+        finished = wait_for_web_task(client, started.json()["task_id"])
+        assert finished["status"] == "completed", finished
+        assert finished["total_segments"] == finished["completed_segments"] == 1
+    assert phases == ["final_review"]
