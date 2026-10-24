@@ -350,6 +350,8 @@ export function TermsView({
       || data.terms.length > 0
       || data.scan.status !== "none"
       || data.scan.candidate_count > 0
+      || decisionDraftPending
+      || manualReview.total > 0
     ),
   );
 
@@ -564,11 +566,18 @@ export function TermsView({
     setSaving(true);
     setMessage("");
     try {
-      const value = await api<TermsResponse>(
+      const value = await api<TermsResponse & { warnings: string[] }>(
         `/api/v1/projects/${project}/terms/clear`,
         { method: "POST", body: JSON.stringify({ confirm: true }) },
       );
       await setCurrentData(value);
+      if (activeProjectRef.current !== projectId) return;
+      decisionPrefetchRequestRef.current += 1;
+      setManualReview(emptyManualReview);
+      setDecisionDraftPending(false);
+      setManualFocusId(null);
+      setDecisionPrefetchError("");
+      setDecisionPrefetchAttempt((value) => value + 1);
       selection.reset();
       setForm(emptyForm);
       setPendingPrimary(null);
@@ -581,7 +590,7 @@ export function TermsView({
       setShowScanFailures(false);
       setPartialOpen(false);
       setClearOpen(false);
-      setMessage(translate("terms.stageCleared", language));
+      setMessage([translate("terms.stageCleared", language), ...value.warnings].join("\n"));
     } catch (error) {
       setFailure(errorMessage(error, language));
     } finally {

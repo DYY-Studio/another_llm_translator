@@ -2861,33 +2861,43 @@ def write_json(project: Path, path: Path, value: dict[str, Any]) -> list[str]:
     return []
 
 
-def clear_terminology_state(project: Path, overrides: dict[str, Any]) -> None:
-    """Atomically remove published and in-progress terminology state."""
+def clear_terminology_state(project: Path, overrides: dict[str, Any]) -> list[str]:
+    """Clear terminology and decision state together, retaining Run history."""
     ensure_supported(project)
     connection = _with_db(project)
+    cleared_runs = []
     try:
         with connection:
             from .term_knowledge import empty_knowledge
+            project_id = _project_id(connection)
             previous = connection.execute("SELECT payload_json FROM terms_state WHERE key = 'terms'").fetchone()
             revision = int(_load(zlib.decompress(previous["payload_json"]).decode("utf-8")).get("terms_revision", 0)) if previous else 0
-            library = record_header("terminology_library", _project_id(connection),
+            library = record_header("terminology_library", project_id,
                                     terms_revision=revision + 1, terms=[], knowledge=empty_knowledge())
             connection.execute("INSERT INTO terms_state(key, payload_json) VALUES ('terms', ?) "
                                "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
                                (_terms_payload(library),))
             connection.execute("DELETE FROM terms_state WHERE key = 'active_task'")
             connection.execute("DELETE FROM terminology_scans")
-            pinned: set[str] = set()
-            for row in connection.execute("SELECT run_id FROM runs WHERE stage = 'terminology_decision'"):
-                draft_path = project / "runs" / row["run_id"] / "terminology_decision_draft.json"
-                if draft_path.is_file():
-                    draft = json.loads(draft_path.read_text(encoding="utf-8"))
-                    pinned.update(fragment["candidate_id"] for fragment in
-                                  draft["source_library"].get("knowledge", {}).get("fragments", {}).values()
-                                  if fragment.get("candidate_id"))
-            deletable = [(row["record_id"],) for row in connection.execute("SELECT record_id FROM terminology_candidates")
-                         if row["record_id"] not in pinned]
-            connection.executemany("DELETE FROM terminology_candidates WHERE record_id = ?", deletable)
+            connection.execute("DELETE FROM terminology_candidates")
+            rows = connection.execute(
+                "SELECT run_id, stage, status, started_at, payload_json FROM runs "
+                "WHERE stage = 'terminology_decision' OR (stage = 'terminology' AND status = 'running')"
+            ).fetchall()
+            now = utc_now()
+            for row in rows:
+                run = _hydrate_run(row, project_id)
+                if run["status"] == "running":
+                    run.update(status="interrupted", interrupted_reason="terminology_cleared",
+                               interrupted_at=now, completed_at=now)
+                if run["stage"] == "terminology_decision":
+                    run.update(decision_status="discarded", discarded_at=now,
+                               discarded_reason="terminology_cleared", proposal_count=0,
+                               needs_review_count=0, rejected_proposal_ids=[],
+                               manual_review_resolved_normalized=[])
+                connection.execute("UPDATE runs SET status = ?, payload_json = ? WHERE run_id = ?",
+                                   (run["status"], _run_residual(run), run["run_id"]))
+                cleared_runs.append(run)
             connection.execute(
                 "INSERT INTO terms_state(key, payload_json) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json",
@@ -2900,6 +2910,14 @@ def clear_terminology_state(project: Path, overrides: dict[str, Any]) -> None:
         raise StorageError(f"无法清空术语阶段状态：{project}: {exc}") from exc
     finally:
         connection.close()
+    warnings = []
+    for run in cleared_runs:
+        try:
+            atomic_write_json(project / "runs" / run["run_id"] / "manifest.json", run, compact=True)
+        except OSError as exc:
+            warnings.append(f"数据库已清空，但 Run 文件镜像写入失败：{run['run_id']}: {exc}")
+        warnings.extend(_remove_terminated_run_draft(project, run))
+    return warnings
 
 
 def write_terminology_decision_state(

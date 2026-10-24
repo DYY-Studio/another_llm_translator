@@ -6208,3 +6208,44 @@ async def test_final_review_includes_windows_for_readonly_related_anchors(tmp_pa
         await run_terminology_decision(project, final_review=True, review_draft_run_id=run_id, http_client=client)
     assert len(final_requests) == 1
     assert current_decision_draft(project)["needs_review"] == []
+
+
+@pytest.mark.asyncio
+async def test_clear_terms_removes_decision_drafts_manual_queue_and_rollback(tmp_path, monkeypatch):
+    project = create_decision_project(tmp_path)
+
+    async def request_batch(*_, **kwargs):
+        return {item["normalized"]: (
+            {"action": "needs_review", "reason": "人工确认身份"}
+            if item["normalized"] == "alice" else
+            {"action": "update", "reason": "修订译名", "after": {**item, "preferred_translation": "新鲍勃"}}
+            if kwargs["phase"] == "adjudication" else
+            {"action": "keep", "reason": "保持"}
+        ) for item in kwargs["focus"]}
+
+    monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
+    first = await run_terminology_decision(project)
+    apply_decision_draft(project, confirm_all=True)
+    assert manual_review_state(project)["remaining"] == 1
+    second = await run_terminology_decision(project)
+    assert current_decision_draft(project)["run_id"] == second["run_id"]
+    child_id, child_dir = create_run(
+        project, config=load_project_config(project, stage="terminology_decision"),
+        stage="terminology_decision", fingerprint="clear-review", prompt="test",
+        selected_count=1, requested_count=1, reused_count=0,
+        details={"decision_status": "generating", "review_draft_run_id": second["run_id"]},
+    )
+    with TestClient(create_app(projects_root=project.parent)) as client:
+        cleared = client.post("/api/v1/projects/decision-demo/terms/clear", json={"confirm": True})
+        assert cleared.status_code == 200, cleared.text
+        review = client.get("/api/v1/projects/decision-demo/terms/decision").json()
+        assert review["draft"] is None
+        assert review["rollback"] is None
+        assert review["manual_review"] == {"items": [], "total": 0, "resolved": 0, "remaining": 0}
+        assert client.post("/api/v1/projects/decision-demo/terms/decision/rollback", json={"confirm": True}).status_code == 400
+        assert client.post("/api/v1/projects/decision-demo/terms", json={"source": "Carol"}).status_code == 200
+        assert client.get("/api/v1/projects/decision-demo/terms/decision").json()["manual_review"]["remaining"] == 0
+    for run_id in (first["run_id"], second["run_id"], child_id):
+        assert read_json(project, project / "runs" / run_id / "manifest.json")["decision_status"] == "discarded"
+        assert not (project / "runs" / run_id / DRAFT_FILE).exists()
+    assert read_json(project, child_dir / "manifest.json")["status"] == "interrupted"

@@ -946,26 +946,14 @@ class WebStore:
 
     def clear_terms(self) -> dict[str, Any]:
         with project_write_lock(self.project):
-            for run in list_runs(self.project, stage="terminology", status="running"):
-                run.update(
-                    status="interrupted",
-                    interrupted_reason="terminology_cleared",
-                    interrupted_at=utc_now(),
-                    completed_at=utc_now(),
-                )
-                write_json(
-                    self.project,
-                    self.project / "runs" / str(run["run_id"]) / "manifest.json",
-                    run,
-                )
             overrides = record_header(
                 "terminology_overrides",
                 self.project_id,
                 record_id="TERMINOLOGY-OVERRIDES",
                 overrides=[],
             )
-            clear_terminology_state(self.project, overrides)
-            return self.terms()
+            warnings = clear_terminology_state(self.project, overrides)
+            return {**self.terms(), "warnings": warnings}
 
     @staticmethod
     def _term_forms(term: dict[str, Any]) -> list[tuple[str, str]]:

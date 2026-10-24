@@ -632,7 +632,7 @@ def test_import_creates_unsourced_explanations_and_preserves_applied_existing_en
     assert repeated["changed"] is False
 
 
-def test_clear_preserves_cited_candidates_in_rollback_and_increments_revision(tmp_path: Path) -> None:
+def test_clear_removes_rollback_draft_and_cited_candidates_and_increments_revision(tmp_path: Path) -> None:
     import json
     from app.config import load_project_config
     from app.sqlite_storage import clear_terminology_state, read_json, write_json, read_terminology_candidates
@@ -652,8 +652,9 @@ def test_clear_preserves_cited_candidates_in_rollback_and_increments_revision(tm
     clear_terminology_state(project, read_json(project, project / "terminology" / "overrides.json"))
     assert load_terms(project)["terms_revision"] == 2
     assert load_terms(project)["terms"] == []
-    assert [r["record_id"] for r in read_terminology_candidates(project, [first["record_id"], unused["record_id"]])] == [first["record_id"]]
-    assert evidence(project, data)[f'{first["record_id"]}:0']["text"] == "captain"
+    assert read_terminology_candidates(project, [first["record_id"], unused["record_id"]]) == []
+    assert not (directory / "terminology_decision_draft.json").exists()
+    assert read_json(project, directory / "manifest.json")["decision_status"] == "discarded"
 
 
 def test_reordered_reviewed_evidence_stays_current_even_when_not_cited(tmp_path: Path) -> None:
