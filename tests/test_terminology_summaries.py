@@ -462,7 +462,11 @@ async def test_summary_rerun_replaces_obsolete_fragments_and_keeps_reusable_ones
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         payload = json.loads(body["messages"][1]["content"])
-        segments = payload["source_segments"]
+        if include_draft and "segment" in response_record_types(payload["response_mode"]):
+            assert "source_segments" not in payload
+            segments = [{"id": item["id"], "text": item["source"]} for item in payload["segments"]]
+        else:
+            segments = payload["source_segments"]
         requests.append([item["text"] for item in segments])
         records = [
             {"type": "summary", "text": item["text"], "refs": [str(index)]}
