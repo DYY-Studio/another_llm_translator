@@ -4,6 +4,16 @@ export type Language = "zh-CN" | "en";
 
 const messages: Record<Language, Record<string, string>> = {
   "zh-CN": {
+    "stageCompletion.none": "尚无结果",
+    "stageCompletion.partial": "部分完成",
+    "stageCompletion.complete": "全部完成",
+    "stageCompletion.conflicts": "冲突 {count} 项",
+    "stageCompletion.changes": "待处理变化 {count} 项",
+    "stageCompletion.knowledge": "说明待更新 {count} 项",
+    "stageCompletion.draft": "有待审草案",
+    "stageCompletion.manual": "人工待办 {count} 项",
+    "stageCompletion.unpublished": "候选尚未全部发布",
+
     "review.pagination": "草案分页",
     "review.previousPage": "上一页",
     "review.nextPage": "下一页",
@@ -1596,6 +1606,16 @@ const messages: Record<Language, Record<string, string>> = {
     "dialog.openHint": "只打开此目录，不扫描父目录，也不会移动项目。",
   },
   en: {
+    "stageCompletion.none": "No results",
+    "stageCompletion.partial": "Partially complete",
+    "stageCompletion.complete": "Complete",
+    "stageCompletion.conflicts": "Conflicts: {count}",
+    "stageCompletion.changes": "Pending changes: {count}",
+    "stageCompletion.knowledge": "Explanations pending: {count}",
+    "stageCompletion.draft": "Draft awaiting review",
+    "stageCompletion.manual": "Manual items: {count}",
+    "stageCompletion.unpublished": "Unpublished candidates",
+
     "review.pagination": "Draft pagination",
     "review.previousPage": "Previous page",
     "review.nextPage": "Next page",

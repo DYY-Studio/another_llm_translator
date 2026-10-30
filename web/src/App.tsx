@@ -663,6 +663,7 @@ export default function App() {
     <>
       <AppShell
         project={project}
+        stageCompletion={overview?.stage_completion}
         stage={stage}
         task={task}
         tasks={Object.values(tasks).filter((item) => isActiveTaskStatus(item.status))}

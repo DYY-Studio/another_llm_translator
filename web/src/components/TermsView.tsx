@@ -191,6 +191,7 @@ export function TermsView({
     await queryClient.cancelQueries({ queryKey: queryKeys.terms({ projectId }) });
     if (activeProjectRef.current !== projectId) return;
     queryClient.setQueryData(queryKeys.terms({ projectId }), value);
+    void queryClient.invalidateQueries({ queryKey: queryKeys.overview({ projectId }) });
     void queryClient.invalidateQueries({ queryKey: ["term-hits", projectId] }).catch(() => {});
     void queryClient.invalidateQueries({ queryKey: ["related-terms", projectId] }).catch(() => {});
   }

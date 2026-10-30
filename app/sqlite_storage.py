@@ -4102,6 +4102,50 @@ def segment_page_counts(
     finally:
         connection.close()
 
+def stage_completion_counts(project: Path) -> dict[str, dict[str, int]]:
+    """Count current results and resolved reviews without loading result text."""
+    stages = ("translation", "proofreading", "proofreading_applied", "polishing", "polishing_applied")
+    joins, params = [], []
+    for stage in stages:
+        join, values = _stage_cte(stage, stage)
+        joins.append(join)
+        params.extend(values)
+    columns = ["COUNT(*) AS total", "SUM(translation.status = 'completed') AS translation_done"]
+    for stage in ("proofreading", "polishing"):
+        base = "translation.record_id" if stage == "proofreading" else "COALESCE(proofreading_applied.record_id, translation.record_id)"
+        columns.extend([
+            f"SUM({stage}.status = 'completed') AS {stage}_generated",
+            f"SUM({stage}.status = 'completed' AND {base} IS NOT NULL AND "
+            f"json_extract({stage}.payload_json, '$.base_result_id') = {base} AND "
+            f"(json_extract({stage}.payload_json, '$.review_status') = 'accepted' OR "
+            f"({stage}_applied.status = 'completed' AND json_extract({stage}_applied.payload_json, '$.suggestion_result_id') = {stage}.record_id))) AS {stage}_done",
+        ])
+    connection = _with_db(project)
+    try:
+        row = connection.execute(
+            f"SELECT {', '.join(columns)} FROM segments {''.join(joins)} WHERE segments.is_empty = 0", params,
+        ).fetchone()
+        return {stage: {"total": int(row["total"]),
+                        "generated": int(row[f"{stage}_generated"] or 0) if stage != "translation" else int(row["translation_done"] or 0),
+                        "completed": int(row[f"{stage}_done"] or 0)}
+                for stage in ("translation", "proofreading", "polishing")}
+    finally:
+        connection.close()
+
+
+def terminology_completed_count(project: Path, task_id: str) -> int:
+    connection = _with_db(project)
+    try:
+        return int(connection.execute(
+            "SELECT COUNT(DISTINCT scans.segment_id) FROM terminology_scans scans "
+            "JOIN segments ON segments.segment_id = scans.segment_id "
+            "WHERE scans.active_task_id = ? AND scans.status = 'completed' AND segments.is_empty = 0",
+            (task_id,),
+        ).fetchone()[0])
+    finally:
+        connection.close()
+
+
 def obsolete_stage_result_count(project: Path) -> int:
     from .stage_result_retention import obsolete_stage_results
     connection = _read_only_connection(project)

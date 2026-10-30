@@ -43,6 +43,8 @@ from .sqlite_storage import (
     segment_page_counts,
     segment_ids,
     segment_part_ids,
+    stage_completion_counts,
+    terminology_completed_count,
     utc_now,
     write_json,
 )
@@ -556,7 +558,33 @@ class WebStore:
             **page,
             "storage": storage,
             "files": files,
+            "stage_completion": self.stage_completion(),
         }
+
+    def stage_completion(self) -> dict[str, Any]:
+        from .term_decision_drafts import current_decision_draft, manual_review_state
+        from .term_knowledge import project_descriptions
+        counts = stage_completion_counts(self.project)
+        total = counts["translation"]["total"]
+        library = load_terms(self.project, resolve_knowledge=False)
+        active_path = self.project / "terminology" / "active_task.json"
+        active = read_json(self.project, active_path) if record_exists(self.project, active_path) else {}
+        scanned = terminology_completed_count(self.project, str(active.get("active_task_id", "")))
+        conflicts = sum(any(term.get("conflicts", {}).values()) for term in (library or {}).get("terms", []))
+        views = project_descriptions(self.project, library) if library else {}
+        generation = self.config["terminology_decision"]["description_generation"] if views else None
+        pending_knowledge = sum(view["status"] != "current" or view["description_generation"] != generation for view in views.values())
+        pending = len((library or {}).get("pending_changes", {}))
+        draft = current_decision_draft(self.project)
+        manual = manual_review_state(self.project)["remaining"]
+        counts["terminology"] = {"total": total, "generated": scanned or int(bool(library)), "completed": scanned,
+            "conflicts": conflicts, "changes": pending, "knowledge": pending_knowledge,
+            "draft": int(draft is not None), "manual": manual,
+            "unpublished": int(bool(active) and active.get("status") != "completed")}
+        for stage, value in counts.items():
+            blocked = stage == "terminology" and (library is None or any(value[key] for key in ("conflicts", "changes", "knowledge", "draft", "manual", "unpublished")))
+            value["state"] = "empty" if total == 0 else "none" if not value["generated"] else "complete" if value["completed"] == total and not blocked else "partial"
+        return counts
 
     def segment_index(
         self,

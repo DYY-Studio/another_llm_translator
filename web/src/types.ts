@@ -170,6 +170,7 @@ export interface StageError {
 }
 
 export interface ProjectOverview {
+  stage_completion: Partial<Record<LLMStage, StageCompletion>>;
   name: string;
   path: string;
   storage: {
@@ -192,6 +193,19 @@ export interface ProjectOverview {
     size_bytes: number;
   }>;
   segments: Segment[];
+}
+
+export interface StageCompletion {
+  state: "empty" | "none" | "partial" | "complete";
+  total: number;
+  generated: number;
+  completed: number;
+  conflicts?: number;
+  changes?: number;
+  knowledge?: number;
+  draft?: number;
+  manual?: number;
+  unpublished?: number;
 }
 
 export interface SegmentQueryResponse {
