@@ -194,6 +194,7 @@ def decision_resume_compatibility(
     source_terms_revision: int,
     final_review: bool = False,
     knowledge_only: bool = False,
+    all_terms: bool = False,
     review_draft_run_id: str | None = None,
 ) -> tuple[bool, str | None]:
     from .execution import run_protocol_is_current
@@ -228,6 +229,8 @@ def decision_resume_compatibility(
         return False, "术语库 revision 已变化，不能续用自动决策 Run"
     if checkpoint.get("decision_rules_version") != DECISION_RULES_VERSION:
         return False, "旧 Run 使用不兼容的术语决策输出协议"
+    if "all_terms" not in checkpoint or bool(checkpoint["all_terms"]) != all_terms:
+        return False, "旧 Run 的术语处理范围与当前运行不一致"
     if bool(checkpoint.get("knowledge_only", False)) != knowledge_only:
         return False, "旧 Run 的实体说明执行模式与当前运行不一致"
     if bool(checkpoint.get("final_review", False)) != final_review:
@@ -254,6 +257,7 @@ def _new_checkpoint(
     *,
     final_review: bool = False,
     knowledge_only: bool = False,
+    all_terms: bool = False,
 ) -> dict[str, Any]:
     return record_header(
         "terminology_decision_checkpoint",
@@ -263,7 +267,7 @@ def _new_checkpoint(
         source_terms_revision=revision,
         decision_rules_version=DECISION_RULES_VERSION,
         final_review=final_review,
-        knowledge_only=knowledge_only,
+        knowledge_only=knowledge_only, all_terms=all_terms,
         phases={phase: {} for phase in _phase_names(final_review)},
     )
 
@@ -277,11 +281,12 @@ def _load_checkpoint(
     knowledge_terms: set[str] | None = None,
     final_review: bool = False,
     knowledge_only: bool = False,
+    all_terms: bool = False,
 ) -> dict[str, Any]:
     path = _checkpoint_path(project, run_id)
     if not path.is_file():
         checkpoint = _new_checkpoint(
-            project_id, run_id, revision, final_review=final_review, knowledge_only=knowledge_only
+            project_id, run_id, revision, final_review=final_review, knowledge_only=knowledge_only, all_terms=all_terms
         )
         atomic_write_json(path, checkpoint, compact=True)
         return checkpoint
@@ -293,6 +298,8 @@ def _load_checkpoint(
         or checkpoint.get("source_terms_revision") != revision
     ):
         raise UsageError("术语决策检查点与当前 Run 或术语 revision 不一致")
+    if bool(checkpoint.get("all_terms", False)) != all_terms:
+        raise UsageError("术语决策检查点处理范围与当前 Run 不一致")
     if bool(checkpoint.get("knowledge_only", False)) != knowledge_only:
         raise UsageError("术语决策检查点实体说明执行模式与当前 Run 不一致")
     if bool(checkpoint.get("final_review", False)) != final_review:
@@ -522,6 +529,7 @@ def _decision_fingerprint(
     *,
     final_review: bool = False,
     knowledge_only: bool = False,
+    all_terms: bool = False,
     review_draft_run_id: str | None = None,
 ) -> str:
     data = {
@@ -530,6 +538,7 @@ def _decision_fingerprint(
         "final_review": final_review,
         **({"review_draft_run_id": review_draft_run_id} if review_draft_run_id is not None else {}),
         "knowledge_only": knowledge_only,
+        "all_terms": all_terms,
         "target_language": config["project"]["target_language"],
         "model": config["llm"]["model"],
         "adapter_hash": config.get("_llm_adapter_hash"),
@@ -554,6 +563,7 @@ def decision_plan(
     *,
     final_review: bool = False,
     knowledge_only: bool = False,
+    all_terms: bool = False,
     review_draft_run_id: str | None = None,
     prepare_requests: bool = True,
     estimate_usage: bool = True,
@@ -565,25 +575,14 @@ def decision_plan(
         raise UsageError("没有已发布术语库可供自动决策")
     config = load_project_config(project, stage=STAGE)
     overrides_document = read_json(project, project / "terminology" / "overrides.json")
-    protected = {
-        str(item["normalized"]) for item in overrides_document.get("overrides", [])
-    }
     source_conflicts = _conflicts_by_term(library.get("terms", []))
-    from .term_knowledge import entity_members, evidence as knowledge_evidence, project_descriptions, applied_descriptions
-    known_fragments = {}
-    knowledge_views = []
-    if prepare_requests:
-        known_fragments = knowledge_evidence(project, library)
-        views = project_descriptions(project, library, all_evidence=known_fragments)
-        generation = config["terminology_decision"]["description_generation"]
-        knowledge_views = [view for view in views.values()
-                           if knowledge_only or view["status"] != "current" or view["description_generation"] != generation]
-        knowledge_pending = len(knowledge_views)
-    else:
-        applied_descriptions(library)
-        # Name decisions can change entity membership. Resolve their knowledge
-        # targets at the actual phase boundary, rather than during UI/queue inspection.
-        knowledge_pending = len(entity_members(library)) if knowledge_only else 0
+    from .term_knowledge import evidence as knowledge_evidence, project_descriptions
+    known_fragments = knowledge_evidence(project, library)
+    views = project_descriptions(project, library, all_evidence=known_fragments)
+    generation = config["terminology_decision"]["description_generation"]
+    knowledge_views = [view for view in views.values()
+                       if (knowledge_only and all_terms) or view["status"] != "current" or view["description_generation"] != generation]
+    knowledge_pending = len(knowledge_views)
     states = {str(item["normalized"]): _term_state(item) for item in library.get("terms", [])}
     source_draft = None
     if review_draft_run_id is not None:
@@ -598,13 +597,20 @@ def decision_plan(
             raise UsageError("当前决策草案规则版本不一致，请重新生成草案")
         if source_draft.get("knowledge_only") or not source_draft["needs_review"]:
             raise UsageError("当前草案没有可终审的术语待审项")
-    eligible = [state for key, state in states.items() if not knowledge_only and key not in protected and not state["disabled"]]
-    if not eligible and not knowledge_pending:
-        raise UsageError("已发布术语全部受到人工 override 保护")
+    from .term_changes import change_details, decision_targets
+    changes = change_details(project, library)
+    targets = decision_targets(library, changes, term_normalization(config), all_terms=all_terms)
+    if review_draft_run_id is not None:
+        targets = set(source_draft.get("decision_targets", targets))
+    protected = set(states) - targets
+    eligible = [state for key, state in states.items() if not knowledge_only and key in targets and not state["disabled"]]
     evidence = ({} if knowledge_only or not prepare_requests else _batches.collect_term_evidence(
         project, list(library.get("terms", [])), config
     ))
     if not knowledge_only and prepare_requests:
+        for key, change in changes.items():
+            if key in evidence:
+                evidence[key]["scan_changes"] = change["candidates"]
         descriptions: dict[str, dict[str, list[str]]] = {}
         for fragment in known_fragments.values():
             if fragment["state"] != "active" or not fragment["valid"]:
@@ -683,6 +689,7 @@ def decision_plan(
         "eligible": eligible,
         "final_review": final_review,
         "knowledge_only": knowledge_only,
+        "all_terms": all_terms,
         "source_draft": source_draft,
         "evidence": evidence,
         "language": language,
@@ -736,17 +743,22 @@ async def run_terminology_decision(
     plan: dict[str, Any] | None = None,
     final_review: bool = False,
     knowledge_only: bool = False,
+    all_terms: bool = False,
     review_draft_run_id: str | None = None,
 ) -> dict[str, Any]:
     existing = (await run_blocking(lambda: _drafts._read_pending_draft(project)))
     if existing is not None and existing["run_id"] != resume_run_id and not replace_draft and review_draft_run_id is None:
         raise UsageError("已有待处理术语决策草案；必须明确替换")
     if plan is None or not plan.get("requests_prepared", True):
-        plan = (await run_blocking(lambda: decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, review_draft_run_id=review_draft_run_id, estimate_usage=dry_run)))
+        plan = (await run_blocking(lambda: decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id, estimate_usage=dry_run)))
     elif bool(plan.get("final_review", False)) != final_review:
         raise UsageError("术语决策计划的终审选项与当前运行不一致")
     if bool(plan.get("knowledge_only", False)) != knowledge_only:
         raise UsageError("术语决策计划的实体说明执行模式与当前运行不一致")
+    if bool(plan.get("all_terms", False)) != all_terms:
+        raise UsageError("术语决策计划的处理范围与当前运行不一致")
+    if not plan["eligible"] and not plan["knowledge_pending"] and plan.get("source_draft") is None and resume_run_id is None:
+        raise UsageError("没有待处理变化")
     source_draft = plan.get("source_draft")
     library = plan["library"]
     config = plan["config"]
@@ -760,7 +772,7 @@ async def run_terminology_decision(
     language = plan["language"]
     prompts = plan["prompts"]
     fingerprint = _decision_fingerprint(
-        config, prompts, library, final_review=final_review, knowledge_only=knowledge_only, review_draft_run_id=review_draft_run_id
+        config, prompts, library, final_review=final_review, knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id
     )
     model_fingerprint = (
         "sha256:"
@@ -790,7 +802,7 @@ async def run_terminology_decision(
             resume_run_id,
             source_terms_revision=revision,
             final_review=final_review,
-            knowledge_only=knowledge_only,
+            knowledge_only=knowledge_only, all_terms=all_terms,
             review_draft_run_id=review_draft_run_id,
         )
         if not compatible:
@@ -801,6 +813,7 @@ async def run_terminology_decision(
             "stage": STAGE,
             "dry_run": True,
             "knowledge_only": knowledge_only,
+            "all_terms": all_terms,
             "terms_revision": int(library["terms_revision"]),
             "eligible": len(eligible),
             "protected": len(protected_states),
@@ -827,6 +840,7 @@ async def run_terminology_decision(
                 "prompt_language": language,
                 "final_review": final_review,
                 "knowledge_only": knowledge_only,
+                "all_terms": all_terms,
                 "review_draft_run_id": review_draft_run_id,
             },
         )))
@@ -864,7 +878,7 @@ async def run_terminology_decision(
         known_terms=eligible_terms,
         knowledge_terms=set(states),
         final_review=final_review,
-        knowledge_only=knowledge_only,
+        knowledge_only=knowledge_only, all_terms=all_terms,
     )))
     tentative = deepcopy(states)
     decisions = _checkpoint_decisions(checkpoint, "adjudication")
@@ -926,6 +940,12 @@ async def run_terminology_decision(
             knowledge_errors=knowledge_errors,
             knowledge_only=knowledge_only,
         )
+        draft["all_terms"] = all_terms
+        draft["decision_targets"] = sorted(eligible_terms)
+        draft["reviewed_terms"] = sorted(eligible_terms & (set(consistency_decisions) | set((source_draft or {}).get("reviewed_terms", []))))
+        confirmed_targets = {item["normalized"] for item in overrides_document.get("overrides", [])} & eligible_terms
+        for proposal in draft["proposals"]:
+            proposal["modifies_confirmed"] = bool(set(proposal["normalized"]) & confirmed_targets)
         if source_draft is not None:
             affected = review_target_ids | {item["normalized"] for item in containment_focus}
             preserved = [deepcopy(item) for item in source_draft["proposals"]
@@ -1499,7 +1519,7 @@ async def run_terminology_decision(
             unresolved_names = {key for key, decision in decisions.items() if decision["action"] == "needs_review"}
             generation = config["terminology_decision"]["description_generation"]
             targets = [view for view in views
-                       if (knowledge_only or view["status"] != "current" or view["description_generation"] != generation)
+                       if ((knowledge_only and all_terms) or view["status"] != "current" or view["description_generation"] != generation)
                        and not set(view["members"]) & unresolved_names]
             if source_draft is not None:
                 affected = review_target_ids | {item["normalized"] for item in containment_focus}
@@ -1583,6 +1603,7 @@ async def run_terminology_decision(
             "eligible": len(eligible),
             "protected": len(protected_states),
             "knowledge_only": knowledge_only,
+            "all_terms": all_terms,
             "proposals": len(draft["proposals"]),
             "needs_review": len(draft["needs_review"]),
             "completed": total,

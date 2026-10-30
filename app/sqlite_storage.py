@@ -17,7 +17,7 @@ from typing import Any, Iterable
 from .errors import ProjectError, StorageError, UsageError
 from .stage_result_retention import prune_stage_results
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 STAGES = frozenset(
     {
@@ -761,7 +761,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             (str(version),),
         )
         return None
-    elif version not in {3, 4, 5, 6, 7, 8, SCHEMA_VERSION}:
+    elif version not in {3, 4, 5, 6, 7, 8, 9, SCHEMA_VERSION}:
         raise ProjectError(
             f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
         )
@@ -824,10 +824,16 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
                 [(zlib.compress(row["payload_json"].encode("utf-8")), row["sequence"]) for row in rows],
             )
         migrated_term_runs = _migrate_term_knowledge_to_v8(connection, project) if version < 8 else []
-        migrated_term_runs.extend(_end_term_decision_runs_to_v9(connection, project))
+        if version < 9:
+            migrated_term_runs.extend(_end_term_decision_runs_to_v9(connection, project))
         if version < 9:
             sidecar_backups = _migrate_term_knowledge_sidecars_to_v9(connection, project, backup_path)
-        _migrate_term_knowledge_to_v9(connection)
+        if version < 9:
+            _migrate_term_knowledge_to_v9(connection)
+        for row in connection.execute("SELECT key, payload_json FROM terms_state WHERE key = 'terms'").fetchall():
+            library = _hydrate_terms(row, _project_id(connection))
+            library["knowledge"]["pending_changes"] = {}
+            connection.execute("UPDATE terms_state SET payload_json = ? WHERE key = ?", (_terms_payload(library), row["key"]))
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",

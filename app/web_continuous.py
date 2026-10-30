@@ -691,37 +691,12 @@ def inspect_continuous(
                 "digest": _stable_digest({"status": "skipped", "reason": "no_published_terms"}),
             }
         else:
-            overrides_document = read_json(
-                project, project / "terminology" / "overrides.json"
-            )
-            protected = {
-                str(item["normalized"])
-                for item in overrides_document.get("overrides", [])
-            }
-            has_eligible = any(
-                str(item["normalized"]) not in protected
-                and not bool(item.get("disabled", False))
-                for item in published_terms.get("terms", [])
-            )
-            if not has_eligible:
-                decision_inputs = {
-                    "status": "skipped",
-                    "reason": "no_work",
-                    "digest": _stable_digest(
-                        {
-                            "status": "skipped",
-                            "reason": "no_work",
-                            "terms_revision": published_terms["terms_revision"],
-                            "overrides": overrides_document,
-                        }
-                    ),
-                }
+            plan, skip_reason = _decision_plan_or_skip(project, prompt_language, final_review=decision_final_review)
+            if skip_reason is not None:
+                decision_inputs = {"status": "skipped", "reason": skip_reason, "digest": _stable_digest({
+                    "status": "skipped", "reason": skip_reason, "terms_revision": published_terms["terms_revision"],
+                })}
             else:
-                plan = decision_plan(
-                    project,
-                    prompt_language,
-                    final_review=decision_final_review,
-                prepare_requests=False, estimate_usage=False)
                 decision_plan_for_fingerprint = plan
                 decision_inputs = _decision_inputs_snapshot(plan)
         if (
@@ -897,24 +872,10 @@ def _decision_plan_or_skip(
     library = load_terms(project, resolve_knowledge=False)
     if library is None or not library.get("terms"):
         return None, "no_published_terms"
-    overrides_document = read_json(
-        project, project / "terminology" / "overrides.json"
-    )
-    protected = {
-        str(item["normalized"])
-        for item in overrides_document.get("overrides", [])
-    }
-    has_eligible = any(
-        str(item["normalized"]) not in protected
-        and not bool(item.get("disabled", False))
-        for item in library.get("terms", [])
-    )
-    if not has_eligible:
+    plan = decision_plan(project, prompt_language, final_review=final_review, prepare_requests=False, estimate_usage=False)
+    if not plan["eligible"] and not plan["knowledge_pending"]:
         return None, "no_work"
-    return (
-        decision_plan(project, prompt_language, final_review=final_review, prepare_requests=False, estimate_usage=False),
-        None,
-    )
+    return plan, None
 
 
 def _continuous_step_summary(

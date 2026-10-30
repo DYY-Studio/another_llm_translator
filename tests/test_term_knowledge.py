@@ -454,7 +454,7 @@ async def test_sibling_name_updates_share_one_review_unit_through_protected_root
         )) for s in payload["terms"]]
         return httpx.Response(200,json={"choices":[{"message":{"content":llm_jsonl(rows)}}]})
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await run_terminology_decision(project,http_client=client)
+        await run_terminology_decision(project,all_terms=True,http_client=client)
     proposals = current_decision_draft(project)["proposals"]
     assert len(proposals)==1
     assert proposals[0]["normalized"]==["alpha","beta","gamma"]

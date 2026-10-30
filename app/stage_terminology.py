@@ -293,6 +293,8 @@ async def run_terminology(
     include_draft_translation: bool = False,
     on_draft_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    from .term_changes import require_no_decision_draft
+    require_no_decision_draft(project)
     from .term_knowledge import replacement_impacts
     from .sqlite_storage import read_segments
     impacts = (await run_blocking(lambda: replacement_impacts(project, [s for s in read_segments(project) if not s["is_empty"]]))) if scope.force else []

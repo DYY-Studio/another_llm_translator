@@ -3708,6 +3708,7 @@ def test_web_decision_options_keep_running_final_review_setting(
         lambda *_args, **_kwargs: {
             "eligible": [{"normalized": "alpha"}, {"normalized": "beta"}],
             "protected": [],
+            "knowledge_pending": 0,
             "estimated_requests": 2,
             "estimated_input_tokens": 10,
         },
@@ -5725,6 +5726,7 @@ def test_continuous_decision_does_not_acknowledge_existing_review_state(
         "overrides_document": {},
         "protected": [],
         "eligible": [],
+        "knowledge_pending": 0,
         "states": {},
         "source_conflicts": {},
         "evidence": {},
@@ -5828,6 +5830,7 @@ def test_continuous_marks_protected_decision_plan_as_no_work(
         "overrides_document": {},
         "protected": ["alpha"],
         "eligible": [],
+        "knowledge_pending": 0,
         "states": {},
         "source_conflicts": {},
         "evidence": {},

@@ -367,7 +367,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     write_json(project, project / "terminology/terms.json", record_header("terminology_library", meta["project_id"], **data))
     before = deepcopy(load_terms(project))
     assert entity_view(project, before, "alpha")["status"] == "current"
-    plan = decision_plan(project, knowledge_only=True)
+    plan = decision_plan(project, knowledge_only=True, all_terms=True)
     assert plan["eligible"] == []
     assert plan["knowledge_pending"] == 1
     assert set(plan["prompts"]) == {"knowledge"}
@@ -388,11 +388,11 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     from app.web_tasks import WebTaskManager
     from app.execution import Scope
     api = TestClient(create_app(projects_root=project.parent))
-    options = api.get("/api/v1/projects/terms/task-options/terminology_decision?knowledge_only=true")
+    options = api.get("/api/v1/projects/terms/task-options/terminology_decision?knowledge_only=true&all_terms=true")
     assert options.status_code == 200
     assert options.json()["selected"] == 1
     assert options.json()["knowledge_only"] is True
-    assert api.get("/api/v1/projects/terms/task-options/translation?knowledge_only=true").status_code == 400
+    assert api.get("/api/v1/projects/terms/task-options/translation?knowledge_only=true&all_terms=true").status_code == 400
     assert api.get("/api/v1/projects/terms/task-options/terminology_decision?knowledge_only=true&final_review=true").status_code == 400
 
     async def execute(*args, **kwargs):
@@ -402,7 +402,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     monkeypatch.setattr("app.web_tasks.run_terminology_decision", execute)
     manager = WebTaskManager()
     started = await manager.start(project, "terminology_decision", scope=Scope(),
-                                  reuse_mixed_fingerprints=False, run_action=None, knowledge_only=True)
+                                  reuse_mixed_fingerprints=False, run_action=None, knowledge_only=True, all_terms=True)
     await manager.tasks[started["task_id"]].asyncio_task
     finished = manager.get(started["task_id"])
     assert finished["status"] == "completed", finished.get("error")
@@ -437,7 +437,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     invalid_output = True
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(UsageError, match="实体说明聚合失败"):
-            await run_terminology_decision(project, knowledge_only=True, http_client=client)
+            await run_terminology_decision(project, knowledge_only=True, all_terms=True, http_client=client)
     assert current_decision_draft(project) is None
 
 
@@ -511,7 +511,7 @@ async def test_sidecar_migration_preserves_real_draft_apply_and_rollback(tmp_pat
         return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await run_terminology_decision(project, http_client=client)
+        result = await run_terminology_decision(project, all_terms=True, http_client=client)
     run_dir = project / "runs" / result["run_id"]
     draft_path = run_dir / "terminology_decision_draft.json"
     draft = json.loads(draft_path.read_text(encoding="utf-8"))
@@ -608,7 +608,7 @@ async def test_sidecar_migration_preserves_real_draft_apply_and_rollback(tmp_pat
     rolled_back = load_terms(project)
     assert next(term for term in rolled_back["terms"] if term["normalized"] == "beta")["group_primary"] is None
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        next_run = await run_terminology_decision(project, replace_draft=True, http_client=client)
+        next_run = await run_terminology_decision(project, replace_draft=True, all_terms=True, http_client=client)
     assert next_run["run_id"] != result["run_id"]
     assert calls == 6
 

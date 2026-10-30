@@ -134,6 +134,13 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             raise UsageError("项目存在运行中的任务，结束或取消后才能清空术语阶段")
         return WebStore(root).clear_terms()
 
+    @app.post("/api/v1/projects/{name}/terms/changes/resolve")
+    def resolve_term_changes(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能处理术语变化")
+        return WebStore(root).resolve_term_changes(payload)
+
     @app.post("/api/v1/projects/{name}/terms/delete")
     def delete_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).delete_terms(payload)
@@ -171,6 +178,8 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能处理术语待办")
         run_id = payload.get("run_id")
         normalized = payload.get("normalized")
         resolved = payload.get("resolved")
