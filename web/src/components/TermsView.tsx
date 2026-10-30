@@ -894,7 +894,7 @@ export function TermsView({
           <div className="batch-toolbar segment-batch-toolbar term-actions-toolbar">
             <span>{translate("terms.selected", language, { count: selection.selectedKeys.size })}</span>
             <div className="segment-batch-actions">
-              <button className="quiet-button" onClick={() => setShowScanFailures(true)}>{translate("terms.viewFailures", language)}</button>
+              {(data?.scan.failed ?? 0) > 0 && <button className="quiet-button" onClick={() => setShowScanFailures(true)}>{translate("terms.viewFailures", language)}</button>}
               <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
               <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
               {selectedActive.length > 0 && <button
