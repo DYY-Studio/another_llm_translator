@@ -196,6 +196,7 @@ export interface ProjectOverview {
 }
 
 export interface StageCompletion {
+  knowledge_entities?: string[];
   state: "empty" | "none" | "partial" | "complete";
   total: number;
   generated: number;
@@ -383,6 +384,7 @@ export interface TaskState {
   steps?: TaskStep[];
   final_review?: boolean;
   knowledge_only?: boolean;
+  all_terms?: boolean;
   status: string;
   include_summaries?: boolean;
   include_draft_translation?: boolean;
@@ -726,6 +728,8 @@ export interface ModelRow {
 export type DraftProgress = Record<"terminology", { completed: number; failed: number; total: number }> & Partial<Record<"translation" | "content_summary", { completed: number; failed: number; total: number }>>;
 
 export interface TaskOptions {
+  knowledge_pending?: number;
+  publication_invalidates_undo?: boolean;
   summary_progress?: { completed: number; total: number };
   include_summaries?: boolean;
   include_draft_translation?: boolean;
@@ -734,6 +738,7 @@ export interface TaskOptions {
   stage: RunStage;
   final_review?: boolean;
   knowledge_only?: boolean;
+  all_terms?: boolean;
   review_draft_run_id?: string | null;
   preset: {
     id: string;
@@ -796,6 +801,7 @@ export interface RunningRun {
   current: { model: string; endpoint: string };
   final_review?: boolean | null;
   knowledge_only?: boolean;
+  all_terms?: boolean;
   final_review_target_count?: number;
   completed_steps?: number;
   total_steps?: number;
@@ -854,6 +860,7 @@ export interface RunDecision {
   run_action: "resume" | "decline" | null;
   final_review: boolean;
   knowledge_only?: boolean;
+  all_terms?: boolean;
 }
 
 export interface TermDecisionConflicts {
@@ -898,6 +905,11 @@ export interface EntityKnowledge {
 }
 
 export interface Term {
+  pending_change?: {
+    kind: "new" | "changed";
+    candidates: Array<{ source: string; preferred_translation?: string; category?: string; aliases: string[]; candidate_id: string;
+      source_range: Array<{ segment_id: string; file_id: string; part_id: string }> }>;
+  } | null;
   entity_key: string;
   knowledge_status: "current" | "pending" | "stale" | null;
   description_items: KnowledgeItem[];
@@ -939,6 +951,7 @@ export interface TermDecisionEvidence {
 }
 
 export interface TermDecisionProposal {
+  modifies_confirmed?: boolean;
   knowledge_evidence: Record<string, KnowledgeFragment>;
   knowledge_before: Record<string, {items: KnowledgeItem[]} | null>;
   knowledge_after: Record<string, {items: KnowledgeItem[]}>;
@@ -955,6 +968,7 @@ export interface TermDecisionProposal {
 
 export interface TermDecisionDraft {
   knowledge_only?: boolean;
+  all_terms?: boolean;
   warnings: string[];
   final_review_error?: { error: string; code: string; params: Record<string, unknown> };
   run_id: string;
@@ -992,6 +1006,7 @@ export interface TermDecisionReviewState {
 }
 
 export interface TermsResponse {
+  publication_invalidates_undo?: boolean;
   terms_revision: number | null;
   conflict_count: number;
   terms: Term[];
