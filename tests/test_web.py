@@ -699,8 +699,8 @@ def test_web_project_list_reports_repair_for_missing_prompt(
     assert listed.json()["projects"][0]["repair_needed"] is True
 
 
-@pytest.mark.parametrize("schema_version", ["3", "4", "5", "6", None])
-def test_web_project_list_checks_schema_read_only_while_project_is_locked(
+@pytest.mark.parametrize("schema_version", ["3", "4", "5", "6", "8", "9", str(sqlite_storage.SCHEMA_VERSION), None])
+def test_web_project_list_does_not_migrate_while_project_is_locked(
     tmp_path: Path, schema_version: str | None
 ) -> None:
     projects_root, project = make_project(tmp_path)
@@ -723,8 +723,12 @@ def test_web_project_list_checks_schema_read_only_while_project_is_locked(
     with project_write_lock(project):
         listed = client.get("/api/v1/projects")
 
-    assert listed.status_code == 200
-    assert listed.json()["projects"][0]["repair_needed"] is True
+    if schema_version == str(sqlite_storage.SCHEMA_VERSION):
+        assert listed.status_code == 200
+        assert listed.json()["projects"][0]["repair_needed"] is False
+    else:
+        assert listed.status_code == 400
+        assert ("schema_version" if schema_version is None else "另一个写入任务") in listed.json()["error"]
     connection = sqlite3.connect(project / "project.sqlite")
     try:
         row = connection.execute(
@@ -1410,7 +1414,7 @@ def test_web_register_project_is_read_only_while_project_is_locked(
     }
 
 
-def test_web_lists_legacy_project_from_read_only_project_json(
+def test_web_project_list_rejects_legacy_project_without_schema(
     tmp_path: Path,
 ) -> None:
     projects_root = tmp_path / "projects"
@@ -1440,20 +1444,9 @@ def test_web_lists_legacy_project_from_read_only_project_json(
 
     listed = client.get("/api/v1/projects")
 
-    assert listed.status_code == 200
-    assert listed.json()["projects"] == [
-        {
-            "selector": "legacy",
-            "name": "legacy",
-            "project_id": "PRJ-LEGACY",
-            "created_at": None,
-            "path": str(legacy.resolve()),
-            "external": False,
-            "file_count": 0,
-            "segment_count": 0,
-            "repair_needed": True,
-        }
-    ]
+    assert listed.status_code == 400
+    assert "schema_version：缺失" in listed.json()["error"]
+    assert not (legacy / "snapshots" / "storage_migrations").exists()
 
 
 def test_web_open_project_rejects_project_write_lock(
@@ -1549,8 +1542,8 @@ def test_web_lists_and_opens_project_with_silent_upgrade(
 
     listed = client.get("/api/v1/projects")
     assert listed.status_code == 200
-    assert listed.json()["projects"][0]["repair_needed"] is True
-    assert not backups.exists()
+    assert listed.json()["projects"][0]["repair_needed"] is False
+    assert len(list(backups.glob("*.sqlite"))) == 1
 
     opened = client.post("/api/v1/projects/open", json={"path": str(project)})
     assert opened.status_code == 200
@@ -1571,7 +1564,7 @@ def test_web_lists_and_opens_project_with_silent_upgrade(
     assert list(backups.glob("*.sqlite")) == initial_backups
 
 
-def test_web_open_project_reports_backup_after_read_triggered_upgrade(
+def test_web_open_project_keeps_read_triggered_upgrade_silent(
     tmp_path: Path,
 ) -> None:
     from tests.test_sqlite_storage import _downgrade_epub_project_to_v4
@@ -1591,15 +1584,13 @@ def test_web_open_project_reports_backup_after_read_triggered_upgrade(
     opened = client.post("/api/v1/projects/open", json={"path": str(project)})
 
     assert opened.status_code == 200
-    backup_warnings = [
-        warning for warning in opened.json()["warnings"] if "升级前备份位于" in warning
-    ]
-    assert len(backup_warnings) == 1
-    backup = next((project / "snapshots" / "storage_migrations").glob("*.sqlite"))
-    assert str(backup) in backup_warnings[0]
+    assert opened.json()["warnings"] == []
+    backups = list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))
+    assert len(backups) == 1
     reopened = client.post("/api/v1/projects/open", json={"path": str(project)})
     assert reopened.status_code == 200
-    assert not any("升级前备份位于" in warning for warning in reopened.json()["warnings"])
+    assert reopened.json()["warnings"] == []
+    assert list((project / "snapshots" / "storage_migrations").glob("*.sqlite")) == backups
 
 
 def test_web_browses_server_directories_one_level_and_filters_symlinks(
@@ -7130,3 +7121,29 @@ def test_delete_unreferenced_llm_preset_when_llm_decision_exists(tmp_path):
     response = client.delete('/api/v1/global/presets/unused')
     assert response.status_code == 200 and response.json() == {'deleted': True}
     assert not (user_root() / 'llm_presets/unused.json').exists()
+
+
+@pytest.mark.parametrize("version", [8, 9])
+@pytest.mark.parametrize("entry", ["/api/v1/projects", "/api/v1/runs", "/api/v1/projects/register"])
+def test_first_project_access_silently_migrates_supported_schema(
+    tmp_path: Path, version: int, entry: str,
+) -> None:
+    projects_root, project = make_project(tmp_path)
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        connection.execute("UPDATE schema_meta SET value=? WHERE key='schema_version'", (str(version),))
+    sqlite_storage._SUPPORTED_CACHE.discard(sqlite_storage.database_path(project))
+    client = TestClient(create_app(projects_root=projects_root))
+
+    response = (client.post(entry, json={"path": str(project)})
+                if entry.endswith("register") else client.get(entry))
+
+    assert response.status_code == 200, response.text
+    assert not response.json().get("warnings")
+    if entry.endswith("projects"):
+        assert response.json()["projects"][0]["repair_needed"] is False
+    with sqlite3.connect(project / "project.sqlite") as connection:
+        assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(sqlite_storage.SCHEMA_VERSION)
+    backups = list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))
+    assert len(backups) == 1
+    with sqlite3.connect(backups[0]) as connection:
+        assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(version)

@@ -750,7 +750,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
     """Ensure the project database matches SCHEMA_VERSION.
 
     A pre-upgrade SQLite backup is made before changing an existing schema.
-    The returned path lets callers surface that backup to users.
+    The returned path identifies the pre-upgrade backup.
     """
     version = _schema_version(connection)
     if version is None:
@@ -870,7 +870,6 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
 
 
 _SUPPORTED_CACHE: set[Path] = set()
-_MIGRATION_BACKUP_NOTICES: dict[Path, Path] = {}
 _SCHEMA_SUPPORT_LOCK = threading.Lock()
 
 
@@ -900,14 +899,7 @@ def ensure_supported(project: Path) -> Path | None:
             except UnboundLocalError:
                 pass
         _SUPPORTED_CACHE.add(path)
-        if backup_path is not None and previous_version < 5:
-            _MIGRATION_BACKUP_NOTICES[path] = backup_path
         return backup_path
-
-
-def _take_migration_backup_notice(project: Path) -> Path | None:
-    with _SCHEMA_SUPPORT_LOCK:
-        return _MIGRATION_BACKUP_NOTICES.pop(database_path(project), None)
 
 
 def _json(value: Any) -> str:
@@ -3260,9 +3252,17 @@ def _read_only_connection(project: Path) -> sqlite3.Connection:
                 "不支持的项目 SQLite schema_version：缺失；请重新创建项目"
             )
         if version != SCHEMA_VERSION:
-            raise ProjectError(
-                f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
+            connection.close()
+            connection = None
+            from .locking import project_write_lock
+
+            with project_write_lock(project):
+                ensure_supported(project)
+            connection = sqlite3.connect(
+                f"{database.as_uri()}?mode=ro", uri=True, timeout=30
             )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA query_only = ON")
         return connection
     except ProjectError:
         if connection is not None:
