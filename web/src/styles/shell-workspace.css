@@ -94,6 +94,12 @@
 .nav-item { display: flex; align-items: center; gap: 12px; min-height: 46px; padding: 0 14px; border: 0; border-radius: 7px; background: transparent; font-size: 15px; text-align: left; }
 .nav-item:hover { background: var(--hover); }
 .nav-item.active { background: var(--accent-soft); color: var(--accent-text); font-weight: 650; box-shadow: inset 3px 0 var(--accent); }
+.nav-item { position: relative; }
+.nav-icon-wrap { display: flex; align-items: center; }
+.nav-status-dot { position: absolute; inset-inline-end: 14px; top: calc(50% - 4.5px); width: 9px; height: 9px; border-radius: 50%; }
+.nav-status-dot.none { background: var(--danger); }
+.nav-status-dot.partial { background: var(--status-warning); }
+.nav-status-dot.complete { background: var(--status-success); }
 .icon { width: 20px; height: 20px; flex: none; }
 .icon-button { display: grid; place-items: center; width: 38px; border: 0; background: transparent; border-radius: 7px; }
 .icon-button:hover { background: var(--hover); }

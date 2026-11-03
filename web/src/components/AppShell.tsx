@@ -1,6 +1,6 @@
 import { PlanUsageLink } from "./ChatGPTSettings";
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import type { DraftProgress, Stage, TaskState, TaskStep, ThemeMode } from "../types";
+import type { DraftProgress, Stage, TaskState, TaskStep, ThemeMode, ProjectOverview } from "../types";
 import { icons } from "./Icons";
 import type { Language } from "../i18n";
 import { errorMessage, translate } from "../i18n";
@@ -139,6 +139,7 @@ function TaskSteps({
 
 export function AppShell({
   project,
+  stageCompletion,
   stage,
   task,
   tasks,
@@ -159,6 +160,7 @@ export function AppShell({
   children,
 }: {
   project: string;
+  stageCompletion?: ProjectOverview["stage_completion"];
   stage: Stage;
   task: TaskState | null;
   tasks: TaskState[];
@@ -389,7 +391,14 @@ export function AppShell({
               aria-label={translate(item.key, language)}
               onClick={() => onStage(item.id)}
             >
-              {icons[item.id]}<span>{translate(item.key, language)}</span>
+              <span className="nav-icon-wrap">{icons[item.id]}{(() => {
+                const status = stageCompletion?.[item.id as keyof typeof stageCompletion];
+                if (!status || status.state === "empty") return null;
+                const reasons = ["conflicts", "changes", "knowledge", "draft", "manual", "unpublished"] as const;
+                const label = [translate(`stageCompletion.${status.state}`, language), `${status.completed}/${status.total}`,
+                  ...reasons.filter(key => status[key]).map(key => translate(`stageCompletion.${key}`, language, { count: status[key] ?? 0 }))].join("，");
+                return <i className={`nav-status-dot ${status.state}`} role="img" aria-label={label} title={label} />;
+              })()}</span><span className="nav-label">{translate(item.key, language)}</span>
             </button>
           ))}
         </nav>

@@ -17,7 +17,7 @@ from typing import Any, Iterable
 from .errors import ProjectError, StorageError, UsageError
 from .stage_result_retention import prune_stage_results
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 STAGES = frozenset(
     {
@@ -750,7 +750,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
     """Ensure the project database matches SCHEMA_VERSION.
 
     A pre-upgrade SQLite backup is made before changing an existing schema.
-    The returned path lets callers surface that backup to users.
+    The returned path identifies the pre-upgrade backup.
     """
     version = _schema_version(connection)
     if version is None:
@@ -761,7 +761,7 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
             (str(version),),
         )
         return None
-    elif version not in {3, 4, 5, 6, 7, 8, SCHEMA_VERSION}:
+    elif version not in {3, 4, 5, 6, 7, 8, 9, SCHEMA_VERSION}:
         raise ProjectError(
             f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
         )
@@ -824,10 +824,16 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
                 [(zlib.compress(row["payload_json"].encode("utf-8")), row["sequence"]) for row in rows],
             )
         migrated_term_runs = _migrate_term_knowledge_to_v8(connection, project) if version < 8 else []
-        migrated_term_runs.extend(_end_term_decision_runs_to_v9(connection, project))
+        if version < 9:
+            migrated_term_runs.extend(_end_term_decision_runs_to_v9(connection, project))
         if version < 9:
             sidecar_backups = _migrate_term_knowledge_sidecars_to_v9(connection, project, backup_path)
-        _migrate_term_knowledge_to_v9(connection)
+        if version < 9:
+            _migrate_term_knowledge_to_v9(connection)
+        for row in connection.execute("SELECT key, payload_json FROM terms_state WHERE key = 'terms'").fetchall():
+            library = _hydrate_terms(row, _project_id(connection))
+            library["knowledge"]["pending_changes"] = {}
+            connection.execute("UPDATE terms_state SET payload_json = ? WHERE key = ?", (_terms_payload(library), row["key"]))
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -864,7 +870,6 @@ def _ensure_schema(connection: sqlite3.Connection, project: Path | None = None) 
 
 
 _SUPPORTED_CACHE: set[Path] = set()
-_MIGRATION_BACKUP_NOTICES: dict[Path, Path] = {}
 _SCHEMA_SUPPORT_LOCK = threading.Lock()
 
 
@@ -894,14 +899,7 @@ def ensure_supported(project: Path) -> Path | None:
             except UnboundLocalError:
                 pass
         _SUPPORTED_CACHE.add(path)
-        if backup_path is not None and previous_version < 5:
-            _MIGRATION_BACKUP_NOTICES[path] = backup_path
         return backup_path
-
-
-def _take_migration_backup_notice(project: Path) -> Path | None:
-    with _SCHEMA_SUPPORT_LOCK:
-        return _MIGRATION_BACKUP_NOTICES.pop(database_path(project), None)
 
 
 def _json(value: Any) -> str:
@@ -3254,9 +3252,17 @@ def _read_only_connection(project: Path) -> sqlite3.Connection:
                 "不支持的项目 SQLite schema_version：缺失；请重新创建项目"
             )
         if version != SCHEMA_VERSION:
-            raise ProjectError(
-                f"不支持的项目 SQLite schema_version：{version}；请重新创建项目"
+            connection.close()
+            connection = None
+            from .locking import project_write_lock
+
+            with project_write_lock(project):
+                ensure_supported(project)
+            connection = sqlite3.connect(
+                f"{database.as_uri()}?mode=ro", uri=True, timeout=30
             )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA query_only = ON")
         return connection
     except ProjectError:
         if connection is not None:
@@ -4101,6 +4107,50 @@ def segment_page_counts(
         return int(row[0]), int(row[1])
     finally:
         connection.close()
+
+def stage_completion_counts(project: Path) -> dict[str, dict[str, int]]:
+    """Count current results and resolved reviews without loading result text."""
+    stages = ("translation", "proofreading", "proofreading_applied", "polishing", "polishing_applied")
+    joins, params = [], []
+    for stage in stages:
+        join, values = _stage_cte(stage, stage)
+        joins.append(join)
+        params.extend(values)
+    columns = ["COUNT(*) AS total", "SUM(translation.status = 'completed') AS translation_done"]
+    for stage in ("proofreading", "polishing"):
+        base = "translation.record_id" if stage == "proofreading" else "COALESCE(proofreading_applied.record_id, translation.record_id)"
+        columns.extend([
+            f"SUM({stage}.status = 'completed') AS {stage}_generated",
+            f"SUM({stage}.status = 'completed' AND {base} IS NOT NULL AND "
+            f"json_extract({stage}.payload_json, '$.base_result_id') = {base} AND "
+            f"(json_extract({stage}.payload_json, '$.review_status') = 'accepted' OR "
+            f"({stage}_applied.status = 'completed' AND json_extract({stage}_applied.payload_json, '$.suggestion_result_id') = {stage}.record_id))) AS {stage}_done",
+        ])
+    connection = _with_db(project)
+    try:
+        row = connection.execute(
+            f"SELECT {', '.join(columns)} FROM segments {''.join(joins)} WHERE segments.is_empty = 0", params,
+        ).fetchone()
+        return {stage: {"total": int(row["total"]),
+                        "generated": int(row[f"{stage}_generated"] or 0) if stage != "translation" else int(row["translation_done"] or 0),
+                        "completed": int(row[f"{stage}_done"] or 0)}
+                for stage in ("translation", "proofreading", "polishing")}
+    finally:
+        connection.close()
+
+
+def terminology_completed_count(project: Path, task_id: str) -> int:
+    connection = _with_db(project)
+    try:
+        return int(connection.execute(
+            "SELECT COUNT(DISTINCT scans.segment_id) FROM terminology_scans scans "
+            "JOIN segments ON segments.segment_id = scans.segment_id "
+            "WHERE scans.active_task_id = ? AND scans.status = 'completed' AND segments.is_empty = 0",
+            (task_id,),
+        ).fetchone()[0])
+    finally:
+        connection.close()
+
 
 def obsolete_stage_result_count(project: Path) -> int:
     from .stage_result_retention import obsolete_stage_results

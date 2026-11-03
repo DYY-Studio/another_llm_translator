@@ -162,6 +162,7 @@ def _running_run(
     if stage == TERMINOLOGY_DECISION_STAGE and "final_review" in manifest:
         result["final_review"] = manifest["final_review"]
         result["knowledge_only"] = bool(manifest.get("knowledge_only", False))
+        result["all_terms"] = bool(manifest.get("all_terms", False))
         result["review_draft_run_id"] = manifest.get("review_draft_run_id")
         if result["knowledge_only"]:
             result["total_steps"] = int(manifest["selected_segment_count"])
@@ -189,6 +190,7 @@ def task_options(
     prompt_language: str | None = None,
     final_review: bool = False,
     knowledge_only: bool = False,
+    all_terms: bool = False,
     review_draft_run_id: str | None = None,
     continuous_stages: Iterable[object] = (),
     apply_terminology_decision: bool = False,
@@ -199,6 +201,11 @@ def task_options(
         raise UsageError("草案终审仅支持自动术语决策终审模式")
     if knowledge_only and (stage != TERMINOLOGY_DECISION_STAGE or final_review):
         raise UsageError("仅实体说明模式只允许自动术语决策，且不能同时启用术语终审")
+    if stage in {"terminology", "run-all"}:
+        from .term_changes import require_no_decision_draft
+        require_no_decision_draft(project)
+    if all_terms and stage != TERMINOLOGY_DECISION_STAGE:
+        raise UsageError("全部术语范围只支持术语自动决策")
     if include_draft_translation and stage not in {"terminology", CONTINUOUS_STAGE}:
         raise UsageError("粗翻开关仅支持术语扫描")
     if final_review and stage not in {
@@ -242,21 +249,16 @@ def task_options(
             str(item["normalized"])
             for item in overrides.get("overrides", [])
         }
-        has_eligible = any(
-            str(item["normalized"]) not in protected
-            and not bool(item.get("disabled", False))
-            for item in library.get("terms", [])
-        )
         config = load_project_config(project, stage=stage)
         plan = (
-            decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, review_draft_run_id=review_draft_run_id, prepare_requests=False, estimate_usage=False)
-            if has_eligible or knowledge_only
+            decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id, prepare_requests=False, estimate_usage=False)
+            if library.get("terms")
             else None
         )
         estimate_error = None
         if estimate_usage and plan is not None:
             try:
-                plan = decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, review_draft_run_id=review_draft_run_id)
+                plan = decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id)
             except RequestSizeError as exc:
                 estimate_error = app_error_payload(exc)
         selected = (plan["total_steps"] if review_draft_run_id else plan["knowledge_pending"] if knowledge_only else len(plan["eligible"])) if plan else 0
@@ -267,7 +269,7 @@ def task_options(
                 project,
                 str(running_run["run_id"]),
                 source_terms_revision=int(library["terms_revision"]),
-                knowledge_only=knowledge_only, review_draft_run_id=review_draft_run_id,
+                knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id,
                 final_review=(
                     bool(running_final_review)
                     if isinstance(running_final_review, bool)
@@ -287,12 +289,14 @@ def task_options(
             "stage": stage,
             "final_review": final_review,
             "knowledge_only": knowledge_only,
+            "all_terms": all_terms,
             "review_draft_run_id": review_draft_run_id,
             "preset": {
                 "id": str(config["_llm_preset_id"]),
                 "model": str(config["llm"]["model"]),
             },
             "selected": selected,
+            "knowledge_pending": plan["knowledge_pending"] if plan else 0,
             "protected": len(plan["protected"]) if plan else len(protected),
             "completed": 0,
             "pending": selected,
@@ -403,6 +407,8 @@ def task_options(
     }
     if stage == "terminology":
         from .term_knowledge import replacement_impacts
+        from .term_changes import publication_invalidates_undo
+        result["publication_invalidates_undo"] = publication_invalidates_undo(project)
         result["knowledge_replacement_impacts"] = replacement_impacts(project, nonempty)
     result["include_summaries"] = include_summaries
     if stage == "terminology" and include_summaries:
@@ -536,6 +542,7 @@ def _running_runs_snapshot(
             if stage == TERMINOLOGY_DECISION_STAGE:
                 stable["final_review"] = manifest.get("final_review")
                 stable["knowledge_only"] = manifest.get("knowledge_only", False)
+                stable["all_terms"] = manifest.get("all_terms", False)
             snapshots.append(
                 (
                     stage,
@@ -560,6 +567,7 @@ def _decision_input_snapshot(plan: dict[str, Any]) -> str:
             "language": plan["language"],
             "final_review": bool(plan.get("final_review", False)),
             "knowledge_only": bool(plan.get("knowledge_only", False)),
+            "all_terms": bool(plan.get("all_terms", False)),
             "review_draft": None if plan.get("source_draft") is None else {
                 "run_id": plan["source_draft"]["run_id"],
                 "rejected_proposal_ids": plan["source_draft"]["rejected_proposal_ids"],
@@ -656,6 +664,7 @@ class WebTask:
     _run_action: str | None = field(default=None, repr=False)
     _final_review: bool = field(default=False, repr=False)
     _knowledge_only: bool = field(default=False, repr=False)
+    _all_terms: bool = field(default=False, repr=False)
     _review_draft_run_id: str | None = field(default=None, repr=False)
     _prompt_language: str | None = field(default=None, repr=False)
     _exclude_punctuation_only: bool = field(default=True, repr=False)
@@ -685,6 +694,7 @@ class WebTask:
             "steps": [dict(step) for step in self.steps],
             "final_review": self._final_review,
             "knowledge_only": self._knowledge_only,
+            "all_terms": self._all_terms,
             "include_summaries": self._include_summaries,
             "include_draft_translation": self._include_draft_translation,
             "aggregate_full_summaries": self._aggregate_full_summaries,
@@ -948,6 +958,7 @@ class WebTaskManager:
         summary_selection: tuple[tuple[str, str], ...] = (),
         final_review: bool = False,
         knowledge_only: bool = False,
+        all_terms: bool = False,
         review_draft_run_id: str | None = None,
         continuous_stages: Iterable[object] = (),
         continuous_run_actions: Mapping[str, str] | None = None,
@@ -1138,7 +1149,7 @@ class WebTaskManager:
                 )
         elif stage == TERMINOLOGY_DECISION_STAGE:
             decision_plan_snapshot = decision_plan(
-                project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, review_draft_run_id=review_draft_run_id
+                project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id
             , prepare_requests=False, estimate_usage=False)
             library = decision_plan_snapshot["library"]
             selected_count = int(
@@ -1169,7 +1180,7 @@ class WebTaskManager:
                     project,
                     str(running[0]["run_id"]),
                     source_terms_revision=current_terms_revision,
-                    knowledge_only=knowledge_only, review_draft_run_id=review_draft_run_id,
+                    knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id,
                     final_review=final_review,
                 )
                 if not compatible:
@@ -1274,7 +1285,7 @@ class WebTaskManager:
                         decision_plan_snapshot["prompts"],
                         decision_plan_snapshot["library"],
                         final_review=final_review,
-                        knowledge_only=knowledge_only, review_draft_run_id=review_draft_run_id,
+                        knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id,
                     )
                     if stage == TERMINOLOGY_DECISION_STAGE
                     else _stage_fingerprint_snapshot(project, stage),
@@ -1392,7 +1403,7 @@ class WebTaskManager:
                     reuse_mixed_fingerprints=state._reuse_mixed_fingerprints,
                     run_action=state._run_action,
                     final_review=state._final_review,
-                    knowledge_only=state._knowledge_only,
+                    knowledge_only=state._knowledge_only, all_terms=state._all_terms,
                     review_draft_run_id=state._review_draft_run_id,
                     continuous_stages=state._continuous_stages,
                     continuous_run_actions=state._continuous_run_actions,
@@ -1451,6 +1462,7 @@ class WebTaskManager:
         summary_selection: Iterable[dict[str, str]] = (),
         final_review: bool = False,
         knowledge_only: bool = False,
+        all_terms: bool = False,
         review_draft_run_id: str | None = None,
         continuous_stages: Iterable[object] = (),
         continuous_run_actions: Mapping[str, str] | None = None,
@@ -1492,7 +1504,7 @@ class WebTaskManager:
                 for item in summary_selection
             ),
             final_review=final_review,
-            knowledge_only=knowledge_only, review_draft_run_id=review_draft_run_id,
+            knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id,
             continuous_stages=continuous_stages,
             continuous_run_actions=continuous_run_actions,
             apply_terminology_decision=apply_terminology_decision,
@@ -1520,6 +1532,7 @@ class WebTaskManager:
             state._run_action = run_action
             state._final_review = decision.final_review
             state._knowledge_only = knowledge_only
+            state._all_terms = all_terms
             state._review_draft_run_id = review_draft_run_id
             state.steps = [dict(step) for step in decision.continuous_steps]
             state._prompt_language = prompt_language
@@ -1565,6 +1578,7 @@ class WebTaskManager:
         summary_selection: tuple[tuple[str, str], ...] = (),
         final_review: bool = False,
         knowledge_only: bool = False,
+        all_terms: bool = False,
         review_draft_run_id: str | None = None,
         continuous_stages: tuple[str, ...] = (),
         continuous_run_actions: Mapping[str, str] | None = None,
@@ -1676,7 +1690,7 @@ class WebTaskManager:
                     aggregate_full_summaries=aggregate_full_summaries,
                     summary_selection=summary_selection,
                     final_review=final_review,
-                    knowledge_only=knowledge_only, review_draft_run_id=review_draft_run_id,
+                    knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id,
                     continuous_stages=continuous_stages,
                     continuous_run_actions=continuous_run_actions,
                     apply_terminology_decision=apply_terminology_decision,
@@ -1794,7 +1808,7 @@ class WebTaskManager:
                         limiter=next(iter(shared_limiters.values())),
                         plan=decision.plan,
                         final_review=final_review,
-                        knowledge_only=knowledge_only, review_draft_run_id=review_draft_run_id,
+                        knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id,
                     )
                 elif state.stage == "terminology":
                     summary = await run_terminology(

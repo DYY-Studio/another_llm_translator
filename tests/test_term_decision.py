@@ -131,6 +131,11 @@ def create_decision_project(tmp_path: Path, text: str = "Alice Ally\nBob") -> Pa
             ],
         ),
     )
+    library = load_terms(project, resolve_knowledge=False)
+    library["knowledge"]["pending_changes"] = {
+        term["normalized"]: {"kind": "new", "candidate_refs": []} for term in library["terms"]
+    }
+    write_json(project, project / "terminology" / "terms.json", library)
     return project
 
 
@@ -330,6 +335,7 @@ def create_complete_legacy_group_run(
             run_id=run_id,
             source_terms_revision=1,
             decision_rules_version=DECISION_RULES_VERSION,
+        all_terms=False,
             phases={
                 "containment": {},
                 "knowledge": {},
@@ -4000,7 +4006,7 @@ async def test_web_decision_review_rejections_and_apply(tmp_path: Path) -> None:
     )
     assert applied.status_code == 200
     assert applied.json()["applied"] == 0
-    assert applied.json()["terms"]["terms_revision"] == 1
+    assert applied.json()["terms"]["terms_revision"] == 2
 
 
 @pytest.mark.asyncio
@@ -4266,6 +4272,7 @@ def test_web_decision_exposes_checkpoint_and_supports_resume_or_force(
             run_id=run_id,
             source_terms_revision=1,
             decision_rules_version=DECISION_RULES_VERSION,
+        all_terms=False,
             phases={
                 "containment": {},
                 "knowledge": {},
@@ -4959,6 +4966,8 @@ async def test_decision_protects_override_and_replacement_failure_keeps_draft(
             "aliases": [],
         }
     )
+    library = load_terms(project)
+    WebStore(project).resolve_term_changes({"normalized": ["bob"], "expected_revision": library["terms_revision"], "confirm": True})
     seen_terms: list[list[str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -5250,6 +5259,7 @@ def test_decision_rejections_and_stale_revision(tmp_path: Path) -> None:
         status="pending",
         source_terms_revision=1,
         decision_rules_version=DECISION_RULES_VERSION,
+        all_terms=False,
         decision_fingerprint="sha256:test",
         proposals=[
             {
@@ -5332,6 +5342,8 @@ def test_atomic_apply_failure_preserves_terms(
         status="pending",
         source_terms_revision=1,
         decision_rules_version=DECISION_RULES_VERSION,
+        all_terms=False,
+        needs_review=[],
         proposals=[
             {
                 "proposal_id": "TDP-A",
@@ -5490,7 +5502,7 @@ async def test_group_alias_partial_rejection_cannot_publish_invalid_combination(
 
 
 @pytest.mark.asyncio
-async def test_group_alias_conflict_does_not_modify_protected_root(tmp_path):
+async def test_group_alias_conflict_on_confirmed_root_requires_review(tmp_path):
     project = create_decision_project(tmp_path)
     library = load_terms(project)
     library["terms"][0]["aliases"] = ["Bob"]
@@ -5501,7 +5513,6 @@ async def test_group_alias_conflict_does_not_modify_protected_root(tmp_path):
     write_json(project, project / "terminology" / "overrides.json", overrides)
     def respond(request):
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        assert all(item["normalized"] != "alice" for item in payload["terms"])
         records = [dict(type="decision", normalized=item["normalized"], action="keep", reason="保持") for item in payload["terms"]]
         return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
@@ -5581,7 +5592,8 @@ def test_containment_candidates_ignore_disabled_equivalent_and_short_noise():
 
 
 @pytest.mark.asyncio
-async def test_containment_review_keeps_protected_spelling_read_only(tmp_path):
+async def test_containment_review_keeps_out_of_scope_spelling_read_only(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.term_changes.decision_targets", lambda *args, **kwargs: {"alice show"})
     project = create_decision_project(tmp_path, 'Alice\nAlice Show')
     library = load_terms(project)
     library['terms'][0].update(preferred_translation='艾丽丝', aliases=[])
@@ -6174,7 +6186,8 @@ async def test_web_starts_final_review_for_current_draft(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("standalone", [False, True])
-async def test_final_review_includes_windows_for_readonly_related_anchors(tmp_path, standalone):
+async def test_final_review_includes_windows_for_readonly_related_anchors(tmp_path, standalone, monkeypatch):
+    monkeypatch.setattr("app.term_changes.decision_targets", lambda *args, **kwargs: {"alice"})
     project = create_decision_project(tmp_path)
     library_path = project / "terminology" / "terms.json"
     library = read_json(project, library_path)

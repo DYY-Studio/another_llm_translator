@@ -376,6 +376,8 @@ def _merge_and_publish_terms(
     published_run_id: str,
     active_status: str = "completed",
 ) -> dict[str, Any]:
+    from .term_changes import accumulate_changes, require_no_decision_draft
+    require_no_decision_draft(project)
     config = load_project_config(project)
     spec = term_normalization(config)
     from .term_knowledge import empty_knowledge, publish_evidence, project_descriptions, transfer_alias_evidence
@@ -408,6 +410,7 @@ def _merge_and_publish_terms(
         terms=terms,
         knowledge=previous["knowledge"] if previous else empty_knowledge(),
     )
+    accumulate_changes(library, previous, candidates, spec)
     publish_evidence(project, library, candidates, spec)
     transfer_alias_evidence(library, spec)
     project_descriptions(project, library)

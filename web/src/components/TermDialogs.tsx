@@ -198,12 +198,14 @@ export function PartialPublishDialog({
   project,
   language,
   count,
+  invalidatesUndo,
   onClose,
   onPublished,
 }: {
   project: string;
   language: Language;
   count: number;
+  invalidatesUndo: boolean;
   onClose: () => void;
   onPublished: () => Promise<void>;
 }) {
@@ -228,6 +230,7 @@ export function PartialPublishDialog({
       <div className="modal" role="dialog" aria-modal="true" aria-label={translate("terms.publishTitle", language)}>
         <h2>{translate("terms.publishTitle", language)}</h2>
         <p>{translate("terms.publishText", language, { count })}</p>
+        {invalidatesUndo && <p className="warning-banner">{translate("terms.publicationUndoLoss", language)}</p>}
         {error && <p className="error-text">{error}</p>}
         <div className="modal-actions">
           <button className="quiet-button" disabled={working} onClick={onClose}>{translate("common.cancel", language)}</button>

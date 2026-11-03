@@ -1766,3 +1766,23 @@ def test_saving_term_fields_preserves_knowledge_without_rebuilding_evidence(tmp_
     assert result["terms_revision"] == before["terms_revision"] + 1
     assert result["terms"][0]["preferred_translation"] == "艾丽丝"
     assert result["terms"][0]["description"] == "主角"
+
+
+def test_stage_completion_tracks_results_and_current_review_base(tmp_path: Path) -> None:
+    project = create_web_store_project(tmp_path, "one\ntwo")
+    store = WebStore(project)
+    assert store.overview(limit=1)["stage_completion"]["translation"]["state"] == "none"
+    for segment_id in ("F0001-S000001", "F0001-S000002"):
+        store.save_translation({"segment_id": segment_id, "text": "译文"})
+        store.save_review({"stage": "proofreading", "segment_id": segment_id,
+                           "review_status": "accepted", "apply": False})
+    states = store.overview(limit=1)["stage_completion"]
+    assert states["translation"]["state"] == "complete"
+    assert states["proofreading"]["state"] == "complete"
+    assert states["polishing"]["state"] == "none"
+    store.save_translation({"segment_id": "F0001-S000001", "text": "新译文"})
+    assert store.overview()["stage_completion"]["proofreading"]["state"] == "partial"
+    extra = tmp_path / "extra.txt"
+    extra.write_text("three", encoding="utf-8")
+    add_project_files(project, [str(extra)])
+    assert WebStore(project).overview()["stage_completion"]["translation"]["state"] == "partial"

@@ -352,6 +352,7 @@ export function ContinuousRunDialog({
             })}
           </fieldset>
 
+          {startStage === "terminology" && terminologyOptions?.publication_invalidates_undo && <p className="warning-banner">{translate("terms.publicationUndoLoss", language)}</p>}
           {startStage === "terminology" && <div className="run-decision-info run-generation-options">
             {terminologyOptions && <small>{translate("runDialog.jointModelHint", language, { model: terminologyOptions.preset.model })}</small>}
             <label className="config-toggle">

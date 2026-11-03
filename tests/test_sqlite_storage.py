@@ -210,7 +210,6 @@ def test_v6_adapter_state_compresses_on_open_preserving_history(
         assert zlib.decompress(packed).decode("utf-8") == raw
         assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
     assert read_adapter_state(project, "F0001") == expected
-    assert sqlite_storage._take_migration_backup_notice(project) is None
     assert ensure_supported(project) is None
     assert list((project / "snapshots" / "storage_migrations").glob("*.sqlite")) == [backup]
 
@@ -330,7 +329,6 @@ def _seed_v6_summary(project: Path, *, same_model_text: bool = True) -> dict:
 def test_v6_summary_upgrade_deduplicates_hashes_without_changing_history(
     tmp_path: Path, same_model_text: bool,
 ) -> None:
-    from app.sqlite_storage import _take_migration_backup_notice
 
     project = create_project(tmp_path)
     summary = _seed_v6_summary(project, same_model_text=same_model_text)
@@ -350,7 +348,6 @@ def test_v6_summary_upgrade_deduplicates_hashes_without_changing_history(
         assert "original_source_digest" not in value
         assert "original_model_text_digest" not in value
         assert ("model_text_digest" not in value) == same_model_text
-    assert _take_migration_backup_notice(project) is None
     assert ensure_supported(project) is None
     assert list((project / "snapshots" / "storage_migrations").glob("*.sqlite")) == [backup]
 
@@ -447,8 +444,6 @@ def test_v5_summary_upgrade_preserves_history_and_compacts_once(tmp_path: Path, 
     assert run["usage"] == {"total_tokens": 123}
     manifest = json.loads((project / "runs" / "RUN-HISTORY" / "manifest.json").read_text())
     assert manifest["summary_boundaries"] == run["summary_boundaries"]
-    from app.sqlite_storage import _take_migration_backup_notice
-    assert _take_migration_backup_notice(project) is None
     assert read_summary_runs(project)[0]["source_ranges"] == [{
         "file_id": "F0001", "part_id": "document", "segment_ids": ["F0001-S000001"],
     }]

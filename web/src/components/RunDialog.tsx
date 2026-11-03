@@ -166,7 +166,7 @@ function StageRunDialog({
   const draftBlocked = draftEnabled && options.draft_prompt_preflight?.ok === false;
   const replacementNeeded = !resuming && resultPolicy === "force" && Boolean(options.knowledge_replacement_impacts?.length);
   const ready = (replacementNeeded && !knowledgeConfirmed) ? false : summaryConfigurationBlocked || draftBlocked || draftLoading ? false : decisionMode
-    ? options.selected > 0 && (!options.running_run || resuming || resultPolicy === "force")
+    ? (options.selected > 0 || (options.knowledge_pending ?? 0) > 0) && (!options.running_run || resuming || resultPolicy === "force")
     : resuming || resultPolicy !== null;
 
   async function changeDraft(enabled: boolean, summaries = false) {
@@ -196,7 +196,7 @@ function StageRunDialog({
   function submit() {
     if (!ready) return;
     onStart({
-      ...(decisionMode ? { knowledge_only: Boolean(options.knowledge_only) } : {}),
+      ...(decisionMode ? { knowledge_only: Boolean(options.knowledge_only), all_terms: resuming ? Boolean(options.running_run?.all_terms) : Boolean(options.all_terms) } : {}),
       force: !resuming && resultPolicy === "force",
       confirm_knowledge_replacement: replacementNeeded && knowledgeConfirmed,
       reuse_mixed_fingerprints: !resuming && resultPolicy === "reuse",
@@ -208,7 +208,7 @@ function StageRunDialog({
 
   return (
     <RunDialogFrame
-      title={translate(options.review_draft_run_id ? "terms.decisionStartFinalReview" : options.knowledge_only ? "terms.knowledgeOnlyTitle" : decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(stageLabelKey(options.stage), language) })}
+      title={translate(options.review_draft_run_id ? "terms.decisionStartFinalReview" : options.knowledge_only ? options.all_terms ? "terms.knowledgeAll" : "terms.knowledgeOnlyTitle" : decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(stageLabelKey(options.stage), language) })}
       subtitle={decisionMode ? translate(options.review_draft_run_id ? "terms.decisionDraftFinalReviewHint" : options.knowledge_only ? "terms.knowledgeOnlyHint" : "terms.decisionHint", language) : translate("runDialog.subtitle", language)}
       onClose={onClose}>
         <div className="run-preset" aria-label={translate("runDialog.currentPreset", language)}>
@@ -235,7 +235,10 @@ function StageRunDialog({
             </div>
           </section>
         )}
+        {options.stage === "terminology" && options.publication_invalidates_undo && <p className="warning-banner">{translate("terms.publicationUndoLoss", language)}</p>}
         {decisionMode && <div className="run-decision-info">
+          <span>{translate(options.all_terms ? "terms.decisionAllTerms" : "terms.pendingChanges", language)}</span>
+          {!options.knowledge_only && (options.knowledge_pending ?? 0) > 0 && <span>{translate("terms.pendingKnowledgeCount", language, { count: options.knowledge_pending ?? 0 })}</span>}
           <span>{translate(options.review_draft_run_id ? "terms.decisionDraftFinalReviewScope" : options.knowledge_only ? "terms.knowledgeOnlyScope" : "terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
           {options.estimated_requests != null && options.estimated_input_tokens != null && <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests, tokens: options.estimated_input_tokens })}</span>}
           {options.estimate_error && <span className="warning-banner">{translate("runDialog.estimateFailed", language, { error: errorMessage(options.estimate_error, language) })}</span>}

@@ -118,6 +118,7 @@ export function TermsView({
   const [form, setForm] = useState<TermForm>(emptyForm);
   const [search, setSearch] = useState("");
   const [onlyConflicts, setOnlyConflicts] = useState(false);
+  const [onlyPending, setOnlyPending] = useState(false);
   const [showDisabled, setShowDisabled] = useState(false);
   const [message, setMessageText] = useState("");
   const [messageType, setMessageType] = useState<"success" | "error">("success");
@@ -191,6 +192,7 @@ export function TermsView({
     await queryClient.cancelQueries({ queryKey: queryKeys.terms({ projectId }) });
     if (activeProjectRef.current !== projectId) return;
     queryClient.setQueryData(queryKeys.terms({ projectId }), value);
+    void queryClient.invalidateQueries({ queryKey: queryKeys.overview({ projectId }) });
     void queryClient.invalidateQueries({ queryKey: ["term-hits", projectId] }).catch(() => {});
     void queryClient.invalidateQueries({ queryKey: ["related-terms", projectId] }).catch(() => {});
   }
@@ -328,9 +330,10 @@ export function TermsView({
     void hitsQuery.fetchNextPage();
   }
 
+  const pendingEntities = useMemo(() => new Set(overview.stage_completion?.terminology?.knowledge_entities ?? []), [overview.stage_completion]);
   const visible = useMemo(() => {
     return (data?.terms ?? []).filter(
-      (term) => matchesFilters(
+      (term) => (!onlyPending || term.pending_change || term.has_conflicts || pendingEntities.has(term.entity_key)) && matchesFilters(
         term,
         term.group_primary ? termByKey.get(term.group_primary)?.source ?? "" : "",
         search,
@@ -338,7 +341,7 @@ export function TermsView({
         showDisabled,
       ),
     );
-  }, [data, onlyConflicts, search, showDisabled, termByKey]);
+  }, [data, onlyConflicts, onlyPending, search, showDisabled, termByKey, pendingEntities]);
   const visibleKeys = visible.map((term) => term.normalized);
   const selectedTerms = visible.filter((term) => selection.selectedKeys.has(term.normalized));
   const selectedActive = visible.filter(
@@ -464,6 +467,7 @@ export function TermsView({
         { method: "PUT", body: JSON.stringify({ run_id: item.run_id, normalized: item.normalized, resolved }) },
       );
       setManualReview(result.manual_review);
+      await setCurrentData(await api<TermsResponse>(`/api/v1/projects/${project}/terms`));
     } catch (error) {
       setFailure(errorMessage(error, language));
     }
@@ -870,6 +874,7 @@ export function TermsView({
           </div>
           <div className="term-secondary">
             <div className="term-filters">
+              <label><input type="checkbox" checked={onlyPending} onChange={event => setOnlyPending(event.target.checked)} />{translate("terms.pendingChanges", language)}</label>
               <label><input type="checkbox" checked={onlyConflicts} onChange={(event) => {
                 const next = event.target.checked;
                 setOnlyConflicts(next);
@@ -889,7 +894,7 @@ export function TermsView({
           <div className="batch-toolbar segment-batch-toolbar term-actions-toolbar">
             <span>{translate("terms.selected", language, { count: selection.selectedKeys.size })}</span>
             <div className="segment-batch-actions">
-              <button className="quiet-button" onClick={() => setShowScanFailures(true)}>{translate("terms.viewFailures", language)}</button>
+              {(data?.scan.failed ?? 0) > 0 && <button className="quiet-button" onClick={() => setShowScanFailures(true)}>{translate("terms.viewFailures", language)}</button>}
               <button className="quiet-button" onClick={() => setImportOpen(true)}>{translate("terms.import", language)}</button>
               <button className="quiet-button" onClick={() => { setExportSource("published"); setExportOpen(true); }}>{translate("terms.export", language)}</button>
               {selectedActive.length > 0 && <button
@@ -979,7 +984,14 @@ export function TermsView({
                     focusTerm(term);
                   }}
                 >
-                  <span className={term.has_conflicts ? "term-state conflict" : term.disabled ? "term-state disabled" : "term-state"} />
+                  <span className="term-state-stack">
+                    <span className={term.has_conflicts || term.pending_change ? "term-state conflict" : term.disabled ? "term-state disabled" : "term-state"}
+                      role="img" aria-label={translate(term.disabled ? "terms.removed" : term.has_conflicts || term.pending_change ? "terms.termPending" : "terms.termCurrent", language)}
+                      title={translate(term.disabled ? "terms.removed" : term.has_conflicts || term.pending_change ? "terms.termPending" : "terms.termCurrent", language)} />
+                    {!term.group_primary && <span className={term.disabled ? "term-state disabled" : pendingEntities.has(term.entity_key) ? "term-state conflict" : "term-state"}
+                      role="img" aria-label={translate(term.disabled ? "terms.removed" : pendingEntities.has(term.entity_key) ? "terms.entityPending" : "terms.entityCurrent", language)}
+                      title={translate(term.disabled ? "terms.removed" : pendingEntities.has(term.entity_key) ? "terms.entityPending" : "terms.entityCurrent", language)} />}
+                  </span>
                   <span>
                     <strong>{term.source}</strong>
                     <span className="term-row-summary">
@@ -1021,6 +1033,21 @@ export function TermsView({
         <div className="page-heading">
           <div><h1>{selected ? translate("terms.editTitle", language) : translate("terms.newTitle", language)}</h1><p>{translate("terms.saveRevisionHint", language)}</p></div>
         </div>
+        {selected?.pending_change && <details className="conflict-box" open>
+          <summary>{translate(selected.pending_change.kind === "new" ? "terms.changeNew" : "terms.changeExisting", language)}</summary>
+          <p>{translate("terms.changeCurrent", language)} {selected.preferred_translation || "—"} / {selected.category || "—"}{selected.aliases.length > 0 ? ` / ${selected.aliases.join("、")}` : ""}</p>
+          {selected.pending_change.candidates.map((candidate, index) => <div key={`${candidate.candidate_id}:${index}`}>
+            <span>{translate("terms.changeCandidate", language)} {candidate.preferred_translation || "—"} / {candidate.category || "—"}{candidate.aliases.length > 0 ? ` / ${candidate.aliases.join("、")}` : ""}</span>
+            {candidate.source_range.slice(0, 1).map(range => <button className="link-button" key={range.segment_id} onClick={() => onFindSegment("", range.segment_id)}>{range.file_id} / {range.segment_id}</button>)}
+          </div>)}
+          <button className="quiet-button" disabled={saving || decisionDraftPending} onClick={() => void (async () => {
+            setSaving(true);
+            try {
+              await setCurrentData(await api<TermsResponse>(`/api/v1/projects/${project}/terms/changes/resolve`, { method: "POST", body: JSON.stringify({ normalized: [selected.normalized], expected_revision: data?.terms_revision, confirm: true }) }));
+            } catch (error) { setFailure(errorMessage(error, language)); }
+            finally { setSaving(false); }
+          })()}>{translate("terms.keepCurrent", language)}</button>
+        </details>}
         {selected && (
           <div className="term-tabs">
             <button className={editorTab === "edit" ? "active" : ""} onClick={() => setEditorTab("edit")}>{translate("terms.tabEdit", language)}</button>
@@ -1348,6 +1375,7 @@ export function TermsView({
           project={project}
           language={language}
           count={data?.scan.candidate_count ?? 0}
+          invalidatesUndo={Boolean(data?.publication_invalidates_undo)}
           onClose={() => setPartialOpen(false)}
           onPublished={async () => {
             setPartialOpen(false);

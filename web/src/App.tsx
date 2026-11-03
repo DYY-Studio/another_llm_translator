@@ -145,6 +145,7 @@ export default function App() {
     queryKey: queryKeys.overview({ projectId: selectedProjectId }),
     queryFn: ({ signal }) => fetchOverview(project, signal),
     enabled: Boolean(project && selectedProjectId),
+    refetchInterval: tasks[selectedProjectId] && isActiveTaskStatus(tasks[selectedProjectId].status) ? 3000 : false,
   });
   const overview = overviewQuery.data ?? null;
   const queryError = projectsQuery.error ?? overviewQuery.error;
@@ -663,6 +664,7 @@ export default function App() {
     <>
       <AppShell
         project={project}
+        stageCompletion={overview?.stage_completion}
         stage={stage}
         task={task}
         tasks={Object.values(tasks).filter((item) => isActiveTaskStatus(item.status))}
