@@ -330,8 +330,8 @@ export function TermsView({
     void hitsQuery.fetchNextPage();
   }
 
+  const pendingEntities = useMemo(() => new Set(overview.stage_completion?.terminology?.knowledge_entities ?? []), [overview.stage_completion]);
   const visible = useMemo(() => {
-    const pendingEntities = new Set(overview.stage_completion?.terminology?.knowledge_entities ?? []);
     return (data?.terms ?? []).filter(
       (term) => (!onlyPending || term.pending_change || term.has_conflicts || pendingEntities.has(term.entity_key)) && matchesFilters(
         term,
@@ -341,7 +341,7 @@ export function TermsView({
         showDisabled,
       ),
     );
-  }, [data, onlyConflicts, onlyPending, search, showDisabled, termByKey, overview.stage_completion]);
+  }, [data, onlyConflicts, onlyPending, search, showDisabled, termByKey, pendingEntities]);
   const visibleKeys = visible.map((term) => term.normalized);
   const selectedTerms = visible.filter((term) => selection.selectedKeys.has(term.normalized));
   const selectedActive = visible.filter(
@@ -984,7 +984,14 @@ export function TermsView({
                     focusTerm(term);
                   }}
                 >
-                  <span className={term.has_conflicts ? "term-state conflict" : term.disabled ? "term-state disabled" : "term-state"} />
+                  <span className="term-state-stack">
+                    <span className={term.has_conflicts || term.pending_change ? "term-state conflict" : term.disabled ? "term-state disabled" : "term-state"}
+                      role="img" aria-label={translate(term.disabled ? "terms.removed" : term.has_conflicts || term.pending_change ? "terms.termPending" : "terms.termCurrent", language)}
+                      title={translate(term.disabled ? "terms.removed" : term.has_conflicts || term.pending_change ? "terms.termPending" : "terms.termCurrent", language)} />
+                    {!term.group_primary && <span className={term.disabled ? "term-state disabled" : pendingEntities.has(term.entity_key) ? "term-state conflict" : "term-state"}
+                      role="img" aria-label={translate(term.disabled ? "terms.removed" : pendingEntities.has(term.entity_key) ? "terms.entityPending" : "terms.entityCurrent", language)}
+                      title={translate(term.disabled ? "terms.removed" : pendingEntities.has(term.entity_key) ? "terms.entityPending" : "terms.entityCurrent", language)} />}
+                  </span>
                   <span>
                     <strong>{term.source}</strong>
                     <span className="term-row-summary">
