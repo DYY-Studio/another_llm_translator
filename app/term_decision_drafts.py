@@ -342,24 +342,32 @@ def set_manual_review_resolved(
     library = load_terms(project, resolve_knowledge=False)
     if library is not None and source_change is not None:
         pending = library["knowledge"]["pending_changes"]
-        if resolved and normalized in pending:
-            old_refs = source_change["candidate_refs"]
-            remaining = [ref for ref in pending[normalized]["candidate_refs"] if ref not in old_refs]
-            if remaining:
-                pending[normalized]["candidate_refs"] = remaining
-            else:
-                del pending[normalized]
-        elif not resolved:
+        previous = deepcopy(pending)
+        if resolved:
+            old_refs = {tuple(ref) for ref in source_change["candidate_refs"]}
+            for key in list(pending):
+                remaining = [ref for ref in pending[key]["candidate_refs"] if tuple(ref) not in old_refs]
+                if remaining:
+                    pending[key]["candidate_refs"] = remaining
+                else:
+                    del pending[key]
+        else:
             entry = pending.setdefault(normalized, deepcopy(source_change))
             for ref in source_change["candidate_refs"]:
                 if ref not in entry["candidate_refs"]:
                     entry["candidate_refs"].append(ref)
-        library["terms_revision"] += 1
-        library["record_id"] = f'TERMS-{library["terms_revision"]}'
-        overrides = read_json(project, project / "terminology" / "overrides.json")
-        write_terminology_decision_state(project, terms=library, overrides=overrides, run_manifest=manifest)
-    else:
-        write_json(project, project / "runs" / run_id / "manifest.json", manifest)
+            from .term_knowledge import transfer_alias_evidence
+            transfer_alias_evidence(library, term_normalization(load_project_config(project)))
+            active = {term["normalized"] for term in library["terms"]}
+            for key in pending.keys() - active:
+                del pending[key]
+        if pending != previous:
+            library["terms_revision"] += 1
+            library["record_id"] = f'TERMS-{library["terms_revision"]}'
+            overrides = read_json(project, project / "terminology" / "overrides.json")
+            write_terminology_decision_state(project, terms=library, overrides=overrides, run_manifest=manifest)
+            return manual_review_state(project)
+    write_json(project, project / "runs" / run_id / "manifest.json", manifest)
     return manual_review_state(project)
 
 def decision_review_state(project: Path) -> dict[str, Any]:

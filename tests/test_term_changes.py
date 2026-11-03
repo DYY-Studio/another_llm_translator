@@ -66,7 +66,7 @@ def test_keeping_current_term_acknowledges_only_selected_changes(tmp_path: Path)
     project = create_web_store_project(tmp_path, "Alice Bob")
     publish(project, "first", "Alice", "爱丽丝")
     library = publish(project, "second", "Bob", "鲍勃")
-    WebStore(project).resolve_term_changes({"normalized": ["alice"], "expected_revision": library["terms_revision"], "confirm": True})
+    WebStore(project).resolve_term_changes({"normalized": ["alice", "alice"], "expected_revision": library["terms_revision"], "confirm": True})
     assert set(load_terms(project)["knowledge"]["pending_changes"]) == {"bob"}
 
 
@@ -99,7 +99,7 @@ def test_pending_knowledge_mode_skips_current_explanations(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change_name", [False, True, "review"])
+@pytest.mark.parametrize("change_name", [False, True, "review", "alias_review"])
 async def test_decision_acknowledges_changes_only_on_apply_and_rollback_restores(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change_name: bool | str,
 ) -> None:
@@ -110,7 +110,7 @@ async def test_decision_acknowledges_changes_only_on_apply_and_rollback_restores
     from app.term_knowledge import save_items
     from tests.helpers import llm_jsonl
     monkeypatch.setenv("LLM_API_KEY", "test")
-    project = create_web_store_project(tmp_path, "Alice")
+    project = create_web_store_project(tmp_path, "Alice Smith")
     library = publish(project, "first", "Alice", "爱丽丝")
     WebStore(project).save_term({"old_normalized": "alice", "source": "Alice", "preferred_translation": "艾莉丝", "aliases": []})
     library = load_terms(project, resolve_knowledge=False)
@@ -120,7 +120,7 @@ async def test_decision_acknowledges_changes_only_on_apply_and_rollback_restores
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         decisions = [{"type": "decision", "normalized": item["normalized"], "action": "keep", "reason": "保持当前"} for item in payload["terms"]]
-        if change_name == "review":
+        if change_name in {"review", "alias_review"}:
             decisions[0].update(action="needs_review", reason="需要人工处理")
         elif change_name and payload["phase"] == "adjudication":
             decisions[0].update(action="update", changes={"preferred_translation": "爱丽丝"})
@@ -133,13 +133,24 @@ async def test_decision_acknowledges_changes_only_on_apply_and_rollback_restores
     if change_name is True:
         assert draft["proposals"][0]["modifies_confirmed"]
     apply_decision_draft(project, confirm_all=True)
-    if change_name == "review":
+    if change_name in {"review", "alias_review"}:
         from app.term_decision_drafts import set_manual_review_resolved
         assert "alice" in load_terms(project)["knowledge"]["pending_changes"]
         publish(project, "later", "Alice", "爱丽丝")
         later_refs = load_terms(project)["knowledge"]["pending_changes"]["alice"]["candidate_refs"]
+        key = "alice"
+        if change_name == "alias_review":
+            store = WebStore(project)
+            store.save_term({"source": "Alice Smith", "preferred_translation": "艾莉丝·史密斯"})
+            store.convert_related_to_alias({"normalized": "alice smith", "related_normalized": "alice", "confirm": True})
+            key = "alice smith"
         set_manual_review_resolved(project, run_id=draft["run_id"], normalized="alice", resolved=True)
-        assert load_terms(project)["knowledge"]["pending_changes"]["alice"]["candidate_refs"] == later_refs[1:]
+        assert load_terms(project)["knowledge"]["pending_changes"][key]["candidate_refs"] == later_refs[1:]
+        set_manual_review_resolved(project, run_id=draft["run_id"], normalized="alice", resolved=False)
+        pending = load_terms(project)["knowledge"]["pending_changes"]
+        assert set(map(tuple, pending[key]["candidate_refs"])) == set(map(tuple, later_refs))
+        if change_name == "alias_review":
+            assert "alice" not in pending
         return
     assert load_terms(project)["knowledge"]["pending_changes"] == {}
     rollback_decision(project, confirm=True)

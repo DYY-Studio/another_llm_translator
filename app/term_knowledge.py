@@ -697,7 +697,9 @@ def transfer_alias_evidence(library: dict[str, Any], spec: Any) -> dict[str, str
         for alias in term.get("aliases", []):
             aliases.setdefault(normalize_term(alias, spec), set()).add(term["normalized"])
     moved = {}
-    for owner in {f["owner"] for f in require_knowledge(library)["fragments"].values()} - active:
+    knowledge = require_knowledge(library)
+    owners = {f["owner"] for f in knowledge["fragments"].values()} | knowledge["pending_changes"].keys()
+    for owner in owners - active:
         receivers = aliases.get(owner, set())
         if len(receivers) == 1:
             new = next(iter(receivers))

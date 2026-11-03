@@ -1542,7 +1542,7 @@ class WebStore:
             pending = library["knowledge"]["pending_changes"]
             if set(keys) - pending.keys():
                 raise UsageError("待处理变化已变化，请刷新后重试")
-            for key in keys:
+            for key in set(keys):
                 del pending[key]
             library["terms_revision"] += 1
             library["record_id"] = f'TERMS-{library["terms_revision"]}'
