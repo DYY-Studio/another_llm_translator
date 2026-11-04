@@ -133,10 +133,5 @@ git branch -d feat/segment-recovery
 * 不包含无关重构；
 * 记录实际执行的验证；
 * 保持当前 Git 用户身份；
-* 添加：
-
-```text
-Co-authored-by: Codex <codex@openai.com>
-```
 
 新增公共 API、配置项、依赖、文件、抽象层或兼容分支前，应能说明当前需求为何不能通过更小改动完成。
