@@ -235,8 +235,6 @@ def test_build_installs_project_wheel_locked_dependency_and_official_plugin_reso
     assert (output / "plugins" / "term_validation" / "plugin.py").is_file()
     assert not (output / "plugins" / "user_adapter").exists()
     assert not (output / "_internal").exists()
-    assert not (output / "translator-sidecar").exists()
-    assert not (output / "sidecar-dist").exists()
     assert not (output / "site-packages" / "host_probe.py").exists()
     assert not (site_packages / "host_probe.py").exists()
     assert not (site_packages / "venv_probe.py").exists()

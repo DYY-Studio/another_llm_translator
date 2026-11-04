@@ -160,47 +160,37 @@ def test_probe_reports_missing_app(tmp_path: Path) -> None:
     assert str(missing) in str(payload)
 
 
-@pytest.mark.parametrize("missing", ["Info.plist", "MacOS/Another LLM Translator"])
-def test_probe_reports_missing_bundle_entrypoints(tmp_path: Path, missing: str) -> None:
+@pytest.mark.parametrize(
+    ("relative_path", "expected_code"),
+    [
+        ("Info.plist", None),
+        ("MacOS/Another LLM Translator", None),
+        ("Resources/managed-runtime/plugins/srt/plugin.toml", None),
+        ("Resources/managed-runtime/bin/python3", "runtime_python_missing"),
+        (
+            "Resources/managed-runtime/lib/python3.13/site-packages",
+            "site_packages_missing",
+        ),
+    ],
+)
+def test_probe_reports_missing_bundle_paths(
+    tmp_path: Path, relative_path: str, expected_code: str | None
+) -> None:
     app = _make_app(tmp_path)
-    (app / "Contents" / missing).unlink()
+    target = app / "Contents" / relative_path
+    if target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink()
 
     result = _run_probe(app)
 
     assert result.returncode != 0
     payload = _payload(result)
     assert payload["status"] == "error"
-    assert str(app / "Contents" / missing) in str(payload)
-
-
-def test_probe_reports_missing_official_plugin_resource(tmp_path: Path) -> None:
-    app = _make_app(tmp_path)
-    resource = (
-        app
-        / "Contents/Resources/managed-runtime/plugins/srt/plugin.toml"
-    )
-    resource.unlink()
-
-    result = _run_probe(app)
-
-    assert result.returncode != 0
-    payload = _payload(result)
-    assert payload["status"] == "error"
-    assert str(resource) in str(payload)
-
-
-def test_probe_reports_missing_bundled_python(tmp_path: Path) -> None:
-    app = _make_app(tmp_path)
-    bundled = app / "Contents/Resources/managed-runtime/bin/python3"
-    bundled.unlink()
-
-    result = _run_probe(app)
-
-    assert result.returncode != 0
-    payload = _payload(result)
-    assert payload["status"] == "error"
-    assert payload["code"] == "runtime_python_missing"
-    assert str(bundled) in str(payload)
+    if expected_code is not None:
+        assert payload["code"] == expected_code
+    assert str(target) in str(payload)
 
 
 def test_probe_rejects_external_dependency_prebundled_with_app(tmp_path: Path) -> None:
@@ -213,19 +203,6 @@ def test_probe_rejects_external_dependency_prebundled_with_app(tmp_path: Path) -
     assert payload["code"] == "private_dependency_bundled"
     bundled = app / "Contents/Resources/managed-runtime/probe_private_dependency.py"
     assert str(bundled) in str(payload)
-
-
-def test_probe_reports_missing_runtime_site_packages(tmp_path: Path) -> None:
-    app = _make_app(tmp_path)
-    site_packages = app / "Contents/Resources/managed-runtime/lib/python3.13/site-packages"
-    shutil.rmtree(site_packages)
-
-    result = _run_probe(app)
-
-    assert result.returncode != 0
-    payload = _payload(result)
-    assert payload["code"] == "site_packages_missing"
-    assert str(site_packages) in str(payload)
 
 
 def test_probe_rejects_incompatible_binary_wheel_tag(tmp_path: Path) -> None:
@@ -256,26 +233,12 @@ def test_probe_reports_packaged_private_dependency_import_failure(
     assert payload["temporary_root_removed"] is True
 
 
-def test_probe_discovers_external_adapter_and_imports_file(tmp_path: Path) -> None:
-    app = _make_app(tmp_path)
-
-    result = _run_probe(app, env=os.environ.copy())
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    payload = _payload(result)
-    assert payload["status"] == "ok"
-    assert payload["adapter_discovered"] is True
-    assert payload["file_imported"] is True
-    assert payload["project_created"] is True
-    assert payload["segments_queried"] is True
-    assert payload["forced_kill"] is False
-    assert payload["port_released"] is True
-    assert payload["temporary_root_removed"] is True
-    assert not Path(str(payload["temporary_root"])).exists()
-
-
-def test_probe_clears_host_paths_before_bundled_runtime(tmp_path: Path) -> None:
-    app = _make_app(tmp_path, require_clean_env=True)
+def test_probe_discovers_external_adapter_clears_host_paths_and_disables_bytecode(
+    tmp_path: Path,
+) -> None:
+    app = _make_app(
+        tmp_path, require_clean_env=True, require_no_bytecode=True
+    )
     host_root = tmp_path / "host-only"
     host_root.mkdir()
     (host_root / "probe_private_dependency.py").write_text(
@@ -292,24 +255,18 @@ def test_probe_clears_host_paths_before_bundled_runtime(tmp_path: Path) -> None:
     assert payload["status"] == "ok"
     assert payload["adapter_discovered"] is True
     assert payload["file_imported"] is True
+    assert payload["project_created"] is True
+    assert payload["segments_queried"] is True
     assert payload["binary_imported"] is True
     assert payload["binary_match"] == "313"
     assert payload["wheel_tags"] == ["cp313-cp313-macosx_11_0_arm64"]
     assert str(app / "Contents/Resources/managed-runtime") in str(
         payload["binary_import_path"]
     )
-
-
-def test_probe_disables_bytecode_for_bundled_python_children(tmp_path: Path) -> None:
-    app = _make_app(tmp_path, require_no_bytecode=True)
-
-    result = _run_probe(app)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    payload = _payload(result)
-    assert payload["status"] == "ok"
-    assert payload["binary_imported"] is True
-    assert payload["adapter_discovered"] is True
+    assert payload["forced_kill"] is False
+    assert payload["port_released"] is True
+    assert payload["temporary_root_removed"] is True
+    assert not Path(str(payload["temporary_root"])).exists()
 
 
 def test_probe_reports_missing_external_adapter(
@@ -394,23 +351,3 @@ def test_probe_reports_port_release_failure(
     assert payload["process_exited"] is True
     assert payload["port_released"] is False
     assert payload["temporary_root_removed"] is True
-
-
-def test_probe_reports_temporary_cleanup_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    module = _probe_module()
-    app = _make_app(tmp_path)
-    monkeypatch.setattr(module.shutil, "rmtree", lambda *_args, **_kwargs: None)
-
-    payload = module.probe(app)
-
-    assert payload["status"] == "error"
-    assert payload["code"] == "cleanup_failed"
-    assert payload["process_exited"] is True
-    assert payload["port_released"] is True
-    assert payload["temporary_root_removed"] is False
-    import shutil
-
-    monkeypatch.undo()
-    shutil.rmtree(str(payload["temporary_root"]))

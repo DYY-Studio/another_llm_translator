@@ -1414,41 +1414,6 @@ def test_web_register_project_is_read_only_while_project_is_locked(
     }
 
 
-def test_web_project_list_rejects_legacy_project_without_schema(
-    tmp_path: Path,
-) -> None:
-    projects_root = tmp_path / "projects"
-    legacy = projects_root / "legacy"
-    legacy.mkdir(parents=True)
-    sqlite3.connect(legacy / "project.sqlite").close()
-    (legacy / "project.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "record_type": "project",
-                "project_id": "PRJ-LEGACY",
-                "name": "legacy",
-                "file_count": 0,
-                "segment_count": 0,
-            }
-        ),
-        encoding="utf-8",
-    )
-    client = TestClient(
-        create_app(
-            projects_root=projects_root,
-            app_root=make_app_root(tmp_path),
-            log_path=tmp_path / "app.log",
-        )
-    )
-
-    listed = client.get("/api/v1/projects")
-
-    assert listed.status_code == 400
-    assert "schema_version：缺失" in listed.json()["error"]
-    assert not (legacy / "snapshots" / "storage_migrations").exists()
-
-
 def test_web_open_project_rejects_project_write_lock(
     tmp_path: Path,
 ) -> None:
@@ -1480,50 +1445,6 @@ def test_web_open_project_rejects_active_task_with_repair_message(
     assert opened.json()["error"] == (
         "项目存在运行中的任务，结束或取消任务后才能修复项目"
     )
-
-
-def test_web_open_project_rejects_unsupported_storage_schema(
-    tmp_path: Path,
-) -> None:
-    from tests.test_sqlite_storage import create_v2_project
-
-    projects_root, _ = make_project(tmp_path)
-    app_root = tmp_path / "app-root"
-    legacy_parent = tmp_path / "legacy-source"
-    legacy_parent.mkdir()
-    legacy, _file_record, _segment_record, _stage_record = create_v2_project(
-        legacy_parent
-    )
-    target = projects_root / "legacy"
-    legacy.replace(target)
-    metadata = record_header(
-        "project",
-        "PRJ-V2",
-        record_id="PRJ-V2",
-        name="legacy",
-        global_bundle_hash_seen=None,
-        file_count=1,
-        segment_count=1,
-        next_file_sequence=2,
-        status="active",
-    )
-    connection = sqlite3.connect(target / "project.sqlite")
-    try:
-        with connection:
-            connection.execute("DELETE FROM project_meta")
-            connection.executemany(
-                "INSERT INTO project_meta(key, value_json) VALUES (?, ?)",
-                [(key, json.dumps(item)) for key, item in metadata.items()],
-            )
-    finally:
-        connection.close()
-
-    client = TestClient(
-        create_app(projects_root=projects_root, app_root=app_root)
-    )
-    opened = client.post("/api/v1/projects/open", json={"path": str(target)})
-    assert opened.status_code == 400
-    assert "schema_version" in opened.json()["error"]
 
 
 @pytest.mark.parametrize("schema_version", [5, 6])

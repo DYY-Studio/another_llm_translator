@@ -9,7 +9,7 @@ import pytest
 from app.chatgpt_oauth import ChatGPTConnection
 from app.config import _resolve_llm_config, load_global_config
 from app.errors import ConfigError, ExternalError, FatalExternalError
-from app.llm_adapter import load_json_adapter, load_json_adapter
+from app.llm_adapter import load_json_adapter
 from app.llm_client import LLMClient, SlidingWindowLimiter
 from app.llm_preset import load_llm_preset
 from tests.test_chatgpt_oauth import oauth_server
@@ -37,12 +37,6 @@ def test_plan_contract_and_developer_messages(tmp_path):
     assert headers == {"Authorization": "Bearer test"}
     with pytest.raises(ConfigError, match="temperature"):
         current["_llm_adapter"].build_request(api_key="test", model="chosen", messages=[], temperature=0, max_output_tokens=0, stream=True, extra_body={"temperature": 1})
-    value = json.loads((tmp_path / "preset.json").read_text())
-    for field, changed in [("stream", False), ("base_url", "https://example.com/v1"), ("credential", {"kind": "environment", "name": "KEY"})]:
-        bad = {**value, field: changed}
-        (tmp_path / "bad.json").write_text(json.dumps(bad))
-        with pytest.raises(ConfigError):
-            load_llm_preset(tmp_path / "bad.json")
 
 
 @pytest.mark.asyncio
@@ -213,3 +207,10 @@ def test_adapter_capabilities_follow_template_and_fixed_connection(tmp_path):
     preset["stream"] = False
     with pytest.raises(ConfigError, match="要求流式"):
         adapter.validate_preset(preset)
+    plan_config(tmp_path)
+    value = json.loads((tmp_path / "preset.json").read_text())
+    for field, changed in [("stream", False), ("base_url", "https://example.com/v1"), ("credential", {"kind": "environment", "name": "KEY"})]:
+        bad = {**value, field: changed}
+        (tmp_path / "bad.json").write_text(json.dumps(bad))
+        with pytest.raises(ConfigError):
+            load_llm_preset(tmp_path / "bad.json")

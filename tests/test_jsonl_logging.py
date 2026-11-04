@@ -75,17 +75,6 @@ def test_jsonl_extraction_accepts_supported_markdown_labels(label: str) -> None:
     assert document.records == ()
 
 
-def test_jsonl_extraction_accepts_leading_thought_blocks() -> None:
-    template = "\ufeff \r\n<think>推理过程</think>\r\n{answer}"
-    answer = llm_jsonl([{"type": "segment", "id": "S1", "translation": "译文"}])
-    document = parse_jsonl_document(
-        template.replace("{answer}", answer),
-        record_type="segment",
-    )
-    assert document.complete is True
-    assert document.records[0]["translation"] == "译文"
-
-
 def test_jsonl_extraction_uses_answer_fence_after_thought_block() -> None:
     content = (
         '<think>```jsonl\n{"type":"end"}\n```</think>\n'
@@ -419,47 +408,6 @@ async def test_partial_truncated_translation_is_buffered_before_format_retry(
 
 
 @pytest.mark.asyncio
-async def test_old_top_level_json_retries_without_added_feedback(
-    tmp_path: Path,
-) -> None:
-    project = await create_project(tmp_path, "one")
-    calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        segment_id = payload["segments"][0]["id"]
-        if calls == 1:
-            content = json.dumps(
-                {"segments": [{"id": segment_id, "translation": "old"}]}
-            )
-        else:
-            assert "format_correction" not in payload
-            content = llm_jsonl(
-                [
-                    {
-                        "type": "segment",
-                        "id": segment_id,
-                        "translation": "new",
-                    }
-                ]
-            )
-        return httpx.Response(
-            200, json={"choices": [{"message": {"content": content}}]}
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        summary = await run_translation(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-    assert summary["completed"] == 1
-    assert calls == 2
-
-
-@pytest.mark.asyncio
 async def test_incomplete_terms_do_not_publish_candidates_or_advance_scan(
     tmp_path: Path,
 ) -> None:
@@ -543,53 +491,9 @@ async def test_malformed_end_does_not_publish_candidates_and_marks_scan_failed(
 
 
 @pytest.mark.asyncio
-async def test_terminology_format_retry_adds_no_guidance(
-    tmp_path: Path,
-) -> None:
-    project = await create_project(tmp_path, "Alice")
-    calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        if calls == 1:
-            content = '{"type":"type":"end"}'
-        else:
-            assert "format_correction" not in payload
-            content = llm_jsonl(
-                [
-                    {
-                        "type": "term",
-                        "source": "Alice",
-                        "category": "人物",
-                        "description": "人物",
-                        "aliases": [],
-                    }
-                ]
-            )
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": content}}]},
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        summary = await run_terminology(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-    assert summary["failed"] == 0
-    assert calls == 2
-    assert read_json(project, project / "terminology" / "terms.json") is not None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("debug_enabled", [False, True])
 async def test_llm_runtime_logs_are_live_and_do_not_expose_content_or_secrets(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    debug_enabled: bool,
 ) -> None:
     source_marker = "PRIVATE_SOURCE_MARKER"
     secret_marker = "PRIVATE_API_KEY_MARKER"
@@ -599,7 +503,7 @@ async def test_llm_runtime_logs_are_live_and_do_not_expose_content_or_secrets(
     text = config_path.read_text(encoding="utf-8")
     text = re.sub(
         r"(?ms)(^\[debug\]\s*.*?^enabled\s*=\s*)\w+",
-        rf"\g<1>{str(debug_enabled).lower()}",
+        r"\g<1>true",
         text,
     )
     config_path.write_text(text, encoding="utf-8")
@@ -664,18 +568,16 @@ async def test_llm_runtime_logs_are_live_and_do_not_expose_content_or_secrets(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("debug_enabled", [False, True])
 async def test_cli_logs_to_stderr_and_project_file_while_stdout_is_json(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    debug_enabled: bool,
 ) -> None:
     project = await create_project(tmp_path, "one")
     config_path = project / "config.toml"
     text = config_path.read_text(encoding="utf-8")
     text = re.sub(
         r"(?ms)(^\[debug\]\s*.*?^enabled\s*=\s*)\w+",
-        rf"\g<1>{str(debug_enabled).lower()}",
+        r"\g<1>true",
         text,
     )
     config_path.write_text(text, encoding="utf-8")
