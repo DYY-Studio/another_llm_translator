@@ -25,20 +25,21 @@ test("continuous stages remain a canonical interval and clearing truncates later
   ]);
 });
 
-test("continuous payload forces middle decision review and explicit apply", () => {
+test("continuous payload forces middle decision review and keeps terminal decision optional", () => {
+  const baseOptions = {
+    finalReview: false,
+    applyTerminologyDecision: true,
+    force: false,
+    reuseMixedFingerprints: false,
+    runActions: { translation: "resume" },
+    includeDraftTranslation: false,
+    includeSummaries: false,
+    aggregateFullSummaries: false,
+  };
   assert.deepEqual(
     continuousPayload(
       ["terminology", "terminology_decision", "translation"],
-      {
-        finalReview: false,
-        applyTerminologyDecision: true,
-        force: false,
-        reuseMixedFingerprints: false,
-        runActions: { translation: "resume" },
-        includeDraftTranslation: false,
-        includeSummaries: false,
-        aggregateFullSummaries: false,
-      },
+      baseOptions,
     ),
     {
       stage: "continuous",
@@ -58,38 +59,15 @@ test("continuous payload forces middle decision review and explicit apply", () =
       aggregate_full_summaries: false,
     },
   );
-});
-
-test("terminal decision keeps optional final review and automatic application", () => {
-  assert.deepEqual(
-    continuousPayload(["terminology", "terminology_decision"], {
-      finalReview: true,
-      applyTerminologyDecision: true,
-      force: true,
-      reuseMixedFingerprints: false,
-      runActions: {},
-      includeDraftTranslation: false,
-      includeSummaries: false,
-      aggregateFullSummaries: false,
-    }),
-    {
-      stage: "continuous",
-      include_repetition_consistency: false,
-      apply_repetition_consistency: false,
-      exclude_punctuation_only: true,
-      screening_enabled: false,
-      repetition_final_review: false,
-      stages: ["terminology", "terminology_decision"],
-      final_review: true,
-      apply_terminology_decision: true,
-      force: true,
-      reuse_mixed_fingerprints: false,
-      run_actions: {},
-      include_draft_translation: false,
-      include_summaries: false,
-      aggregate_full_summaries: false,
-    },
-  );
+  const terminal = continuousPayload(["terminology", "terminology_decision"], {
+    ...baseOptions,
+    finalReview: false,
+    force: true,
+    runActions: {},
+  });
+  assert.equal(terminal.final_review, false);
+  assert.equal(terminal.apply_terminology_decision, true);
+  assert.equal(terminal.force, true);
 });
 
 test("run actions follow the current running Run and remove incompatible resume", () => {

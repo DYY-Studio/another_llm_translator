@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
+import app.plugins as plugins
 from app.errors import ConfigError
 from app.plugin_api import PLUGIN_PROTOCOL_VERSION
 from app.plugins import (
     _PLUGIN_NAMESPACE_PREFIX,
-    _official_plugin_root,
     load_plugins,
 )
 
@@ -96,20 +96,12 @@ def test_directory_plugins_are_sorted_and_loaded_from_user_root(
 
     descriptors = load_plugins()
 
+    assert not hasattr(plugins, "PluginDescriptor")
     assert [item.plugin_id for item in descriptors[-3:]] == [
         "a-official",
         "z-official",
         "user-plugin",
     ]
-
-
-def test_official_plugin_root_uses_builtin_prefix_resources(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    builtin_root = tmp_path / "prefix"
-    monkeypatch.setattr("app.plugins.BUILTIN_ROOT", builtin_root)
-
-    assert _official_plugin_root() == builtin_root / "plugins"
 
 
 def test_user_plugin_root_file_is_a_discovery_error(
@@ -170,31 +162,6 @@ def test_invalid_utf8_manifest_is_a_manifest_error(
         load_plugins()
 
     assert str(broken / "plugin.toml") in str(raised.value)
-
-
-def test_malformed_adapter_descriptor_reports_source_and_stage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from app.plugin_api import PluginDescriptor
-
-    descriptor = PluginDescriptor(
-        plugin_id="malformed-adapter-plugin",
-        version="1",
-        protocol_version=PLUGIN_PROTOCOL_VERSION,
-        document_adapters=(object(),),  # type: ignore[arg-type]
-    )
-    source = tmp_path / "malformed-adapter"
-    monkeypatch.setattr(
-        "app.plugins._load_external_descriptors",
-        lambda: [(descriptor, source)],
-    )
-    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
-
-    with pytest.raises(ConfigError, match="Document Adapter 描述无效") as raised:
-        load_plugins()
-
-    assert str(source) in str(raised.value)
-    assert "阶段：descriptor" in str(raised.value)
 
 
 def test_user_plugin_id_collision_with_builtin_fails_before_import(

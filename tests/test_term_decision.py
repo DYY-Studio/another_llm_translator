@@ -6262,3 +6262,34 @@ async def test_clear_terms_removes_decision_drafts_manual_queue_and_rollback(tmp
         assert read_json(project, project / "runs" / run_id / "manifest.json")["decision_status"] == "discarded"
         assert not (project / "runs" / run_id / DRAFT_FILE).exists()
     assert read_json(project, child_dir / "manifest.json")["status"] == "interrupted"
+
+
+def test_only_enabled_dialog_estimates_and_estimate_failure_does_not_block(tmp_path, monkeypatch):
+    from app import web_tasks
+    project = create_decision_project(tmp_path)
+    app = create_app(app_root=tmp_path / "app-root", projects_root=project.parent, log_path=tmp_path / "app.log")
+    original = web_tasks.decision_plan
+    calls = []
+
+    def plan(*args, **kwargs):
+        if kwargs.get("estimate_usage", True):
+            calls.append(True)
+            raise RequestSizeError("estimate is over budget", reason="context")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(web_tasks, "decision_plan", plan)
+    with TestClient(app) as client:
+        url = f"/api/v1/projects/{project.name}/task-options/terminology_decision"
+        assert client.get(url + "?estimate_usage=true").json()["estimated_requests"] is None
+        assert calls == []
+        app.state.server_config.setdefault("tasks", {})["estimate_usage_before_run"] = True
+        assert client.get(url).json()["estimated_requests"] is None
+        assert calls == []
+        response = client.get(url + "?estimate_usage=true")
+        assert response.status_code == 200
+        value = response.json()
+        assert value["selected"] > 0
+        assert value["estimated_requests"] is None
+        assert value["estimate_error"]["error"] == "estimate is over budget"
+        assert calls == [True]
+

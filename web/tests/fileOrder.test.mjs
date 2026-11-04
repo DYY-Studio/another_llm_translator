@@ -49,11 +49,17 @@ test("moves one file with top, up, down, and bottom commands", () => {
   assert.deepEqual(moveFilesByCommand(ORDER, ["C"], "bottom"), ["A", "B", "D", "E", "C"]);
 });
 
-test("keeps the current order for command boundaries and unknown files", () => {
+test("keeps the current order for command boundaries and invalid inputs", () => {
   assert.deepEqual(moveFilesByCommand(ORDER, ["A"], "top"), ORDER);
   assert.deepEqual(moveFilesByCommand(ORDER, ["A"], "up"), ORDER);
   assert.deepEqual(moveFilesByCommand(ORDER, ["E"], "down"), ORDER);
   assert.deepEqual(moveFilesByCommand(ORDER, ["E"], "bottom"), ORDER);
+  assert.strictEqual(moveFilesByCommand(ORDER, ["A", "C"], "up"), ORDER);
+  assert.strictEqual(moveFilesByCommand(ORDER, ["C", "E"], "down"), ORDER);
+  assert.strictEqual(moveFilesByCommand(ORDER, ORDER, "top"), ORDER);
+  assert.strictEqual(moveFilesByCommand(ORDER, ORDER, "bottom"), ORDER);
+  assert.strictEqual(moveFilesByCommand(ORDER, [], "top"), ORDER);
+  assert.strictEqual(moveFilesByCommand(ORDER, ["B", "B"], "top"), ORDER);
   assert.strictEqual(moveFilesByCommand(ORDER, ["X"], "top"), ORDER);
 });
 
@@ -69,17 +75,4 @@ test("collapses a non-contiguous selection while preserving visual order", () =>
   assert.deepEqual(moveFilesByCommand(ORDER, ["D", "B"], "up"), ["B", "D", "A", "C", "E"]);
   assert.deepEqual(moveFilesByCommand(ORDER, ["B", "D"], "down"), ["A", "C", "E", "B", "D"]);
   assert.deepEqual(moveFilesByCommand(ORDER, ["D", "B"], "bottom"), ["A", "C", "E", "B", "D"]);
-});
-
-test("keeps a multi-file order at its command boundary", () => {
-  assert.strictEqual(moveFilesByCommand(ORDER, ["A", "C"], "up"), ORDER);
-  assert.strictEqual(moveFilesByCommand(ORDER, ["C", "E"], "down"), ORDER);
-  assert.strictEqual(moveFilesByCommand(ORDER, ORDER, "top"), ORDER);
-  assert.strictEqual(moveFilesByCommand(ORDER, ORDER, "bottom"), ORDER);
-});
-
-test("rejects duplicate, unknown, and empty multi-file commands", () => {
-  assert.strictEqual(moveFilesByCommand(ORDER, [], "top"), ORDER);
-  assert.strictEqual(moveFilesByCommand(ORDER, ["B", "B"], "top"), ORDER);
-  assert.strictEqual(moveFilesByCommand(ORDER, ["X"], "top"), ORDER);
 });
