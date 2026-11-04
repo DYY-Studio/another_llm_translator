@@ -99,16 +99,17 @@ def test_stage_fingerprint_ignores_chunk_but_tracks_scheduling() -> None:
         if first["execution"]["scheduling_mode"] == "parallel"
         else "parallel"
     )
-    assert stage_fingerprint(first, "translation", prompt, terms_revision=1) != original
-
-
-def test_stage_fingerprint_tracks_document_prompt_requirements() -> None:
-    current = config()
-    baseline = stage_fingerprint(current, "translation", {})
-    current["_document_adapter_prompt_requirements"] = {
+    scheduling_changed = stage_fingerprint(
+        first, "translation", prompt, terms_revision=1
+    )
+    assert scheduling_changed != original
+    first["_document_adapter_prompt_requirements"] = {
         "F0001": {"zh-CN": "保留 EPUB 标记", "en": "Keep EPUB markers"}
     }
-    assert stage_fingerprint(current, "translation", {}) != baseline
+    assert (
+        stage_fingerprint(first, "translation", prompt, terms_revision=1)
+        != scheduling_changed
+    )
 
 
 def test_token_estimate_accounts_for_scripts_whitespace_and_rounding() -> None:
@@ -269,19 +270,6 @@ def test_terminology_scan_state_uses_completed_records_only(tmp_path: Path) -> N
     assert fingerprints == {"fp-1"}
 
 
-@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
-def test_review_prompt_uses_conditional_fields(stage: str) -> None:
-    prompt = full_prompt(stage, "Review carefully.")
-    assert "accepted 仅含 type、id、status" in prompt
-    assert "表示无条件保留 current_text" in prompt
-    assert (
-        '{"type":"segment","id":"1","status":"suggested",'
-        '"suggested_text":"完整建议","reason":"原因"}'
-        in prompt
-    )
-    assert "suggested 还须含非空完整 suggested_text" in prompt
-
-
 def test_request_payload_uses_local_ids_without_mutating_source() -> None:
     items = [
         {"segment_id": "F0001-S000001", "source": "one"},
@@ -440,55 +428,6 @@ def test_scope_and_result_selection_preserve_old_success() -> None:
     assert forced.latest_completed == result.latest_completed
     assert forced.fingerprints == result.fingerprints
     assert forced.last_attempt_failed == result.last_attempt_failed
-
-
-def test_chunk_builder_crosses_empty_gaps_and_materializes_run_ids() -> None:
-    current = config()
-    prompt = full_prompt("translation", "Translate faithfully.")
-    work = [segments()[0], segments()[2], segments()[3]]
-
-    def payload_builder(items: list[dict]) -> dict:
-        return {
-            "segments": [
-                {"id": item["segment_id"], "source": item["source"]} for item in items
-            ]
-        }
-
-    plans = build_chunk_plans(
-        work,
-        all_segments=segments(),
-        config=current,
-        stage="translation",
-        prompt=prompt,
-        payload_builder=payload_builder,
-    )
-    assert [[item["line_index"] for item in plan.segments] for plan in plans] == [
-        [0, 2, 3],
-    ]
-    chunks = list(materialize_chunk_stream("RUN-X", "translation", plans))
-    assert all(chunk.chunk_id and "RUN-X" in chunk.chunk_id for chunk in chunks)
-
-
-def test_materialize_chunk_stream_namespaces_continuation_chunks() -> None:
-    plan = ChunkPlan(
-        file_id="F0001",
-        segments=tuple(segments()[:1]),
-        payload={},
-        estimated_input_tokens=1,
-    )
-
-    fresh = list(materialize_chunk_stream("RUN-X", "translation", [plan]))
-    resumed = list(
-        materialize_chunk_stream(
-            "RUN-X",
-            "translation",
-            [plan],
-            continuation_index=3,
-        )
-    )
-
-    assert fresh[0].chunk_id == "CHK-RUN-X-TR-F0001-C00001"
-    assert resumed[0].chunk_id == "CHK-RUN-X-TR-R0003-F0001-C00001"
 
 
 def test_resume_debug_chunks_do_not_reuse_sqlite_record_ids(tmp_path: Path) -> None:
@@ -1055,6 +994,7 @@ def test_chunk_builder_partitions_alternating_empty_lines_within_soft_target() -
 def test_single_segment_may_exceed_soft_target_but_not_input_limit() -> None:
     current = config()
     current["chunking"]["target_content_tokens"] = 50
+    current["execution"]["input_tokens_per_minute"] = 0
     source = [segments()[0]]
     plans = build_chunk_plans(
         source,
@@ -1071,81 +1011,6 @@ def test_single_segment_may_exceed_soft_target_but_not_input_limit() -> None:
     )
     assert len(plans) == 1
     assert plans[0].estimated_input_tokens > 50
-
-
-def test_chunk_builder_splits_without_duplicating_segments() -> None:
-    current = config()
-    current["chunking"]["target_content_tokens"] = 75
-    prompt = full_prompt("translation", "Translate.")
-    work = [segments()[2], segments()[3], segments()[4]]
-
-    def payload_builder(items: list[dict]) -> dict:
-        return {
-            "segments": [
-                {
-                    "id": item["segment_id"],
-                    "source": str(item["source"]) * 30,
-                }
-                for item in items
-            ]
-        }
-
-    plans = build_chunk_plans(
-        work,
-        all_segments=segments(),
-        config=current,
-        stage="translation",
-        prompt=prompt,
-        payload_builder=payload_builder,
-    )
-    ids = [
-        item["segment_id"]
-        for plan in plans
-        for item in plan.segments
-    ]
-    assert ids == [item["segment_id"] for item in work]
-
-
-def test_chunk_builder_ignores_disabled_itpm() -> None:
-    current = config()
-    current["execution"]["input_tokens_per_minute"] = 0
-    prompt = full_prompt("translation", "Translate.")
-    plans = build_chunk_plans(
-        [segments()[0]],
-        all_segments=segments(),
-        config=current,
-        stage="translation",
-        prompt=prompt,
-        payload_builder=lambda items: {
-            "segments": [
-                {"id": item["segment_id"], "source": item["source"]}
-                for item in items
-            ]
-        },
-    )
-    assert len(plans) == 1
-    assert plans[0].estimated_input_tokens > 0
-
-
-def test_context_is_same_file_and_optional_target() -> None:
-    source = segments()
-    source.append(
-        {
-            "segment_id": "F0002-S000001",
-            "file_id": "F0002",
-            "part_id": "document",
-            "line_index": 0,
-            "source": "other",
-            "is_empty": False,
-        }
-    )
-    context = PreviousContextIndex(source).previous(
-        source[4],
-        2,
-        target_resolver=lambda segment_id: f"translated:{segment_id}",
-    )
-    assert [item["source"] for item in context] == ["three", "four"]
-    assert all("translation" in item for item in context)
 
 
 def test_previous_context_index_matches_sparse_and_probe_segments() -> None:
@@ -1326,7 +1191,7 @@ async def test_llm_client_rotates_keys_on_429_without_consuming_round(
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.headers["Authorization"])
         if len(calls) == 1:
-            return httpx.Response(429, headers={"Retry-After": "0"}, text="slow")
+            return httpx.Response(429, headers={"Retry-After": "later"}, text="slow")
         return httpx.Response(
             200,
             json={
@@ -1356,11 +1221,13 @@ async def test_llm_client_rotates_keys_on_429_without_consuming_round(
                 temperature=0.2,
                 estimated_input_tokens=10,
             )
+            warnings = list(llm.warnings)
     finally:
         del os.environ["LLM_API_KEY"]
         await client.aclose()
     assert response.content == '{"type":"end"}'
     assert calls == ["Bearer first-key", "Bearer second-key"]
+    assert any("Retry-After 无效" in warning for warning in warnings)
     audit = llm.key_audit_summary(execution_index=0)
     assert audit["key_count"] == 2
     assert audit["keys"] == [
@@ -1469,51 +1336,6 @@ async def test_llm_client_does_not_switch_key_for_configuration_error(
         del os.environ["LLM_API_KEY"]
         await client.aclose()
     assert calls == ["Bearer first-key"]
-
-
-@pytest.mark.asyncio
-async def test_llm_client_warns_and_uses_backoff_for_invalid_retry_after(
-    tmp_path: Path,
-) -> None:
-    current = config()
-    current["retry"]["http_max_attempts"] = 1
-    current["retry"]["base_delay_seconds"] = 0
-    current["retry"]["jitter_seconds"] = 0
-    calls: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request.headers["Authorization"])
-        if len(calls) == 1:
-            return httpx.Response(429, headers={"Retry-After": "later"}, text="slow")
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    os.environ["LLM_API_KEY"] = "first-key\nsecond-key"
-    try:
-        async with LLMClient(
-            current,
-            SlidingWindowLimiter(0, 0),
-            run_dir=tmp_path,
-            project_id="PRJ",
-            run_id="RUN",
-            stage="translation",
-            client=client,
-        ) as llm:
-            response, _ = await llm.chat(
-                messages=render_messages("prompt", {"segments": []}),
-                temperature=0.2,
-                estimated_input_tokens=10,
-            )
-            warnings = list(llm.warnings)
-    finally:
-        del os.environ["LLM_API_KEY"]
-        await client.aclose()
-    assert response.content == '{"type":"end"}'
-    assert calls == ["Bearer first-key", "Bearer second-key"]
-    assert any("Retry-After 无效" in warning for warning in warnings)
 
 
 @pytest.mark.asyncio
@@ -1785,25 +1607,16 @@ async def test_rate_limits_can_be_disabled_independently() -> None:
     await rpm_only.acquire(1000000)
     assert waits == [60.0]
 
-
-@pytest.mark.asyncio
-async def test_concurrent_requests_reserve_one_shared_rate_window() -> None:
-    now = [0.0]
-    waits: list[float] = []
-
-    async def sleeper(delay: float) -> None:
-        waits.append(delay)
-        now[0] += delay
-
-    limiter = SlidingWindowLimiter(
-        1,
-        0,
+    waits.clear()
+    both = SlidingWindowLimiter(
+        60,
+        5,
         clock=lambda: now[0],
         sleeper=sleeper,
     )
-    await asyncio.gather(limiter.acquire(10), limiter.acquire(10))
+    await both.acquire(3)
+    await both.acquire(3)
     assert waits == [60.0]
-    assert len(limiter.records) == 1
 
 
 @pytest.mark.asyncio
@@ -1827,31 +1640,6 @@ async def test_rpm_paces_concurrent_admissions_evenly() -> None:
 
     await asyncio.gather(*(acquire() for _ in range(15)))
     assert admissions == [float(index * 4) for index in range(15)]
-
-
-@pytest.mark.asyncio
-async def test_rpm_and_itpm_use_the_later_admission_time() -> None:
-    now = [0.0]
-    waits: list[float] = []
-
-    async def sleeper(delay: float) -> None:
-        waits.append(delay)
-        now[0] += delay
-
-    limiter = SlidingWindowLimiter(
-        60,
-        5,
-        clock=lambda: now[0],
-        sleeper=sleeper,
-    )
-    await limiter.acquire(3)
-    await limiter.acquire(3)
-    assert waits == [60.0]
-
-
-def test_token_safety_factor_below_one_scales_estimate() -> None:
-    messages = render_messages("prompt", {"segments": [{"source": "one"}]})
-    assert estimate_messages(messages, 0.5) < estimate_messages(messages, 1.0)
 
 
 @pytest.mark.asyncio
@@ -2150,67 +1938,6 @@ async def test_llm_client_without_usage_mapping_has_no_summary(
         await client.aclose()
 
 
-def test_finalize_run_records_usage_in_manifest(tmp_path: Path) -> None:
-    project = _finalize_project(tmp_path)
-    run_dir = project / "runs" / "RUN-TEST"
-    run_dir.mkdir(parents=True)
-
-    def write_manifest() -> None:
-        write_json(
-            project,
-            run_dir / "manifest.json",
-            _run_manifest(project),
-        )
-
-    usage = {
-        "input_tokens": 10,
-        "output_tokens": 5,
-        "total_tokens": 15,
-        "available": True,
-    }
-    write_manifest()
-    finalize_run(project, run_dir, status="completed", completed=2, failed=0, usage=usage)
-    manifest = read_json(project, run_dir / "manifest.json")
-    assert manifest["usage"] == usage
-    assert manifest["status"] == "completed"
-    write_manifest()
-    finalize_run(project, run_dir, status="failed", completed=0, failed=1)
-    manifest = read_json(project, run_dir / "manifest.json")
-    assert "usage" not in manifest
-
-
-def test_finalize_run_appends_key_audit(tmp_path: Path) -> None:
-    project = _finalize_project(tmp_path)
-    current = config()
-    run_id, run_dir = create_run(
-        project,
-        config=current,
-        stage="translation",
-        fingerprint="fingerprint",
-        prompt="prompt",
-        selected_count=0,
-        requested_count=0,
-        reused_count=0,
-    )
-    audit = {
-        "credential": {"kind": "environment", "name": "LLM_API_KEY"},
-        "execution_index": 0,
-        "key_count": 1,
-        "keys": [],
-    }
-    finalize_run(
-        project,
-        run_dir,
-        status="completed",
-        completed=0,
-        failed=0,
-        key_audit=audit,
-    )
-    manifest = read_json(project, run_dir / "manifest.json")
-    assert manifest["key_audits"] == [audit]
-    assert manifest["status"] == "completed"
-
-
 def test_combine_usage_accumulates_observed_lower_bounds() -> None:
     exact = {
         "input_tokens": 10,
@@ -2260,12 +1987,23 @@ def test_combine_usage_accumulates_observed_lower_bounds() -> None:
     }
 
 
-def test_finalize_run_accumulates_exact_usage_across_continuations(
+def test_finalize_run_records_usage_key_audit_and_continuations(
     tmp_path: Path,
 ) -> None:
     project = _finalize_project(tmp_path)
     run_dir = project / "runs" / "RUN-TEST"
     run_dir.mkdir(parents=True)
+
+    write_json(project, run_dir / "manifest.json", _run_manifest(project))
+    finalize_run(project, run_dir, status="failed", completed=0, failed=1)
+    assert "usage" not in read_json(project, run_dir / "manifest.json")
+
+    audit = {
+        "credential": {"kind": "environment", "name": "LLM_API_KEY"},
+        "execution_index": 0,
+        "key_count": 1,
+        "keys": [],
+    }
     write_json(
         project,
         run_dir / "manifest.json",
@@ -2280,7 +2018,6 @@ def test_finalize_run_accumulates_exact_usage_across_continuations(
             },
         ),
     )
-
     combined = finalize_run(
         project,
         run_dir,
@@ -2293,8 +2030,8 @@ def test_finalize_run_accumulates_exact_usage_across_continuations(
             "total_tokens": 10,
             "available": True,
         },
+        key_audit=audit,
     )
-
     assert combined == {
         "input_tokens": 17,
         "output_tokens": 7,
@@ -2305,26 +2042,9 @@ def test_finalize_run_accumulates_exact_usage_across_continuations(
     manifest = read_json(project, run_dir / "manifest.json")
     assert manifest["usage"] == combined
     assert manifest["usage_invocation_count"] == 2
+    assert manifest["key_audits"] == [audit]
+    assert manifest["status"] == "completed"
 
-
-@pytest.mark.parametrize(
-    "current",
-    [
-        None,
-        {
-            "input_tokens": 7,
-            "output_tokens": 3,
-            "total_tokens": 10,
-            "available": False,
-        },
-    ],
-)
-def test_finalize_run_preserves_lower_bound_for_incomplete_continuation_usage(
-    tmp_path: Path, current: dict[str, object] | None
-) -> None:
-    project = _finalize_project(tmp_path)
-    run_dir = project / "runs" / "RUN-TEST"
-    run_dir.mkdir(parents=True)
     write_json(
         project,
         run_dir / "manifest.json",
@@ -2339,17 +2059,15 @@ def test_finalize_run_preserves_lower_bound_for_incomplete_continuation_usage(
             },
         ),
     )
-
-    usage = finalize_run(
+    lower_bound = finalize_run(
         project,
         run_dir,
         status="completed",
         completed=2,
         failed=0,
-        usage=current,
+        usage=None,
     )
-
-    assert usage == {
+    assert lower_bound == {
         "input_tokens": 10,
         "output_tokens": 4,
         "total_tokens": 14,

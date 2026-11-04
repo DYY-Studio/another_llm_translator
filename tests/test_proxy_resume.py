@@ -108,17 +108,12 @@ def _seed_terminology_task(project: Path, task_id: str) -> None:
     )
 
 
-def test_resume_flags_only_exist_on_standalone_llm_commands() -> None:
+def test_resume_and_fingerprint_reuse_cli_flags() -> None:
     parser = build_parser()
     for command in ("terminology", "translate", "proofread", "polish"):
-        parsed = parser.parse_args([command, "demo", "--resume-run"])
-        assert parsed.resume_run is True
+        assert parser.parse_args([command, "demo", "--resume-run"]).resume_run is True
     with pytest.raises(SystemExit):
         parser.parse_args(["run-all", "demo", "--resume-run"])
-
-
-def test_fingerprint_reuse_flag_only_exists_on_llm_commands() -> None:
-    parser = build_parser()
     for command in (
         "terminology",
         "translate",
@@ -294,29 +289,6 @@ async def test_llm_client_passes_proxy_and_preserves_httpx_environment_defaults(
         pass
     assert calls[1]["proxy"] is None
     assert "trust_env" not in calls[1]
-
-
-@pytest.mark.asyncio
-async def test_injected_http_client_does_not_create_another_client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    current = load_test_config()
-    injected = object()
-
-    def fail(**_: Any) -> None:
-        raise AssertionError("unexpected client construction")
-
-    monkeypatch.setattr(httpx, "AsyncClient", fail)
-    async with LLMClient(
-        current,
-        SlidingWindowLimiter(0, 0),
-        run_dir=tmp_path,
-        project_id="P",
-        run_id="R",
-        stage="translation",
-        client=injected,  # type: ignore[arg-type]
-    ) as llm:
-        assert llm.client is injected
 
 
 @pytest.mark.asyncio

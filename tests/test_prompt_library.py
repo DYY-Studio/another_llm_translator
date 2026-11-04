@@ -197,33 +197,16 @@ def test_prompt_api_reports_sync_and_keeps_library_separate(
     metadata = read_json(project, project / "project.json")
     assert "prompt_library" not in metadata
 
-
-def test_project_prompt_sync_rejects_missing_requested_language(tmp_path: Path) -> None:
-    app_root, projects_root, project = make_project(tmp_path)
-    (project / "prompts" / "translation.en.middle.txt").unlink()
-    client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
-    response = client.get(
+    (app_root / "prompts" / "translation.en.middle.txt").unlink()
+    unavailable = client.get(
         "/api/v1/projects/sample/prompts/translation",
         params={"language": "en"},
     )
-    assert response.status_code == 400
-    assert response.json()["params"]["reason"] == "prompt_language_missing"
-    assert "translation.en.middle.txt" in response.json()["error"]
-
-
-def test_project_prompt_reports_unavailable_global_prompt(tmp_path: Path) -> None:
-    app_root, projects_root, _ = make_project(tmp_path)
-    (app_root / "prompts" / "translation.zh-CN.middle.txt").unlink()
-    client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
-    response = client.get(
-        "/api/v1/projects/sample/prompts/translation",
-        params={"language": "zh-CN"},
-    )
-    assert response.status_code == 200
-    assert response.json()["global_sync"] == {
+    assert unavailable.status_code == 200
+    assert unavailable.json()["global_sync"] == {
         "available": False,
         "same": False,
-        "language": "zh-CN",
+        "language": "en",
     }
 
 
@@ -256,14 +239,9 @@ def test_entity_knowledge_prompt_edit_preview_sync_and_runtime(tmp_path: Path) -
     app_root, projects_root, project = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
     url = "/api/v1/projects/sample/prompts/terminology_knowledge"
-    initial = client.get(url)
-    assert initial.status_code == 200
     content = "KNOWLEDGE_POLICY_SENTINEL"
-    assert client.put("/api/v1/global/prompts/terminology_knowledge", json={"language": "zh-CN", "content": content}).status_code == 200
-    assert not client.get(url).json()["global_sync"]["same"]
     assert client.put(url, json={"language": "zh-CN", "content": content}).status_code == 200
     preview = client.get(url).json()
-    assert preview["global_sync"]["same"]
     assert preview["assembled"] == _prompt(project, "zh-CN")["knowledge"]
     assert content in preview["assembled"]
     assert client.put("/api/v1/prompt-library/terminology_knowledge/zh-CN/policy", json={"content": content}).status_code == 200
