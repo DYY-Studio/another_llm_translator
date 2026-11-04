@@ -12,12 +12,11 @@ from app.decision import DecisionAnswer
 from app.diagnostics import Diagnostics
 from app.execution import Scope
 from app.errors import FatalExternalError
-from app.sqlite_storage import read_json, read_jsonl, record_header, write_json
+from app.sqlite_storage import read_json, read_jsonl, record_header
 from app.stage_translation import run_translation
 from app.translation_validation import (
     SegmentAlignmentValidator,
     TranslationValidationContext,
-    validate_translation_response,
 )
 from app.user_config import write_user
 from tests.helpers import llm_jsonl

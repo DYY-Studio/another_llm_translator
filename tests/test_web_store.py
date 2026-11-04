@@ -774,23 +774,75 @@ def test_segment_detail_matches_current_terms_without_request_limit(tmp_path: Pa
 def test_term_hits_include_matches_found_in_aozora_ruby_reading(
     tmp_path: Path,
 ) -> None:
-    project = create_web_store_project(tmp_path, "｜猫《Aoki》出现")
-    store = WebStore(project)
-    store.save_term(
-        {
-            "expected_revision": store.terms()["terms_revision"] or 0,
-            "source": "Aoki",
-            "category": "人名",
-            "description_items": [],
-            "preferred_translation": "青木",
-            "aliases": [],
-        }
+    project = create_web_store_project(
+        tmp_path, "｜猫《Aoki》出现\nA walks\nAli sings\nAlicia and Alice"
     )
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    write_term_library(
+        project,
+        project / "terminology" / "terms.json",
+        record_header(
+            "terminology_library",
+            project_id,
+            record_id="TERMS-HITS",
+            terms_revision=1,
+            terms=[
+                {
+                    "record_id": "TERM-AOKI",
+                    "source": "Aoki",
+                    "normalized": "aoki",
+                    "category": "人名",
+                    "description": None,
+                    "preferred_translation": "青木",
+                    "aliases": [],
+                    "conflicts": {},
+                },
+                {
+                    "record_id": "TERM-ALICE",
+                    "source": "Alice",
+                    "normalized": "alice",
+                    "category": "人名",
+                    "description": None,
+                    "preferred_translation": "爱丽丝",
+                    "aliases": ["A", "Ali"],
+                    "conflicts": {
+                        "alias_primaries": [
+                            {"alias": "A", "primary_source": "Alpha"}
+                        ]
+                    },
+                },
+                {
+                    "record_id": "TERM-ALICIA",
+                    "source": "Alicia",
+                    "normalized": "alicia",
+                    "category": "人名",
+                    "description": None,
+                    "preferred_translation": "艾丽西亚",
+                    "aliases": ["Ali"],
+                    "group_primary": "alice",
+                    "conflicts": {},
+                },
+            ],
+        ),
+    )
+    store = WebStore(project)
 
     hits = store.term_hits("aoki")
-
     assert hits["total"] == 1
     assert hits["hits"][0]["source"] == "｜猫《Aoki》出现"
+
+    alice_hits = store.term_hits("alice")
+    assert [item["segment_id"] for item in alice_hits["hits"]] == [
+        "F0001-S000003",
+        "F0001-S000004",
+    ]
+
+    alicia_hits = store.term_hits("alicia")
+    assert alicia_hits["source"] == "Alicia"
+    assert [item["segment_id"] for item in alicia_hits["hits"]] == [
+        "F0001-S000003",
+        "F0001-S000004",
+    ]
 
 
 def test_terms_keep_group_primary_before_members_even_when_member_conflicts(

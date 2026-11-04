@@ -19,7 +19,6 @@ from fastapi.testclient import TestClient
 import app.web as web_module
 import app.web_continuous as web_continuous_module
 import app.web_resource_routes as web_resource_module
-import app.web_store as web_store_module
 import app.web_tasks as web_tasks_module
 from app import data_root, sqlite_storage
 from app.config import dump_config, load_config, load_project_config

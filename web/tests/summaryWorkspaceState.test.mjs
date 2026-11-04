@@ -16,6 +16,7 @@ import {
   termsSubpageForTask,
   updateSummaryWorkspaceState,
 } from "../src/summaryWorkspaceState.ts";
+import { canAutoSelectProject, isCurrentProjectRequest } from "../src/requestState.ts";
 
 test("restores the summary subpage state per project without sharing it", () => {
   const initial = createSummaryWorkspaceState();
@@ -119,4 +120,13 @@ test("returns the latest known server selection after the newest PUT fails", () 
   assert.deepEqual([...state.confirmed], ["[\"F0001\",\"p1\"]"]);
   assert.deepEqual([...state.displayed], ["[\"F0001\",\"p1\"]"]);
   assert.equal(state.dirty, false);
+});
+
+test("guards project responses and auto-selection against stale or switched projects", () => {
+  assert.equal(isCurrentProjectRequest(3, 3, "project-a", "project-a"), true);
+  assert.equal(isCurrentProjectRequest(3, 4, "project-a", "project-a"), false);
+  assert.equal(isCurrentProjectRequest(3, 3, "project-a", "project-b"), false);
+  assert.equal(canAutoSelectProject("project-a", ""), true);
+  assert.equal(canAutoSelectProject("project-a", "project-a"), true);
+  assert.equal(canAutoSelectProject("project-a", "project-b"), false);
 });

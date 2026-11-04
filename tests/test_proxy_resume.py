@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
-from app.config import load_global_config, load_project_config
+from app.config import load_global_config
 from app.llm_preset import load_llm_preset
 from app.errors import ConfigError, UsageError
 from app.llm_client import LLMClient, SlidingWindowLimiter
@@ -35,14 +35,6 @@ ROOT = Path(__file__).parents[1]
 
 def load_test_config() -> dict:
     return load_global_config(ROOT)
-
-
-def _replace_config(project: Path, old: str, new: str) -> None:
-    path = project / "config.toml"
-    path.write_text(
-        path.read_text(encoding="utf-8").replace(old, new),
-        encoding="utf-8",
-    )
 
 
 def _new_running_run(

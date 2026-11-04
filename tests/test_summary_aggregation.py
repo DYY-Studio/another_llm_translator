@@ -27,7 +27,6 @@ from app.stage_terminology import _digest
 from app.summary_aggregation import (
     aggregate_summaries,
     export_summary_markdown,
-    full_summary_expired,
 )
 from app.summary_provenance import build_provenance
 from app.web_tasks import WebTaskManager

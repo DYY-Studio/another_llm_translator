@@ -5,7 +5,6 @@ import re
 import sqlite3
 import stat
 import zipfile
-from dataclasses import FrozenInstanceError
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -16,14 +15,12 @@ from app.documents import (
     DocumentExportJob,
     aozora_to_model_ruby,
     compact_emphasis_aozora,
-    escape_model_ruby_literal,
     publish_document_exports,
 )
-from app.errors import ConfigError, ExportError, IncompleteError, ProjectError, UsageError
+from app.errors import ConfigError, IncompleteError, ProjectError, UsageError
 from app.execution import stage_result_path
 from app.plugin_api import (
     DecodedPlaintext,
-    DocumentChoiceOption,
     ImportedFile,
     PLUGIN_PROTOCOL_VERSION,
     PluginDescriptor,

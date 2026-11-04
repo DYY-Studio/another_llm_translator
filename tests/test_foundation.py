@@ -7,14 +7,12 @@ import keyring
 import pytest
 
 from app.config import ConfigError, dump_config, load_config, load_project_config
-from app.documents import decode_plaintext
 from app.errors import StorageError, UsageError
 from app.main import run
 from app.project import (
     bundle_hash,
     discover_inputs,
     init_project,
-    natural_path_key,
     resolve_project_parent,
     sync_global_templates,
 )

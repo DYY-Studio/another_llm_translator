@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import sqlite3
 from copy import deepcopy
 from pathlib import Path
@@ -20,7 +19,7 @@ from app.project_export import export_project
 from app.stages import inspect_full, run_all
 from app.stage_review import run_apply, run_review
 from app.stage_translation import run_translation
-from app.sqlite_storage import read_content_summaries, read_jsonl
+from app.sqlite_storage import read_jsonl
 from tests.helpers import llm_jsonl, use_llm_preset
 from tests.test_terminology_translation import create_project
 

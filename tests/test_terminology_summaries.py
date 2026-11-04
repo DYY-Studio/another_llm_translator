@@ -13,7 +13,6 @@ from app.config import dump_config, load_config
 from app.diagnostics import Diagnostics
 from app.execution import Scope
 from app.llm_response import response_record_types
-from app.main import run
 from app.project import (
     add_project_files,
     init_project,

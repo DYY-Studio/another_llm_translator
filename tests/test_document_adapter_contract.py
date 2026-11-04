@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.errors import ConfigError, IncompleteError, UsageError
-from app.execution import Scope, create_run, stage_fingerprint, stage_result_path
+from app.execution import Scope, stage_result_path
 from app.plugin_api import (
     DocumentChoiceOption,
     DocumentImport,

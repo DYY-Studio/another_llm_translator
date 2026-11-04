@@ -13,10 +13,9 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import load_config, load_project_config, validate_config
-from app.errors import ConfigError, RequestSizeError, StorageError, UsageError
-from app.execution import create_run, estimate_messages, full_prompt, render_messages
-from app.main import build_parser
+from app.config import load_project_config
+from app.errors import RequestSizeError, StorageError, UsageError
+from app.execution import create_run, estimate_messages, render_messages
 from app.project import init_project
 from app.sqlite_storage import (
     atomic_write_json,
@@ -29,17 +28,14 @@ from app.term_library import build_term_library_rows, term_normalization, load_t
 from app.term_decision import (
     CHECKPOINT_FILE,
     DRAFT_FILE,
-    _apply_tentative,
-    _automatic_phase_two_anchors,
     _consistency_states,
     _final_review_targets,
-    _merge_phase_decisions,
     decision_plan,
     run_terminology_decision,
 )
 from app.term_decision_rules import (
     _alias_violations, _analyze_decisions, _effective_conflicts,
-    _group_violations, _hard_components, _recover_invalid_relationship_components,
+    _hard_components, _recover_invalid_relationship_components,
 )
 from app.term_decision_batches import (
     _make_payload, _pack_batches, _related_anchors,
@@ -925,7 +921,6 @@ def test_hard_component_is_never_split_and_reports_all_members_when_oversized(
 
 
 def test_decision_batches_keep_required_anchors_and_allow_soft_singletons(tmp_path: Path) -> None:
-    from app.execution import estimate_messages, render_messages
     config = load_project_config(create_decision_project(tmp_path), stage="terminology_decision")
     config["chunking"].update(target_content_tokens=1, context_reserve_tokens=0)
     config["execution"]["input_tokens_per_minute"] = 0
@@ -5003,4 +4998,3 @@ def test_only_enabled_dialog_estimates_and_estimate_failure_does_not_block(tmp_p
         assert value["estimated_requests"] is None
         assert value["estimate_error"]["error"] == "estimate is over budget"
         assert calls == [True]
-
