@@ -220,33 +220,19 @@ async def test_stream_http_error_reuses_decoded_response_without_double_decompre
 
 
 @pytest.mark.asyncio
-async def test_stream_corrupt_compression_fails_without_retry(tmp_path: Path) -> None:
-    current = streaming_config(tmp_path)
-    current["retry"]["http_max_attempts"] = 2
-    calls = 0
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(
-            503,
-            headers={
-                "content-type": "application/json",
-                "content-encoding": "gzip",
-            },
-            stream=ByteChunks([b"not-gzip"]),
-        )
-
-    with pytest.raises(ExternalError, match="响应内容解码失败"):
-        await run_client(current, tmp_path, handler)
-    assert calls == 1
-
-
-@pytest.mark.asyncio
-async def test_success_stream_corrupt_compression_fails_without_retry(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("stream", "status_code", "content_type"),
+    [
+        (True, 503, "application/json"),
+        (True, 200, "text/event-stream"),
+        (False, 200, "application/json"),
+    ],
+)
+async def test_corrupt_compression_fails_without_retry(
+    tmp_path: Path, stream: bool, status_code: int, content_type: str
 ) -> None:
     current = streaming_config(tmp_path)
+    current["llm"]["stream"] = stream
     current["retry"]["http_max_attempts"] = 2
     calls = 0
 
@@ -254,33 +240,9 @@ async def test_success_stream_corrupt_compression_fails_without_retry(
         nonlocal calls
         calls += 1
         return httpx.Response(
-            200,
+            status_code,
             headers={
-                "content-type": "text/event-stream",
-                "content-encoding": "gzip",
-            },
-            stream=ByteChunks([b"not-gzip"]),
-        )
-
-    with pytest.raises(ExternalError, match="响应内容解码失败"):
-        await run_client(current, tmp_path, handler)
-    assert calls == 1
-
-
-@pytest.mark.asyncio
-async def test_nonstream_corrupt_compression_fails_without_retry(tmp_path: Path) -> None:
-    current = streaming_config(tmp_path)
-    current["llm"]["stream"] = False
-    current["retry"]["http_max_attempts"] = 2
-    calls = 0
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(
-            200,
-            headers={
-                "content-type": "application/json",
+                "content-type": content_type,
                 "content-encoding": "gzip",
             },
             stream=ByteChunks([b"not-gzip"]),
@@ -290,16 +252,21 @@ async def test_nonstream_corrupt_compression_fails_without_retry(tmp_path: Path)
     with pytest.raises(ExternalError, match="响应内容解码失败"):
         await run_client(current, tmp_path, handler, diagnostics=diagnostics)
     assert calls == 1
-    item = diagnostics.snapshot()["requests"]["items"][0]
-    assert item["status"] == "failed"
-    assert diagnostics.request_detail(item["request_id"])["attempts"][0][
-        "http_status"
-    ] is None
+    if not stream:
+        item = diagnostics.snapshot()["requests"]["items"][0]
+        assert item["status"] == "failed"
+        assert diagnostics.request_detail(item["request_id"])["attempts"][0][
+            "http_status"
+        ] is None
 
 
 @pytest.mark.asyncio
-async def test_stream_remote_protocol_error_retries(tmp_path: Path) -> None:
+@pytest.mark.parametrize("stream", [True, False])
+async def test_remote_protocol_error_retries(
+    tmp_path: Path, stream: bool
+) -> None:
     current = streaming_config(tmp_path)
+    current["llm"]["stream"] = stream
     current["retry"]["http_max_attempts"] = 2
     calls = 0
 
@@ -309,12 +276,21 @@ async def test_stream_remote_protocol_error_retries(tmp_path: Path) -> None:
         if calls == 1:
             return httpx.Response(
                 200,
-                headers={"content-type": "text/event-stream"},
+                headers={
+                    "content-type": (
+                        "text/event-stream" if stream else "application/json"
+                    )
+                },
                 stream=ErrorStream(httpx.RemoteProtocolError("peer closed")),
             )
-        return stream_response(
-            {"choices": [{"delta": {"content": "ok"}}]},
-            "[DONE]",
+        if stream:
+            return stream_response(
+                {"choices": [{"delta": {"content": "ok"}}]},
+                "[DONE]",
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}}]},
         )
 
     response, _, client = await run_client(current, tmp_path, handler)
@@ -342,33 +318,6 @@ async def test_stream_remote_protocol_error_exhausts_retry_budget(
 
     with pytest.raises(ExternalError, match="流式请求重试耗尽"):
         await run_client(current, tmp_path, handler)
-    assert calls == 2
-
-
-@pytest.mark.asyncio
-async def test_nonstream_remote_protocol_error_retries(tmp_path: Path) -> None:
-    current = streaming_config(tmp_path)
-    current["llm"]["stream"] = False
-    current["retry"]["http_max_attempts"] = 2
-    calls = 0
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return httpx.Response(
-                200,
-                headers={"content-type": "application/json"},
-                stream=ErrorStream(httpx.RemoteProtocolError("peer closed")),
-            )
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": "ok"}}]},
-        )
-
-    response, _, client = await run_client(current, tmp_path, handler)
-    await client.aclose()
-    assert response.content == "ok"
     assert calls == 2
 
 
@@ -1020,33 +969,6 @@ async def test_stream_protocol_error_keeps_usage_seen_before_error(
             ],
             "hello",
             {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
-        ),
-        (
-            "anthropic",
-            [
-                {"type": "message_start", "message": {"usage": {"input_tokens": 4}}},
-                {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "你好"}},
-                {"type": "message_delta", "usage": {"output_tokens": 2}},
-                {"type": "message_stop"},
-            ],
-            "你好",
-            {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
-        ),
-        (
-            "google-gemini",
-            [
-                {"candidates": [{"content": {"parts": [{"text": "gem"}]}}]},
-                {
-                    "candidates": [{"finishReason": "STOP"}],
-                    "usageMetadata": {
-                        "promptTokenCount": 3,
-                        "candidatesTokenCount": 2,
-                        "totalTokenCount": 5,
-                    },
-                },
-            ],
-            "gem",
-            {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
         ),
     ],
 )

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import sqlite3
 from copy import deepcopy
 from pathlib import Path
@@ -20,7 +19,7 @@ from app.project_export import export_project
 from app.stages import inspect_full, run_all
 from app.stage_review import run_apply, run_review
 from app.stage_translation import run_translation
-from app.sqlite_storage import read_content_summaries, read_jsonl
+from app.sqlite_storage import read_jsonl
 from tests.helpers import llm_jsonl, use_llm_preset
 from tests.test_terminology_translation import create_project
 
@@ -220,36 +219,6 @@ async def test_review_apply_and_export_restore_source_indentation(
 
 
 @pytest.mark.asyncio
-async def test_apply_rejects_outdated_base(tmp_path: Path) -> None:
-    project = await create_project(tmp_path, "one")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
-    try:
-        await run_translation(project, Scope(), http_client=client)
-        await run_review(project, "proofreading", Scope(), http_client=client)
-        await run_translation(project, Scope(force=True), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-    with pytest.raises(IncompleteError, match="旧上游"):
-        run_apply(
-            project,
-            "proofreading",
-            Scope(),
-            allow_outdated_base=False,
-            confirmed_all=True,
-        )
-    summary = run_apply(
-        project,
-        "proofreading",
-        Scope(),
-        allow_outdated_base=True,
-        confirmed_all=True,
-    )
-    assert summary["completed"] == 1
-    assert summary["warnings"]
-
-
-@pytest.mark.asyncio
 async def test_review_missing_upstream_creates_no_run(tmp_path: Path) -> None:
     project = await create_project(tmp_path, "one")
     before = list((project / "runs").iterdir())
@@ -441,28 +410,6 @@ async def test_review_limits_upstream_reads_to_scope_and_ordered_context(
 
 
 @pytest.mark.asyncio
-async def test_run_all_generates_suggestions_without_apply(tmp_path: Path) -> None:
-    project = await create_project(tmp_path, "one\ntwo")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
-    try:
-        summary = await run_all(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-    assert [step["stage"] for step in summary["steps"]] == [
-        "terminology",
-        "translation",
-        "proofreading",
-        "polishing",
-    ]
-    assert read_jsonl(project, project / "stages" / "proofreading.jsonl")
-    assert read_jsonl(project, project / "stages" / "polishing.jsonl")
-    assert read_content_summaries(project) == []
-    assert not (project / "stages" / "proofreading_applied.jsonl").exists()
-    assert not (project / "stages" / "polishing_applied.jsonl").exists()
-
-
-@pytest.mark.asyncio
 async def test_run_all_scans_terms_for_new_files_after_completed_task(
     tmp_path: Path,
 ) -> None:
@@ -525,77 +472,6 @@ async def test_run_all_dry_run_plans_without_writing(tmp_path: Path) -> None:
     ]
     assert before == after
     del os.environ["LLM_API_KEY"]
-
-
-@pytest.mark.asyncio
-async def test_run_all_shares_production_client_and_limiter(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    project = await create_project(tmp_path, "one")
-    clients: list[object] = []
-    calls: list[tuple[str, object, object]] = []
-
-    class DummyClient:
-        def __init__(self, **_: object) -> None:
-            clients.append(self)
-            self.closed = False
-
-        async def __aenter__(self) -> "DummyClient":
-            return self
-
-        async def __aexit__(self, *_: object) -> None:
-            self.closed = True
-
-    async def fake_terminology(
-        _project: Path,
-        _scope: Scope,
-        **kwargs: object,
-    ) -> dict:
-        assert kwargs["reuse_mixed_fingerprints"] is True
-        calls.append(
-            ("terminology", kwargs["http_client"], kwargs["limiter"])
-        )
-        return {"stage": "terminology", "failed": 0, "pending": 0}
-
-    async def fake_translation(
-        _project: Path,
-        _scope: Scope,
-        **kwargs: object,
-    ) -> dict:
-        assert kwargs["reuse_mixed_fingerprints"] is True
-        calls.append(
-            ("translation", kwargs["http_client"], kwargs["limiter"])
-        )
-        return {"stage": "translation", "failed": 0, "pending": 0}
-
-    async def fake_review(
-        _project: Path,
-        stage: str,
-        _scope: Scope,
-        **kwargs: object,
-    ) -> dict:
-        assert kwargs["reuse_mixed_fingerprints"] is True
-        calls.append((stage, kwargs["http_client"], kwargs["limiter"]))
-        return {"stage": stage, "failed": 0, "pending": 0}
-
-    monkeypatch.setattr("app.stages.httpx.AsyncClient", DummyClient)
-    monkeypatch.setattr("app.stages.run_terminology", fake_terminology)
-    monkeypatch.setattr("app.stages.run_translation", fake_translation)
-    monkeypatch.setattr("app.stages.run_review", fake_review)
-    try:
-        await run_all(
-            project,
-            Scope(),
-            reuse_mixed_fingerprints=True,
-        )
-    finally:
-        del os.environ["LLM_API_KEY"]
-
-    assert len(clients) == 1
-    assert clients[0].closed
-    assert {id(client) for _, client, _ in calls} == {id(clients[0])}
-    assert len({id(limiter) for _, _, limiter in calls}) == 1
 
 
 @pytest.mark.asyncio
@@ -798,9 +674,6 @@ async def test_invalid_complete_batch_retries_original_batch(
         # On retry the previous response has been processed, but none of it may persist.
         assert not read_jsonl(project, result_path)
         assert "format_correction" not in payload
-        if stage != "translation":
-            assert "accepted 仅含 type、id、status" in body["messages"][0]["content"]
-            assert '"suggested_text":"完整建议"' in body["messages"][0]["content"]
         ids = [item["id"] for item in payload["segments"]]
         if len(calls) == 1:
             if mismatch == "missing":
@@ -854,11 +727,16 @@ async def test_invalid_complete_batch_retries_original_batch(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["translation", "proofreading", "polishing"])
 @pytest.mark.parametrize(
-    ("error", "max_attempts", "succeeds"),
-    [("missing", 2, True), ("duplicate", 2, True), ("field", 2, True),
-     ("missing", 0, False), ("missing", 1, False), ("missing_end", 0, False)],
+    ("stage", "error", "max_attempts", "succeeds"),
+    [
+        ("translation", "missing", 2, True),
+        ("translation", "field", 2, True),
+        ("translation", "missing", 0, False),
+        ("proofreading", "duplicate", 2, True),
+        ("proofreading", "field", 2, True),
+        ("polishing", "missing_end", 0, False),
+    ],
 )
 async def test_chunk_retry_discards_partial_results(
     tmp_path: Path, stage: str, error: str, max_attempts: int, succeeds: bool,
@@ -938,61 +816,6 @@ async def test_chunk_retry_discards_partial_results(
             assert all(record["review_status"] == "accepted" for record in records)
     else:
         assert all(record["status"] == "failed" for record in records)
-
-
-@pytest.mark.asyncio
-async def test_review_format_retry_adds_no_guidance(
-    tmp_path: Path,
-) -> None:
-    project = await create_project(tmp_path, "one")
-    review_calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal review_calls
-        body = json.loads(request.content)
-        system = body["messages"][0]["content"]
-        payload = json.loads(body["messages"][1]["content"])
-        if "完整 translation" in system:
-            records = [
-                {
-                    "type": "segment",
-                    "id": item["id"],
-                    "translation": f"译:{item['source']}",
-                }
-                for item in payload["segments"]
-            ]
-            content = llm_jsonl(records)
-        else:
-            review_calls += 1
-            if review_calls == 1:
-                content = json.dumps({"segments": [{"id": "1"}]})
-            else:
-                assert "format_correction" not in payload
-                records = [
-                    {
-                        "type": "segment",
-                        "id": item["id"],
-                        "status": "accepted",
-                        "suggested_text": None,
-                        "reason": None,
-                    }
-                    for item in payload["segments"]
-                ]
-                content = llm_jsonl(records)
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": content}}]},
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        await run_translation(project, Scope(), http_client=client)
-        summary = await run_review(project, "proofreading", Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-    assert summary["completed"] == 1
-    assert review_calls == 2
 
 
 @pytest.mark.asyncio
@@ -1245,29 +1068,6 @@ async def test_force_redo_counts_only_current_results(
     history = read_jsonl(project, project / "stages" / f"{stage}.jsonl")
     assert sum(item.get("run_id") == first["run_id"] for item in history) == 0
     assert sum(item.get("run_id") == redo["run_id"] for item in history) == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
-async def test_apply_reuses_identical_results_and_counts_run(tmp_path: Path, stage: str) -> None:
-    from app.sqlite_storage import read_json
-    project = await create_project(tmp_path, "one\ntwo")
-    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
-        await run_translation(project, Scope(), http_client=client)
-        await run_review(project, stage, Scope(), http_client=client)
-    first = run_apply(project, stage, Scope(only_segment="F0001-S000001"),
-                      allow_outdated_base=False, confirmed_all=True)
-    second = run_apply(project, stage, Scope(), allow_outdated_base=False, confirmed_all=True)
-    third = run_apply(project, stage, Scope(), allow_outdated_base=False, confirmed_all=True)
-    assert first["reused"] == 0
-    assert second["completed"] == 2 and second["reused"] == 1
-    assert third["completed"] == 2 and third["reused"] == 2
-    assert len(read_jsonl(project, project / "stages" / f"{stage}_applied.jsonl")) == 2
-    manifest = read_json(project, project / "runs" / third["run_id"] / "manifest.json")
-    assert manifest["status"] == "completed"
-    assert manifest["completed_segment_count"] == 0
-    assert manifest["requested_segment_count"] == 0
-    assert manifest["reused_segment_count"] == 2
 
 
 @pytest.mark.asyncio

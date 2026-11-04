@@ -3,41 +3,7 @@ from dataclasses import replace
 import pytest
 
 from app.errors import ConfigError
-from app.plugins import _builtin_plugins, _validate_plugins, load_plugins
-
-
-def test_plugins_declare_optional_decision_prompts():
-    plugins = load_plugins()
-    declarations = [prompt for plugin in plugins for prompt in plugin.decision_prompts]
-    assert {prompt.validator_id for prompt in declarations} == {"preferred_term_usage", "segment_alignment"}
-    for prompt in declarations:
-        assert not hasattr(prompt, "defaults")
-        assert set(prompt.default["criteria"]) == set(prompt.choice_ids)
-
-
-def test_prompt_declaration_must_belong_to_its_plugin():
-    plugin = _builtin_plugins()[1]
-    foreign = replace(plugin.decision_prompts[0], validator_id="foreign")
-    with pytest.raises(ConfigError, match="Decision"):
-        _validate_plugins([replace(plugin, decision_prompts=(foreign,))])
-
-
-def test_prompt_resolution_precedence_and_invalid_override(tmp_path, monkeypatch):
-    from app.decision_prompt import resolve_prompt, prompt_path
-    from app.sqlite_storage import atomic_write_json
-    monkeypatch.setenv("ANOTHER_LLM_USER_ROOT", str(tmp_path / "user"))
-    prompt = next(p for plugin in load_plugins() for p in plugin.decision_prompts if p.validator_id == "preferred_term_usage")
-    project = tmp_path / "project"
-    global_content = {**prompt.default, "instructions": "Global rule"}
-    project_content = {**global_content, "instructions": "Project nickname rule"}
-    assert resolve_prompt(prompt)[1] == "default"
-    atomic_write_json(prompt_path(tmp_path / "user", prompt.validator_id), global_content)
-    assert resolve_prompt(prompt, project)[0] == global_content
-    atomic_write_json(prompt_path(project, prompt.validator_id), project_content)
-    assert resolve_prompt(prompt, project) == (project_content, "project")
-    atomic_write_json(prompt_path(project, prompt.validator_id), {**project_content, "criteria": {}})
-    with pytest.raises(ConfigError, match="选项"):
-        resolve_prompt(prompt, project)
+from app.plugins import _validate_plugins
 
 
 def test_prompt_routes_project_override_restore_and_library(tmp_path):

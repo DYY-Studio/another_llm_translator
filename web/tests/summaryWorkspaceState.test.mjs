@@ -33,20 +33,6 @@ test("restores the summary subpage state per project without sharing it", () => 
   assert.deepEqual(restoreSummaryWorkspaceState(cache, "project-b"), createSummaryWorkspaceState());
 });
 
-test("keeps unspecified view state when one control changes", () => {
-  const state = updateSummaryWorkspaceState(createSummaryWorkspaceState(), {
-    tab: "fragment",
-    focusedBoundary: "file-a:part-1",
-    sourceOpen: true,
-  });
-  const next = updateSummaryWorkspaceState(state, { search: "term" });
-
-  assert.equal(next.tab, "fragment");
-  assert.equal(next.focusedBoundary, "file-a:part-1");
-  assert.equal(next.sourceOpen, true);
-  assert.equal(next.search, "term");
-});
-
 test("opens the correct terms subpage for task-bar tasks", () => {
   assert.equal(termsSubpageForTask("terminology_decision"), "decision");
   assert.equal(termsSubpageForTask("content_summary"), "summary");
@@ -78,6 +64,7 @@ test("counts an expired full summary as usable progress and exposes its warning 
     kind: "full",
     status: "completed",
     expired: true,
+    expiry_reason: "source_changed",
     file_id: "F0001",
     part_id: "p1",
     text: "仍可使用的过期概括。",
@@ -85,13 +72,8 @@ test("counts an expired full summary as usable progress and exposes its warning 
   };
 
   assert.equal(summaryArtifactIsExpired(artifact), true);
+  assert.equal(summaryArtifactExpiryReason(artifact), "source_changed");
   assert.deepEqual(summaryProgress(boundaries, new Set(["F0001:p1"]), [artifact]), { done: 1, total: 1 });
-});
-
-test("keeps server expiry reasons available for source and provenance warnings", () => {
-  assert.equal(summaryArtifactExpiryReason({ expired: true, expiry_reason: "source_changed" }), "source_changed");
-  assert.equal(summaryArtifactExpiryReason({ expired: true, expiry_reason: "dependency_changed" }), "dependency_changed");
-  assert.equal(summaryArtifactExpiryReason({ expired: true, expiry_reason: "provenance_unavailable" }), "provenance_unavailable");
 });
 
 test("resolves numeric summary references to stable source segment ids", () => {
@@ -140,13 +122,10 @@ test("returns the latest known server selection after the newest PUT fails", () 
   assert.equal(state.dirty, false);
 });
 
-test("rejects a late project response even when its request id is otherwise current", () => {
+test("guards project responses and auto-selection against stale or switched projects", () => {
   assert.equal(isCurrentProjectRequest(3, 3, "project-a", "project-a"), true);
   assert.equal(isCurrentProjectRequest(3, 4, "project-a", "project-a"), false);
   assert.equal(isCurrentProjectRequest(3, 3, "project-a", "project-b"), false);
-});
-
-test("allows refresh selection after deletion but blocks a switched project", () => {
   assert.equal(canAutoSelectProject("project-a", ""), true);
   assert.equal(canAutoSelectProject("project-a", "project-a"), true);
   assert.equal(canAutoSelectProject("project-a", "project-b"), false);

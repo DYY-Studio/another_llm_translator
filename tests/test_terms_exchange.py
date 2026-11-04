@@ -280,44 +280,40 @@ def test_terms_json_csv_round_trip_and_disabled_export(tmp_path: Path) -> None:
     assert [item["source"] for item in load_terms(restored)["terms"]] == ["Alpha"]
 
 
-def test_import_merge_follows_case_insensitive_setting(tmp_path: Path) -> None:
-    project = make_project(tmp_path)
-    config_path = project / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
+@pytest.mark.parametrize(
+    ("target", "replacement", "sources", "expected"),
+    [
+        (
             "case_insensitive = true",
             "case_insensitive = false",
+            ["Alice", "alice"],
+            ["Alice", "alice"],
         ),
-        encoding="utf-8",
-    )
-    source = tmp_path / "terms.json"
-    write_exchange(source, [term("Alice"), term("alice")])
-    import_terms(project, source, dry_run=False)
-    assert [item["source"] for item in load_terms(project)["terms"]] == [
-        "Alice",
-        "alice",
-    ]
-
-
-def test_import_merge_follows_unicode_normalization_setting(
+        (
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = ""',
+            ["\uff21\uff22\uff23", "ABC"],
+            ["ABC", "\uff21\uff22\uff23"],
+        ),
+    ],
+)
+def test_import_merge_follows_normalization_settings(
     tmp_path: Path,
+    target: str,
+    replacement: str,
+    sources: list[str],
+    expected: list[str],
 ) -> None:
     project = make_project(tmp_path)
     config_path = project / "config.toml"
     config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            'unicode_normalization = "NFKC"',
-            'unicode_normalization = ""',
-        ),
+        config_path.read_text(encoding="utf-8").replace(target, replacement),
         encoding="utf-8",
     )
     source = tmp_path / "terms.json"
-    write_exchange(source, [term("\uff21\uff22\uff23"), term("ABC")])
+    write_exchange(source, [term(item) for item in sources])
     import_terms(project, source, dry_run=False)
-    assert [item["source"] for item in load_terms(project)["terms"]] == [
-        "ABC",
-        "\uff21\uff22\uff23",
-    ]
+    assert [item["source"] for item in load_terms(project)["terms"]] == expected
 
 
 def test_terms_import_is_atomic_and_noop_does_not_increment_revision(
@@ -542,32 +538,20 @@ def test_group_alias_matching_is_exact_and_ignores_disabled_members(tmp_path):
     assert not built[0]["conflicts"]["group_claims"]
 
 
-def test_manual_term_edit_and_grouping_reject_overlapping_aliases_atomically(tmp_path):
+def test_manual_term_edit_and_primary_change_reject_overlapping_aliases_atomically(tmp_path):
     from app.web_store import WebStore
     project = make_project(tmp_path)
     source = tmp_path / "explicit.json"
-    source.write_text(json.dumps({"schema_version": 2, "record_type": "terminology_exchange", "terms": [
-        term("Alpha"), {**term("Beta"), "group_primary": "alpha"}]}), encoding="utf-8")
-    import_terms(project, source, dry_run=False)
-    library = load_terms(project)
-    overrides = read_json(project, project / "terminology" / "overrides.json")
-    with pytest.raises(UsageError, match="组.*Alias"):
-        WebStore(project).save_term({**{k:v for k,v in term("Alpha", aliases=["Beta"]).items() if k != "description"}, "old_normalized": "alpha"})
-    assert load_terms(project) == library
-    assert read_json(project, project / "terminology" / "overrides.json") == overrides
-
-
-def test_changing_group_primary_cannot_introduce_alias_overlap(tmp_path):
-    from app.web_store import WebStore
-    project = make_project(tmp_path)
-    source = tmp_path / "groups.json"
     source.write_text(json.dumps({"schema_version": 2, "record_type": "terminology_exchange", "terms": [
         term("Alpha"), {**term("Beta", aliases=["Alpha"]), "group_primary": "alpha"}]}), encoding="utf-8")
     import_terms(project, source, dry_run=False)
     library = load_terms(project)
     overrides = read_json(project, project / "terminology" / "overrides.json")
+    store = WebStore(project)
     with pytest.raises(UsageError, match="组.*Alias"):
-        WebStore(project).set_term_primary({"normalized": "beta", "confirm": True})
+        store.save_term({**{k: v for k, v in term("Alpha", aliases=["Beta"]).items() if k != "description"}, "old_normalized": "alpha"})
+    with pytest.raises(UsageError, match="组.*Alias"):
+        store.set_term_primary({"normalized": "beta", "confirm": True})
     assert load_terms(project) == library
     assert read_json(project, project / "terminology" / "overrides.json") == overrides
 

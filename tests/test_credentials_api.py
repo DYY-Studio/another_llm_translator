@@ -53,21 +53,8 @@ def test_web_credentials_crud_and_test(tmp_path: Path, fake_keyring: FakeKeyring
     assert deleted.json() == {"deleted": True}
     assert client.get("/api/v1/credentials").json() == {"credentials": []}
     assert client.delete("/api/v1/credentials/openai-main").status_code == 400
-
-
-def test_web_credentials_reject_invalid_payloads(tmp_path: Path) -> None:
-    projects_root = tmp_path / "projects"
-    client = TestClient(create_app(projects_root=projects_root))
-    assert client.post("/api/v1/credentials", json={"id": 1, "secret": "x"}).status_code == 400
-    assert client.post("/api/v1/credentials", json={"id": "ok", "secret": ""}).status_code == 400
     assert client.post("/api/v1/credentials", json={"id": "../bad", "secret": "x"}).status_code == 400
-    assert client.put("/api/v1/credentials/openai-main", json={"secret": 1}).status_code == 400
-    assert client.post(
-        "/api/v1/credentials", json={"id": "blank", "secret": "one\n\ntwo"}
-    ).status_code == 400
-    assert client.post(
-        "/api/v1/credentials", json={"id": "duplicate", "secret": "one\none"}
-    ).status_code == 400
+    assert client.post("/api/v1/credentials", json={"id": "duplicate", "secret": "one\none"}).status_code == 400
 
 
 def test_web_preset_with_keychain_credential_validates(

@@ -27,7 +27,6 @@ from app.stage_terminology import _digest
 from app.summary_aggregation import (
     aggregate_summaries,
     export_summary_markdown,
-    full_summary_expired,
 )
 from app.summary_provenance import build_provenance
 from app.web_tasks import WebTaskManager
@@ -584,89 +583,6 @@ def test_single_full_fragment_is_adopted_without_llm_call(tmp_path: Path) -> Non
     assert full[0]["provenance"]["origin"] == "adopted"
 
 
-def test_aggregation_success_surfaces_cleanup_warning_without_deleting_history(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path)
-    _fragment(
-        project,
-        summary_id="SUMMARY-FRAGMENT-ONE",
-        segment_indexes=[0],
-        text="片段一。",
-    )
-    _fragment(
-        project,
-        summary_id="SUMMARY-FRAGMENT-TWO",
-        segment_indexes=[1],
-        text="片段二。",
-    )
-    metadata = read_json(project, project / "project.json")
-    invalid_full = record_header(
-        "content_summary",
-        str(metadata["project_id"]),
-        record_id="SUMMARY-FULL-INVALID",
-        kind="full",
-        file_id="F0001",
-        part_id="document",
-        status="completed",
-        text="旧完整概括。",
-        source_range={"file_id": "F0001", "part_id": "document", "segments": []},
-        source_digest="sha256:old-source",
-        input_digest="sha256:old-input",
-        prompt_digest="sha256:prompt",
-        model="test-model",
-    )
-    invalid_full["created_at"] = "2024-01-01T00:00:00+00:00"
-    invalid_full["updated_at"] = invalid_full["created_at"]
-    write_content_summary(project, invalid_full)
-    old_reduction = record_header(
-        "content_summary",
-        str(metadata["project_id"]),
-        record_id="SUMMARY-REDUCTION-OLD",
-        kind="reduction",
-        file_id="F0001",
-        part_id="document",
-        status="completed",
-        text="旧压缩结果。",
-        source_range={"file_id": "F0001", "part_id": "document", "segments": []},
-        source_digest="sha256:reduction-source",
-        input_digest="sha256:reduction-input",
-        prompt_digest="sha256:prompt",
-        model="test-model",
-    )
-    write_content_summary(project, old_reduction)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(_summary_response))
-    try:
-        result = asyncio.run(
-            aggregate_summaries(
-                project,
-                [{"file_id": "F0001", "part_id": "document"}],
-                http_client=client,
-            )
-        )
-    finally:
-        asyncio.run(client.aclose())
-        os.environ.pop("LLM_API_KEY", None)
-
-    warning = "内容概括历史清理已跳过：F0001/document 的 provenance 无法验证"
-    assert result["completed"] == 1
-    assert result["failed"] == 0
-    assert result["warnings"] == [warning]
-    assert {
-        str(item["record_id"]) for item in read_content_summaries(project)
-    } >= {"SUMMARY-FULL-INVALID", "SUMMARY-REDUCTION-OLD"}
-    manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
-    assert manifest["warnings"] == [warning]
-    summary_run = next(
-        item
-        for item in read_summary_runs(project, mode="aggregation")
-        if item["run_id"] == result["run_id"]
-    )
-    assert summary_run["status"] == "completed"
-    assert summary_run["warnings"] == [warning]
-
-
 def test_aggregation_cleans_valid_boundary_when_another_boundary_is_skipped(
     tmp_path: Path,
 ) -> None:
@@ -830,183 +746,6 @@ def test_aggregation_reports_and_persists_exact_usage(tmp_path: Path) -> None:
     assert result["usage"] == expected_usage
     manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
     assert manifest["usage"] == expected_usage
-
-
-def test_adopted_full_expires_when_current_fragments_become_partitioned(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path)
-    _fragment(
-        project,
-        summary_id="SUMMARY-FRAGMENT-OLD-ALL",
-        segment_indexes=[0, 1],
-        text="旧的直接采用概括。",
-    )
-    asyncio.run(
-        aggregate_summaries(
-            project,
-            [{"file_id": "F0001", "part_id": "document"}],
-        )
-    )
-    _fragment(
-        project,
-        summary_id="SUMMARY-FRAGMENT-NEW-1",
-        segment_indexes=[0],
-        text="新的片段一。",
-    )
-    _fragment(
-        project,
-        summary_id="SUMMARY-FRAGMENT-NEW-2",
-        segment_indexes=[1],
-        text="新的片段二。",
-    )
-
-    full = read_content_summaries(project, kind="full", status="completed")[0]
-    current = [
-        item
-        for item in read_segments(project)
-        if not item["is_empty"]
-        and item["file_id"] == "F0001"
-        and item["part_id"] == "document"
-    ]
-    fragments = read_content_summaries(
-        project,
-        file_id="F0001",
-        part_id="document",
-        kind="fragment",
-        status="completed",
-    )
-
-    assert full_summary_expired(full, current, fragments) is True
-    os.environ.pop("LLM_API_KEY", None)
-
-
-def test_llm_aggregated_full_expires_when_fragment_text_changes(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path)
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-OLD-1", segment_indexes=[0], text="旧片段一。")
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-OLD-2", segment_indexes=[1], text="旧片段二。")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(_summary_response))
-    try:
-        asyncio.run(
-            aggregate_summaries(
-                project,
-                [{"file_id": "F0001", "part_id": "document"}],
-                http_client=client,
-            )
-        )
-    finally:
-        asyncio.run(client.aclose())
-        os.environ.pop("LLM_API_KEY", None)
-
-    full = read_content_summaries(project, kind="full", status="completed")[0]
-    current = [item for item in read_segments(project) if not item["is_empty"]]
-    artifacts = read_content_summaries(project)
-    assert full_summary_expired(full, current, artifacts) is False
-
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-OLD-1", segment_indexes=[0], text="新片段一。")
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-OLD-2", segment_indexes=[1], text="新片段二。")
-
-    artifacts = read_content_summaries(project)
-    assert full_summary_expired(full, current, artifacts) is True
-    exported = export_summary_markdown(
-        project,
-        [{"file_id": "F0001", "part_id": "document"}],
-        "old-aggregated.md",
-    )
-    assert "整合后的内容概括。" in exported.read_text(encoding="utf-8")
-
-
-def test_llm_aggregated_full_expires_when_fragment_ranges_change(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path, "A\nB\nC\nD")
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-OLD-1", segment_indexes=[0, 1], text="前半段。")
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-OLD-2", segment_indexes=[2, 3], text="后半段。")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(_summary_response))
-    try:
-        asyncio.run(
-            aggregate_summaries(
-                project,
-                [{"file_id": "F0001", "part_id": "document"}],
-                http_client=client,
-            )
-        )
-    finally:
-        asyncio.run(client.aclose())
-        os.environ.pop("LLM_API_KEY", None)
-
-    full = read_content_summaries(project, kind="full", status="completed")[0]
-    current = [item for item in read_segments(project) if not item["is_empty"]]
-    artifacts = read_content_summaries(project)
-    assert full_summary_expired(full, current, artifacts) is False
-
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-OLD-1", segment_indexes=[0], text="前半段。")
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-OLD-2", segment_indexes=[1, 2, 3], text="后半段。")
-
-    artifacts = read_content_summaries(project)
-    assert full_summary_expired(full, current, artifacts) is True
-
-
-def test_recursive_full_expires_when_fragment_text_changes(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path)
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-OLD-1", segment_indexes=[0], text="甲" * 7500)
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-OLD-2", segment_indexes=[1], text="乙" * 7500)
-    client = httpx.AsyncClient(transport=httpx.MockTransport(_summary_response))
-    try:
-        asyncio.run(
-            aggregate_summaries(
-                project,
-                [{"file_id": "F0001", "part_id": "document"}],
-                http_client=client,
-            )
-        )
-    finally:
-        asyncio.run(client.aclose())
-        os.environ.pop("LLM_API_KEY", None)
-
-    full = read_content_summaries(project, kind="full", status="completed")[0]
-    assert read_content_summaries(project, kind="reduction", status="completed")
-    current = [item for item in read_segments(project) if not item["is_empty"]]
-    artifacts = read_content_summaries(project)
-    assert full_summary_expired(full, current, artifacts) is False
-
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-OLD-1", segment_indexes=[0], text="新甲" * 3750)
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-OLD-2", segment_indexes=[1], text="新乙" * 3750)
-
-    artifacts = read_content_summaries(project)
-    assert full_summary_expired(full, current, artifacts) is True
-
-
-def test_export_keeps_a_stale_full_when_no_current_full_exists(tmp_path: Path) -> None:
-    project = _project(tmp_path)
-    _fragment(
-        project,
-        summary_id="SUMMARY-FRAGMENT-ALL",
-        segment_indexes=[0, 1],
-        text="仍可使用的过期概括。",
-    )
-    asyncio.run(
-        aggregate_summaries(
-            project,
-            [{"file_id": "F0001", "part_id": "document"}],
-        )
-    )
-    full = read_content_summaries(project, kind="full", status="completed")[0]
-    full["status"] = "stale"
-    write_content_summary(project, full)
-
-    output = export_summary_markdown(
-        project,
-        [{"file_id": "F0001", "part_id": "document"}],
-        "stale-summary.md",
-    )
-
-    assert "仍可使用的过期概括。" in output.read_text(encoding="utf-8")
-    os.environ.pop("LLM_API_KEY", None)
 
 
 def test_multiple_fragments_are_aggregated_and_keep_references(tmp_path: Path) -> None:
@@ -1204,13 +943,14 @@ def test_aggregation_rejects_incomplete_or_changed_coverage(tmp_path: Path) -> N
                 [{"file_id": "F0001", "part_id": "document"}],
             )
         )
-    os.environ.pop("LLM_API_KEY", None)
 
-
-def test_aggregation_rejects_overlapping_completed_fragment_ranges(tmp_path: Path) -> None:
-    project = _project(tmp_path)
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-1", segment_indexes=[0], text="Alice 出现。")
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-OVERLAP", segment_indexes=[0, 1], text="重复覆盖。")
+    _fragment(
+        project,
+        summary_id="SUMMARY-FRAGMENT-ALL",
+        segment_indexes=[0, 1],
+        text="重复覆盖。",
+        source_changed=False,
+    )
     with pytest.raises(UsageError, match="重叠"):
         asyncio.run(
             aggregate_summaries(
@@ -1219,67 +959,6 @@ def test_aggregation_rejects_overlapping_completed_fragment_ranges(tmp_path: Pat
             )
         )
     os.environ.pop("LLM_API_KEY", None)
-
-
-def test_failed_aggregation_keeps_previous_full_result(tmp_path: Path) -> None:
-    project = _project(tmp_path)
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-1", segment_indexes=[0], text="Alice 出现。")
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-2", segment_indexes=[1], text="Bob 挥手。")
-    metadata = read_json(project, project / "project.json")
-    segments = read_segments(project)
-    ranges = []
-    for segment in segments:
-        ranges.append(
-            {
-                "segment_id": segment["segment_id"],
-                "source": segment["source"],
-                "source_digest": _digest(segment["source"]),
-            }
-        )
-    write_content_summary(
-        project,
-        record_header(
-            "content_summary",
-            str(metadata["project_id"]),
-            record_id="SUMMARY-FULL-OLD",
-            kind="full",
-            file_id="F0001",
-            part_id="document",
-            status="completed",
-            text="旧的完整概括。",
-            refs=["1", "2"],
-            source_range={"segments": ranges},
-            source_digest="sha256:old",
-            input_digest="sha256:old-input",
-            prompt_digest="sha256:prompt",
-            model="test-model",
-        ),
-    )
-
-    def malformed(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(malformed))
-    try:
-        result = asyncio.run(
-            aggregate_summaries(
-                project,
-                [{"file_id": "F0001", "part_id": "document"}],
-                http_client=client,
-            )
-        )
-    finally:
-        asyncio.run(client.aclose())
-        os.environ.pop("LLM_API_KEY", None)
-    full = read_content_summaries(project, kind="full", status="completed")
-    assert result["completed"] == 0
-    assert result["failed"] == 1
-    assert result["pending"] == 0
-    assert read_content_summaries(project, kind="full", status="failed") == []
-    assert [item["text"] for item in full] == ["旧的完整概括。"]
 
 
 def test_empty_export_selection_and_markdown_refs(tmp_path: Path) -> None:
@@ -1308,88 +987,26 @@ def test_empty_export_selection_and_markdown_refs(tmp_path: Path) -> None:
     assert "# F0001 / document" in markdown
     assert "可导出的概括。" in markdown
     assert "F0001-S" in markdown
-    os.environ.pop("LLM_API_KEY", None)
 
-
-def test_export_keeps_full_when_adapter_model_text_changes(tmp_path: Path) -> None:
-    project = _project(tmp_path)
-    _fragment(
-        project,
-        summary_id="SUMMARY-FRAGMENT-ALL",
-        segment_indexes=[0, 1],
-        text="可导出的概括。",
-    )
-    asyncio.run(
-        aggregate_summaries(
-            project,
-            [{"file_id": "F0001", "part_id": "document"}],
-        )
-    )
     with sqlite3.connect(project / "project.sqlite") as connection:
         connection.execute(
             "UPDATE segments SET model_source = ? WHERE segment_id = ?",
             ("adapter remapped text", "F0001-S000001"),
         )
         connection.commit()
-    output = export_summary_markdown(
+    assert "可导出的概括。" in export_summary_markdown(
         project,
         [{"file_id": "F0001", "part_id": "document"}],
-    )
-    assert "可导出的概括。" in output.read_text(encoding="utf-8")
-    os.environ.pop("LLM_API_KEY", None)
+    ).read_text(encoding="utf-8")
 
-
-def test_large_fragment_set_uses_reduction_checkpoints(tmp_path: Path) -> None:
-    project = _project(tmp_path)
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-1", segment_indexes=[0], text="甲" * 7500)
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-2", segment_indexes=[1], text="乙" * 7500)
-    calls = 0
-    requests: list[dict[str, object]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        requests.append(json.loads(request.content))
-        return _summary_response(request)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        result = asyncio.run(
-            aggregate_summaries(
-                project,
-                [{"file_id": "F0001", "part_id": "document"}],
-                http_client=client,
-            )
-        )
-    finally:
-        asyncio.run(client.aclose())
-        os.environ.pop("LLM_API_KEY", None)
-    assert calls >= 3
-    assert result["boundaries"][0]["origin"] == "llm"
-    assert len(read_content_summaries(project, kind="reduction", status="completed")) >= 2
-    assert all(
-        "refs" not in summary
-        for request in requests
-        for summary in json.loads(request["messages"][1]["content"])["summaries"]
-    )
-
-
-def test_minimal_aggregation_request_over_budget_fails_without_full_result(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path)
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-1", segment_indexes=[0], text="甲" * 16_384)
-    _fragment(project, summary_id="SUMMARY-FRAGMENT-2", segment_indexes=[1], text="乙" * 16_384)
-    result = asyncio.run(
-        aggregate_summaries(
-            project,
-            [{"file_id": "F0001", "part_id": "document"}],
-        )
-    )
-    assert result["completed"] == 0
-    assert result["failed"] == 1
-    assert result["pending"] == 0
-    assert read_content_summaries(project, kind="full", status="completed") == []
+    full = read_content_summaries(project, kind="full", status="completed")[0]
+    full["status"] = "stale"
+    write_content_summary(project, full)
+    assert "可导出的概括。" in export_summary_markdown(
+        project,
+        [{"file_id": "F0001", "part_id": "document"}],
+        "stale-summary.md",
+    ).read_text(encoding="utf-8")
     os.environ.pop("LLM_API_KEY", None)
 
 

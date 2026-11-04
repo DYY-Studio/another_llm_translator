@@ -145,9 +145,21 @@ async def test_empty_split_limit_is_inherited_and_never_formats(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason,count", [("stop", 1), ("length", 2), ("stop", 0)])
+@pytest.mark.parametrize(
+    ("reason", "count", "expected_error"),
+    [
+        ("stop", 1, "预算已耗尽"),
+        ("length", 2, "预算已耗尽"),
+        ("stop", 0, "预算已耗尽"),
+        ("content_filter", 2, "拒绝生成正文"),
+    ],
+)
 async def test_empty_retry_exhaustion_and_disable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str, count: int
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    count: int,
+    expected_error: str,
 ) -> None:
     monkeypatch.setenv("LLM_API_KEY", "test")
     config = load_global_config(ROOT)
@@ -160,9 +172,10 @@ async def test_empty_retry_exhaustion_and_disable(
     def handler(_request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
+        content = None if reason == "content_filter" else " "
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": " "}, "finish_reason": reason}]},
+            json={"choices": [{"message": {"content": content}, "finish_reason": reason}]},
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -175,13 +188,13 @@ async def test_empty_retry_exhaustion_and_disable(
             stage="translation",
             client=client,
         ) as llm:
-            with pytest.raises(ExternalError, match="预算已耗尽"):
+            with pytest.raises(ExternalError, match=expected_error):
                 await llm.chat(
                     messages=[{"role": "user", "content": "source"}],
                     temperature=0,
                     estimated_input_tokens=10,
                 )
-    assert calls == count + 1
+    assert calls == (1 if reason == "content_filter" else count + 1)
 
 
 @pytest.mark.asyncio
@@ -343,43 +356,3 @@ async def test_singleton_empty_split_fails_with_correct_reason(
     if stage != "proofreading":
         assert record["error_class"] == "empty_response"
     assert "长度限制截断" in record["error_message"]
-
-
-@pytest.mark.asyncio
-async def test_explicit_blocked_reason_is_not_empty_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("LLM_API_KEY", "test")
-    config = load_global_config(ROOT)
-    config["chunking"]["context_reserve_tokens"] = 512
-    calls = 0
-
-    def handler(_request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {"message": {"content": None}, "finish_reason": "content_filter"}
-                ]
-            },
-        )
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        async with LLMClient(
-            config,
-            SlidingWindowLimiter(0, 0),
-            run_dir=tmp_path / "run",
-            project_id="PRJ",
-            run_id="RUN",
-            stage="translation",
-            client=client,
-        ) as llm:
-            with pytest.raises(ExternalError, match="拒绝生成正文"):
-                await llm.chat(
-                    messages=[{"role": "user", "content": "source"}],
-                    temperature=0,
-                    estimated_input_tokens=10,
-                )
-    assert calls == 1

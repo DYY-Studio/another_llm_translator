@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.errors import ConfigError, IncompleteError, UsageError
-from app.execution import Scope, create_run, stage_fingerprint, stage_result_path
+from app.execution import Scope, stage_result_path
 from app.plugin_api import (
     DocumentChoiceOption,
     DocumentImport,
@@ -439,41 +439,6 @@ def test_contract_stateless_run_options_persist_and_update(
     assert state["run_options"] == {"mode": "strict"}
 
 
-def test_contract_stateless_run_options_are_frozen_in_run_manifest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    register_plugin(monkeypatch, StatelessRunOptionsAdapter())
-    source = tmp_path / "book.srec"
-    source.write_text("line one", encoding="utf-8")
-    project, _ = init_project(
-        [str(source)],
-        name="stateless-run",
-        app_root=make_app_root(tmp_path),
-        projects_root=tmp_path / "projects",
-        document_adapter_id="stateless-record",
-        adapter_options={"stateless-record": {"mode": "strict"}},
-    )
-    assert project is not None
-    config, metadata, _, segments = _project_context(project, stage="translation")
-    run_id, run_dir = create_run(
-        project,
-        config=config,
-        stage="translation",
-        fingerprint="test-fingerprint",
-        prompt=None,
-        selected_count=1,
-        requested_count=1,
-        reused_count=0,
-    )
-    assert run_id
-    assert metadata["project_id"]
-    assert segments[0]["_adapter_run_options"] == {"mode": "strict"}
-    manifest = read_json(project, run_dir / "manifest.json")
-    assert manifest["document_adapter_options"] == {
-        "F0001": {"mode": "strict"}
-    }
-
-
 def test_contract_stateless_state_null_reaches_export_adapter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -677,40 +642,14 @@ def register_plugin(
     return descriptor
 
 
-def test_contract_requires_runtime_model_renderer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Document adapters must provide the v12 runtime render boundary."""
-    class MissingRenderer(RecordDocumentAdapter):
-        render_model_source = None
-
-    register_plugin(monkeypatch, MissingRenderer())
-
-    from app.plugins import load_plugins
-
-    with pytest.raises(ConfigError, match="render_model_source") as raised:
-        load_plugins()
-    assert "<fixture-plugin>" in str(raised.value)
-    assert "阶段：descriptor" in str(raised.value)
-
-
-def test_contract_requires_segment_format_counter(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class MissingFormatCounter(RecordDocumentAdapter):
-        segment_format_count = None
-
-    register_plugin(monkeypatch, MissingFormatCounter())
-
-    from app.plugins import load_plugins
-
-    with pytest.raises(ConfigError, match="segment_format_count"):
-        load_plugins()
-
-
 @pytest.mark.parametrize(
     ("missing_attribute", "message"),
-    (("import_sources", "import_sources"), ("export_sources", "export_sources")),
+    (
+        ("import_sources", "import_sources"),
+        ("export_sources", "export_sources"),
+        ("render_model_source", "render_model_source"),
+        ("segment_format_count", "segment_format_count"),
+    ),
 )
 def test_contract_requires_declared_boundary_methods(
     monkeypatch: pytest.MonkeyPatch,
@@ -910,15 +849,6 @@ def test_contract_rejects_unknown_or_invalid_options(
             document_adapter_id="record",
             adapter_options={"record": {"source_style": "bogus"}},
         )
-
-
-def test_contract_missing_adapter_fails_import(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    register_plugin(monkeypatch, RecordDocumentAdapter())
-    app_root = make_app_root(tmp_path)
-    source = tmp_path / "book.rec"
-    write_record(source, "line one")
     with pytest.raises(UsageError, match="未安装 Document Adapter"):
         init_project(
             [str(source)],
@@ -1128,30 +1058,6 @@ def test_contract_missing_export_capability_blocks_export(
             project, "translated", bilingual=False, allow_missing=True
         )
     assert not (project / "output" / "translated").exists()
-
-
-def test_contract_fingerprint_tracks_adapter_version(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    register_plugin(monkeypatch, RecordDocumentAdapter())
-    app_root = make_app_root(tmp_path)
-    source = tmp_path / "book.rec"
-    write_record(source, "line one")
-    project, _ = init_project(
-        [str(source)],
-        name="demo",
-        app_root=app_root,
-        projects_root=tmp_path / "projects",
-        document_adapter_id="record",
-    )
-    assert project is not None
-    config, _, _, _ = _project_context(project)
-    assert config["_document_adapters"] == {
-        "F0001": {"adapter_id": "record", "version": "1"}
-    }
-    base = stage_fingerprint(config, "translation", "prompt")
-    config["_document_adapters"]["F0001"]["version"] = "2"
-    assert stage_fingerprint(config, "translation", "prompt") != base
 
 
 def test_contract_cli_adapter_option_reaches_import_options(

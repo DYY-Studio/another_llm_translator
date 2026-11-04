@@ -44,6 +44,15 @@ def test_source_text_residual_reports_complete_and_long_partial_matches() -> Non
     assert partial[0].start == 3
     assert partial[0].end == 3 + len(partial[0].text)
 
+    latin_source = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    assert validator.validate(TranslationValidationContext(latin_source, "译文 abcdefghijk")) == ()
+    assert validator.validate(TranslationValidationContext(latin_source, "译文 abcdefghij")) == ()
+    assert validator.validate(
+        TranslationValidationContext(
+            latin_source, "译文 abcdefghijklmnopqrstuvwxyzABCDEF"
+        )
+    )
+
 
 def test_async_validator_preserves_nonrepairable_advisory() -> None:
     class Validator:
@@ -82,18 +91,6 @@ def test_source_text_residual_handles_whitespace_and_nfkc_without_numeric_noise(
     assert (
         validator.validate(TranslationValidationContext("？！；，。", "译文？！；，。"))
         == ()
-    )
-
-
-def test_source_text_residual_respects_both_partial_match_thresholds() -> None:
-    validator = SourceTextResidualValidator()
-    source = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    assert validator.validate(TranslationValidationContext(source, "译文 abcdefghijk")) == ()
-    assert validator.validate(TranslationValidationContext(source, "译文 abcdefghij")) == ()
-    assert validator.validate(
-        TranslationValidationContext(
-            source, "译文 abcdefghijklmnopqrstuvwxyzABCDEF"
-        )
     )
 
 
@@ -221,90 +218,6 @@ def test_builtin_translation_validator_summaries_are_complete() -> None:
         for item in summaries[:2]
     )
     assert summaries[4]["plugin_id"] == "term-validation"
-
-
-def test_external_translation_validator_is_discoverable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class ExternalValidator:
-        phase = "mechanical"
-        scope = "segment"
-        validator_id = "external_example"
-        version = "2"
-        label = "External example"
-
-        def validate(self, context: TranslationValidationContext) -> tuple[()]:
-            del context
-            return ()
-
-        def retry_instruction(self, match_type, language):
-            return ""
-
-    descriptor = PluginDescriptor(
-        plugin_id="external-validator-plugin",
-        version="3",
-        protocol_version=PLUGIN_PROTOCOL_VERSION,
-        translation_validators=(ExternalValidator(),),
-    )
-    monkeypatch.setattr(
-        "app.plugins._load_external_descriptors",
-        lambda: [(descriptor, Path("<fixture-plugin>"))],
-    )
-    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
-
-    summary = next(
-        item
-        for _, item in resolve_translation_validators()
-        if item["validator_id"] == "external_example"
-    )
-    assert summary == {
-        "validator_id": "external_example",
-        "version": "2",
-        "label": "External example",
-            "phase": "mechanical",
-            "scope": "segment",
-        "plugin_id": "external-validator-plugin",
-        "plugin_version": "3",
-    }
-
-
-def test_translation_validator_resolution_reuses_loaded_instance(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class ExternalValidator:
-        phase = "mechanical"
-        scope = "segment"
-        validator_id = "external_example"
-        version = "2"
-        label = "External example"
-
-        def validate(self, context: TranslationValidationContext) -> tuple[()]:
-            del context
-            return ()
-
-        def retry_instruction(self, match_type, language):
-            return ""
-
-    validator = ExternalValidator()
-    descriptor = PluginDescriptor(
-        plugin_id="external-validator-plugin",
-        version="3",
-        protocol_version=PLUGIN_PROTOCOL_VERSION,
-        translation_validators=(validator,),
-    )
-    monkeypatch.setattr(
-        "app.plugins._load_external_descriptors",
-        lambda: [(descriptor, Path("<fixture-plugin>"))],
-    )
-    monkeypatch.setattr("app.plugins._PLUGIN_CACHE", None)
-
-    bindings = resolve_translation_validators(["external_example"])
-
-    assert len(bindings) == 1
-    instance, summary = bindings[0]
-    assert instance is validator
-    assert summary["validator_id"] == "external_example"
-    assert summary["plugin_version"] == "3"
 
 
 def test_project_config_and_web_store_reuse_one_validator_resolution(

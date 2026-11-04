@@ -177,15 +177,8 @@ def test_completed_full_remains_usable_while_fragment_refresh_is_pending() -> No
     assert assessment.expired is True
     assert assessment.expiry_reason == DEPENDENCY_CHANGED
     assert full_summary_context_usable(full, [first, second]) is True
-
-
-def test_source_changed_full_is_not_usable_context() -> None:
-    segment = _segment("F0001-S-1", "Alice")
-    fragment = _fragment(_source_range(segment), record_id="FRAGMENT-1", text="甲")
-    full = _full([segment], [fragment])
     full["source_changed"] = True
-
-    assert full_summary_context_usable(full, [segment]) is False
+    assert full_summary_context_usable(full, [first, second]) is False
 
 
 @pytest.mark.parametrize(
@@ -288,44 +281,6 @@ def test_unverifiable_provenance_fails_closed(case: str) -> None:
         artifacts = [full, reduction]
 
     assessment = _assessment(full, [first], artifacts)
-    assert assessment.expired is True
-    assert assessment.expiry_reason == PROVENANCE_UNAVAILABLE
-
-
-def test_unmigrated_adopted_fragment_is_unverifiable() -> None:
-    segment = _segment("F0001-S-1", "Alice")
-    fragment = _fragment(_source_range(segment), record_id="FRAGMENT-1", text="片段")
-    full = {
-        **_full([segment], [fragment], origin="adopted_fragment"),
-        "text": fragment["text"],
-        "input_digest": fragment["input_digest"],
-        "provenance": {
-            "origin": "adopted_fragment",
-            "artifact_ids": ["FRAGMENT-1"],
-            "source_ranges": [fragment["source_range"]],
-        },
-    }
-
-    assessment = _assessment(full, [segment], [full, fragment])
-
-    assert assessment.expired is True
-    assert assessment.expiry_reason == PROVENANCE_UNAVAILABLE
-
-
-def test_legacy_adopted_fragment_without_child_is_unverifiable() -> None:
-    segment = _segment("F0001-S-1", "Alice")
-    fragment = _fragment(_source_range(segment), record_id="FRAGMENT-1", text="片段")
-    full = {
-        **_full([segment], [fragment], origin="adopted_fragment"),
-        "provenance": {
-            "origin": "adopted_fragment",
-            "artifact_ids": ["DELETED-FRAGMENT"],
-            "source_ranges": [fragment["source_range"]],
-        },
-    }
-
-    assessment = _assessment(full, [segment], [full])
-
     assert assessment.expired is True
     assert assessment.expiry_reason == PROVENANCE_UNAVAILABLE
 

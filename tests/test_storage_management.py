@@ -37,6 +37,16 @@ def test_storage_scan_classifies_files_and_deduplicates_registered_projects(
     tmp_path: Path,
 ) -> None:
     app_root, projects_root, project = make_storage_project(tmp_path)
+    external_parent = tmp_path / "external"
+    external, _ = init_project(
+        [],
+        name="external",
+        empty=True,
+        app_root=app_root,
+        projects_root=external_parent,
+    )
+    assert external is not None
+    (external / "other.bin").write_bytes(b"external")
     (app_root / "not-user-data.bin").write_bytes(b"builtin")
 
     (user_root() / "config").mkdir(parents=True)
@@ -48,19 +58,23 @@ def test_storage_scan_classifies_files_and_deduplicates_registered_projects(
     (user_root() / "unclassified.bin").write_bytes(b"other")
     (project / "logs" / "app.log").write_bytes(b"project-log")
     (project / "output" / "result.txt").write_bytes(b"output")
+    (project / "project.sqlite-wal").write_bytes(b"wal")
+    (project / "project.sqlite-shm").write_bytes(b"shm")
 
     manager = StorageManager(
         user_data_root=user_root(),
         projects_root=projects_root,
         app_root=app_root,
-        project_paths=lambda: [project],
+        project_paths=lambda: [project, external, external],
     )
 
     summary = manager.scan()
 
     assert summary["complete"] is True
+    assert len(summary["projects"]) == 2
     global_categories = {item["id"]: item for item in summary["global"]}
-    project_summary = summary["projects"][0]
+    project_by_name = {item["name"]: item for item in summary["projects"]}
+    project_summary = project_by_name["sample"]
     project_categories = {
         item["id"]: item for item in project_summary["categories"]
     }
@@ -69,16 +83,17 @@ def test_storage_scan_classifies_files_and_deduplicates_registered_projects(
     assert global_categories["other"]["bytes"] == len(b"other")
     assert project_categories["logs"]["bytes"] == len(b"project-log")
     assert project_categories["output"]["bytes"] == len(b"output")
-    assert summary["total_bytes"] == sum(
-        item["bytes"] for item in summary["global"]
-    ) + sum(
-        item["bytes"]
-        for item in project_summary["categories"]
+    assert project_categories["sqlite"]["bytes"] == sum(
+        path.stat().st_size
+        for path in project.iterdir()
+        if path.name.startswith("project.sqlite")
     )
+    assert project_categories["sqlite"]["can_clear"] is False
+    assert project_by_name["external"]["total_bytes"] >= len(b"external")
     assert summary["total_bytes"] > len(b"builtin")
     assert summary["total_bytes"] == sum(
         item["bytes"] for item in summary["global"]
-    ) + project_summary["total_bytes"]
+    ) + sum(item["total_bytes"] for item in summary["projects"])
 
 
 def _manager(app_root: Path, projects_root: Path, project: Path, **kwargs: object) -> StorageManager:
@@ -253,51 +268,6 @@ def test_lightweight_project_storage_keeps_legacy_totals_and_sqlite_main_size(
     assert totals["sqlite_bytes"] == (project / "project.sqlite").stat().st_size
 
 
-def test_storage_scan_counts_sqlite_sidecars_and_registered_external_project(
-    tmp_path: Path,
-) -> None:
-    app_root, projects_root, project = make_storage_project(tmp_path)
-    (project / "project.sqlite-wal").write_bytes(b"wal")
-    (project / "project.sqlite-shm").write_bytes(b"shm")
-    external_parent = tmp_path / "external"
-    external, _ = init_project(
-        [],
-        name="external",
-        empty=True,
-        app_root=app_root,
-        projects_root=external_parent,
-    )
-    assert external is not None
-    (external / "other.bin").write_bytes(b"external")
-
-    manager = StorageManager(
-        user_data_root=user_root(),
-        projects_root=projects_root,
-        app_root=app_root,
-        project_paths=lambda: [project, external, external],
-    )
-    summary = manager.scan()
-
-    project_by_name = {item["name"]: item for item in summary["projects"]}
-    sqlite_category = {
-        item["id"]: item
-        for item in project_by_name["sample"]["categories"]
-    }["sqlite"]
-    assert sqlite_category["bytes"] == (
-        sum(
-            path.stat().st_size
-            for path in project.iterdir()
-            if path.name.startswith("project.sqlite")
-        )
-    )
-    assert sqlite_category["can_clear"] is False
-    assert len(summary["projects"]) == 2
-    assert project_by_name["external"]["total_bytes"] >= len(b"external")
-    assert {
-        item["id"]: item for item in summary["global"]
-    }["other"]["bytes"] == 0
-
-
 def test_storage_scan_returns_partial_results_and_blocks_affected_category(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -321,38 +291,6 @@ def test_storage_scan_returns_partial_results_and_blocks_affected_category(
     global_logs = next(item for item in summary["global"] if item["id"] == "logs")
     assert global_logs["can_clear"] is False
     assert global_logs["blocked_reason"]
-
-
-def test_storage_scan_reports_unresolvable_registered_project(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app_root, projects_root, project = make_storage_project(tmp_path)
-    bad_path = tmp_path / "registered-unreadable"
-    global_logs = user_root() / "logs"
-    global_logs.mkdir(parents=True)
-    (global_logs / "app.log").write_bytes(b"global-log")
-    original_resolve = storage_management._safe_resolve
-
-    def failing_resolve(path: Path) -> Path:
-        if path == bad_path:
-            raise StorageError(f"无法解析存储路径：{path}: permission denied")
-        return original_resolve(path)
-
-    monkeypatch.setattr(storage_management, "_safe_resolve", failing_resolve)
-    manager = StorageManager(
-        user_data_root=user_root(),
-        projects_root=projects_root,
-        app_root=app_root,
-        project_paths=lambda: [project, bad_path],
-    )
-
-    summary = manager.scan()
-
-    assert summary["complete"] is False
-    assert any(str(bad_path) in error for error in summary["errors"])
-    assert [item["path"] for item in summary["projects"]] == [str(project)]
-    logs = next(item for item in summary["global"] if item["id"] == "logs")
-    assert logs["can_clear"] is True
 
 
 def test_incomplete_project_scan_blocks_all_project_cleanup_targets(

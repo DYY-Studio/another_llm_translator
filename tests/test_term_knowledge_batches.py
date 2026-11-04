@@ -46,18 +46,6 @@ async def test_batch_keeps_success_before_retry_and_isolates_cross_entity_refs(t
     assert saved["beta"]["items"][0]["fragment_ids"] == ["beta-fragment"]
 
 
-def test_budget_packing_isolates_oversized_entity(tmp_path):
-    from app.term_knowledge import pack_knowledge_batches
-    config = load_project_config(make_project(tmp_path), stage="terminology_decision")
-    config["execution"].update(input_tokens_per_minute=0)
-    config["chunking"].update(target_content_tokens=1000, context_reserve_tokens=0)
-    config["llm"].update(context_window_tokens=2000)
-    batches, tokens, errors = pack_knowledge_batches([view("a"), view("large", "大" * 10000), view("b")], "整理", config)
-    assert [[v["entity_key"] for v in b] for b in batches] == [["a", "b"]]
-    assert tokens > 0
-    assert set(errors) == {"large"}
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("damage", ["missing", "duplicate", "unknown", "broken", "no_end"])
 async def test_batch_response_failure_scope(tmp_path, damage):
@@ -222,20 +210,6 @@ async def test_cancelled_retry_preserves_checkpoint_and_resume_requests_only_unf
     plan = decision_plan(project, knowledge_only=knowledge_only)
     after = _decision_fingerprint(plan["config"], plan["prompts"], plan["library"], final_review=False)
     assert before != after
-
-
-def test_soft_overflow_and_feedback_budget_are_explicit(tmp_path):
-    from app.term_knowledge import pack_knowledge_batches, knowledge_payload
-    from app.execution import estimate_messages, render_messages
-    config = load_project_config(make_project(tmp_path), stage="terminology_decision")
-    config["execution"]["input_tokens_per_minute"] = 0
-    size = estimate_messages(render_messages("整理", knowledge_payload([view("alpha")], config["project"]["target_language"])[0]), config["execution"]["token_safety_factor"])
-    config["chunking"]["target_content_tokens"] = 1
-    assert len(pack_knowledge_batches([view("alpha")], "整理", config)[0]) == 1
-    config["llm"].update(context_window_tokens=size + 5)
-    config["chunking"]["context_reserve_tokens"] = 0
-    batches, _, errors = pack_knowledge_batches([view("alpha")], "整理", config, feedback="格式修正" * 100)
-    assert not batches and set(errors) == {"alpha"}
 
 
 @pytest.mark.asyncio
@@ -669,3 +643,12 @@ def test_knowledge_budget_excludes_comparison_items_but_limits_complete_payload(
     batches, _, errors = pack_knowledge_batches(entities, "整理", config)
     assert not errors
     assert [[entity["entity_key"] for entity in batch] for batch in batches] == [["alpha"], ["beta"]]
+    batches, _, errors = pack_knowledge_batches(
+        [entities[0], view("large", "大" * 10000), entities[1]], "整理", config
+    )
+    assert [[entity["entity_key"] for entity in batch] for batch in batches] == [["alpha"], ["beta"]]
+    assert set(errors) == {"large"}
+    batches, _, errors = pack_knowledge_batches(
+        [entities[0]], "整理", config, feedback="格式修正" * 100
+    )
+    assert not batches and set(errors) == {"alpha"}

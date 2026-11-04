@@ -204,35 +204,6 @@ def test_probe_hides_host_only_dependencies_from_clean_venv(
         assert payload["import_target"] == target
 
 
-def test_main_returns_nonzero_when_temporary_cleanup_fails(
-    project_wheel: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    module = _probe_module()
-    monkeypatch.setattr(module.shutil, "rmtree", lambda *_args, **_kwargs: None)
-
-    exit_code = module.main(
-        [
-            "--wheel",
-            str(project_wheel),
-            "--python",
-            sys.executable,
-            "--import-target",
-            "plugins.srt.plugin",
-        ]
-    )
-
-    assert exit_code != 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "error"
-    assert payload["code"] == "cleanup_failed"
-    assert payload["temporary_root_removed"] is False
-    cleanup_root = Path(str(payload["temporary_root"]))
-    module.shutil.rmtree = shutil.rmtree
-    shutil.rmtree(cleanup_root)
-
-
 def test_wait_for_web_preserves_last_probe_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

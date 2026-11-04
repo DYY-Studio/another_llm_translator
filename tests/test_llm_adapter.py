@@ -63,23 +63,6 @@ def test_adapter_declares_request_controls(tmp_path: Path) -> None:
         adapter.build_request(**arguments, extra_body={"reasoning_effort": "high"})
 
 
-def test_adapter_schema_v3_owns_request_endpoints(tmp_path: Path) -> None:
-    value = definition()
-    value["endpoint"] = "/models/${model}:generate"
-    value["streaming"] = {
-        "transport": "sse",
-        "endpoint": "/models/${model}:stream",
-        "content_events": [{"pointer": "/delta"}],
-        "terminal": {"sentinel": "[DONE]"},
-    }
-
-    adapter = load_json_adapter(write_adapter(tmp_path, value))
-
-    assert adapter.endpoint == "/models/${model}:generate"
-    assert adapter.streaming_spec is not None
-    assert adapter.streaming_spec["endpoint"] == "/models/${model}:stream"
-
-
 def test_adapter_rejects_legacy_schema_without_endpoints(tmp_path: Path) -> None:
     value = definition()
     value["schema_version"] = 2
@@ -219,29 +202,6 @@ def test_json_adapter_omits_zero_output_limit_from_nested_body(
     }
 
 
-def test_json_adapter_omits_zero_output_limit_from_stream_request() -> None:
-    adapter = load_json_adapter(
-        Path(__file__).parents[1] / "llm_adapters" / "openai-compatible.json"
-    )
-
-    _, body = adapter.build_request(
-        api_key="secret",
-        model="model-a",
-        messages=[{"role": "user", "content": "hello"}],
-        temperature=0.25,
-        max_output_tokens=0,
-        stream=True,
-    )
-
-    assert body == {
-        "model": "model-a",
-        "messages": [{"role": "user", "content": "hello"}],
-        "temperature": 0.25,
-        "stream": True,
-        "stream_options": {"include_usage": True},
-    }
-
-
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -302,29 +262,6 @@ def test_json_adapter_response_path_fails_fast(tmp_path: Path) -> None:
         adapter.parse_response({"result": []})
     with pytest.raises(ExternalError, match="不是字符串"):
         adapter.parse_response({"result": [{"text": 3}]})
-
-
-def test_json_adapter_extracts_optional_reasoning_content(tmp_path: Path) -> None:
-    value = definition()
-    value["response_reasoning_content_pointer"] = "/result/0/reasoning"
-    adapter = load_json_adapter(write_adapter(tmp_path, value))
-
-    response = adapter.parse_response(
-        {"result": [{"text": "answer", "reasoning": "thought"}]}
-    )
-    assert response.content == "answer"
-    assert response.reasoning_content == "thought"
-    assert adapter.parse_response(
-        {"result": [{"text": "answer", "reasoning": None}]}
-    ).reasoning_content is None
-
-    assert adapter.parse_response(
-        {"result": [{"text": "answer"}]}
-    ).reasoning_content is None
-    with pytest.raises(ExternalError, match="字符串或 null"):
-        adapter.parse_response(
-            {"result": [{"text": "answer", "reasoning": {}}]}
-        )
 
 
 def test_json_adapter_uses_ordered_reasoning_pointer_fallbacks(

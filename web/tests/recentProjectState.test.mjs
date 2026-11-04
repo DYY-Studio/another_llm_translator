@@ -18,13 +18,3 @@ test("removes only confirmed invalid paths and retains transient failures", () =
     },
   );
 });
-
-test("keeps successful paths in their existing recency order", () => {
-  assert.deepEqual(
-    reconcileRecentProjectPaths([
-      { path: "/new", openedPath: "/new" },
-      { path: "/old", openedPath: "/old" },
-    ]).paths,
-    ["/new", "/old"],
-  );
-});

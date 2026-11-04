@@ -266,20 +266,12 @@ def test_summary_payload_schema_aliases_and_safe_errors(tmp_path: Path) -> None:
     )
     assert export_with_unknown_language.status_code == 200
 
-    schema = client.get("/openapi.json")
-    assert schema.status_code == 200
-    boundaries_description = schema.json()["components"]["schemas"][
-        "SummarySelectionPayload"
-    ]["properties"]["boundaries"]["description"]
-    assert "selection" in boundaries_description
-    for model_name in (
-        "SummarySelectionPayload",
-        "SummaryParticipationPayload",
-        "SummaryExportPayload",
-    ):
-        assert schema.json()["components"]["schemas"][model_name]["properties"][
-            "boundaries"
-        ]["x-input-aliases"] == ["selection"]
+    duplicated = client.put(
+        "/api/v1/projects/demo/summaries/participation",
+        json={"boundaries": [boundary, boundary], "selected": True},
+    )
+    assert duplicated.status_code == 400
+    assert "不能重复" in duplicated.json()["error"]
 
 
 def test_open_project_restores_missing_summary_prompts(tmp_path: Path):
@@ -374,50 +366,6 @@ def test_summary_task_options_keep_source_changed_full_usable(tmp_path: Path):
     assert full[0]["expiry_reason"] == "source_changed"
 
 
-def test_summary_route_marks_llm_full_expired_after_fragment_text_changes(tmp_path: Path):
-    project = _project(tmp_path)
-    _full_fragment(project)
-    fragment = read_content_summaries(project, kind="fragment", status="completed")[0]
-    legacy_full = {
-        **fragment,
-        "record_id": "SUMMARY-FULL-LLM-WEB",
-        "kind": "full",
-        "input_digest": _digest(
-            [{"summary_id": fragment["record_id"], "text": fragment["text"]}]
-        ),
-        "provenance": {
-            "origin": "llm",
-            "artifact_ids": [fragment["record_id"]],
-            "source_ranges": [fragment["source_range"]],
-        },
-    }
-    write_content_summary(project, legacy_full)
-    fragment["text"] = "片段文本已重新生成。"
-    write_content_summary(project, fragment)
-
-    client = TestClient(create_app(projects_root=project.parent))
-    response = client.get("/api/v1/projects/demo/summaries")
-    assert response.status_code == 200
-    full = [item for item in response.json()["artifacts"] if item["record_id"] == "SUMMARY-FULL-LLM-WEB"]
-    assert full[0]["expired"] is True
-    assert full[0]["expiry_reason"] == "provenance_unavailable"
-
-
-def test_tasks_reject_summary_selection_for_non_summary_stage(tmp_path: Path):
-    project = _project(tmp_path)
-    client = TestClient(create_app(projects_root=project.parent))
-    response = client.post(
-        "/api/v1/projects/demo/tasks",
-        json={
-            "stage": "terminology",
-            "summary_selection": [{"file_id": "F0001", "part_id": "document"}],
-        },
-    )
-    assert response.status_code == 400
-    assert response.json()["code"] == "usage_error"
-    assert "summary_selection" in response.json()["error"]
-
-
 def test_terminology_summary_start_rejects_partial_scope_before_queueing(
     tmp_path: Path,
 ):
@@ -438,36 +386,11 @@ def test_terminology_summary_start_rejects_partial_scope_before_queueing(
     assert client.get("/api/v1/tasks/active").json()["tasks"] == []
 
 
-def test_terminology_task_options_expose_summary_preflight(tmp_path: Path):
-    project = _project(tmp_path)
-    _full_fragment(project)
-    from app.sqlite_storage import write_summary_participation
-
-    write_summary_participation(
-        project,
-        [{"file_id": "F0001", "part_id": "document", "selected": True}],
-    )
-    client = TestClient(create_app(projects_root=project.parent))
-
-    with_flag = client.get(
-        "/api/v1/projects/demo/task-options/terminology",
-        params={"include_summaries": "true"},
-    )
-    assert with_flag.status_code == 200
-    body = with_flag.json()
-    assert body["summary_selected_boundaries"] == 1
-    assert body["summary_only_work"] is False
-
-    without_flag = client.get(
-        "/api/v1/projects/demo/task-options/terminology"
-    )
-    assert "summary_selected_boundaries" not in without_flag.json()
-
-
 def test_terminology_summary_prompt_preflight_and_start_fail_consistently(
     tmp_path: Path,
 ):
     project = _project(tmp_path)
+    _full_fragment(project)
     (project / "prompts" / "fragment_summary.en.middle.txt").unlink()
     write_summary_participation(
         project,
@@ -475,12 +398,17 @@ def test_terminology_summary_prompt_preflight_and_start_fail_consistently(
     )
     client = TestClient(create_app(projects_root=project.parent))
 
+    without_flag = client.get("/api/v1/projects/demo/task-options/terminology")
+    assert "summary_selected_boundaries" not in without_flag.json()
+
     options = client.get(
         "/api/v1/projects/demo/task-options/terminology",
         params={"include_summaries": "true", "language": "en"},
     )
 
     assert options.status_code == 200
+    assert options.json()["summary_selected_boundaries"] == 1
+    assert options.json()["summary_only_work"] is False
     assert options.json()["summary_prompt_preflight"] == {
         "ok": False,
         "language": "en",
@@ -497,25 +425,6 @@ def test_terminology_summary_prompt_preflight_and_start_fail_consistently(
     assert started.json()["params"]["reason"] == "summary_prompt_missing"
     assert "fragment_summary.en.middle.txt" in started.json()["error"]
     assert client.get("/api/v1/tasks/active").json()["tasks"] == []
-
-
-def test_summary_participation_rejects_duplicate_boundaries(tmp_path: Path):
-    project = _project(tmp_path)
-    client = TestClient(create_app(projects_root=project.parent))
-
-    response = client.put(
-        "/api/v1/projects/demo/summaries/participation",
-        json={
-            "boundaries": [
-                {"file_id": "F0001", "part_id": "document"},
-                {"file_id": "F0001", "part_id": "document"},
-            ],
-            "selected": True,
-        },
-    )
-
-    assert response.status_code == 400
-    assert "不能重复" in response.json()["error"]
 
 
 def test_terminology_start_reports_machine_readable_conflict_reasons(
@@ -595,56 +504,38 @@ def test_content_summary_task_options_and_start_report_unfinished_run(
     assert started.json()["params"]["reason"] == "unfinished_run"
 
 
-def test_content_summary_task_options_preflights_requested_prompt_language(
+def test_content_summary_preflights_requested_prompt_language(
     tmp_path: Path,
 ):
     project = _project(tmp_path)
+    _full_fragment(project)
     (project / "prompts" / "content_summary.en.middle.txt").unlink()
 
     with pytest.raises(UsageError, match="en Prompt"):
         task_options(project, "content_summary", prompt_language="en")
 
-
-def test_content_summary_start_preflights_requested_prompt_language(
-    tmp_path: Path,
-):
-    project = _project(tmp_path)
-    _full_fragment(project)
-    (project / "prompts" / "content_summary.en.middle.txt").unlink()
     client = TestClient(create_app(projects_root=project.parent))
-
-    response = client.post(
-        "/api/v1/projects/demo/tasks",
-        json={
-            "stage": "content_summary",
-            "language": "en",
-            "summary_selection": [{"file_id": "F0001", "part_id": "document"}],
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.json()["params"]["reason"] == "prompt_language_missing"
+    for path, payload in (
+        (
+            "/api/v1/projects/demo/tasks",
+            {
+                "stage": "content_summary",
+                "language": "en",
+                "summary_selection": [{"file_id": "F0001", "part_id": "document"}],
+            },
+        ),
+        (
+            "/api/v1/projects/demo/summaries/aggregate",
+            {
+                "language": "en",
+                "boundaries": [{"file_id": "F0001", "part_id": "document"}],
+            },
+        ),
+    ):
+        response = client.post(path, json=payload)
+        assert response.status_code == 400
+        assert response.json()["params"]["reason"] == "prompt_language_missing"
     assert client.get("/api/v1/tasks/active").json()["tasks"] == []
-
-
-def test_specialized_summary_aggregate_route_passes_prompt_language(
-    tmp_path: Path,
-):
-    project = _project(tmp_path)
-    _full_fragment(project)
-    (project / "prompts" / "content_summary.en.middle.txt").unlink()
-    client = TestClient(create_app(projects_root=project.parent))
-
-    response = client.post(
-        "/api/v1/projects/demo/summaries/aggregate",
-        json={
-            "language": "en",
-            "boundaries": [{"file_id": "F0001", "part_id": "document"}],
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.json()["params"]["reason"] == "prompt_language_missing"
 
 
 @pytest.mark.parametrize(

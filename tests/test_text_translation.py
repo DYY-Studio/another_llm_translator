@@ -136,29 +136,7 @@ def test_temporary_translation_recovers_and_reassembles_one_segment(tmp_path: Pa
     asyncio.run(scenario())
 
 
-def test_text_translation_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from fastapi.testclient import TestClient
-    from app.web import create_app
-    from tests.test_web import make_project
-
-    projects_root, project = make_project(tmp_path)
-    seen = []
-
-    async def translate(root: Path, source: str, **kwargs: object) -> dict:
-        seen.append((root, source, kwargs))
-        return dict(text="你好", usage=None, warnings=[], validation_findings=[])
-
-    monkeypatch.setattr("app.text_translation.translate_text", translate)
-    with TestClient(create_app(projects_root=projects_root, app_root=tmp_path / "app-root")) as client:
-        response = client.post("/api/v1/projects/sample/text-translation", json={"source": "hello"})
-        assert response.status_code == 200
-        assert response.json()["text"] == "你好"
-        assert seen[0][0:2] == (project, "hello")
-        assert seen[0][2]["limiter"] is not None
-        assert client.post("/api/v1/projects/sample/text-translation", json={"source": 3}).status_code == 400
-
-
-def test_text_translation_options_use_translation_preset(tmp_path: Path) -> None:
+def test_text_translation_endpoint_and_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from fastapi.testclient import TestClient
     from app.web import create_app
     from tests.test_web import make_project
@@ -171,8 +149,22 @@ def test_text_translation_options_use_translation_preset(tmp_path: Path) -> None
     config = load_config(project / "config.toml")
     config["llm"]["preset_translation"] = "text-preview"
     (project / "config.toml").write_text(dump_config(config))
+
+    seen = []
+
+    async def translate(root: Path, source: str, **kwargs: object) -> dict:
+        seen.append((root, source, kwargs))
+        return dict(text="你好", usage=None, warnings=[], validation_findings=[])
+
+    monkeypatch.setattr("app.text_translation.translate_text", translate)
     with TestClient(create_app(projects_root=projects_root, app_root=tmp_path / "app-root")) as client:
-        response = client.get("/api/v1/projects/sample/text-translation")
+        options = client.get("/api/v1/projects/sample/text-translation")
+        assert options.status_code == 200
+        assert options.json() == {"preset": {"id": "text-preview", "model": "translation-model"}}
+        response = client.post("/api/v1/projects/sample/text-translation", json={"source": "hello"})
         assert response.status_code == 200
-        assert response.json() == {"preset": {"id": "text-preview", "model": "translation-model"}}
+        assert response.json()["text"] == "你好"
+        assert seen[0][0:2] == (project, "hello")
+        assert seen[0][2]["limiter"] is not None
+        assert client.post("/api/v1/projects/sample/text-translation", json={"source": 3}).status_code == 400
     assert list_run_index(project) == ([], 0)

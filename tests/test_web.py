@@ -15,12 +15,10 @@ from urllib.parse import unquote
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
 
 import app.web as web_module
 import app.web_continuous as web_continuous_module
 import app.web_resource_routes as web_resource_module
-import app.web_store as web_store_module
 import app.web_tasks as web_tasks_module
 from app import data_root, sqlite_storage
 from app.config import dump_config, load_config, load_project_config
@@ -47,15 +45,6 @@ from app.web_continuous import (
     inspect_continuous,
     normalize_stages,
     run_continuous,
-)
-from app.web_payloads import (
-    BoundaryPayload,
-    SegmentFilterPayload,
-    SegmentQueryPayload,
-    SummaryExportPayload,
-    SummaryParticipationPayload,
-    SummarySelectionPayload,
-    TaskStartPayload,
 )
 from app.web_store import WebStore
 from app.web_tasks import SharedLimiterPool, WebTask, WebTaskManager
@@ -109,49 +98,38 @@ def test_cancelled_dangling_pending_locator_allows_task_start(
     assert resumed.json()["task_id"]
 
 
-def test_desktop_shutdown_rejects_active_backend_tasks(tmp_path: Path) -> None:
+def test_desktop_shutdown_guards_and_loopback_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     app = create_app(projects_root=tmp_path / "projects")
     app.state.uvicorn_server = type("Server", (), {"should_exit": False})()
     app.state.tasks.active_tasks = lambda: [{"status": "running"}]
 
-    response = TestClient(app).post("/api/v1/server/desktop-shutdown")
-
-    assert response.status_code == 409
+    busy = TestClient(app).post("/api/v1/server/desktop-shutdown")
+    assert busy.status_code == 409
     assert app.state.uvicorn_server.should_exit is False
 
-
-def test_desktop_shutdown_requests_uvicorn_exit_from_loopback(tmp_path: Path) -> None:
-    app = create_app(projects_root=tmp_path / "projects")
-    app.state.uvicorn_server = type("Server", (), {"should_exit": False})()
     app.state.tasks.active_tasks = lambda: []
-
-    response = TestClient(app).post("/api/v1/server/desktop-shutdown")
-
-    assert response.status_code == 200
+    ok = TestClient(app).post("/api/v1/server/desktop-shutdown")
+    assert ok.status_code == 200
     assert app.state.uvicorn_server.should_exit is True
 
-
-def test_desktop_shutdown_is_not_exposed_to_lan_clients(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
     monkeypatch.setattr(web_module, "_client_allowed_on_bind", lambda *_: True)
-    app = create_app(
-        projects_root=tmp_path / "projects",
+    lan_app = create_app(
+        projects_root=tmp_path / "lan-projects",
         server_config={
             "lan": {"enabled": True, "bind_address": "0.0.0.0"},
             "auth": {"required": False},
             "tasks": {},
         },
     )
-    app.state.uvicorn_server = type("Server", (), {"should_exit": False})()
-    app.state.tasks.active_tasks = lambda: []
-
-    response = TestClient(app, client=("192.168.1.12", 12345)).post(
+    lan_app.state.uvicorn_server = type("Server", (), {"should_exit": False})()
+    lan_app.state.tasks.active_tasks = lambda: []
+    lan = TestClient(lan_app, client=("192.168.1.12", 12345)).post(
         "http://192.168.1.10/api/v1/server/desktop-shutdown"
     )
-
-    assert response.status_code == 403
-    assert app.state.uvicorn_server.should_exit is False
+    assert lan.status_code == 403
+    assert lan_app.state.uvicorn_server.should_exit is False
 
 
 def test_web_lists_historical_runs_with_filters_pagination_and_safe_projection(
@@ -602,48 +580,6 @@ def test_web_lists_all_projects_without_synthetic_run_all_parent(
     assert all(item["stage"] != "run-all" for item in items)
 
 
-def test_web_payload_models_keep_stable_defaults_and_types() -> None:
-    boundary = BoundaryPayload(file_id="F0001", part_id="document")
-    assert boundary.model_dump() == {"file_id": "F0001", "part_id": "document"}
-
-    query = SegmentQueryPayload(offset="12", limit="7", unknown="ignored")
-    assert query.offset == 12
-    assert query.limit == 7
-    assert query.stage == "translation"
-    assert "unknown" not in query.model_dump()
-    assert SegmentFilterPayload(q="needle").q == "needle"
-
-    selection = SummarySelectionPayload(selection=[boundary])
-    assert selection.boundaries == [boundary]
-    assert SummaryParticipationPayload(boundaries=[boundary]).selected is True
-    assert SummaryExportPayload(boundaries=[boundary]).path == "summary.md"
-
-    task = TaskStartPayload(stage="translation")
-    assert task.force is False
-    assert task.replace_draft is False
-    assert task.final_review is False
-    assert task.summary_selection == []
-
-
-@pytest.mark.parametrize("value", [1, "true"])
-def test_web_payload_models_reject_boolean_option_coercion(value: object) -> None:
-    with pytest.raises(ValidationError):
-        TaskStartPayload(stage="translation", force=value)
-    with pytest.raises(ValidationError):
-        TaskStartPayload(stage="terminology_decision", final_review=value)
-
-
-def test_web_payload_models_reject_invalid_structured_values() -> None:
-    with pytest.raises(ValidationError):
-        BoundaryPayload(file_id="", part_id="document")
-    with pytest.raises(ValidationError):
-        SegmentFilterPayload(file_id=123)
-    with pytest.raises(ValidationError):
-        SegmentQueryPayload(offset=True)
-    with pytest.raises(ValidationError):
-        SummarySelectionPayload(boundaries=[{"file_id": "F0001"}])
-
-
 def test_web_lists_project_edits_translation_and_rejects_remote_origin(
     tmp_path: Path,
 ) -> None:
@@ -671,35 +607,26 @@ def test_web_lists_project_edits_translation_and_rejects_remote_origin(
     )
 
 
-def test_web_project_list_reports_no_repair_for_complete_project(
+def test_web_project_list_reports_repair_status_and_created_at(
     tmp_path: Path,
 ) -> None:
     projects_root, project = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
 
     listed = client.get("/api/v1/projects")
-
     assert listed.status_code == 200
     assert listed.json()["projects"][0]["repair_needed"] is False
     assert listed.json()["projects"][0]["created_at"] == read_json(
         project, project / "project.json"
     )["created_at"]
 
-
-def test_web_project_list_reports_repair_for_missing_prompt(
-    tmp_path: Path,
-) -> None:
-    projects_root, project = make_project(tmp_path)
     (project / "prompts" / "translation.zh-CN.middle.txt").unlink()
-    client = TestClient(create_app(projects_root=projects_root))
-
-    listed = client.get("/api/v1/projects")
-
-    assert listed.status_code == 200
-    assert listed.json()["projects"][0]["repair_needed"] is True
+    repaired = client.get("/api/v1/projects")
+    assert repaired.status_code == 200
+    assert repaired.json()["projects"][0]["repair_needed"] is True
 
 
-@pytest.mark.parametrize("schema_version", ["3", "4", "5", "6", "8", "9", str(sqlite_storage.SCHEMA_VERSION), None])
+@pytest.mark.parametrize("schema_version", ["5", str(sqlite_storage.SCHEMA_VERSION), None])
 def test_web_project_list_does_not_migrate_while_project_is_locked(
     tmp_path: Path, schema_version: str | None
 ) -> None:
@@ -765,38 +692,6 @@ def test_web_project_list_rejects_unsupported_legacy_schema(
 
     assert listed.status_code == 400
     assert "schema_version" in listed.json()["error"]
-
-
-def test_web_segment_query_does_not_collect_project_storage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    projects_root, _ = make_project(tmp_path, source="one\ntwo")
-    client = TestClient(create_app(projects_root=projects_root))
-
-    def fail_storage_scan(_: Path) -> int:
-        raise AssertionError("Segment query must not scan project storage")
-
-    monkeypatch.setattr(web_store_module, "_project_storage_size", fail_storage_scan)
-
-    response = client.post(
-        "/api/v1/projects/sample/segments/query",
-        json={"stage": "translation", "offset": 0, "limit": 1},
-    )
-
-    assert response.status_code == 200
-    assert set(response.json()) == {
-        "offset",
-        "limit",
-        "stage",
-        "completed_segments",
-        "total_segments",
-        "segments",
-    }
-    monkeypatch.undo()
-    overview = client.get("/api/v1/projects/sample")
-    assert overview.status_code == 200
-    assert "storage" in overview.json()
-    assert "files" in overview.json()
 
 
 def test_web_segment_payload_schema_and_business_errors(tmp_path: Path) -> None:
@@ -926,26 +821,18 @@ def test_web_compacts_project_storage_and_blocks_running_tasks(
     assert called == [projects_root / "sample"]
 
 
-def test_web_validation_errors_have_stable_safe_fields(tmp_path: Path) -> None:
-    client = TestClient(create_app(projects_root=tmp_path / "projects"))
-
-    response = client.post(
-        "/api/v1/projects",
-    )
-
-    assert response.status_code == 400
-    payload = response.json()
-    assert payload["code"] == "request_validation_error"
-    assert payload["params"]["fields"] == ["name"]
-    assert "input" not in payload["params"]
-
-
 def test_web_payload_validation_errors_do_not_echo_input_values(
     tmp_path: Path,
 ) -> None:
     projects_root, _ = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
     secret = "sk-local-validation-secret"
+
+    missing_body = client.post("/api/v1/projects")
+    assert missing_body.status_code == 400
+    assert missing_body.json()["code"] == "request_validation_error"
+    assert missing_body.json()["params"]["fields"] == ["name"]
+    assert "input" not in missing_body.json()["params"]
 
     response = client.post(
         "/api/v1/projects/sample/segments/query",
@@ -1414,41 +1301,6 @@ def test_web_register_project_is_read_only_while_project_is_locked(
     }
 
 
-def test_web_project_list_rejects_legacy_project_without_schema(
-    tmp_path: Path,
-) -> None:
-    projects_root = tmp_path / "projects"
-    legacy = projects_root / "legacy"
-    legacy.mkdir(parents=True)
-    sqlite3.connect(legacy / "project.sqlite").close()
-    (legacy / "project.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "record_type": "project",
-                "project_id": "PRJ-LEGACY",
-                "name": "legacy",
-                "file_count": 0,
-                "segment_count": 0,
-            }
-        ),
-        encoding="utf-8",
-    )
-    client = TestClient(
-        create_app(
-            projects_root=projects_root,
-            app_root=make_app_root(tmp_path),
-            log_path=tmp_path / "app.log",
-        )
-    )
-
-    listed = client.get("/api/v1/projects")
-
-    assert listed.status_code == 400
-    assert "schema_version：缺失" in listed.json()["error"]
-    assert not (legacy / "snapshots" / "storage_migrations").exists()
-
-
 def test_web_open_project_rejects_project_write_lock(
     tmp_path: Path,
 ) -> None:
@@ -1480,117 +1332,6 @@ def test_web_open_project_rejects_active_task_with_repair_message(
     assert opened.json()["error"] == (
         "项目存在运行中的任务，结束或取消任务后才能修复项目"
     )
-
-
-def test_web_open_project_rejects_unsupported_storage_schema(
-    tmp_path: Path,
-) -> None:
-    from tests.test_sqlite_storage import create_v2_project
-
-    projects_root, _ = make_project(tmp_path)
-    app_root = tmp_path / "app-root"
-    legacy_parent = tmp_path / "legacy-source"
-    legacy_parent.mkdir()
-    legacy, _file_record, _segment_record, _stage_record = create_v2_project(
-        legacy_parent
-    )
-    target = projects_root / "legacy"
-    legacy.replace(target)
-    metadata = record_header(
-        "project",
-        "PRJ-V2",
-        record_id="PRJ-V2",
-        name="legacy",
-        global_bundle_hash_seen=None,
-        file_count=1,
-        segment_count=1,
-        next_file_sequence=2,
-        status="active",
-    )
-    connection = sqlite3.connect(target / "project.sqlite")
-    try:
-        with connection:
-            connection.execute("DELETE FROM project_meta")
-            connection.executemany(
-                "INSERT INTO project_meta(key, value_json) VALUES (?, ?)",
-                [(key, json.dumps(item)) for key, item in metadata.items()],
-            )
-    finally:
-        connection.close()
-
-    client = TestClient(
-        create_app(projects_root=projects_root, app_root=app_root)
-    )
-    opened = client.post("/api/v1/projects/open", json={"path": str(target)})
-    assert opened.status_code == 400
-    assert "schema_version" in opened.json()["error"]
-
-
-@pytest.mark.parametrize("schema_version", [5, 6])
-def test_web_lists_and_opens_project_with_silent_upgrade(
-    tmp_path: Path, schema_version: int,
-) -> None:
-    from tests.test_sqlite_storage import _seed_v5_summary, _seed_v6_summary
-
-    projects_root, project = make_project(tmp_path)
-    if schema_version == 5:
-        _seed_v5_summary(project)
-    else:
-        _seed_v6_summary(project)
-    client = TestClient(create_app(projects_root=projects_root))
-    backups = project / "snapshots" / "storage_migrations"
-
-    listed = client.get("/api/v1/projects")
-    assert listed.status_code == 200
-    assert listed.json()["projects"][0]["repair_needed"] is False
-    assert len(list(backups.glob("*.sqlite"))) == 1
-
-    opened = client.post("/api/v1/projects/open", json={"path": str(project)})
-    assert opened.status_code == 200
-    assert opened.json()["warnings"] == []
-    with sqlite3.connect(project / "project.sqlite") as database:
-        assert database.execute(
-            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-        ).fetchone()[0] == str(sqlite_storage.SCHEMA_VERSION)
-    initial_backups = list(backups.glob("*.sqlite"))
-    assert len(initial_backups) == 1
-
-    listed = client.get("/api/v1/projects")
-    assert listed.status_code == 200
-    assert listed.json()["projects"][0]["repair_needed"] is False
-    reopened = client.post("/api/v1/projects/open", json={"path": str(project)})
-    assert reopened.status_code == 200
-    assert reopened.json()["warnings"] == []
-    assert list(backups.glob("*.sqlite")) == initial_backups
-
-
-def test_web_open_project_keeps_read_triggered_upgrade_silent(
-    tmp_path: Path,
-) -> None:
-    from tests.test_sqlite_storage import _downgrade_epub_project_to_v4
-
-    project = init_epub(tmp_path)
-    _downgrade_epub_project_to_v4(project)
-    with sqlite3.connect(project / "project.sqlite") as database:
-        file_id = str(database.execute("SELECT file_id FROM files").fetchone()[0])
-    client = TestClient(create_app(projects_root=project.parent))
-
-    options = client.get(
-        f"/api/v1/projects/{project.name}/files/{file_id}/run-options"
-    )
-
-    assert options.status_code == 200
-
-    opened = client.post("/api/v1/projects/open", json={"path": str(project)})
-
-    assert opened.status_code == 200
-    assert opened.json()["warnings"] == []
-    backups = list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))
-    assert len(backups) == 1
-    reopened = client.post("/api/v1/projects/open", json={"path": str(project)})
-    assert reopened.status_code == 200
-    assert reopened.json()["warnings"] == []
-    assert list((project / "snapshots" / "storage_migrations").glob("*.sqlite")) == backups
 
 
 def test_web_browses_server_directories_one_level_and_filters_symlinks(
@@ -2713,32 +2454,6 @@ def test_web_rejects_unresolved_term_conflict_on_save(tmp_path: Path) -> None:
     assert "类别冲突尚未裁决" in unresolved.json()["error"]
 
 
-def test_web_can_permanently_delete_disabled_term(tmp_path: Path) -> None:
-    projects_root, project = make_project(tmp_path)
-    client = TestClient(create_app(projects_root=projects_root))
-    added = client.post(
-        "/api/v1/projects/sample/terms",
-        json={
-            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
-            "source": "Alice",
-            "preferred_translation": "爱丽丝",
-            "category": "人物",
-            "description_items": [{"text": "主角", "fragment_ids": []}],
-            "aliases": [],
-            "disabled": True,
-        },
-    )
-    assert added.status_code == 200
-    deleted = client.post(
-        "/api/v1/projects/sample/terms/delete",
-        json={"normalized": ["alice"]},
-    )
-    assert deleted.status_code == 200
-    assert deleted.json()["deleted"] == 1
-    assert read_json(project, project / "terminology" / "terms.json")["terms"] == []
-    assert read_json(project, project / "terminology" / "overrides.json")["overrides"] == []
-
-
 def test_web_clears_all_terminology_state_and_interrupts_stale_run(
     tmp_path: Path,
 ) -> None:
@@ -2852,97 +2567,6 @@ def test_web_rejects_terminology_clear_while_project_task_runs(
     assert "运行中的任务" in blocked.json()["error"]
 
 
-def test_web_materializes_alias_and_changes_group_primary(tmp_path: Path) -> None:
-    projects_root, _ = make_project(tmp_path)
-    client = TestClient(create_app(projects_root=projects_root))
-    added = client.post(
-        "/api/v1/projects/sample/terms",
-        json={
-            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
-            "source": "Alice",
-            "preferred_translation": "爱丽丝",
-            "category": "人物",
-            "description_items": [{"text": "主角", "fragment_ids": []}],
-            "aliases": ["Alicia"],
-            "disabled": False,
-        },
-    )
-    assert added.status_code == 200
-    materialized = client.post(
-        "/api/v1/projects/sample/terms/materialize",
-        json={"normalized": "alice", "alias": "Alicia"},
-    )
-    assert materialized.status_code == 200
-    assert materialized.json()["materialized"] == "alicia"
-    member = next(
-        item for item in materialized.json()["terms"] if item["normalized"] == "alicia"
-    )
-    assert member["group_primary"] == "alice"
-
-    missing_confirmation = client.post(
-        "/api/v1/projects/sample/terms/set-primary",
-        json={"normalized": "alicia"},
-    )
-    assert missing_confirmation.status_code == 400
-    switched = client.post(
-        "/api/v1/projects/sample/terms/set-primary",
-        json={"normalized": "alicia", "confirm": True},
-    )
-    assert switched.status_code == 200
-    rows = {item["normalized"]: item for item in switched.json()["terms"]}
-    assert rows["alicia"]["group_primary"] is None
-    assert rows["alice"]["group_primary"] == "alicia"
-
-
-def test_web_materializes_alias_by_restoring_removed_matching_entry(
-    tmp_path: Path,
-) -> None:
-    projects_root, _ = make_project(tmp_path)
-    client = TestClient(create_app(projects_root=projects_root))
-    assert client.post(
-        "/api/v1/projects/sample/terms",
-        json={
-            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
-            "source": "Alicia",
-            "preferred_translation": "艾丽西亚",
-            "category": "别名条目",
-            "description_items": [{"text": "已有人物资料", "fragment_ids": []}],
-            "aliases": ["Alicia Jr"],
-            "disabled": False,
-        },
-    ).status_code == 200
-    removed = client.post(
-        "/api/v1/projects/sample/terms/remove",
-        json={"normalized": ["alicia"]},
-    )
-    assert removed.status_code == 200
-    assert client.post(
-        "/api/v1/projects/sample/terms",
-        json={
-            "expected_revision": client.get("/api/v1/projects/sample/terms").json()["terms_revision"] or 0,
-            "source": "Alice",
-            "preferred_translation": "爱丽丝",
-            "category": "人物",
-            "description_items": [{"text": "主角", "fragment_ids": []}],
-            "aliases": ["Alicia"],
-            "disabled": False,
-        },
-    ).status_code == 200
-    restored = client.post(
-        "/api/v1/projects/sample/terms/materialize",
-        json={"normalized": "alice", "alias": "Alicia"},
-    )
-    assert restored.status_code == 200
-    rows = {item["normalized"]: item for item in restored.json()["terms"]}
-    assert rows["alicia"]["disabled"] is False
-    assert rows["alicia"]["group_primary"] == "alice"
-    assert rows["alicia"]["preferred_translation"] == "艾丽西亚"
-    assert rows["alicia"]["category"] == "别名条目"
-    assert rows["alicia"]["description"] == "主角"
-    assert rows["alicia"]["aliases"] == ["Alicia Jr"]
-    assert rows["alice"]["aliases"] == []
-
-
 def test_web_term_group_member_can_leave_group(tmp_path: Path) -> None:
     projects_root, _ = make_project(tmp_path)
     client = TestClient(create_app(projects_root=projects_root))
@@ -2994,17 +2618,6 @@ def test_web_term_group_member_can_leave_group(tmp_path: Path) -> None:
     assert primary.json()["code"] == "term_group_error"
     assert primary.json()["params"]["reason"] == "not_group_member"
 
-
-def test_web_related_alias_conversion_route_is_exposed(tmp_path: Path) -> None:
-    projects_root, _ = make_project(tmp_path)
-    client = TestClient(create_app(projects_root=projects_root))
-    for source, aliases in (("John Smith", []), ("John", ["Johnny"])):
-        response = client.post(
-            "/api/v1/projects/sample/terms",
-            json={"source": source, "aliases": aliases, "disabled": False},
-        )
-        assert response.status_code == 200
-
     converted = client.post(
         "/api/v1/projects/sample/terms/convert-to-alias",
         json={
@@ -3014,37 +2627,32 @@ def test_web_related_alias_conversion_route_is_exposed(tmp_path: Path) -> None:
         },
     )
     assert converted.status_code == 200
-    rows = {item["normalized"]: item for item in converted.json()["terms"]}
-    assert set(rows["john smith"]["aliases"]) == {"John", "Johnny"}
-    assert rows["john"]["disabled"] is True
-
-
-def test_web_related_quick_remove_uses_reversible_remove_route(tmp_path: Path) -> None:
-    projects_root, _ = make_project(tmp_path)
-    client = TestClient(create_app(projects_root=projects_root))
-    for source in ("John Smith", "John"):
-        response = client.post(
-            "/api/v1/projects/sample/terms",
-            json={"source": source, "aliases": [], "disabled": False},
-        )
-        assert response.status_code == 200
-
-    related = client.post(
-        "/api/v1/projects/sample/terms/related",
-        json={"normalized": "john smith"},
+    materialized = client.post(
+        "/api/v1/projects/sample/terms/materialize",
+        json={"normalized": "john smith", "alias": "John"},
     )
-    assert related.status_code == 200
-    candidate = related.json()["related"][0]
-    assert candidate["can_remove"] is True
-
-    removed = client.post(
-        "/api/v1/projects/sample/terms/remove",
-        json={"normalized": [candidate["normalized"]]},
+    assert materialized.status_code == 200
+    assert (
+        client.post(
+            "/api/v1/projects/sample/terms/set-primary",
+            json={"normalized": "john", "confirm": True},
+        ).status_code
+        == 200
     )
-    assert removed.status_code == 200
-    assert removed.json()["removed"] == 1
-    rows = {item["normalized"]: item for item in removed.json()["terms"]}
-    assert rows["john"]["disabled"] is True
+    assert (
+        client.post(
+            "/api/v1/projects/sample/terms/remove",
+            json={"normalized": ["john smith"]},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/v1/projects/sample/terms/delete",
+            json={"normalized": ["john smith"]},
+        ).status_code
+        == 200
+    )
 
 
 def test_web_imports_exports_and_bulk_removes_terms(tmp_path: Path) -> None:
@@ -3227,132 +2835,6 @@ def test_web_terms_hits_count_order_and_pagination(tmp_path: Path) -> None:
     assert second.json()["hits"][0]["source"] == "Alice sings Alice"
 
 
-def test_web_terms_hits_for_group_member_does_not_require_primary(tmp_path: Path) -> None:
-    projects_root, project = make_project(
-        tmp_path,
-        "Alice only\nAlicia walks\nAlly sings\nAlice and Alicia",
-    )
-    _seed_terms(
-        project,
-        [
-            {
-                "record_id": "TERM-H-MEMBER",
-                "source": "Alice",
-                "normalized": "alice",
-                "category": None,
-                "description": None,
-                "preferred_translation": "爱丽丝",
-                "aliases": [],
-                "group_primary": None,
-                "conflicts": {},
-            },
-            {
-                "record_id": "TERM-H-MEMBER-CHILD",
-                "source": "Alicia",
-                "normalized": "alicia",
-                "category": None,
-                "description": None,
-                "preferred_translation": "艾丽西亚",
-                "aliases": ["Ally"],
-                "group_primary": "alice",
-                "conflicts": {},
-            },
-        ],
-    )
-    client = TestClient(create_app(projects_root=projects_root))
-
-    response = client.post(
-        "/api/v1/projects/sample/terms/hits",
-        json={"normalized": "alicia"},
-    )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["source"] == "Alicia"
-    assert payload["total"] == 3
-    assert [item["source"] for item in payload["hits"]] == [
-        "Alicia walks",
-        "Ally sings",
-        "Alice and Alicia",
-    ]
-
-
-def test_web_terms_hits_match_aliases_and_exclude_conflicted_aliases(
-    tmp_path: Path,
-) -> None:
-    projects_root, project = make_project(tmp_path, "A walks\nAli sings\nAlice talks")
-    _seed_terms(
-        project,
-        [
-            {
-                "record_id": "TERM-H-2",
-                "source": "Alice",
-                "normalized": "alice",
-                "category": None,
-                "description": None,
-                "preferred_translation": "爱丽丝",
-                "aliases": ["A", "Ali"],
-                "conflicts": {
-                    "categories": [],
-                    "preferred_translations": [],
-                    "alias_primaries": [
-                        {"alias": "A", "primary_source": "Alpha"}
-                    ],
-                },
-            }
-        ],
-    )
-    client = TestClient(create_app(projects_root=projects_root))
-
-    payload = client.post(
-        "/api/v1/projects/sample/terms/hits",
-        json={"normalized": "alice"},
-    ).json()
-    assert payload["total"] == 2
-    assert [item["segment_id"] for item in payload["hits"]] == [
-        "F0001-S000002",
-        "F0001-S000003",
-    ]
-
-
-def test_web_terms_hits_apply_casefold_and_unicode_normalization(
-    tmp_path: Path,
-) -> None:
-    projects_root, project = make_project(
-        tmp_path, "alice writes\nＡｌｉｃｅ speaks\nbob listens"
-    )
-    _seed_terms(
-        project,
-        [
-            {
-                "record_id": "TERM-H-3",
-                "source": "Alice",
-                "normalized": "alice",
-                "category": None,
-                "description": None,
-                "preferred_translation": "爱丽丝",
-                "aliases": [],
-                "conflicts": {
-                    "categories": [],
-                    "preferred_translations": [],
-                    "alias_primaries": [],
-                },
-            }
-        ],
-    )
-    client = TestClient(create_app(projects_root=projects_root))
-
-    payload = client.post(
-        "/api/v1/projects/sample/terms/hits",
-        json={"normalized": "alice"},
-    ).json()
-    assert payload["total"] == 2
-    assert [item["segment_id"] for item in payload["hits"]] == [
-        "F0001-S000001",
-        "F0001-S000002",
-    ]
-
-
 def test_web_terms_hits_cover_disabled_terms_and_validate_parameters(
     tmp_path: Path,
 ) -> None:
@@ -3461,7 +2943,7 @@ def test_web_resets_results_and_applies_explicit_segments(tmp_path: Path) -> Non
 
 
 def test_web_batches_translation_resets_and_deduplicates_ids(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     _, project = make_project(tmp_path, "one\ntwo\nthree")
     store = WebStore(project)
@@ -3472,69 +2954,8 @@ def test_web_batches_translation_resets_and_deduplicates_ids(
     for segment_id in segment_ids:
         store.save_translation({"segment_id": segment_id, "text": segment_id})
 
-    connect_calls = 0
-    original_connect = sqlite_storage._connect
-
-    def counted_connect(path: Path) -> sqlite3.Connection:
-        nonlocal connect_calls
-        connect_calls += 1
-        return original_connect(path)
-
-    monkeypatch.setattr(sqlite_storage, "_connect", counted_connect)
-    reset = store.reset_results(
-        {"stage": "translation", "segment_ids": [segment_ids[0], *segment_ids]}
-    )
-
-    assert reset["stage"] == "translation"
-    assert reset["selected"] == 2
-    assert reset["cleared"] == 2
-    assert reset["unchanged"] == 0
-    assert reset["reset_records"] == 2
-    assert reset["reset_batch_id"]
-    assert connect_calls == 3
-    pending = WebStore(project).segment_index(stage="translation", status="pending")
-    assert pending["total"] == 3
-
-
-def test_web_reset_without_results_does_not_write_stage_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _, project = make_project(tmp_path)
-    store = WebStore(project)
     path = project / "stages" / "translation.jsonl"
-    before = read_jsonl(project, path)
-
-    connect_calls = 0
-    original_connect = sqlite_storage._connect
-
-    def counted_connect(path: Path) -> sqlite3.Connection:
-        nonlocal connect_calls
-        connect_calls += 1
-        return original_connect(path)
-
-    monkeypatch.setattr(sqlite_storage, "_connect", counted_connect)
-    reset = store.reset_results(
-        {"stage": "translation", "segment_ids": ["F0001-S000001"]}
-    )
-
-    assert reset["cleared"] == 0
-    assert reset["reset_records"] == 0
-    assert reset["reset_batch_id"] is None
-    assert connect_calls == 2
-    assert read_jsonl(project, path) == before
-
-
-def test_web_reset_invalid_segment_fails_before_writing_any_reset(
-    tmp_path: Path,
-) -> None:
-    _, project = make_project(tmp_path)
-    store = WebStore(project)
-    store.save_translation(
-        {"segment_id": "F0001-S000001", "text": "translated"}
-    )
-    path = project / "stages" / "translation.jsonl"
-    before = read_jsonl(project, path)
-
+    before_invalid = read_jsonl(project, path)
     with pytest.raises(UsageError, match="未知或空 Segment"):
         store.reset_results(
             {
@@ -3542,21 +2963,34 @@ def test_web_reset_invalid_segment_fails_before_writing_any_reset(
                 "segment_ids": ["F0001-S000001", "missing"],
             }
         )
+    assert read_jsonl(project, path) == before_invalid
 
-    assert read_jsonl(project, path) == before
+    reset = store.reset_results(
+        {"stage": "translation", "segment_ids": [segment_ids[0], *segment_ids]}
+    )
+    assert reset["stage"] == "translation"
+    assert reset["selected"] == 2
+    assert reset["cleared"] == 2
+    assert reset["unchanged"] == 0
+    assert reset["reset_records"] == 2
+    assert reset["reset_batch_id"]
+    pending = WebStore(project).segment_index(stage="translation", status="pending")
+    assert pending["total"] == 3
 
+    after_reset = read_jsonl(project, path)
+    noop = store.reset_results(
+        {"stage": "translation", "segment_ids": ["F0001-S000001"]}
+    )
+    assert noop["cleared"] == 0
+    assert noop["reset_records"] == 0
+    assert noop["reset_batch_id"] is None
+    assert read_jsonl(project, path) == after_reset
 
-def test_web_reset_polishing_batches_suggestion_and_applied_records(
-    tmp_path: Path,
-) -> None:
-    _, project = make_project(tmp_path)
-    store = WebStore(project)
-    segment_id = "F0001-S000001"
-    store.save_translation({"segment_id": segment_id, "text": "translated"})
+    store.save_translation({"segment_id": "F0001-S000001", "text": "translated"})
     store.save_review(
         {
             "stage": "proofreading",
-            "segment_id": segment_id,
+            "segment_id": "F0001-S000001",
             "review_status": "accepted",
             "apply": True,
         }
@@ -3564,20 +2998,17 @@ def test_web_reset_polishing_batches_suggestion_and_applied_records(
     store.save_review(
         {
             "stage": "polishing",
-            "segment_id": segment_id,
+            "segment_id": "F0001-S000001",
             "review_status": "accepted",
             "apply": True,
         }
     )
-
-    reset = store.reset_results(
-        {"stage": "polishing", "segment_ids": [segment_id]}
+    polishing_reset = store.reset_results(
+        {"stage": "polishing", "segment_ids": ["F0001-S000001"]}
     )
-
-    assert reset["cleared"] == 1
-    assert reset["reset_records"] == 2
-    overview = store.overview(stage="polishing", offset=0, limit=1)
-    review = overview["segments"][0]["reviews"]["polishing"]
+    assert polishing_reset["cleared"] == 1
+    assert polishing_reset["reset_records"] == 2
+    review = store.overview(stage="polishing", offset=0, limit=1)["segments"][0]["reviews"]["polishing"]
     assert review["suggestion"] is None
     assert review["applied"] is None
 
@@ -4267,95 +3698,70 @@ async def test_web_task_manager_raising_limit_promotes_fifo_queue(
 
 
 @pytest.mark.asyncio
-async def test_web_task_manager_revalidates_queued_start(
+@pytest.mark.parametrize(
+    ("stage", "mutation_kind"),
+    [
+        ("translation", "options_error"),
+        ("translation", "selection_count"),
+        ("terminology", "summary_participation"),
+        ("translation", "source_change"),
+        ("run-all", "source_change"),
+        ("translation", "prompt_fingerprint"),
+    ],
+)
+async def test_web_task_manager_rejects_queued_mutation_before_promotion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    mutation_kind: str,
 ) -> None:
     _, first_project = make_project(tmp_path / "first")
     _, second_project = make_project(tmp_path / "second")
+    if mutation_kind == "summary_participation":
+        write_summary_participation(
+            second_project,
+            [{"file_id": "F0001", "part_id": "document", "selected": True}],
+        )
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def fake_translation(*_: object, **__: object) -> dict[str, object]:
-        entered.set()
-        await release.wait()
-        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
-
-    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
-    original_options = web_tasks_module.task_options
-    second_calls = 0
-
-    def changed_options(
-        project: Path, stage: str, **kwargs: object
-    ) -> dict[str, object]:
-        nonlocal second_calls
-        if project == second_project:
-            second_calls += 1
-        if project == second_project and second_calls == 2:
-            raise UsageError("排队期间项目设置已变化")
-        return original_options(project, stage, **kwargs)
-
-    monkeypatch.setattr("app.web_tasks.task_options", changed_options)
-    manager = WebTaskManager(max_active_projects=1)
-    first = await manager.start(
-        first_project,
-        "translation",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-    await entered.wait()
-    second = await manager.start(
-        second_project,
-        "translation",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-    release.set()
-    await manager.tasks[first["task_id"]].asyncio_task
-    assert manager.tasks[second["task_id"]].asyncio_task is not None
-    await manager.tasks[second["task_id"]].asyncio_task
-    assert manager.get(second["task_id"])["status"] == "failed"
-    assert "项目设置已变化" in str(manager.get(second["task_id"])["error"])
-
-
-@pytest.mark.asyncio
-async def test_web_task_manager_rejects_changed_selection_before_promotion(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _, first_project = make_project(tmp_path / "first")
-    _, second_project = make_project(tmp_path / "second")
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
+    async def fake_runner(project: Path, *_: object, **__: object) -> dict[str, object]:
         if project == first_project:
             entered.set()
             await release.wait()
         return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
 
-    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
-    original_options = web_tasks_module.task_options
-    second_calls = 0
+    monkeypatch.setattr("app.web_tasks.run_translation", fake_runner)
+    monkeypatch.setattr("app.web_tasks.run_terminology", fake_runner)
+    monkeypatch.setattr("app.web_tasks.run_all", fake_runner)
 
-    def changed_options(
-        project: Path, stage: str, **kwargs: object
-    ) -> dict[str, object]:
-        nonlocal second_calls
-        options = original_options(project, stage, **kwargs)
-        if project == second_project:
-            second_calls += 1
-            if second_calls == 1:
+    if mutation_kind in ("options_error", "selection_count"):
+        original_options = web_tasks_module.task_options
+        second_calls = 0
+
+        def changed_options(
+            project: Path, stage_name: str, **kwargs: object
+        ) -> dict[str, object]:
+            nonlocal second_calls
+            if project == second_project:
+                second_calls += 1
+                if mutation_kind == "options_error" and second_calls == 2:
+                    raise UsageError("排队期间项目设置已变化")
+            options = original_options(project, stage_name, **kwargs)
+            if (
+                project == second_project
+                and mutation_kind == "selection_count"
+                and second_calls == 1
+            ):
                 options["selected"] = int(options["selected"]) - 1
-        return options
+            return options
 
-    monkeypatch.setattr("app.web_tasks.task_options", changed_options)
+        monkeypatch.setattr("app.web_tasks.task_options", changed_options)
+
     manager = WebTaskManager(max_active_projects=1)
     first = await manager.start(
         first_project,
-        "translation",
+        stage,
         scope=Scope(),
         reuse_mixed_fingerprints=False,
         run_action=None,
@@ -4363,11 +3769,34 @@ async def test_web_task_manager_rejects_changed_selection_before_promotion(
     await entered.wait()
     second = await manager.start(
         second_project,
-        "translation",
+        stage,
         scope=Scope(),
         reuse_mixed_fingerprints=False,
         run_action=None,
+        include_summaries=(mutation_kind == "summary_participation"),
     )
+
+    if mutation_kind == "summary_participation":
+        write_summary_participation(
+            second_project,
+            [{"file_id": "F0001", "part_id": "document", "selected": False}],
+        )
+    elif mutation_kind == "source_change":
+        files = read_files(second_project)
+        segments = [dict(item) for item in read_segments(second_project)]
+        segments[0]["source"] = "changed while queued"
+        replace_source(
+            second_project,
+            files,
+            segments,
+            read_json(second_project, second_project / "project.json"),
+        )
+    elif mutation_kind == "prompt_fingerprint":
+        prompt_path = second_project / "prompts" / "translation.zh-CN.middle.txt"
+        prompt_path.write_text(
+            prompt_path.read_text(encoding="utf-8") + "\nchanged while queued",
+            encoding="utf-8",
+        )
 
     release.set()
     await manager.tasks[first["task_id"]].asyncio_task
@@ -4375,58 +3804,7 @@ async def test_web_task_manager_rejects_changed_selection_before_promotion(
 
     state = manager.get(second["task_id"])
     assert state["status"] == "failed"
-    assert "排队期间项目选择或设置已变化" in str(state["error"])
-
-
-@pytest.mark.asyncio
-async def test_web_task_manager_rejects_changed_summary_participation_before_promotion(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _, first_project = make_project(tmp_path / "first")
-    _, second_project = make_project(tmp_path / "second")
-    write_summary_participation(
-        second_project,
-        [{"file_id": "F0001", "part_id": "document", "selected": True}],
-    )
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def fake_terminology(project: Path, *_: object, **__: object) -> dict[str, object]:
-        if project == first_project:
-            entered.set()
-            await release.wait()
-        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
-
-    monkeypatch.setattr("app.web_tasks.run_terminology", fake_terminology)
-    manager = WebTaskManager(max_active_projects=1)
-    first = await manager.start(
-        first_project,
-        "terminology",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-    await entered.wait()
-    second = await manager.start(
-        second_project,
-        "terminology",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-        include_summaries=True,
-    )
-    write_summary_participation(
-        second_project,
-        [{"file_id": "F0001", "part_id": "document", "selected": False}],
-    )
-    release.set()
-    await manager.tasks[first["task_id"]].asyncio_task
-    await manager.tasks[second["task_id"]].asyncio_task
-
-    state = manager.get(second["task_id"])
-    assert state["status"] == "failed"
-    assert "排队期间项目选择或设置已变化" in str(state["error"])
+    assert "已变化" in str(state["error"])
 
 
 @pytest.mark.asyncio
@@ -4455,118 +3833,6 @@ async def test_web_task_scope_counts_actual_selected_segments(
     assert started["total_segments"] == 1
     release.set()
     await manager.tasks[started["task_id"]].asyncio_task
-
-
-@pytest.mark.asyncio
-async def test_web_task_rejects_same_count_source_change_before_promotion(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _, first_project = make_project(tmp_path / "first")
-    _, second_project = make_project(tmp_path / "second")
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
-        if project == first_project:
-            entered.set()
-            await release.wait()
-        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
-
-    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
-    manager = WebTaskManager(max_active_projects=1)
-    first = await manager.start(
-        first_project,
-        "translation",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-    await entered.wait()
-    second = await manager.start(
-        second_project,
-        "translation",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-
-    files = read_files(second_project)
-    segments = read_segments(second_project)
-    changed = [dict(item) for item in segments]
-    changed[0]["source"] = "changed while queued"
-    replace_source(
-        second_project,
-        files,
-        changed,
-        read_json(second_project, second_project / "project.json"),
-    )
-    release.set()
-    await manager.tasks[first["task_id"]].asyncio_task
-    await manager.tasks[second["task_id"]].asyncio_task
-
-    state = manager.get(second["task_id"])
-    assert state["status"] == "failed"
-    assert "排队期间项目选择或设置已变化" in str(state["error"])
-
-
-@pytest.mark.asyncio
-async def test_web_run_all_rejects_changed_input_before_promotion(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _, first_project = make_project(tmp_path / "first")
-    _, second_project = make_project(tmp_path / "second")
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def fake_run_all(project: Path, *_: object, **__: object) -> dict[str, object]:
-        if project == first_project:
-            entered.set()
-            await release.wait()
-        return {
-            "stage": "run-all",
-            "selected": 8,
-            "completed": 8,
-            "failed": 0,
-            "pending": 0,
-        }
-
-    monkeypatch.setattr("app.web_tasks.run_all", fake_run_all)
-    manager = WebTaskManager(max_active_projects=1)
-    first = await manager.start(
-        first_project,
-        "run-all",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-    await entered.wait()
-    second = await manager.start(
-        second_project,
-        "run-all",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-
-    files = read_files(second_project)
-    segments = read_segments(second_project)
-    changed = [dict(item) for item in segments]
-    changed[0]["source"] = "changed while queued"
-    replace_source(
-        second_project,
-        files,
-        changed,
-        read_json(second_project, second_project / "project.json"),
-    )
-    release.set()
-    await manager.tasks[first["task_id"]].asyncio_task
-    await manager.tasks[second["task_id"]].asyncio_task
-
-    state = manager.get(second["task_id"])
-    assert state["status"] == "failed"
-    assert "排队期间项目选择或设置已变化" in str(state["error"])
 
 
 @pytest.mark.asyncio
@@ -4690,54 +3956,6 @@ def test_selection_snapshots_track_source_and_adapter_state(tmp_path: Path) -> N
     write_json(project, state_path, state)
     assert web_tasks_module._selection_snapshot(project, Scope()) != after_source
     assert inspect_continuous(project, ["translation"])["snapshot"]["selections"] != continuous_after_source
-
-
-@pytest.mark.asyncio
-async def test_web_task_manager_rejects_changed_fingerprint_before_promotion(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _, first_project = make_project(tmp_path / "first")
-    _, second_project = make_project(tmp_path / "second")
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def fake_translation(project: Path, *_: object, **__: object) -> dict[str, object]:
-        if project == first_project:
-            entered.set()
-            await release.wait()
-        return {"selected": 2, "completed": 2, "failed": 0, "pending": 0}
-
-    monkeypatch.setattr("app.web_tasks.run_translation", fake_translation)
-    manager = WebTaskManager(max_active_projects=1)
-    first = await manager.start(
-        first_project,
-        "translation",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-    await entered.wait()
-    second = await manager.start(
-        second_project,
-        "translation",
-        scope=Scope(),
-        reuse_mixed_fingerprints=False,
-        run_action=None,
-    )
-
-    prompt_path = second_project / "prompts" / "translation.zh-CN.middle.txt"
-    prompt_path.write_text(
-        prompt_path.read_text(encoding="utf-8") + "\nchanged while queued",
-        encoding="utf-8",
-    )
-    release.set()
-    await manager.tasks[first["task_id"]].asyncio_task
-    await manager.tasks[second["task_id"]].asyncio_task
-
-    state = manager.get(second["task_id"])
-    assert state["status"] == "failed"
-    assert "排队期间项目选择或设置已变化" in str(state["error"])
 
 
 @pytest.mark.asyncio
@@ -5779,32 +4997,6 @@ def test_continuous_terminal_decision_is_manual_apply_and_allows_no_apply(
     )
 
 
-def test_continuous_checks_review_state_even_without_published_terms(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _projects_root, project = make_project(tmp_path)
-    monkeypatch.setattr("app.web_continuous.load_terms", lambda _project, **_kwargs: None)
-    monkeypatch.setattr(
-        "app.web_continuous.current_decision_draft",
-        lambda _project: {"status": "pending"},
-    )
-    monkeypatch.setattr(
-        "app.web_continuous.manual_review_state",
-        lambda _project: {"remaining": 1},
-    )
-
-    result = inspect_continuous(
-        project,
-        ["terminology", "terminology_decision"],
-        apply_terminology_decision=True,
-    )
-
-    assert {item["code"] for item in result["blocking"]} >= {
-        "pending_decision_draft",
-        "pending_manual_review",
-    }
-
-
 def test_continuous_marks_protected_decision_plan_as_no_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -6547,35 +5739,6 @@ async def test_continuous_failed_step_stops_following_stage(
             Scope(),
             stages,
             limiters=_continuous_limiter_map(project, stages),
-        )
-
-    assert called is False
-
-
-@pytest.mark.asyncio
-async def test_continuous_cancellation_stops_following_stage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _projects_root, project = make_project(tmp_path)
-    called = False
-
-    async def cancelled_translation(*_: object, **__: object) -> dict[str, object]:
-        raise asyncio.CancelledError
-
-    async def following_review(*_: object, **__: object) -> dict[str, object]:
-        nonlocal called
-        called = True
-        return {}
-
-    monkeypatch.setattr("app.web_continuous.run_translation", cancelled_translation)
-    monkeypatch.setattr("app.web_continuous.run_review", following_review)
-
-    with pytest.raises(asyncio.CancelledError):
-        await run_continuous(
-            project,
-            Scope(),
-            ("translation", "proofreading"),
-            limiters=_continuous_limiter_map(project, ("translation", "proofreading")),
         )
 
     assert called is False

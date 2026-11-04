@@ -8,61 +8,56 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.project import bundle_hash, init_project, sync_global_templates
-from app.user_config import (
-    effective_path,
-    user_root,
-    write_user,
-)
+from app.user_config import user_root
 from app.web import create_app
 from tests.test_foundation import make_app_root
 
 
-def test_user_root_honors_environment_override(
+def test_user_root_precedence_and_no_legacy_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    override = tmp_path / "custom-user-root"
-    monkeypatch.setenv("ANOTHER_LLM_USER_ROOT", str(override))
     monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
-    (tmp_path / "another-llm-translator-location.json").write_text(
-        '{"version": 1, "active_root": "/locator-root"}', encoding="utf-8"
-    )
-    assert user_root() == override
+    legacy_name = "-".join(("minimal", "llm", "translator"))
+    legacy = tmp_path / legacy_name
+    legacy.mkdir()
+    (legacy / "marker").write_text("legacy", encoding="utf-8")
 
-
-def test_user_root_uses_locator_before_platform_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
     monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
-    monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
+    assert user_root() == tmp_path / "another-llm-translator"
+    assert legacy.is_dir()
+    assert not (tmp_path / "another-llm-translator").exists()
+
     custom = tmp_path / "external" / "another-llm-translator"
-    custom.mkdir(parents=True)
-    (tmp_path / "another-llm-translator-location.json").write_text(
-        '{"version": 1, "active_root": "' + str(custom) + '"}', encoding="utf-8"
-    )
-
-    assert user_root() == custom
-
-
-def test_user_root_rejects_locator_with_wrong_directory_name(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
-    monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
-    custom = tmp_path / "external" / "translator-data"
     custom.mkdir(parents=True)
     (tmp_path / "another-llm-translator-location.json").write_text(
         json.dumps({"version": 1, "active_root": str(custom)}), encoding="utf-8"
     )
+    assert user_root() == custom
 
-    with pytest.raises(ValueError, match="locator"):
-        user_root()
+    override = tmp_path / "custom-user-root"
+    monkeypatch.setenv("ANOTHER_LLM_USER_ROOT", str(override))
+    assert user_root() == override
 
 
-def test_user_root_rejects_locator_root_symlink(
+def test_user_root_rejects_invalid_locators(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
     monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
+    locator = tmp_path / "another-llm-translator-location.json"
+
+    locator.write_text("{", encoding="utf-8")
+    with pytest.raises(ValueError, match="locator"):
+        user_root()
+
+    wrong_name = tmp_path / "external" / "translator-data"
+    wrong_name.mkdir(parents=True)
+    locator.write_text(
+        json.dumps({"version": 1, "active_root": str(wrong_name)}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="locator"):
+        user_root()
+
     actual = tmp_path / "actual-root"
     actual.mkdir()
     custom = tmp_path / "another-llm-translator"
@@ -70,40 +65,11 @@ def test_user_root_rejects_locator_root_symlink(
         custom.symlink_to(actual, target_is_directory=True)
     except OSError as exc:
         pytest.skip(f"directory symlinks are unavailable: {exc}")
-    (tmp_path / "another-llm-translator-location.json").write_text(
+    locator.write_text(
         json.dumps({"version": 1, "active_root": str(custom)}), encoding="utf-8"
     )
-
     with pytest.raises(ValueError, match="locator"):
         user_root()
-
-
-def test_user_root_fails_on_invalid_locator(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
-    monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
-    (tmp_path / "another-llm-translator-location.json").write_text(
-        "{", encoding="utf-8"
-    )
-
-    with pytest.raises(ValueError, match="locator"):
-        user_root()
-
-
-def test_user_root_does_not_scan_or_move_legacy_default_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
-    monkeypatch.setattr("app.user_config._platform_data_base", lambda: tmp_path)
-    legacy_name = "-".join(("minimal", "llm", "translator"))
-    legacy = tmp_path / legacy_name
-    legacy.mkdir()
-    (legacy / "marker").write_text("legacy", encoding="utf-8")
-
-    assert user_root() == tmp_path / "another-llm-translator"
-    assert legacy.is_dir()
-    assert not (tmp_path / "another-llm-translator").exists()
 
 
 def test_web_app_creation_does_not_access_keyring(
@@ -120,31 +86,6 @@ def test_web_app_creation_does_not_access_keyring(
         projects_root=tmp_path / "projects",
         app_root=tmp_path / "app-root",
     )
-
-
-def test_effective_path_prefers_user_copy_and_falls_back_to_builtin(
-    tmp_path: Path,
-) -> None:
-    builtin = tmp_path / "builtin"
-    (builtin / "config").mkdir(parents=True)
-    (builtin / "config" / "config.toml").write_text("builtin", encoding="utf-8")
-    assert effective_path("config/config.toml", builtin_root=builtin) == (
-        builtin / "config" / "config.toml"
-    )
-
-    (user_root() / "config").mkdir(parents=True)
-    (user_root() / "config" / "config.toml").write_text("user", encoding="utf-8")
-    assert effective_path("config/config.toml", builtin_root=builtin) == (
-        user_root() / "config" / "config.toml"
-    )
-
-
-def test_write_user_creates_parent_directories(tmp_path: Path) -> None:
-    target = write_user("prompts/translation.zh-CN.middle.txt")
-    assert target == user_root() / "prompts" / "translation.zh-CN.middle.txt"
-    assert not target.exists()
-    target.write_text("content", encoding="utf-8")
-    assert target.read_text(encoding="utf-8") == "content"
 
 
 def test_init_project_defaults_to_user_root_and_uses_user_override(

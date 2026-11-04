@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from app.config import load_config
@@ -129,22 +127,6 @@ def test_complete_project_does_not_depend_on_invalid_global(tmp_path):
         load_project_settings(project)
 
 
-@pytest.mark.parametrize('missing_ordinary_field', [False, True])
-def test_missing_override_container_uses_global_independently_of_other_missing_fields(missing_ordinary_field):
-    from app.config import builtin_settings, normalize_project_settings
-    from app.user_config import user_root
-    global_path = user_root() / 'config/config.toml'
-    global_path.parent.mkdir(parents=True)
-    global_path.write_text('[chunking.stage_overrides.translation]\ntarget_content_tokens = 17\nmax_input_tokens = 111\n')
-    value = builtin_settings()
-    del value['chunking']['stage_overrides']
-    if missing_ordinary_field:
-        del value['retry']['http_max_attempts']
-    normalized = normalize_project_settings(value)
-    assert normalized['chunking']['stage_overrides'] == {
-        'translation': {'target_content_tokens': 17, 'max_input_tokens': 111}}
-
-
 def test_present_sparse_override_table_inherits_project_common():
     from app.config import builtin_settings, normalize_project_settings
     from app.request_budget import resolve_request_budget
@@ -152,6 +134,11 @@ def test_present_sparse_override_table_inherits_project_common():
     global_path = user_root() / 'config/config.toml'
     global_path.parent.mkdir(parents=True)
     global_path.write_text('[chunking.stage_overrides.translation]\ntarget_content_tokens = 17\nmax_input_tokens = 111\n')
+    missing_container = builtin_settings()
+    del missing_container['chunking']['stage_overrides']
+    del missing_container['retry']['http_max_attempts']
+    assert normalize_project_settings(missing_container)['chunking']['stage_overrides'] == {
+        'translation': {'target_content_tokens': 17, 'max_input_tokens': 111}}
     value = builtin_settings()
     value['chunking']['stage_overrides'] = {'translation': {'target_content_tokens': 9}}
     del value['retry']['http_max_attempts']

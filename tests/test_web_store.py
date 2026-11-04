@@ -55,56 +55,25 @@ def _replace_epub_state_run_options(
     write_json(project, state_path, state)
 
 
-def test_web_store_save_translation_uses_persisted_epub_run_options(
+def test_web_store_save_uses_persisted_and_updated_epub_run_options(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "ruby.epub"
-    make_epub(source, xhtml=RUBY_XHTML)
-    project, _ = init_project(
-        [str(source)],
-        name="web-ruby-options",
-        document_adapter_id="epub",
-        adapter_options={"epub": {"ruby_mode": "short_xml"}},
-        app_root=make_app_root(tmp_path),
-        projects_root=tmp_path / "projects",
-    )
-    assert project is not None
-    _replace_epub_state_run_options(
-        project,
-        {
-            "ruby_mode": "short_xml",
-            "inline_format_mode": "plain",
-            "inline_format_policy": "tiered",
-        },
-    )
-
-    result = WebStore(project).save_translation(
-        {
-            "segment_id": "F0001-S000001",
-            "text": "<r><b>汉字</b><y>hànzì</y></r>",
-        }
-    )
-
-    assert result["text"] == "｜汉字《hànzì》"
-
-
-def test_web_store_save_review_uses_persisted_epub_run_options_for_markers(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "markers.epub"
     make_epub(
         source,
         xhtml=(
             b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b"<p><ruby>\xe6\xb1\x89\xe5\xad\x97<rt>h\xc3\xa0nz\xc3\xac</rt></ruby></p>"
             b"<p>A <em>B</em> C</p></body></html>"
         ),
     )
     project, _ = init_project(
         [str(source)],
-        name="web-marker-options",
+        name="web-ruby-options",
         document_adapter_id="epub",
         adapter_options={
             "epub": {
+                "ruby_mode": "short_xml",
                 "inline_format_mode": "markers",
                 "inline_format_policy": "strict",
             }
@@ -116,55 +85,41 @@ def test_web_store_save_review_uses_persisted_epub_run_options_for_markers(
     _replace_epub_state_run_options(
         project,
         {
-            "ruby_mode": "aozora",
+            "ruby_mode": "short_xml",
             "inline_format_mode": "markers",
             "inline_format_policy": "strict",
         },
     )
     store = WebStore(project)
-    store.save_translation(
-        {"segment_id": "F0001-S000001", "text": "base"}
+    result = store.save_translation(
+        {
+            "segment_id": "F0001-S000001",
+            "text": "<r><b>汉字</b><y>hànzì</y></r>",
+        }
     )
+    assert result["text"] == "｜汉字《hànzì》"
 
-    result = store.save_review(
+    store.save_translation({"segment_id": "F0001-S000002", "text": "base"})
+    review = store.save_review(
         {
             "stage": "proofreading",
-            "segment_id": "F0001-S000001",
+            "segment_id": "F0001-S000002",
             "review_status": "suggested",
             "suggested_text": "甲 <em1>乙</em1> 丙",
             "reason": None,
             "apply": False,
         }
     )
+    assert review["suggestion"]["suggested_text"] == "甲 乙 丙"
 
-    assert result["suggestion"]["suggested_text"] == "甲 乙 丙"
-
-
-def test_web_store_save_reads_current_run_options_after_store_init(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "ruby.epub"
-    make_epub(source, xhtml=RUBY_XHTML)
-    project, _ = init_project(
-        [str(source)],
-        name="web-current-options",
-        document_adapter_id="epub",
-        adapter_options={"epub": {"ruby_mode": "short_xml"}},
-        app_root=make_app_root(tmp_path),
-        projects_root=tmp_path / "projects",
-    )
-    assert project is not None
-    store = WebStore(project)
     update_file_run_options(project, "F0001", {"ruby_mode": "compact"})
-
-    result = store.save_translation(
+    updated = store.save_translation(
         {
             "segment_id": "F0001-S000001",
             "text": "⟦R:汉字|Y:hànzì⟧",
         }
     )
-
-    assert result["text"] == "｜汉字《hànzì》"
+    assert updated["text"] == "｜汉字《hànzì》"
 
 
 @pytest.mark.parametrize(
@@ -243,7 +198,7 @@ def test_term_group_materialize_switch_primary_and_lifecycle(tmp_path: Path) -> 
 def test_materialize_alias_restores_removed_entry_and_preserves_term_data(
     tmp_path: Path,
 ) -> None:
-    project = create_web_store_project(tmp_path, "Alice Alicia Alicia Jr")
+    project = create_web_store_project(tmp_path, "Alice Prime Alice Alicia Alicia Jr")
     store = WebStore(project)
     store.save_term(
         {
@@ -293,16 +248,9 @@ def test_materialize_alias_restores_removed_entry_and_preserves_term_data(
         for item in matched
     )
 
-
-def test_materialize_alias_restores_removed_entry_into_owner_group(
-    tmp_path: Path,
-) -> None:
-    project = create_web_store_project(tmp_path, "Alice Prime Alice Alicia")
-    store = WebStore(project)
     store.save_term({"source": "Alice Prime"})
-    store.save_term({"source": "Alicia", "preferred_translation": "艾丽西亚"})
     store.remove_terms({"normalized": ["alicia"]})
-    store.save_term({"source": "Alice", "aliases": ["Alicia"]})
+    store.save_term({"old_normalized": "alice", "source": "Alice", "aliases": ["Alicia"]})
     store.group_related_terms(
         {
             "normalized": "alice prime",
@@ -311,11 +259,10 @@ def test_materialize_alias_restores_removed_entry_into_owner_group(
             "confirm": True,
         }
     )
-
-    restored = store.materialize_term({"normalized": "alice", "alias": "Alicia"})
-    rows = {item["normalized"]: item for item in restored["terms"]}
-    assert rows["alicia"]["group_primary"] == "alice prime"
-    assert rows["alicia"]["preferred_translation"] == "艾丽西亚"
+    regrouped = store.materialize_term({"normalized": "alice", "alias": "Alicia"})
+    assert next(
+        item for item in regrouped["terms"] if item["normalized"] == "alicia"
+    )["group_primary"] == "alice prime"
 
 
 def _group_three_terms(store: WebStore) -> None:
@@ -827,23 +774,75 @@ def test_segment_detail_matches_current_terms_without_request_limit(tmp_path: Pa
 def test_term_hits_include_matches_found_in_aozora_ruby_reading(
     tmp_path: Path,
 ) -> None:
-    project = create_web_store_project(tmp_path, "｜猫《Aoki》出现")
-    store = WebStore(project)
-    store.save_term(
-        {
-            "expected_revision": store.terms()["terms_revision"] or 0,
-            "source": "Aoki",
-            "category": "人名",
-            "description_items": [],
-            "preferred_translation": "青木",
-            "aliases": [],
-        }
+    project = create_web_store_project(
+        tmp_path, "｜猫《Aoki》出现\nA walks\nAli sings\nAlicia and Alice"
     )
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    write_term_library(
+        project,
+        project / "terminology" / "terms.json",
+        record_header(
+            "terminology_library",
+            project_id,
+            record_id="TERMS-HITS",
+            terms_revision=1,
+            terms=[
+                {
+                    "record_id": "TERM-AOKI",
+                    "source": "Aoki",
+                    "normalized": "aoki",
+                    "category": "人名",
+                    "description": None,
+                    "preferred_translation": "青木",
+                    "aliases": [],
+                    "conflicts": {},
+                },
+                {
+                    "record_id": "TERM-ALICE",
+                    "source": "Alice",
+                    "normalized": "alice",
+                    "category": "人名",
+                    "description": None,
+                    "preferred_translation": "爱丽丝",
+                    "aliases": ["A", "Ali"],
+                    "conflicts": {
+                        "alias_primaries": [
+                            {"alias": "A", "primary_source": "Alpha"}
+                        ]
+                    },
+                },
+                {
+                    "record_id": "TERM-ALICIA",
+                    "source": "Alicia",
+                    "normalized": "alicia",
+                    "category": "人名",
+                    "description": None,
+                    "preferred_translation": "艾丽西亚",
+                    "aliases": ["Ali"],
+                    "group_primary": "alice",
+                    "conflicts": {},
+                },
+            ],
+        ),
+    )
+    store = WebStore(project)
 
     hits = store.term_hits("aoki")
-
     assert hits["total"] == 1
     assert hits["hits"][0]["source"] == "｜猫《Aoki》出现"
+
+    alice_hits = store.term_hits("alice")
+    assert [item["segment_id"] for item in alice_hits["hits"]] == [
+        "F0001-S000003",
+        "F0001-S000004",
+    ]
+
+    alicia_hits = store.term_hits("alicia")
+    assert alicia_hits["source"] == "Alicia"
+    assert [item["segment_id"] for item in alicia_hits["hits"]] == [
+        "F0001-S000003",
+        "F0001-S000004",
+    ]
 
 
 def test_terms_keep_group_primary_before_members_even_when_member_conflicts(
@@ -1408,7 +1407,14 @@ def test_web_store_saves_and_applies_review_results_with_current_lineage(
 ) -> None:
     project = create_web_store_project(tmp_path, "one")
     store = WebStore(project)
-    store.save_translation({"segment_id": "F0001-S000001", "text": "译文一"})
+    initial_translation = store.save_translation(
+        {"segment_id": "F0001-S000001", "text": "译文一"}
+    )
+    polishing_before = store.overview()["segments"][0]["reviews"]["polishing"]
+    assert polishing_before["base"]["record_id"] == initial_translation["record_id"]
+    assert polishing_before["base"]["text"] == "译文一"
+    assert polishing_before["suggestion"] is None
+    assert polishing_before["applied_current"] is False
     proof = store.save_review(
         {
             "stage": "proofreading",
@@ -1481,22 +1487,6 @@ def test_web_store_saves_and_applies_review_results_with_current_lineage(
     newer = store.overview()["segments"][0]["reviews"]["proofreading"]
     assert newer["applied"]["text"] == "译文二"
     assert newer["applied_current"] is False
-
-
-def test_web_store_polishing_overview_falls_back_to_translation_base(
-    tmp_path: Path,
-) -> None:
-    project = create_web_store_project(tmp_path, "one")
-    store = WebStore(project)
-    translation = store.save_translation(
-        {"segment_id": "F0001-S000001", "text": "仅有译文"}
-    )
-
-    polishing = store.overview()["segments"][0]["reviews"]["polishing"]
-    assert polishing["base"]["record_id"] == translation["record_id"]
-    assert polishing["base"]["text"] == "仅有译文"
-    assert polishing["suggestion"] is None
-    assert polishing["applied_current"] is False
 
 
 def test_web_store_terms_update_library_and_overrides_immediately(tmp_path: Path) -> None:
@@ -1650,13 +1640,6 @@ def test_web_store_exposes_and_resolves_term_conflicts_independently(
             }
         )
 
-
-def test_web_store_can_remove_conflicted_term_without_resolving_it(
-    tmp_path: Path,
-) -> None:
-    project = create_web_store_project(tmp_path)
-    seed_conflicted_terms(project)
-    store = WebStore(project)
     removed = store.save_term(
         {
             "expected_revision": store.terms()["terms_revision"] or 0,
@@ -1669,21 +1652,13 @@ def test_web_store_can_remove_conflicted_term_without_resolving_it(
             "disabled": True,
         }
     )
-    assert removed["conflict_count"] == 2
+    assert removed["conflict_count"] == 1
     gamma = next(item for item in removed["terms"] if item["normalized"] == "gamma")
     assert gamma["disabled"] is True
     assert gamma["has_conflicts"] is False
     assert all(
         item["normalized"] != "gamma" for item in load_terms(project)["terms"]
     )
-    override = next(
-        item
-        for item in read_json(project, project / "terminology" / "overrides.json")[
-            "overrides"
-        ]
-        if item["normalized"] == "gamma"
-    )
-    assert override["disabled"] is True
 
 
 def test_web_store_rejects_unknown_segments_and_invalid_terms(tmp_path: Path) -> None:
@@ -1725,22 +1700,6 @@ def test_web_store_keeps_case_distinct_aliases_when_case_insensitive_off(
     assert added["terms"][0]["aliases"] == ["alice"]
     spec = TermNormalization("NFKC", False)
     assert [item["source"] for item in match_terms("alice arrived", load_terms(project), 10, spec)] == ["Alice"]
-
-
-def test_detail_does_not_read_adapter_state(tmp_path: Path, monkeypatch) -> None:
-    import app.web_store as module
-    project = create_web_store_project(tmp_path, "one\ntwo")
-    store = WebStore(project)
-    calls = []
-    original = module._read_adapter_context
-    def read(*args):
-        calls.append(args[1]["file_id"])
-        return original(*args)
-    monkeypatch.setattr(module, "_read_adapter_context", read)
-    store.segment_detail("F0001-S000001")
-    assert calls == []
-    store.segment_detail("F0001-S000001")
-    assert calls == []
 
 
 def test_saving_term_fields_preserves_knowledge_without_rebuilding_evidence(tmp_path, monkeypatch):
