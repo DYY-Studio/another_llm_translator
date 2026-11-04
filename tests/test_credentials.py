@@ -49,7 +49,7 @@ def test_credential_rejects_invalid_ids_and_empty_secret() -> None:
         save_credential("openai-main", "first\n\nsecond")
 
 
-def test_resolve_environment_credential(
+def test_resolve_api_keys_sources_and_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("DRAFT_KEY", "value\nvalue-2")
@@ -61,8 +61,6 @@ def test_resolve_environment_credential(
     with pytest.raises(ExternalError, match="缺少环境变量：DRAFT_KEY"):
         resolve_api_keys({"kind": "environment", "name": "DRAFT_KEY"})
 
-
-def test_resolve_keychain_credential() -> None:
     save_credential("keychain-main", "value\nvalue-2")
     assert resolve_api_keys({"kind": "keychain", "name": "keychain-main"}) == (
         "value",
@@ -70,9 +68,6 @@ def test_resolve_keychain_credential() -> None:
     )
     with pytest.raises(ExternalError, match="缺少钥匙串凭据：missing"):
         resolve_api_keys({"kind": "keychain", "name": "missing"})
-
-
-def test_resolve_rejects_unknown_kind() -> None:
     with pytest.raises(ExternalError, match="未知凭据类型"):
         resolve_api_keys({"kind": "file", "name": "x"})
 

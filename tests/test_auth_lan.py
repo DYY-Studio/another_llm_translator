@@ -160,6 +160,13 @@ def test_lan_requires_login_and_validates_credentials(
     )
     assert wrong.status_code == 400
     assert "用户名或密码错误" in wrong.json()["error"]
+    assert (
+        client.post(
+            "/api/v1/auth/login",
+            json={"username": "other", "password": "p@ss"},
+        ).status_code
+        == 400
+    )
 
     login = client.post(
         "/api/v1/auth/login",
@@ -285,43 +292,32 @@ def test_server_config_validation_and_password_flow(
     assert isinstance(interfaces["interfaces"], list)
 
 
-def test_lan_auth_uses_username_from_config(fake_keyring: FakeKeyring) -> None:
-    config = lan_config(auth={"required": True, "username": "me", "password": "x"})
-    save_server_config(config)
-    client = make_client(server_config=config, client=LAN)
-    wrong_user = client.post(
-        "/api/v1/auth/login",
-        json={"username": "other", "password": "x"},
-    )
-    assert wrong_user.status_code == 400
-
-
-def test_lan_client_on_selected_subnet_allowed() -> None:
-    client = make_client(server_config=lan_config(), client=("192.168.1.20", 1234))
-    assert client.get("/api/v1/projects").status_code == 200
-
-
-def test_lan_client_outside_selected_subnet_blocked() -> None:
-    client = make_client(server_config=lan_config(), client=("10.0.0.7", 1234))
-    response = client.get("/api/v1/projects")
-    assert response.status_code == 403
-    assert response.json()["code"] == "out_of_subnet"
-
-
-def test_lan_all_interfaces_accepts_any_client() -> None:
+@pytest.mark.parametrize(
+    ("bind_address", "client_addr", "expected_status", "expected_code"),
+    [
+        ("192.168.1.5", ("192.168.1.20", 1234), 200, None),
+        ("192.168.1.5", ("10.0.0.7", 1234), 403, "out_of_subnet"),
+        ("0.0.0.0", ("10.0.0.7", 1234), 200, None),
+        ("192.168.1.5", LOOPBACK, 200, None),
+    ],
+)
+def test_lan_subnet_and_interface_access_control(
+    bind_address: str,
+    client_addr: tuple[str, int],
+    expected_status: int,
+    expected_code: str | None,
+) -> None:
     client = make_client(
-        server_config=lan_config(lan={"bind_address": "0.0.0.0"}),
-        client=("10.0.0.7", 1234),
+        server_config=lan_config(lan={"bind_address": bind_address}),
+        client=client_addr,
     )
-    assert client.get("/api/v1/projects").status_code == 200
+    response = client.get("/api/v1/projects")
+    assert response.status_code == expected_status
+    if expected_code is not None:
+        assert response.json()["code"] == expected_code
 
 
-def test_loopback_allowed_when_interface_selected() -> None:
-    client = make_client(server_config=lan_config(), client=LOOPBACK)
-    assert client.get("/api/v1/projects").status_code == 200
-
-
-def test_server_config_toml_round_trip_preserves_bools() -> None:
+def test_server_config_toml_round_trip_and_legacy_defaults() -> None:
     config = lan_config(auth={"required": True, "username": "me"})
     save_server_config(config)
     loaded = load_server_config()
@@ -330,19 +326,15 @@ def test_server_config_toml_round_trip_preserves_bools() -> None:
     assert loaded["auth"]["required"] is True
     assert loaded["auth"]["username"] == "me"
 
-
-def test_legacy_server_config_loads_default_and_save_writes_tasks_section() -> None:
     path = server_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         '[lan]\nenabled = false\nbind_address = ""\n\n'
         '[auth]\nrequired = false\nusername = ""\n',
         encoding="utf-8",
     )
-
-    loaded = load_server_config()
-    assert loaded["tasks"]["max_active_projects"] == 2
-    save_server_config(loaded)
+    loaded_legacy = load_server_config()
+    assert loaded_legacy["tasks"]["max_active_projects"] == 2
+    save_server_config(loaded_legacy)
     saved = path.read_text(encoding="utf-8")
     assert "[tasks]" in saved
     assert "max_active_projects = 2" in saved

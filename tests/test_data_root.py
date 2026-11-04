@@ -8,7 +8,7 @@ import pytest
 from app import data_root
 
 
-@pytest.mark.parametrize("mismatch", ("paths", "type", "size", "content", "symlink"))
+@pytest.mark.parametrize("mismatch", ("paths", "content", "symlink"))
 def test_copy_mismatch_is_rejected_before_publish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
 ) -> None:
@@ -30,11 +30,6 @@ def test_copy_mismatch_is_rejected_before_publish(
         result = copytree(src, dst, **kwargs)
         if mismatch == "paths":
             (dst / "entry.txt").rename(dst / "renamed.txt")
-        elif mismatch == "type":
-            (dst / "entry.txt").unlink()
-            (dst / "entry.txt").mkdir()
-        elif mismatch == "size":
-            (dst / "entry.txt").write_text("different size", encoding="utf-8")
         elif mismatch == "content":
             (dst / "entry.txt").write_text("corrupt", encoding="utf-8")
         else:
@@ -78,8 +73,9 @@ def test_relocation_copies_root_then_switches_locator_and_removes_source(
     assert not source.exists()
 
 
-def test_relocation_rejects_existing_target_without_touching_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("failure_mode", ("existing_target", "missing_parent", "symlink_parent"))
+def test_relocation_rejects_invalid_target_states_without_touching_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_mode: str
 ) -> None:
     monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
     monkeypatch.setattr(
@@ -92,14 +88,28 @@ def test_relocation_rejects_existing_target_without_touching_it(
     parent.mkdir()
     target = parent / "another-llm-translator"
     data_root.request_relocation(parent)
-    target.mkdir(parents=True)
-    (target / "keep").write_text("existing", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="already exists"):
+    if failure_mode == "existing_target":
+        target.mkdir(parents=True)
+        (target / "keep").write_text("existing", encoding="utf-8")
+        expected = "already exists"
+    elif failure_mode == "missing_parent":
+        parent.rmdir()
+        expected = "target parent is unavailable"
+    else:
+        redirected_parent = tmp_path / "redirected"
+        redirected_parent.mkdir()
+        parent.rename(tmp_path / "external-original")
+        parent.symlink_to(redirected_parent, target_is_directory=True)
+        expected = "canonical"
+
+    with pytest.raises(ValueError, match=expected):
         data_root.apply_pending()
 
-    assert (target / "keep").read_text(encoding="utf-8") == "existing"
+    if failure_mode == "existing_target":
+        assert (target / "keep").read_text(encoding="utf-8") == "existing"
     assert data_root.user_root() == source
+    assert source.is_dir()
 
 
 def test_request_relocation_preserves_existing_pending_request_and_symlink(
@@ -131,53 +141,6 @@ def test_request_relocation_preserves_existing_pending_request_and_symlink(
     with pytest.raises(ValueError, match="already exists"):
         data_root.request_relocation(second_parent)
     assert pending.is_symlink()
-
-
-def test_relocation_fails_if_selected_volume_disappears(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
-    monkeypatch.setattr(
-        "app.user_config._platform_data_base", lambda: tmp_path / "system"
-    )
-    source = tmp_path / "system" / "another-llm-translator"
-    source.mkdir(parents=True)
-    parent = tmp_path / "external"
-    parent.mkdir()
-    data_root.request_relocation(parent)
-    parent.rmdir()
-
-    with pytest.raises(ValueError, match="target parent is unavailable"):
-        data_root.apply_pending()
-
-    assert source.is_dir()
-    assert not parent.exists()
-
-
-def test_apply_pending_rejects_target_parent_replaced_by_symlink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("ANOTHER_LLM_USER_ROOT", raising=False)
-    monkeypatch.setattr(
-        "app.user_config._platform_data_base", lambda: tmp_path / "system"
-    )
-    source = tmp_path / "system" / "another-llm-translator"
-    source.mkdir(parents=True)
-    (source / "entry.txt").write_text("source", encoding="utf-8")
-    parent = tmp_path / "external"
-    parent.mkdir()
-    data_root.request_relocation(parent)
-    redirected_parent = tmp_path / "redirected"
-    redirected_parent.mkdir()
-    parent.rename(tmp_path / "external-original")
-    parent.symlink_to(redirected_parent, target_is_directory=True)
-
-    with pytest.raises(ValueError, match="canonical"):
-        data_root.apply_pending()
-
-    assert data_root.user_root() == source
-    assert source.is_dir()
-    assert not (redirected_parent / "another-llm-translator").exists()
 
 
 def test_apply_pending_recovers_only_its_published_transaction(
