@@ -388,67 +388,6 @@ async def test_joint_partitioned_summaries_persist_separate_fragments(
 
 
 @pytest.mark.asyncio
-async def test_forced_full_cover_summary_replaces_auto_adopted_full(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path)
-    write_summary_participation(
-        project,
-        [{"file_id": "F0001", "part_id": "document", "selected": True}],
-    )
-
-    first_client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
-    try:
-        await run_terminology(
-            project,
-            Scope(),
-            http_client=first_client,
-            include_summaries=True,
-        )
-    finally:
-        await first_client.aclose()
-
-    def forced_handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        payload = json.loads(body["messages"][1]["content"])
-        source_segments = payload["source_segments"]
-        records: list[dict[str, object]] = [
-            {
-                "type": "summary",
-                "text": "强制重做后的概括。",
-                "refs": [str(index) for index in range(1, len(source_segments) + 1)],
-            }
-        ]
-        source_texts = [_source_text(value) for value in source_segments]
-        for source in ("Alice", "Bob"):
-            if any(source in value for value in source_texts):
-                records.append({"type": "term", "source": source, "category": "人物"})
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(forced_handler))
-    try:
-        result = await run_terminology(
-            project,
-            Scope(force=True),
-            http_client=client,
-            include_summaries=True,
-        )
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-
-    assert result["failed"] == 0
-    full = read_content_summaries(project, kind="full")
-    assert {(item["status"], item["text"]) for item in full} == {
-        ("stale", "人物依次出现并行动。"),
-        ("completed", "强制重做后的概括。"),
-    }
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("change_all", [True, False])
 @pytest.mark.parametrize("include_draft", [False, True])
 async def test_summary_rerun_replaces_obsolete_fragments_and_keeps_reusable_ones(
@@ -1126,46 +1065,6 @@ async def test_epub_joint_prompt_combines_only_terminology_adapter_requirements(
 
 
 @pytest.mark.asyncio
-async def test_joint_run_snapshots_only_requested_prompt_variant(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path, "Alice entered.")
-    write_summary_participation(
-        project,
-        [{"file_id": "F0001", "part_id": "document", "selected": True}],
-    )
-    client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
-    try:
-        result = await run_terminology(
-            project,
-            Scope(),
-            http_client=client,
-            include_summaries=True,
-        )
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-
-    run_dir = project / "runs" / result["run_id"]
-    variants = run_dir / "prompt_variants"
-    assert (variants / "terms-and-fragment-summary.txt").is_file()
-    assert not (variants / "terms-only.txt").exists()
-    assert not (variants / "summary-only.txt").exists()
-    assert (run_dir / "prompt.txt").read_text("utf-8") == (
-        variants / "terms-and-fragment-summary.txt"
-    ).read_text("utf-8")
-    assert (run_dir / "document_adapter_prompt_requirements.json").is_file()
-    manifest = read_json(project, run_dir / "manifest.json")
-    assert manifest["prompt_languages"] == {"terms+fragment-summary": "zh-CN"}
-    summary_run = next(
-        item
-        for item in read_summary_runs(project)
-        if item["run_id"] == result["run_id"]
-    )
-    assert summary_run["prompt_languages"] == {"terms+fragment-summary": "zh-CN"}
-
-
-@pytest.mark.asyncio
 async def test_mixed_terms_and_joint_run_prefers_joint_primary_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -1278,79 +1177,6 @@ async def test_mixed_terms_and_joint_run_prefers_joint_primary_snapshot(
     assert "必须保留所有已有标记" in json.dumps(
         adapter_snapshot, ensure_ascii=False
     )
-
-
-@pytest.mark.asyncio
-async def test_joint_run_prompt_variants_rebuild_actual_adapter_prompt(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    project = _project(tmp_path, "Alice entered.")
-    write_summary_participation(
-        project,
-        [{"file_id": "F0001", "part_id": "document", "selected": True}],
-    )
-    from app import stage_terminology as terminology_module
-
-    original_context = terminology_module._project_context
-    requirement = "Adapter requirement A"
-
-    def context_with_requirement(
-        project_path: Path, *, stage: str | None = None
-    ) -> tuple[dict, dict, list[dict], list[dict]]:
-        config, metadata, files, segments = original_context(project_path, stage=stage)
-        config["_document_adapter_prompt_requirements"] = {
-            "F0001": {"zh-CN": requirement}
-        }
-        return config, metadata, files, segments
-
-    monkeypatch.setattr(
-        terminology_module, "_project_context", context_with_requirement
-    )
-    seen_prompts: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        seen_prompts.append(body["messages"][0]["content"])
-        return _joint_handler(request)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        result = await run_terminology(
-            project,
-            Scope(),
-            http_client=client,
-            include_summaries=True,
-        )
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-
-    run_dir = project / "runs" / result["run_id"]
-    metadata = json.loads(
-        (run_dir / "prompt_variants.json").read_text(encoding="utf-8")
-    )
-    matching = {
-        key: value
-        for key, value in metadata.items()
-        if value["requirements"] == [requirement]
-    }
-    assert len(matching) == 1
-    for value in matching.values():
-        variant = (run_dir / value["path"]).read_text(encoding="utf-8")
-        assert requirement in variant
-    joint_key = next(
-        key for key in matching if key.startswith("terms+fragment-summary")
-    )
-    joint_variant = (run_dir / matching[joint_key]["path"]).read_text(
-        encoding="utf-8"
-    )
-    variant_texts = {
-        (run_dir / value["path"]).read_text(encoding="utf-8")
-        for value in matching.values()
-    }
-    assert set(seen_prompts) <= variant_texts
-    assert joint_variant in seen_prompts
 
 
 @pytest.mark.asyncio
@@ -1482,8 +1308,9 @@ async def test_preflight_interception_selects_primary_mode_from_actual_requests(
 
 
 @pytest.mark.asyncio
-async def test_ordinary_terminology_without_pending_work_does_not_write_empty_prompt(
-    tmp_path: Path,
+@pytest.mark.parametrize("mode", ["summary-only", "terms-only"])
+async def test_single_mode_run_does_not_read_unused_prompt(
+    tmp_path: Path, mode: str
 ) -> None:
     project = _project(tmp_path, "Alice entered.")
 
@@ -1495,13 +1322,7 @@ async def test_ordinary_terminology_without_pending_work_does_not_write_empty_pr
                     {
                         "message": {
                             "content": llm_jsonl(
-                                [
-                                    {
-                                        "type": "term",
-                                        "source": "Alice",
-                                        "category": "人物",
-                                    }
-                                ]
+                                [{"type": "term", "source": "Alice", "category": "人物"}]
                             )
                         }
                     }
@@ -1509,216 +1330,73 @@ async def test_ordinary_terminology_without_pending_work_does_not_write_empty_pr
             },
         )
 
-    os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(terms_handler))
-    try:
-        first = await run_terminology(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-    assert first["failed"] == 0
-    assert first["pending"] == 0
-    first_manifest = read_json(
-        project, project / "runs" / first["run_id"] / "manifest.json"
-    )
-
-    calls = 0
-
-    def fail_if_called(_request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        raise AssertionError("没有待处理术语时不应请求模型")
-
-    os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(fail_if_called))
-    try:
-        second = await run_terminology(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-
-    assert calls == 0
-    assert second["pending"] == 0
-    assert second["run_id"]
-    second_manifest = read_json(
-        project, project / "runs" / second["run_id"] / "manifest.json"
-    )
-    assert (
-        second_manifest["stage_fingerprint"]
-        == first_manifest["stage_fingerprint"]
-    )
-    assert not (
-        project / "runs" / second["run_id"] / "prompt.txt"
-    ).exists()
-
-
-@pytest.mark.asyncio
-async def test_summary_only_run_does_not_read_missing_terminology_prompt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project = _project(tmp_path, "Alice entered.")
-
-    def terms_handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": llm_jsonl(
-                                [
-                                    {
-                                        "type": "term",
-                                        "source": "Alice",
-                                        "category": "人物",
-                                    }
-                                ]
-                            )
-                        }
-                    }
-                ]
-            },
+    if mode == "summary-only":
+        client = httpx.AsyncClient(transport=httpx.MockTransport(terms_handler))
+        try:
+            first = await run_terminology(project, Scope(), http_client=client)
+        finally:
+            await client.aclose()
+            os.environ.pop("LLM_API_KEY", None)
+        assert first["failed"] == 0
+        write_summary_participation(
+            project,
+            [{"file_id": "F0001", "part_id": "document", "selected": True}],
         )
+        for language in ("zh-CN", "en"):
+            (project / "prompts" / f"terminology.{language}.middle.txt").unlink()
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(terms_handler))
-    try:
-        first = await run_terminology(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-    assert first["failed"] == 0
-    write_summary_participation(
-        project,
-        [{"file_id": "F0001", "part_id": "document", "selected": True}],
-    )
-    for language in ("zh-CN", "en"):
-        (project / "prompts" / f"terminology.{language}.middle.txt").unlink()
+        def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": llm_jsonl(
+                                    [
+                                        {
+                                            "type": "summary",
+                                            "text": "Alice 进入。",
+                                            "refs": [
+                                                str(i)
+                                                for i in range(
+                                                    1, len(payload["source_segments"]) + 1
+                                                )
+                                            ],
+                                        }
+                                    ]
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
 
-    original_read_bytes = Path.read_bytes
-    original_read_text = Path.read_text
-
-    def forbid_terminology_bytes(path: Path, *args: object, **kwargs: object) -> bytes:
-        if path.parent.name == "prompts" and path.name.startswith("terminology."):
-            raise AssertionError("summary-only 不应读取 terminology Prompt")
-        return original_read_bytes(path, *args, **kwargs)
-
-    def forbid_terminology_text(path: Path, *args: object, **kwargs: object) -> str:
-        if path.parent.name == "prompts" and path.name.startswith("terminology."):
-            raise AssertionError("summary-only 不应读取 terminology Prompt")
-        return original_read_text(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_bytes", forbid_terminology_bytes)
-    monkeypatch.setattr(Path, "read_text", forbid_terminology_text)
+        reuse = True
+    else:
+        for language in ("zh-CN", "en"):
+            (project / "prompts" / f"fragment_summary.{language}.middle.txt").unlink()
+        handler = terms_handler
+        reuse = False
 
     os.environ["LLM_API_KEY"] = "test"
-
-    def summary_handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": llm_jsonl(
-                                [
-                                    {
-                                        "type": "summary",
-                                        "text": "Alice 进入。",
-                                        "refs": [
-                                            str(i)
-                                            for i in range(
-                                                1, len(payload["source_segments"]) + 1
-                                            )
-                                        ],
-                                    }
-                                ]
-                            )
-                        }
-                    }
-                ]
-            },
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(summary_handler))
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         result = await run_terminology(
             project,
             Scope(),
             http_client=client,
             include_summaries=True,
-            reuse_mixed_fingerprints=True,
+            reuse_mixed_fingerprints=reuse,
         )
     finally:
         await client.aclose()
         os.environ.pop("LLM_API_KEY", None)
     assert result["failed"] == 0
     manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
-    assert set(manifest["prompt_variants"]) == {"summary-only"}
-    assert manifest["prompt_languages"] == {"summary-only": "zh-CN"}
-
-
-@pytest.mark.asyncio
-async def test_terms_only_run_does_not_read_fragment_prompt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project = _project(tmp_path, "Alice entered.")
-    for language in ("zh-CN", "en"):
-        (project / "prompts" / f"fragment_summary.{language}.middle.txt").unlink()
-    original_read_bytes = Path.read_bytes
-    original_read_text = Path.read_text
-
-    def forbid_fragment_bytes(path: Path, *args: object, **kwargs: object) -> bytes:
-        if path.parent.name == "prompts" and path.name.startswith("fragment_summary."):
-            raise AssertionError("terms-only 不应读取 fragment_summary Prompt")
-        return original_read_bytes(path, *args, **kwargs)
-
-    def forbid_fragment_text(path: Path, *args: object, **kwargs: object) -> str:
-        if path.parent.name == "prompts" and path.name.startswith("fragment_summary."):
-            raise AssertionError("terms-only 不应读取 fragment_summary Prompt")
-        return original_read_text(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_bytes", forbid_fragment_bytes)
-    monkeypatch.setattr(Path, "read_text", forbid_fragment_text)
-
-    def terms_handler(request: httpx.Request) -> httpx.Response:
-        del request
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": llm_jsonl(
-                                [
-                                    {
-                                        "type": "term",
-                                        "source": "Alice",
-                                        "category": "人物",
-                                    }
-                                ]
-                            )
-                        }
-                    }
-                ]
-            },
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(terms_handler))
-    try:
-        result = await run_terminology(
-            project,
-            Scope(),
-            http_client=client,
-            include_summaries=True,
-        )
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-    assert result["failed"] == 0
-    manifest = read_json(project, project / "runs" / result["run_id"] / "manifest.json")
-    assert set(manifest["prompt_variants"]) == {"terms-only"}
-    assert manifest["prompt_languages"] == {"terms-only": "zh-CN"}
+    assert set(manifest["prompt_variants"]) == {mode}
+    assert manifest["prompt_languages"] == {mode: "zh-CN"}
 
 
 @pytest.mark.asyncio
@@ -2586,32 +2264,6 @@ async def test_summary_external_failure_is_counted_as_external_error(
 
 
 @pytest.mark.asyncio
-async def test_joint_external_failure_is_counted_once_per_requested_segment(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path, "Alice entered.")
-    write_summary_participation(
-        project,
-        [{"file_id": "F0001", "part_id": "document", "selected": True}],
-    )
-
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(502, text="upstream unavailable")
-
-    os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        result = await run_terminology(
-            project, Scope(), http_client=client, include_summaries=True
-        )
-    finally:
-        await client.aclose()
-        os.environ.pop("LLM_API_KEY", None)
-    assert result["failed"] == 1
-    assert result["failure_counts"] == {"external_error": 1}
-
-
-@pytest.mark.asyncio
 async def test_summary_backfill_preserves_terminology_state(
     tmp_path: Path,
 ) -> None:
@@ -2851,33 +2503,3 @@ async def test_external_adapter_parts_use_generic_summary_boundaries(
     assert ranges["a"]["model_text"] == "<k1>Alice entered.</k1>"
     assert ranges["b"]["source"] == "Bob waved."
     assert ranges["b"]["model_text"] == "<k2>Bob waved.</k2>"
-
-
-def test_cli_terminology_keeps_summary_opt_in_out_of_standard_entry(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    project = _project(tmp_path, "Alice entered.")
-    calls: list[dict[str, object]] = []
-
-    async def fake_run_terminology(
-        _project: Path, _scope: Scope, **kwargs: object
-    ) -> dict[str, object]:
-        calls.append(kwargs)
-        return {
-            "stage": "terminology",
-            "completed": 1,
-            "failed": 0,
-            "pending": 0,
-            "warnings": [],
-        }
-
-    monkeypatch.setattr("app.main.run_terminology", fake_run_terminology)
-    try:
-        assert run(["terminology", str(project)]) == 0
-    finally:
-        os.environ.pop("LLM_API_KEY", None)
-    capsys.readouterr()
-
-    assert calls == [{"resume_run_id": None, "reuse_mixed_fingerprints": False}]

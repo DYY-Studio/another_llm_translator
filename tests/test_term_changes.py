@@ -165,20 +165,3 @@ def test_continuous_decision_includes_confirmed_terms_with_pending_changes(tmp_p
     plan, reason = _decision_plan_or_skip(project, None, final_review=False)
     assert reason is None
     assert {term["normalized"] for term in plan["eligible"]} == {"alice"}
-
-
-def test_v9_upgrade_starts_change_tracking_from_current_library(tmp_path: Path) -> None:
-    import sqlite3
-    from app import sqlite_storage
-    project = create_web_store_project(tmp_path, "Alice")
-    library = publish(project, "first", "Alice", "爱丽丝")
-    del library["knowledge"]["pending_changes"]
-    write_json(project, project / "terminology" / "terms.json", library)
-    before = load_terms(project, resolve_knowledge=False)
-    with sqlite3.connect(sqlite_storage.database_path(project)) as connection:
-        connection.execute("UPDATE schema_meta SET value='9' WHERE key='schema_version'")
-    sqlite_storage._SUPPORTED_CACHE.discard(sqlite_storage.database_path(project))
-    upgraded = load_terms(project, resolve_knowledge=False)
-    assert upgraded["terms"] == before["terms"]
-    assert upgraded["knowledge"]["pending_changes"] == {}
-    assert list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))

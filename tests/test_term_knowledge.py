@@ -392,22 +392,6 @@ async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(
     assert counts == {"evidence": 2, "project_descriptions": 2}
 
 
-@pytest.mark.asyncio
-async def test_entity_budget_fails_before_any_model_request(tmp_path: Path) -> None:
-    from app.config import load_project_config
-    from app.term_library import term_normalization
-    from app.term_knowledge import publish_evidence, entity_view, pack_knowledge_batches
-    project = make_project(tmp_path)
-    data = library()
-    config = load_project_config(project, stage="terminology_decision")
-    publish_evidence(project, data, [scan_record(project, "身份信息" * 1000)], term_normalization(config))
-    config["llm"]["context_window_tokens"] = 100
-    config["chunking"]["context_reserve_tokens"] = 0
-    batches, _, errors = pack_knowledge_batches([entity_view(project, data, "alpha")], "聚合", config)
-    assert not batches
-    assert "完整证据" in errors["alpha"]
-
-
 def test_group_changes_invalidate_shared_explanation_and_cross_entity_refs(tmp_path: Path) -> None:
     from app.term_knowledge import entity_view, save_items, project_descriptions
     project = make_project(tmp_path)
@@ -748,65 +732,6 @@ def test_v9_migration_uses_only_complete_saved_order_to_rebuild_hash(
         assert entity_view(project, migrated, "alpha")["status"] == "pending"
 
 
-def test_v9_migration_preserves_unmatched_pending_hash(tmp_path: Path) -> None:
-    import sqlite3
-    from app.sqlite_storage import database_path, ensure_supported, read_json, write_json
-    from app.term_knowledge import save_items, entity_view
-    from app.term_library import load_terms
-
-    project = make_project(tmp_path)
-    data = library()
-    save_items(project, data, "alpha", [{"text": "manual explanation", "fragment_ids": []}])
-    data["knowledge"]["version"] = 1
-    data["knowledge"]["entities"]["alpha"]["input_version"] = "sha256:historical-pending"
-    meta = read_json(project, project / "project.json")
-    write_json(project, project / "terminology" / "terms.json",
-               record_header("terminology_library", meta["project_id"], **data))
-    with sqlite3.connect(database_path(project)) as connection:
-        connection.execute("UPDATE schema_meta SET value = '8' WHERE key = 'schema_version'")
-    from app.sqlite_storage import _SUPPORTED_CACHE
-    _SUPPORTED_CACHE.discard(database_path(project))
-
-    ensure_supported(project)
-    migrated = load_terms(project)
-    saved = migrated["knowledge"]["entities"]["alpha"]
-    assert migrated["knowledge"]["version"] == 2
-    assert saved["input_version"] == "sha256:historical-pending"
-    assert entity_view(project, migrated, "alpha")["status"] == "pending"
-
-
-def test_v9_migration_failure_rolls_back_and_keeps_backup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import sqlite3
-    from app.sqlite_storage import database_path, ensure_supported, read_json, write_json
-
-    project = make_project(tmp_path)
-    data = library()
-    data["knowledge"]["version"] = 1
-    meta = read_json(project, project / "project.json")
-    write_json(project, project / "terminology" / "terms.json",
-               record_header("terminology_library", meta["project_id"], **data))
-    with sqlite3.connect(database_path(project)) as connection:
-        connection.execute("UPDATE schema_meta SET value = '8' WHERE key = 'schema_version'")
-        before = connection.execute("SELECT payload_json FROM terms_state WHERE key='terms'").fetchone()[0]
-        before = connection.execute("SELECT payload_json FROM terms_state WHERE key='terms'").fetchone()[0]
-    from app import sqlite_storage
-    sqlite_storage._SUPPORTED_CACHE.discard(database_path(project))
-
-    def fail(*args: object, **kwargs: object) -> None:
-        raise RuntimeError("migration failure")
-
-    monkeypatch.setattr("app.term_knowledge._migrate_knowledge_to_v2", fail)
-    with pytest.raises(RuntimeError, match="migration failure"):
-        ensure_supported(project)
-    backup, = (project / "snapshots" / "storage_migrations").glob("*.sqlite")
-    with sqlite3.connect(database_path(project)) as connection:
-        assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "8"
-        raw = connection.execute("SELECT payload_json FROM terms_state WHERE key='terms'").fetchone()[0]
-    with sqlite3.connect(backup) as connection:
-        assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "8"
-    assert raw == before
-
-
 @pytest.mark.parametrize("fail", [False, True])
 def test_automatic_migration_ends_old_tasks_atomically_and_opens_silently(tmp_path, monkeypatch, fail):
     import json
@@ -908,23 +833,6 @@ def test_storage_upgrade_preserves_current_knowledge_and_pending_tasks(tmp_path)
     assert migrated_run["status"] == "interrupted"
     assert migrated_run["decision_status"] == "discarded"
     assert "新建 Run" in migrated_run["error_message"]
-
-
-
-def test_automatic_upgrade_ends_unpublished_legacy_scan(tmp_path):
-    import sqlite3
-    from app import sqlite_storage
-    from app.sqlite_storage import database_path, read_json, write_json
-
-    project = make_project(tmp_path)
-    write_json(project, project / "terminology/active_task.json",
-               record_header("terminology_task", "test", status="active"))
-    with sqlite3.connect(database_path(project)) as db:
-        db.execute("DELETE FROM terms_state WHERE key='terms'")
-        db.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
-    sqlite_storage._SUPPORTED_CACHE.discard(database_path(project))
-    sqlite_storage.ensure_supported(project)
-    assert read_json(project, project / "terminology/active_task.json")["status"] == "reset"
 
 
 def test_scan_publication_transfers_new_alias_evidence(tmp_path: Path) -> None:

@@ -1177,35 +1177,6 @@ async def test_forced_terminology_scan_is_always_project_wide(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_terminology_context_and_sources_never_expose_segment_ids(
-    tmp_path: Path,
-) -> None:
-    project = await create_project(tmp_path, "before\ncurrent")
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        assert payload["reference_context"] == ["before"]
-        assert payload["source_segments"] == ["current"]
-        assert "id" not in json.dumps(payload)
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": llm_jsonl([])}}]},
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        summary = await run_terminology(
-            project,
-            Scope(only_segment="F0001-S000002"),
-            http_client=client,
-        )
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-    assert summary["completed"] == 1
-
-
-@pytest.mark.asyncio
 async def test_parallel_translation_uses_compact_source_only_context(
     tmp_path: Path,
 ) -> None:
@@ -1330,6 +1301,12 @@ def test_term_matching_reads_names_and_aliases_from_ruby_reading() -> None:
     matched = match_terms("｜猫《Aly》出现", library, 10, spec)
     assert [item["source"] for item in matched] == ["Alice"]
     assert matched[0]["aliases"] == ["Aly"]
+    assert [item["source"] for item in match_terms(
+        "｜Alice《Alice》出现", library, 10, spec
+    )] == ["Alice"]
+    assert [item["source"] for item in match_terms(
+        "｜猫《ＡＬＩＣＥ》出现", library, 10, spec
+    )] == ["Alice"]
 
 
 def test_term_matching_injects_only_aliases_hit_by_the_source() -> None:
@@ -1408,8 +1385,10 @@ def test_term_validation_matches_only_actual_preferred_term_hits() -> None:
 
 
 @pytest.mark.asyncio
-async def test_advisory_term_usage_repairs_once_even_when_hard_repairs_are_zero(
+@pytest.mark.parametrize("repairs", [True, False])
+async def test_advisory_term_usage_repairs_once_or_accepts_warning(
     tmp_path: Path,
+    repairs: bool,
 ) -> None:
     project = await create_project(tmp_path, "Alice arrived.")
     project_id = str(read_json(project, project / "project.json")["project_id"])
@@ -1440,7 +1419,7 @@ async def test_advisory_term_usage_repairs_once_even_when_hard_repairs_are_zero(
     config_path.write_text(
         config_path.read_text(encoding="utf-8")
         .replace("validators = []", 'validators = ["preferred_term_usage"]')
-        .replace("max_retry_attempts = 2", "max_retry_attempts = 0"),
+        .replace("max_retry_attempts = 2", "max_retry_attempts = 0" if repairs else "max_retry_attempts = 2"),
         encoding="utf-8",
     )
     calls: list[dict] = []
@@ -1448,7 +1427,7 @@ async def test_advisory_term_usage_repairs_once_even_when_hard_repairs_are_zero(
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         calls.append(payload)
-        repaired = "validation_repair" in payload
+        repaired = "validation_repair" in payload and repairs
         return httpx.Response(
             200,
             json={
@@ -1460,11 +1439,7 @@ async def test_advisory_term_usage_repairs_once_even_when_hard_repairs_are_zero(
                                     {
                                         "type": "segment",
                                         "id": item["id"],
-                                        "translation": (
-                                            "译文：爱丽丝"
-                                            if repaired
-                                            else "译文"
-                                        ),
+                                        "translation": "译文：爱丽丝" if repaired else "译文",
                                     }
                                     for item in payload["segments"]
                                 ]
@@ -1489,126 +1464,29 @@ async def test_advisory_term_usage_repairs_once_even_when_hard_repairs_are_zero(
     assert calls[1]["validation_repair"] == "对源文中适用的术语使用本次提供的推荐译名"
     assert calls[1]["segments"] == calls[0]["segments"]
     record = read_jsonl(project, project / "stages" / "translation.jsonl")[-1]
-    assert record["validation_status"] == "passed"
-    assert record["validation_findings"] == []
+    if repairs:
+        assert record["validation_status"] == "passed"
+        assert record["validation_findings"] == []
+    else:
+        assert record["validation_status"] == "warning"
+        assert record["validation_findings"][0]["severity"] == "advisory"
 
 
 @pytest.mark.asyncio
-async def test_advisory_term_usage_accepts_warning_after_one_repair(
-    tmp_path: Path,
-) -> None:
-    project = await create_project(tmp_path, "Alice arrived.")
-    project_id = str(read_json(project, project / "project.json")["project_id"])
-    write_term_library(
-        project,
-        project / "terminology" / "terms.json",
-        record_header(
-            "terminology_library",
-            project_id,
-            record_id="TERMS-USAGE-WARNING",
-            terms_revision=1,
-            terms=[
-                {
-                    "record_id": "TERM-ALICE-WARNING",
-                    "source": "Alice",
-                    "normalized": "alice",
-                    "category": "人名",
-                    "description": None,
-                    "preferred_translation": "爱丽丝",
-                    "aliases": [],
-                    "group_primary": None,
-                    "conflicts": {},
-                }
-            ],
-        ),
-    )
-    config_path = project / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            "validators = []", 'validators = ["preferred_term_usage"]'
-        ),
-        encoding="utf-8",
-    )
-    calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": llm_jsonl(
-                                [
-                                    {
-                                        "type": "segment",
-                                        "id": item["id"],
-                                        "translation": "译文",
-                                    }
-                                    for item in payload["segments"]
-                                ]
-                            )
-                        }
-                    }
-                ]
-            },
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        summary = await run_translation(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-
-    assert summary["completed"] == 1
-    assert summary["failed"] == 0
-    assert calls == 2
-    record = read_jsonl(project, project / "stages" / "translation.jsonl")[-1]
-    assert record["validation_status"] == "warning"
-    assert record["validation_findings"][0]["severity"] == "advisory"
-
-
-def test_term_matching_deduplicates_term_hit_across_base_and_reading() -> None:
-    library = {
-        "terms": [
-            {
-                "source": "Alice",
-                "aliases": [],
-                "preferred_translation": "爱丽丝",
-            }
-        ]
-    }
-    matched = match_terms(
-        "｜Alice《Alice》出现", library, 10, TermNormalization("NFKC", True)
-    )
-    assert [item["source"] for item in matched] == ["Alice"]
-
-
-def test_term_matching_applies_normalization_to_ruby_reading() -> None:
-    library = {
-        "terms": [
-            {
-                "source": "Alice",
-                "aliases": [],
-                "preferred_translation": "爱丽丝",
-            }
-        ]
-    }
-    matched = match_terms(
-        "｜猫《ＡＬＩＣＥ》出现", library, 10, TermNormalization("NFKC", True)
-    )
-    assert [item["source"] for item in matched] == ["Alice"]
-
-
-@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "term_source", "normalized", "preferred"),
+    [
+        ("｜漢《かん》｜字《じ》を読む。", "漢字", "漢字", "汉字"),
+        ("｜猫《Aoki》出现。", "Aoki", "aoki", "青木"),
+    ],
+)
 async def test_translation_injects_term_across_aozora_ruby_without_rewriting_source(
     tmp_path: Path,
+    source: str,
+    term_source: str,
+    normalized: str,
+    preferred: str,
 ) -> None:
-    source = "｜漢《かん》｜字《じ》を読む。"
     project = await create_project(tmp_path, source)
     project_id = str(read_json(project, project / "project.json")["project_id"])
     write_term_library(
@@ -1622,11 +1500,11 @@ async def test_translation_injects_term_across_aozora_ruby_without_rewriting_sou
             terms=[
                 {
                     "record_id": "TERM-AOZORA",
-                    "source": "漢字",
-                    "normalized": "漢字",
+                    "source": term_source,
+                    "normalized": normalized,
                     "category": "普通名词",
                     "description": None,
-                    "preferred_translation": "汉字",
+                    "preferred_translation": preferred,
                     "aliases": [],
                     "group_primary": None,
                     "conflicts": {},
@@ -1652,7 +1530,7 @@ async def test_translation_injects_term_across_aozora_ruby_without_rewriting_sou
                                     {
                                         "type": "segment",
                                         "id": "1",
-                                        "translation": "阅读汉字。",
+                                        "translation": f"译文：{preferred}",
                                     }
                                 ]
                             )
@@ -1672,78 +1550,7 @@ async def test_translation_injects_term_across_aozora_ruby_without_rewriting_sou
     assert summary["completed"] == 1
     assert seen_payload is not None
     assert seen_payload["segments"] == [{"id": "1", "source": source}]
-    assert [item["source"] for item in seen_payload["terms"]] == ["漢字"]
-
-
-@pytest.mark.asyncio
-async def test_translation_injects_term_found_only_in_aozora_ruby_reading(
-    tmp_path: Path,
-) -> None:
-    source = "｜猫《Aoki》出现。"
-    project = await create_project(tmp_path, source)
-    project_id = str(read_json(project, project / "project.json")["project_id"])
-    write_term_library(
-        project,
-        project / "terminology" / "terms.json",
-        record_header(
-            "terminology_library",
-            project_id,
-            record_id="TERMS-AOZORA-READING",
-            terms_revision=1,
-            terms=[
-                {
-                    "record_id": "TERM-AOZORA-READING",
-                    "source": "Aoki",
-                    "normalized": "aoki",
-                    "category": "人名",
-                    "description": None,
-                    "preferred_translation": "青木",
-                    "aliases": [],
-                    "group_primary": None,
-                    "conflicts": {},
-                }
-            ],
-        ),
-    )
-    seen_payload: dict | None = None
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal seen_payload
-        seen_payload = json.loads(
-            json.loads(request.content)["messages"][1]["content"]
-        )
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": llm_jsonl(
-                                [
-                                    {
-                                        "type": "segment",
-                                        "id": "1",
-                                        "translation": "猫出现。",
-                                    }
-                                ]
-                            )
-                        }
-                    }
-                ]
-            },
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        summary = await run_translation(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-
-    assert summary["completed"] == 1
-    assert seen_payload is not None
-    assert seen_payload["segments"] == [{"id": "1", "source": source}]
-    assert [item["source"] for item in seen_payload["terms"]] == ["Aoki"]
+    assert [item["source"] for item in seen_payload["terms"]] == [term_source]
 
 
 def test_term_match_cache_is_keyed_by_segment_and_source() -> None:
@@ -1862,12 +1669,23 @@ async def test_translation_truncated_response_saves_prefix_and_retries_only_miss
 
 
 @pytest.mark.asyncio
-async def test_complete_missing_id_retries_full_132_segment_batch(
+@pytest.mark.parametrize("exhausted", [False, True])
+async def test_complete_missing_id_retries_or_fails_entire_translation_batch(
     tmp_path: Path,
+    exhausted: bool,
 ) -> None:
+    line_count = 3 if exhausted else 132
     project = await create_project(
-        tmp_path, "\n".join(f"line-{index}" for index in range(132))
+        tmp_path, "\n".join(f"line-{index}" for index in range(line_count))
     )
+    if exhausted:
+        config_path = project / "config.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "format_max_attempts = 2", "format_max_attempts = 0"
+            ),
+            encoding="utf-8",
+        )
     calls: list[list[str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1899,61 +1717,18 @@ async def test_complete_missing_id_retries_full_132_segment_batch(
         await client.aclose()
         del os.environ["LLM_API_KEY"]
 
-    expected_ids = [str(index) for index in range(1, 133)]
-    assert summary["completed"] == 132
-    assert calls == [expected_ids, expected_ids]
+    expected_ids = [str(index) for index in range(1, line_count + 1)]
     records = read_jsonl(project, project / "stages" / "translation.jsonl")
-    assert len(records) == 132
-    assert [record["text"] for record in records] == [f"ok:{i}" for i in expected_ids]
-
-
-@pytest.mark.asyncio
-async def test_complete_id_mismatch_exhaustion_fails_entire_translation_batch(
-    tmp_path: Path,
-) -> None:
-    project = await create_project(tmp_path, "one\ntwo\nthree")
-    config_path = project / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            "format_max_attempts = 2", "format_max_attempts = 0"
-        ),
-        encoding="utf-8",
-    )
-    calls: list[list[str]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        ids = [item["id"] for item in payload["segments"]]
-        calls.append(ids)
-        records = [
-            {
-                "type": "segment",
-                "id": segment_id,
-                "translation": f"ok:{segment_id}",
-            }
-            for segment_id in ids[:-1]
-        ]
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        summary = await run_translation(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-
-    assert summary["completed"] == 0
-    assert summary["failed"] == 3
-    assert calls == [["1", "2", "3"]]
-    records = read_jsonl(project, project / "stages" / "translation.jsonl")
-    assert [record["error_class"] for record in records] == [
-        "format_error",
-        "format_error",
-        "format_error",
-    ]
+    if exhausted:
+        assert summary["completed"] == 0
+        assert summary["failed"] == line_count
+        assert calls == [expected_ids]
+        assert [record["error_class"] for record in records] == ["format_error"] * line_count
+    else:
+        assert summary["completed"] == line_count
+        assert calls == [expected_ids, expected_ids]
+        assert len(records) == line_count
+        assert [record["text"] for record in records] == [f"ok:{i}" for i in expected_ids]
 
 
 @pytest.mark.asyncio
@@ -2414,59 +2189,21 @@ async def test_draft_scan_saves_translation_and_reuses_both_results(
 
 
 @pytest.mark.asyncio
-async def test_draft_scan_retries_translation_without_rescanning_terms(
+async def test_draft_scan_uses_translation_validation_without_rescanning_terms(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "Alice entered.")
-    modes: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        modes.append(payload["response_mode"])
-        records = (
-            [{"type": "term", "source": "Alice", "category": "人名"}]
-            if len(modes) == 1
-            else [
-                {"type": "segment", "id": item["id"], "translation": "爱丽丝进来了。"}
-                for item in payload["segments"]
-            ]
+    path = project / "config.toml"
+    path.write_text(
+        path.read_text().replace(
+            "validators = []", 'validators = ["japanese_kana"]'
         )
-        return httpx.Response(
-            200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
-        )
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await run_terminology(
-            project, Scope(), http_client=client, include_draft_translation=True
-        )
-    assert modes == ["terms+translation", "translation-only"]
-    assert result["failed"] == 0
-    assert len(read_jsonl(project, project / "terminology" / "scans.jsonl")) == 1
-    assert load_stage_history(project, "translation")[0]["text"] == "爱丽丝进来了。"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("repair", [False, True])
-async def test_draft_scan_uses_translation_split_and_validation(
-    tmp_path: Path, repair: bool
-) -> None:
-    project = await create_project(tmp_path, "Alice entered.")
-    if repair:
-        path = project / "config.toml"
-        path.write_text(
-            path.read_text().replace(
-                "validators = []", 'validators = ["japanese_kana"]'
-            )
-        )
+    )
     requests: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         requests.append(payload)
-        if not repair and any(len(item["source"]) > 4 for item in payload["segments"]):
-            return httpx.Response(
-                400, text="context_length_exceeded: maximum context tokens"
-            )
         records = []
         if payload["response_mode"] != "translation-only":
             records = (
@@ -2478,9 +2215,7 @@ async def test_draft_scan_uses_translation_split_and_validation(
             {
                 "type": "segment",
                 "id": item["id"],
-                "translation": "あ"
-                if repair and "validation_repair" not in payload
-                else "译",
+                "translation": "あ" if "validation_repair" not in payload else "译",
             }
             for item in payload["segments"]
         )
@@ -2495,13 +2230,13 @@ async def test_draft_scan_uses_translation_split_and_validation(
     translations = load_stage_history(project, "translation")
     assert result["completed"] == 1
     assert result["failed"] == 0
+    assert len(read_jsonl(project, project / "terminology" / "scans.jsonl")) == 1
     assert len(translations) == 1
     assert translations[0]["segment_id"] == "F0001-S000001"
     assert translations[0]["validation_status"] == "passed"
-    assert translations[0]["text"] == ("译" if repair else "译译译译")
-    if repair:
-        assert requests[-1]["response_mode"] == "translation-only"
-        assert "validation_repair" in requests[-1]
+    assert translations[0]["text"] == "译"
+    assert requests[-1]["response_mode"] == "translation-only"
+    assert "validation_repair" in requests[-1]
 
 
 @pytest.mark.asyncio
@@ -2797,11 +2532,18 @@ async def test_draft_scan_repairs_epub_markers_without_repeating_scan(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "declaration", [None, {"type": "no_terms", "extra": True}, {"type": "no_terms"}]
+    ("declaration", "exhausted"),
+    [
+        (None, False),
+        ({"type": "no_terms", "extra": True}, False),
+        ({"type": "no_terms"}, False),
+        (None, True),
+    ],
 )
 async def test_draft_scan_requires_explicit_term_response_before_saving(
     tmp_path: Path,
     declaration: dict | None,
+    exhausted: bool,
 ) -> None:
     project = await create_project(tmp_path, "The door opened.")
     requests = []
@@ -2814,7 +2556,7 @@ async def test_draft_scan_requires_explicit_term_response_before_saving(
             assert load_stage_history(project, "translation") == []
             assert read_jsonl(project, project / "terminology" / "scans.jsonl") == []
         records = [declaration] if len(requests) == 1 and declaration else []
-        if len(requests) > 1:
+        if len(requests) > 1 and not exhausted:
             records = [{"type": "no_terms"}]
         records.extend(
             {"type": "segment", "id": item["id"], "translation": "门开了。"}
@@ -2828,56 +2570,20 @@ async def test_draft_scan_requires_explicit_term_response_before_saving(
         result = await run_terminology(
             project, Scope(), http_client=client, include_draft_translation=True
         )
-    assert result["failed"] == 0
-    assert len(requests) == (1 if declaration == {"type": "no_terms"} else 2)
     assert all(request["response_mode"] == "terms+translation" for request in requests)
-    if len(requests) == 2:
-        assert "format_correction" not in requests[1]
-    assert load_stage_history(project, "translation")[0]["text"] == "门开了。"
-
-
-@pytest.mark.asyncio
-async def test_missing_draft_term_declaration_fails_with_format_reason(
-    tmp_path: Path,
-) -> None:
-    project = await create_project(tmp_path, "The door opened.")
-    requests = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        requests.append(payload)
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": llm_jsonl(
-                                [
-                                    {
-                                        "type": "segment",
-                                        "id": "1",
-                                        "translation": "门开了。",
-                                    }
-                                ]
-                            )
-                        }
-                    }
-                ]
-            },
-        )
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await run_terminology(
-            project, Scope(), http_client=client, include_draft_translation=True
-        )
-    assert result["failed"] == 1
-    assert len(requests) == 3
-    assert all(payload["response_mode"] == "terms+translation" for payload in requests)
-    records = load_stage_history(project, "translation")
-    assert not any(record["status"] == "completed" for record in records)
-    assert records[-1]["error_class"] == "format_error"
-    assert "术语响应声明" in records[-1]["error_message"]
+    if exhausted:
+        assert result["failed"] == 1
+        assert len(requests) == 3
+        records = load_stage_history(project, "translation")
+        assert not any(record["status"] == "completed" for record in records)
+        assert records[-1]["error_class"] == "format_error"
+        assert "术语响应声明" in records[-1]["error_message"]
+    else:
+        assert result["failed"] == 0
+        assert len(requests) == (1 if declaration == {"type": "no_terms"} else 2)
+        if len(requests) == 2:
+            assert "format_correction" not in requests[1]
+        assert load_stage_history(project, "translation")[0]["text"] == "门开了。"
 
 
 @pytest.mark.asyncio

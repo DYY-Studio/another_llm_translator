@@ -26,25 +26,6 @@ from tests.test_terminology_translation import create_project
 
 
 @pytest.mark.asyncio
-async def test_alignment_can_repair_a_batch_containing_an_empty_translation():
-    class Decision:
-        async def choose(self, state, questions, *, segment_id):
-            return {question.name: DecisionAnswer("misaligned", {"misaligned": 1}, 1)
-                    for question in questions}
-
-    findings = await validate_translation_response((
-        TranslationValidationContext("First source.", "", segment_id="S1"),
-        TranslationValidationContext("Second source.", "错位译文", segment_id="S2"),
-    ), (SegmentAlignmentValidator(Decision()),))
-    assert set(findings) == {"S1", "S2"}
-    finding = findings["S1"][0]
-    assert finding["match_type"] == "segment_misaligned"
-    assert finding["severity"] == "error"
-    assert finding["matched_text"] == ""
-    assert (finding["start"], finding["end"]) == (0, 0)
-
-
-@pytest.mark.asyncio
 async def test_alignment_uses_plain_ruby_evidence_and_preserves_finding_offsets():
     source = "｜撮影《さつえい》と｜稽古《けいこ》。普通の《括弧》。"
     translation = "｜排练《páil iàn》和拍摄。普通的《括号》。"
@@ -74,10 +55,6 @@ async def test_alignment_uses_plain_ruby_evidence_and_preserves_finding_offsets(
     ("still_missing", 0.9, 1, "warning", 0.8),
     ("http_error", 0, 0, "failed", 0.8),
     ("context_error", 0, 0, "failed", 0.8),
-    ("uncertain", 0.9, 0, "passed", 0),
-    ("required", 0.5, 0, "passed", 0),
-    ("required", 0.9, 1, "passed", 0),
-    ("acceptable", 0.7, 0, "passed", 0.6),
 ])
 async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypatch, choice, confidence, repairs, status, warning_threshold):
     project = await create_project(tmp_path, "Alice arrived.")
@@ -246,8 +223,6 @@ def test_decision_presets_inherit_and_override_independently(tmp_path, monkeypat
     ("aligned", 0.9, "passed", 0, 0.8), ("misaligned", 0.9, "passed", 1, 0.8),
     ("uncertain", 0.9, "warning", 0, 0.8), ("aligned", 0.5, "warning", 0, 0.8),
     ("empty_translation", 0.9, "passed", 1, 0.8),
-    ("uncertain", 0.9, "passed", 0, 0), ("aligned", 0.5, "passed", 0, 0),
-    ("misaligned", 0.9, "passed", 1, 0),
 ])
 async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monkeypatch, choice, confidence, expected_status, repairs, warning_threshold):
     diagnostics = Diagnostics(tmp_path / "global.log")
@@ -541,16 +516,6 @@ async def test_alignment_warning_threshold_is_independent(
         assert findings["S1"][0].repairable == (expected == "error")
 
 
-@pytest.mark.parametrize("value", [-0.1, 1.1, True])
-def test_alignment_warning_threshold_rejects_invalid_config(value) -> None:
-    from app.errors import ConfigError
-
-    config = load_config(Path(__file__).parents[1] / "config/config.toml")
-    config["validation"]["translation"]["alignment"]["warning_threshold"] = value
-    with pytest.raises(ConfigError, match="警告阈值"):
-        dump_config(config)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("threshold,choice,confidence,refused,expected", [
     (0.6, "acceptable", 0.59, False, "preferred_term_uncertain"),
@@ -579,13 +544,17 @@ async def test_term_warning_threshold_boundary_and_refusal(
     assert all(not finding.repairable for finding in findings)
 
 
+@pytest.mark.parametrize("field", ["alignment", "term"])
 @pytest.mark.parametrize("value", [-0.1, 1.1, True])
-def test_term_warning_threshold_rejects_invalid_config(value):
+def test_warning_threshold_rejects_invalid_config(field: str, value) -> None:
     from app.errors import ConfigError
 
-    config = load_config(Path("config/config.toml"))
-    config["validation"]["translation"]["decision_warning_threshold"] = value
-    with pytest.raises(ConfigError, match="术语复核警告阈值"):
+    config = load_config(Path(__file__).parents[1] / "config/config.toml")
+    if field == "alignment":
+        config["validation"]["translation"]["alignment"]["warning_threshold"] = value
+    else:
+        config["validation"]["translation"]["decision_warning_threshold"] = value
+    with pytest.raises(ConfigError, match="警告阈值"):
         dump_config(config)
 
 

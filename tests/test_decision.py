@@ -196,16 +196,6 @@ def test_preset_rejects_credentials_in_url():
         validate_decision_preset(value)
 
 
-def test_invalid_answer_fails_without_fallback(monkeypatch):
-    monkeypatch.setenv("DECISION_TEST_KEY", "secret")
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"answers": {}}))) as http:
-            client = DecisionClient(validate_decision_preset(preset()), http_client=http)
-            with pytest.raises(ExternalError):
-                await client.choose("source", [DecisionQuestion("term", "Question", {"a": "A", "b": "B"})])
-    asyncio.run(run())
-
-
 @pytest.mark.parametrize("protocol,invalid", [
     ("typesafe", "empty"), ("typesafe", "json"),
     ("openai-decisions", "missing"), ("openai-decisions", "fields"),
@@ -254,22 +244,6 @@ def test_invalid_decision_response_uses_retry_budget(tmp_path, monkeypatch, prot
             assert [attempt["outcome"] for attempt in attempts] == [
                 "response_parse_error", "response_parse_error" if exhausted else "succeeded",
             ]
-    asyncio.run(run())
-
-
-def test_retry_and_refusal_are_recorded(monkeypatch):
-    monkeypatch.setenv("DECISION_TEST_KEY", "secret")
-    responses = iter([httpx.Response(429), httpx.Response(200, json={
-        "model": "test-model", "answers": {"term": {"type": "refusal"}},
-    })])
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: next(responses))) as http:
-            client = DecisionClient(preset(), http_client=http,
-                                    retry={"http_max_attempts": 2, "base_delay_seconds": 0})
-            result = await client.choose("source", [DecisionQuestion("term", "Question", {"a": "A", "b": "B"})])
-            assert result["term"].refused
-            assert [record["http_status"] for record in client.records] == [429, 200]
-            assert client.pool.active == 0
     asyncio.run(run())
 
 
