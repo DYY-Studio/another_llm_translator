@@ -180,7 +180,13 @@ def register_agent_routes(
                 histories,
                 format_count=format_counts[segment_id],
             )
-            detail["model_source"] = segment_model_source(files, segment, stage="translation")
+            file_by_id = {str(f["file_id"]): f for f in files}
+            adapter, state, run_options = document_prompt_context(
+                root, file_by_id[str(segment["file_id"])]
+            )
+            detail["model_source"] = adapter.render_model_source(
+                segment=segment, opaque_state=state, run_options=run_options
+            )
             all_segments = load_segments(root)
             library = load_terms(root, resolve_knowledge=False)
             warnings: list[str] = []
@@ -196,10 +202,6 @@ def register_agent_routes(
             )
             detail["matched_terms"] = cache.for_items([segment])
             detail["term_warnings"] = warnings
-            file_by_id = {str(f["file_id"]): f for f in files}
-            adapter, state, run_options = document_prompt_context(
-                root, file_by_id[str(segment["file_id"])]
-            )
             detail["document_adapter_requirements"] = {
                 stage_name: document_prompt_requirements(adapter, state, run_options, stage_name)
                 for stage_name in AGENT_STAGES
@@ -246,7 +248,7 @@ def register_agent_routes(
                 store = WebStore(root)
                 files = load_source_files(root)
                 segment = store._require_segment(segment_id, files=files, with_adapter_state=True)
-                language = _prompt_language(store.config, None)
+                language = _prompt_language(root, stage, None)
                 validators = store.config["_translation_validator_instances"]
 
                 if stage == "translation":
@@ -416,9 +418,6 @@ def register_agent_routes(
 
         def _prepare() -> dict[str, Any]:
             with project_write_lock(root):
-                config, metadata, files, segments = _project_context(root, stage=stage)
-                _require_nonempty_segments(segments)
-                language = _prompt_language(config, prompt_language)
                 candidates = find_running_runs(root, stage)
                 resume_run_id: str | None = None
                 run_warnings: list[str] = []
@@ -449,6 +448,12 @@ def register_agent_routes(
                 elif run_action == "resume":
                     raise UsageError(f"{stage} 没有可续用的 running Run")
 
+                frozen_options = _frozen_run_options(root, resume_run_id)
+                config, metadata, files, segments = _project_context(
+                    root, stage=stage, frozen_run_options=frozen_options
+                )
+                _require_nonempty_segments(segments)
+                language = _prompt_language(root, stage, prompt_language)
                 effective_scope = (
                     scope_from_run(root, resume_run_id, dry_run=False)
                     if resume_run_id
@@ -469,13 +474,9 @@ def register_agent_routes(
                 )
                 library = load_terms(root, resolve_knowledge=False)
                 terms_revision = int(library["terms_revision"]) if library else None
-                frozen_options = _frozen_run_options(root, resume_run_id)
-                requirements, requirement_map, _ = _document_prompt_requirement_helpers(
-                    root, files, selected, config, stage, frozen_options
-                )
-                prompt, prompt_variants, variant_reqs = _prompt_factory(
-                    root, stage, language, requirements, requirement_map
-                )
+                requirements_for, _ = _document_prompt_requirement_helpers(config, language)
+                prompt_fn = _prompt_factory(root, stage, language)
+                prompt = prompt_fn(requirements_for(selected))
                 fingerprint = stage_fingerprint(
                     config,
                     stage,
@@ -502,11 +503,17 @@ def register_agent_routes(
                     cache.for_items(list(selection.work))
                 warnings = _assemble_warnings(
                     stage=stage,
-                    library=library,
-                    mixed_fingerprints=mixed,
-                    effective_force=effective_scope.force,
-                    reuse_mixed_fingerprints=reuse_mixed,
-                    extra_warnings=[*run_warnings, *term_warnings],
+                    resume_run_id=resume_run_id,
+                    resume_arguments_ignored=False,
+                    resume_message=f"将续用 Agent MCP Run：{resume_run_id}" if resume_run_id else "",
+                    config=config,
+                    fingerprint=fingerprint,
+                    existing_fingerprints=selection.fingerprints,
+                    reusable_count=len(selection.reusable),
+                    force=effective_scope.force,
+                    reuse_allowed=reuse_mixed,
+                    dry_run=False,
+                    extra=[*(w for w in run_warnings if not resume_run_id), *term_warnings],
                 )
                 if not selection.work and not resume_run_id:
                     raise UsageError("所选范围内没有待处理的 Segment")
@@ -523,8 +530,6 @@ def register_agent_routes(
                         selected_count=len(selected),
                         requested_count=len(selection.work),
                         reused_count=len(selection.reusable),
-                        prompt_variants=prompt_variants,
-                        prompt_variant_requirements=variant_reqs,
                     )[:2]
                 else:
                     run_id, _ = create_run(
@@ -544,8 +549,6 @@ def register_agent_routes(
                             "scope": _scope_record(effective_scope),
                             "warnings": warnings,
                         },
-                        prompt_variants=prompt_variants,
-                        prompt_variant_requirements=variant_reqs,
                     )
                 return {
                     "run_id": run_id,
@@ -604,10 +607,9 @@ def register_agent_routes(
             if manifest.get("status") != "running":
                 raise UsageError(f"Run {safe_id} 当前状态为 {manifest.get('status')}，不可拉取批次")
             stage = str(manifest["stage"])
-            config, _, files, segments = _project_context(root, stage=stage)
             frozen_options = _frozen_run_options(root, safe_id)
-            _, requirement_map, _ = _document_prompt_requirement_helpers(
-                root, files, segments, config, stage, frozen_options
+            config, _, files, segments = _project_context(
+                root, stage=stage, frozen_run_options=frozen_options
             )
             raw_scope = manifest.get("scope") or {}
             scope = Scope(
@@ -696,7 +698,7 @@ def register_agent_routes(
                 }
                 for item in before_neighbors
             ]
-            language = str(manifest.get("prompt_language") or _prompt_language(config, None))
+            language = str(manifest.get("prompt_language") or _prompt_language(root, stage, None))
             req_for_file = (
                 config.get("_document_adapter_prompt_requirements", {})
                 .get(boundary[0], {})
@@ -711,7 +713,7 @@ def register_agent_routes(
                     "part_id": boundary[1],
                     "line_index": int(item["line_index"]),
                     "source": str(item["source"]),
-                    "model_source": segment_model_source(files, item, stage=stage),
+                    "model_source": segment_model_source(item),
                 }
                 if stage in REVIEW_STAGES and sid in bases:
                     entry["current_text"] = bases[sid]["text"]
@@ -758,10 +760,9 @@ def register_agent_routes(
                     raise UsageError(f"Run {safe_id} 当前状态为 {manifest.get('status')}，不可提交结果")
                 stage = str(manifest["stage"])
                 store = WebStore(root)
-                config, metadata, files, segments = _project_context(root, stage=stage)
                 frozen_options = _frozen_run_options(root, safe_id)
-                _document_prompt_requirement_helpers(
-                    root, files, segments, config, stage, frozen_options
+                config, metadata, files, segments = _project_context(
+                    root, stage=stage, frozen_run_options=frozen_options
                 )
                 raw_scope = manifest.get("scope") or {}
                 scope = Scope(
@@ -777,7 +778,7 @@ def register_agent_routes(
                 )
                 selected = select_scope(segments, files, scope)
                 selected_by_id = {str(item["segment_id"]): item for item in selected}
-                language = str(manifest.get("prompt_language") or _prompt_language(config, None))
+                language = str(manifest.get("prompt_language") or _prompt_language(root, stage, None))
                 validators = config["_translation_validator_instances"]
                 fingerprint = str(manifest.get("stage_fingerprint") or store._fingerprint(stage))
                 terms_revision = manifest.get("terms_revision")
