@@ -133,8 +133,6 @@ def _agent_run_progress(
 def register_agent_routes(
     *,
     app: FastAPI,
-    projects_root: Path,
-    app_root: Path,
     project: Callable[[str], Path],
 ) -> None:
     @app.post("/api/v1/projects/{name}/agent/segments/context")
