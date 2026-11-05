@@ -24,6 +24,7 @@ dependencies = [
 [project.scripts]
 another-llm-translator = "app.main:main"
 another-llm-translator-web = "app.web:main"
+another-llm-translator-mcp = "app.mcp:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "plugins"]
