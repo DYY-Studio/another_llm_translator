@@ -610,7 +610,14 @@ def decision_plan(
     if not knowledge_only and prepare_requests:
         for key, change in changes.items():
             if key in evidence:
-                evidence[key]["scan_changes"] = change["candidates"]
+                evidence[key]["scan_changes"] = [
+                    {
+                        field: candidate[field]
+                        for field in ("source", "preferred_translation", "category", "aliases")
+                        if field in candidate
+                    }
+                    for candidate in change["candidates"]
+                ]
         descriptions: dict[str, dict[str, list[str]]] = {}
         for fragment in known_fragments.values():
             if fragment["state"] != "active" or not fragment["valid"]:
