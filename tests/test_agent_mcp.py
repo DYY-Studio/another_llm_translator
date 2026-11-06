@@ -323,9 +323,10 @@ def test_terminology_and_repetition_mcp_collaboration(
         "inspect_term_entity", {"project": "repetition", "normalized": "承诺"}
     )
     assert entity["knowledge"]["entity_key"] == "承诺"
+    assert entity["term"]["source"] == "承诺"
 
     saved_term = bridge.call_tool(
-        "edit_single_term",
+        "edit_terms",
         {
             "project": "repetition",
             "action": "save_term",
@@ -445,6 +446,7 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     assert added["added_files"] == 1
 
     ov = bridge.call_tool("get_project_overview", {"project": "mcp-created"})
+    assert ov["project_id"].startswith("PRJ-")
     file_ids = [f["file_id"] for f in ov["files"]]
     assert file_ids == ["F0001", "F0002", "F0003"]
 
@@ -525,6 +527,16 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     )
     assert opened["name"] == "ext-proj"
     assert opened["external"] is True
+    ext_ov = bridge.call_tool("get_project_overview", {"project": "ext-proj"})
+    assert ext_ov["project_id"] == ext_created["project_selector"]
+    listed = bridge.call_tool("list_projects", {"q": "mcp-created"})
+    assert listed["total"] == 1
+    assert "path" not in listed["projects"][0]
+    assert "external" not in listed["projects"][0]
+    ext_listed = bridge.call_tool("list_projects", {"q": "ext-proj"})
+    assert ext_listed["total"] == 1
+    assert ext_listed["projects"][0]["external"] is True
+    assert ext_listed["projects"][0]["selector"] == ext_created["project_selector"]
 
     # 7. Query segments by file_id alone (without part_id) and verify compact payload
     queried = bridge.call_tool(
@@ -538,10 +550,10 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
 
     # 8. Batch import terms with unsourced knowledge descriptions & update_knowledge without expected_revision
     imported = bridge.call_tool(
-        "edit_single_term",
+        "edit_terms",
         {
             "project": "mcp-created",
-            "action": "import_terms",
+            "action": "save_term",
             "payload": {
                 "terms": [
                     {
@@ -558,7 +570,7 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     )
     assert imported["imported"] == 1
     updated_know = bridge.call_tool(
-        "edit_single_term",
+        "edit_terms",
         {
             "project": "mcp-created",
             "action": "update_knowledge",
@@ -571,13 +583,17 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     assert updated_know["terms"][0]["description"] == "更新后的首行说明"
     term_ov = bridge.call_tool(
         "get_terminology_overview",
-        {"project": "mcp-created"},
+        {"project": "mcp-created", "q": "首行"},
     )
     assert term_ov["total"] == 1
     assert "description_items" not in term_ov["terms"][0]
     assert "conflicts" not in term_ov["terms"][0]
+    assert bridge.call_tool(
+        "get_terminology_overview",
+        {"project": "mcp-created", "q": "不存在的词"},
+    )["total"] == 0
     completed_scan = bridge.call_tool(
-        "edit_single_term",
+        "edit_terms",
         {
             "project": "mcp-created",
             "action": "complete_scan",
@@ -627,6 +643,8 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
         },
     )
     assert part_run["selected_count"] == 3
+    assert "submit_stage_batch" in part_run["prompt"]
+    assert '{"type":"end"}' not in part_run["prompt"]
     slice_id = f"{part_run['run_id']}@{rep_segs[0]['part_id']}:0-2"
     slice_co = bridge.call_tool(
         "checkout_stage_batch",
@@ -679,6 +697,9 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     rep_group = rep_overview["draft"]["groups"][0]
     assert rep_group["source"] == "待て！"
     assert "signature" not in rep_group["occurrences"][0]
+    assert rep_group["occurrences"][0]["translation"] == "站住！"
+    assert rep_group["occurrences"][1]["translation"] == "等一下！"
+    assert "live_scan" not in rep_overview
 
     # Proofreading Run with targeted suggestion + accept_remaining bulk confirmation
     pr_run = bridge.call_tool(
@@ -686,6 +707,8 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
         {"project": "rep-mcp", "stage": "proofreading"},
     )
     assert pr_run["selected_count"] == 3
+    assert "accept_remaining=True" in pr_run["prompt"]
+    assert '{"type":"end"}' not in pr_run["prompt"]
     bridge.call_tool(
         "submit_stage_batch",
         {

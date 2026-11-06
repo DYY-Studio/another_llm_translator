@@ -156,8 +156,19 @@ def _compact_term_row(
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "list_projects",
-        "description": "List all registered projects and currently active background tasks.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "description": "List registered projects (newest first, with optional keyword filter and pagination) and currently active background tasks.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "q": {
+                    "type": "string",
+                    "description": "Optional case-insensitive substring filter matching project name, project_id, selector, or path",
+                },
+                "offset": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 50},
+            },
+            "additionalProperties": False,
+        },
     },
     {
         "name": "create_project",
@@ -618,6 +629,10 @@ TOOLS: list[dict[str, Any]] = [
                     ],
                     "default": "all",
                 },
+                "q": {
+                    "type": "string",
+                    "description": "Optional case-insensitive substring search across source, normalized, preferred_translation, and aliases",
+                },
                 "offset": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 50},
             },
@@ -627,7 +642,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "inspect_term_entity",
-        "description": "Inspect a term/entity including group members, applied description items, source evidence fragments, and segment hits.",
+        "description": "Inspect a term/entity including its glossary entry, group members, applied description items, source evidence fragments, and segment hits.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -643,7 +658,7 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "edit_single_term",
+        "name": "edit_terms",
         "description": (
             "Perform a controlled edit on terminology: save_term (single term or batch {'terms': [...]}), "
             "import_terms ({'terms': [...]} or {'path': '...'}), complete_scan (mark terminology scan completed for full project or scope), "
@@ -869,13 +884,61 @@ class MCPWebBridge:
     def call_tool(self, name: str, arguments: dict[str, Any] | None) -> Any:
         args = dict(arguments or {})
         if name == "list_projects":
-            projects = self._request("GET", "/api/v1/projects")
+            projects_data = self._request("GET", "/api/v1/projects")
             active = self._request("GET", "/api/v1/tasks/active")
             tasks = [
                 _compact_task(t) if isinstance(t, dict) else t
                 for t in active.get("tasks", [])
             ]
-            return {**projects, "active_tasks": tasks}
+            items = list(projects_data.get("projects", []))
+            items.sort(
+                key=lambda p: (
+                    str(p.get("created_at") or ""),
+                    str(p.get("name") or ""),
+                ),
+                reverse=True,
+            )
+            q_str = str(args.get("q") or "").strip().casefold()
+            if q_str:
+                items = [
+                    p
+                    for p in items
+                    if isinstance(p, dict)
+                    and any(
+                        q_str in str(p.get(k) or "").casefold()
+                        for k in ("name", "project_id", "selector", "path")
+                    )
+                ]
+            offset = max(0, int(args.get("offset", 0)))
+            limit = max(1, int(args.get("limit", 50)))
+            compact_projects = []
+            for p in items[offset : offset + limit]:
+                if not isinstance(p, dict):
+                    compact_projects.append(p)
+                    continue
+                row: dict[str, Any] = {
+                    "name": p.get("name"),
+                    "project_id": p.get("project_id"),
+                    "created_at": p.get("created_at"),
+                    "file_count": p.get("file_count"),
+                    "segment_count": p.get("segment_count"),
+                }
+                if p.get("selector") and p.get("selector") != p.get("name"):
+                    row["selector"] = p["selector"]
+                if p.get("external"):
+                    row["external"] = True
+                    row["path"] = p.get("path")
+                if p.get("repair_needed"):
+                    row["repair_needed"] = True
+                compact_projects.append(row)
+            return {
+                "total": len(items),
+                "offset": offset,
+                "limit": limit,
+                "default_projects_path": projects_data.get("default_projects_path"),
+                "projects": compact_projects,
+                "active_tasks": tasks,
+            }
 
         if name == "create_project":
             empty = bool(args.get("empty", False))
@@ -1305,9 +1368,41 @@ class MCPWebBridge:
         if name == "start_agent_stage_run":
             proj = quote(str(args["project"]), safe="")
             body = {k: v for k, v in args.items() if k != "project" and v is not None}
-            return self._request(
+            res = self._request(
                 "POST", f"/api/v1/projects/{proj}/agent/runs/start", json_body=body
             )
+            if isinstance(res, dict) and isinstance(res.get("prompt"), str):
+                prompt_text = res["prompt"]
+                for marker in (
+                    "segments[] 每项一条",
+                    "Return one type=segment",
+                    "每个 segments[] 恰好输出",
+                    "Output exactly one type=segment",
+                ):
+                    idx = prompt_text.rfind(marker)
+                    if idx != -1:
+                        prompt_text = prompt_text[:idx].rstrip()
+                        break
+                stage_name = str(res.get("stage") or args.get("stage") or "translation")
+                if stage_name == "translation":
+                    mcp_footer = (
+                        "Agent MCP 提交方式：通过 submit_stage_batch 提交 "
+                        'items=[{"segment_id": "F0001-S000001", "text": "完整译文"}]'
+                        "（必须使用 checkout_stage_batch 返回的完整 segment_id，不要输出 JSONL 或短 id）。"
+                        '全部批次提交完毕后调用 finish_agent_stage_run(action="complete")。'
+                    )
+                else:
+                    mcp_footer = (
+                        "Agent MCP 提交方式：通过 checkout_stage_batch 拉取待审批次"
+                        "（建议传入上批末尾的 line_start 推进窗口），仅需将有修改建议的条目通过 "
+                        'submit_stage_batch 提交：items=[{"segment_id": "F0001-S000001", '
+                        '"review_status": "suggested", "suggested_text": "完整修改后译文", '
+                        '"reason": "修改原因"}]；无需逐条提交无修改条目，全部审阅后调用 '
+                        'finish_agent_stage_run(action="complete", accept_remaining=True) '
+                        "即可批量确认其余条目为 accepted，最后调用 apply_stage_suggestions(confirm=True) 应用建议。"
+                    )
+                res = {**res, "prompt": f"{prompt_text}\n\n{mcp_footer}"}
+            return res
 
         if name == "checkout_stage_batch":
             proj = quote(str(args["project"]), safe="")
@@ -1450,6 +1545,23 @@ class MCPWebBridge:
                     for t in items
                     if t.get("knowledge_status") in {"stale", "pending"}
                 ]
+            q_str = str(args.get("q") or "").strip().casefold()
+            if q_str:
+                items = [
+                    t
+                    for t in items
+                    if isinstance(t, dict)
+                    and (
+                        any(
+                            q_str in str(t.get(k) or "").casefold()
+                            for k in ("source", "normalized", "preferred_translation")
+                        )
+                        or any(
+                            q_str in str(a).casefold()
+                            for a in (t.get("aliases") or [])
+                        )
+                    )
+                ]
             compact_terms = [
                 _compact_term_row(t, keep_candidates=(flt == "changes"))
                 if isinstance(t, dict)
@@ -1481,6 +1593,19 @@ class MCPWebBridge:
             normalized = args.get("normalized")
             if not normalized:
                 raise UsageError("必须提供 normalized 或 (run_id + proposal_id)")
+            terms_data = self._request("GET", f"/api/v1/projects/{proj}/terms")
+            matched_term = next(
+                (
+                    _compact_term_row(t)
+                    for t in terms_data.get("terms", [])
+                    if isinstance(t, dict)
+                    and (
+                        t.get("normalized") == normalized
+                        or t.get("source") == normalized
+                    )
+                ),
+                None,
+            )
             knowledge = self._request(
                 "GET",
                 f"/api/v1/projects/{proj}/terms/knowledge",
@@ -1499,13 +1624,15 @@ class MCPWebBridge:
                 if args.get("include_hits", True)
                 else None
             )
-            return {"knowledge": knowledge, "hits": hits}
+            return {"term": matched_term, "knowledge": knowledge, "hits": hits}
 
-        if name == "edit_single_term":
+        if name == "edit_terms":
             proj = quote(str(args["project"]), safe="")
             action = str(args["action"])
             payload = dict(args["payload"])
-            if action == "import_terms":
+            if action == "import_terms" or (
+                action == "save_term" and isinstance(payload.get("terms"), list)
+            ):
                 if isinstance(payload.get("terms"), list):
                     doc = {
                         "schema_version": 2,
@@ -1681,16 +1808,39 @@ class MCPWebBridge:
                 compact_groups = []
                 for g in groups[offset : offset + limit]:
                     cg = {k: v for k, v in g.items() if k != "files"}
+                    translations = (
+                        g.get("translations")
+                        if isinstance(g.get("translations"), list)
+                        else []
+                    )
                     if isinstance(cg.get("occurrences"), list):
-                        cg["occurrences"] = [
-                            {
+                        compact_occs = []
+                        for occ in cg["occurrences"]:
+                            if not isinstance(occ, dict):
+                                continue
+                            c_occ = {
                                 k: v
                                 for k, v in occ.items()
-                                if k in {"id", "segment_id", "part_id", "line_index", "text"}
+                                if k
+                                in {
+                                    "id",
+                                    "segment_id",
+                                    "file_id",
+                                    "part_id",
+                                    "line_index",
+                                    "variant",
+                                    "text",
+                                }
                             }
-                            for occ in cg["occurrences"]
-                            if isinstance(occ, dict)
-                        ]
+                            v_idx = occ.get("variant")
+                            if (
+                                "text" not in c_occ
+                                and isinstance(v_idx, int)
+                                and 0 <= v_idx < len(translations)
+                            ):
+                                c_occ["translation"] = translations[v_idx]
+                            compact_occs.append(c_occ)
+                        cg["occurrences"] = compact_occs
                     compact_groups.append(cg)
                 draft = {
                     **{k: v for k, v in draft.items() if k not in {"evidence", "sources"}},
@@ -1698,7 +1848,11 @@ class MCPWebBridge:
                     "groups": compact_groups,
                 }
             result_state: dict[str, Any] = {**state, "draft": draft}
-            if draft is None or args.get("only_file") or args.get("only_part"):
+            if (
+                draft is None
+                or args.get("only_part")
+                or (args.get("only_file") and not args.get("create_draft"))
+            ):
                 result_state["live_scan"] = self._request(
                     "POST",
                     f"/api/v1/projects/{proj}/agent/repetition/scan",
