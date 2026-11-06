@@ -1506,8 +1506,11 @@ def create_run(
     run_id = f"RUN-{timestamp}-{STAGE_CODES[stage]}-{suffix}"
     run_dir = project / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+    manifest_details = dict(details or {})
+    is_agent_mcp = manifest_details.get("executor") == "agent_mcp"
     (run_dir / "config.toml").write_text(dump_config(canonical_config(config)), encoding="utf-8")
-    _write_llm_snapshots(run_dir, config)
+    if not is_agent_mcp:
+        _write_llm_snapshots(run_dir, config)
     atomic_write_json(
         run_dir / "document_adapter_prompt_requirements.json",
         config.get("_document_adapter_prompt_requirements", {}), compact=True,
@@ -1520,7 +1523,6 @@ def create_run(
         prompt_variant_requirements,
         primary_mode=primary_mode,
     )
-    manifest_details = dict(details or {})
     if prompt_variant_paths:
         manifest_details["prompt_variants"] = prompt_variant_paths
     manifest = record_header(
@@ -1544,7 +1546,7 @@ def create_run(
         started_at=utc_now(),
         completed_at=None,
     )
-    if stage in {
+    if not is_agent_mcp and stage in {
         "terminology",
         "terminology_decision",
         "content_summary",
@@ -1589,8 +1591,12 @@ def _interrupt_run(
 
 def run_protocol_is_current(project: Path, run_id: str) -> bool:
     directory = project / "runs" / run_id
-    preset = json.loads((directory / "llm_preset.json").read_text(encoding="utf-8"))
-    adapter = json.loads((directory / "llm_adapter.json").read_text(encoding="utf-8"))
+    preset_path = directory / "llm_preset.json"
+    adapter_path = directory / "llm_adapter.json"
+    if not preset_path.is_file() or not adapter_path.is_file():
+        return False
+    preset = json.loads(preset_path.read_text(encoding="utf-8"))
+    adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
     return preset.get("schema_version") == 9 and adapter.get("schema_version") == ADAPTER_SCHEMA_VERSION
 
 
@@ -1610,6 +1616,8 @@ def choose_running_run(
     latest = candidates[0]
     run_id = str(latest["run_id"])
     warning = f"发现未完成 Run：{run_id}"
+    if latest.get("executor") == "agent_mcp" and action != "decline":
+        raise UsageError(f"未完成 Run 由 Agent MCP 创建，不能由宿主模型直接续作；请使用 --decline-run 创建新 Run：{run_id}")
     if not run_protocol_is_current(project, run_id) and action != "decline":
         raise UsageError(f"旧 Run 使用旧 LLM 协议，不能续作；请使用 --decline-run 创建新 Run：{run_id}")
     if dry_run:
@@ -1712,7 +1720,8 @@ def continue_run(
     snapshot_dir = run_dir / relative
     snapshot_dir.mkdir(parents=True, exist_ok=False)
     (snapshot_dir / "config.toml").write_text(dump_config(canonical_config(config)), encoding="utf-8")
-    _write_llm_snapshots(snapshot_dir, config)
+    if manifest.get("executor") != "agent_mcp":
+        _write_llm_snapshots(snapshot_dir, config)
     atomic_write_json(
         snapshot_dir / "document_adapter_prompt_requirements.json",
         config.get("_document_adapter_prompt_requirements", {}), compact=True,

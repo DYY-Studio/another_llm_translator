@@ -3632,6 +3632,7 @@ def query_segment_neighbors(
     part_id: str,
     line_index: int,
     before_limit: int = 2,
+    after_limit: int = 2,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     connection = _with_db(project)
     try:
@@ -3659,9 +3660,9 @@ def query_segment_neighbors(
               AND is_empty = 0
               AND line_index > ?
             ORDER BY line_index
-            LIMIT 2
+            LIMIT ?
             """,
-            (file_id, part_id, line_index),
+            (file_id, part_id, line_index, after_limit),
         ).fetchall()
         project_id = _project_id(connection)
         before = [_hydrate_segment(row, project_id) for row in reversed(before_rows)]

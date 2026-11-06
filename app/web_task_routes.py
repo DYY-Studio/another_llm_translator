@@ -203,6 +203,8 @@ def _safe_run_summary(
         "prompt_language",
         "review_stage",
         "primary_mode",
+        "executor",
+        "agent_model_hint",
     ):
         if isinstance(run.get(key), str):
             result[key] = run[key]
@@ -317,6 +319,8 @@ def _execution_snapshot(directory: Path, metadata: dict[str, Any]) -> dict[str, 
         "stage_fingerprint",
         "prompt_language",
         "primary_mode",
+        "executor",
+        "agent_model_hint",
     ):
         value = metadata.get(key)
         if isinstance(value, str):

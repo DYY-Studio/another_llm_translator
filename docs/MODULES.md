@@ -48,6 +48,10 @@ CLI / Web / Tauri
 
 CLI 命令注册、参数解析、交互确认和结果输出。它调用项目、阶段和导出模块，不拥有业务状态。
 
+### `app/mcp.py`
+
+面向外部 Agent Harness 的 `stdio` JSON-RPC 2.0 MCP 服务入口。它只负责 MCP 协议协商与工具分发，并将所有操作转发到本地运行中的 `app.web` HTTP 接口，不直接读写 SQLite、不持有项目写锁或第二套业务规则；本地 Web 服务不可达时明确报错。
+
 ### `app/web.py`
 
 FastAPI 应用装配、鉴权、生命周期、静态资源和 route 注册。全局依赖通过明确的构造与 route
@@ -66,6 +70,7 @@ FastAPI 应用装配、鉴权、生命周期、静态资源和 route 注册。�
 - `web_term_routes.py`：术语扫描、编辑、交换、发布与自动决策入口。
 - `web_summary_routes.py`：内容概括选择、运行、聚合、阅读和 Markdown 导出。
 - `web_task_routes.py`：阶段任务启动、状态、诊断和取消。
+- `web_agent_routes.py`：面向 Agent MCP 桥接的局部上下文读取、经由 Document Adapter 与翻译校验器严格门控的单段修正、以及 `executor="agent_mcp"` 外部阶段批次的创建、领料、校验提交与收尾入口。
 - `web_continuous.py`：连续运行阶段区间、预检快照、阶段选项摘要和运行编排；复用共享阶段入口，按显式选项插入一致性审查，在阶段边界装配证据并判断自动应用或待审停止，不拥有第二套阶段语义。
 - `web_export_routes.py`：项目导出、下载和桌面保存位置。
 - `web_storage_routes.py`：存储占用查询以及需要明确确认的可清理项入口。

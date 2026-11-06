@@ -137,6 +137,23 @@ def _running_run(
         return None
     manifest = candidates[0]
     run_id = str(manifest["run_id"])
+    if manifest.get("executor") == "agent_mcp":
+        result = {
+            "run_id": run_id,
+            "executor": "agent_mcp",
+            "started_at": manifest.get("started_at"),
+            "scope": manifest.get("scope"),
+            "previous": {
+                "model": str(manifest.get("agent_model_hint") or "agent_mcp"),
+                "endpoint": "mcp://agent_harness",
+            },
+            "current": _endpoint_summary(current_config),
+            "resume_compatible": False,
+            "resume_incompatibility_reason": "未完成 Run 由 Agent MCP 创建，请在 Agent 中续作或创建新 Run",
+        }
+        if isinstance(manifest.get("last_interruption"), dict):
+            result["last_interruption"] = manifest["last_interruption"]
+        return result
     current_protocol = run_protocol_is_current(project, run_id)
     if current_protocol:
         previous = _endpoint_summary(load_run_config(project / "runs" / run_id))
@@ -637,6 +654,8 @@ class WebTask:
     project_id: str
     stage: str
     status: str = "queued"
+    executor: str | None = None
+    run_id: str | None = None
     created_at: str = field(default_factory=utc_now)
     started_at: str | None = None
     completed_at: str | None = None
@@ -727,6 +746,8 @@ class WebTask:
             ),
             "failure_counts": dict(self.failure_counts),
             "usage": self.usage,
+            **({"executor": self.executor} if self.executor is not None else {}),
+            **({"run_id": self.run_id} if self.run_id is not None else {}),
         }
 
 
@@ -1962,6 +1983,87 @@ class WebTaskManager:
             for state in self.tasks.values()
         )
 
+    def has_conflicting_task(self, project: Path, run_id: str) -> bool:
+        return any(
+            state.project == project
+            and state.status in {"queued", "running", "cancelling"}
+            and not (state.executor == "agent_mcp" and state.run_id == run_id)
+            for state in self.tasks.values()
+        )
+
+    async def register_agent_task(
+        self,
+        project: Path,
+        project_id: str,
+        stage: str,
+        run_id: str,
+        total_segments: int,
+        completed_segments: int = 0,
+    ) -> dict[str, Any]:
+        async with self.guard:
+            if self._shutting_down:
+                raise UsageError("任务管理器正在关闭")
+            if self.is_project_running(project):
+                raise UsageError("项目已有后台任务")
+            task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
+            now = utc_now()
+            state = WebTask(
+                task_id=task_id,
+                project=project,
+                project_id=project_id,
+                stage=stage,
+                status="running",
+                executor="agent_mcp",
+                run_id=run_id,
+                created_at=now,
+                started_at=now,
+                total_segments=total_segments,
+                completed_segments=completed_segments,
+            )
+            self.tasks[task_id] = state
+            self.active_by_project[project] = task_id
+            self.running_task_ids.add(task_id)
+            return state.view()
+
+    def update_agent_task(
+        self,
+        project: Path,
+        run_id: str,
+        *,
+        completed_segments: int,
+        failed_segments: int = 0,
+    ) -> None:
+        task_id = self.active_by_project.get(project)
+        if task_id is None:
+            return
+        state = self.tasks.get(task_id)
+        if state is None or state.executor != "agent_mcp" or state.run_id != run_id:
+            return
+        state.completed_segments = completed_segments
+        state.failed_segments = failed_segments
+
+    async def finish_agent_task(
+        self,
+        project: Path,
+        run_id: str,
+        *,
+        status: str,
+        summary: dict[str, Any] | None = None,
+    ) -> None:
+        async with self.guard:
+            task_id = self.active_by_project.get(project)
+            if task_id is None:
+                return
+            state = self.tasks.get(task_id)
+            if state is None or state.executor != "agent_mcp" or state.run_id != run_id:
+                return
+            state.status = status
+            state.summary = summary
+            state.completed_at = utc_now()
+            self.running_task_ids.discard(task_id)
+            self.active_by_project.pop(project, None)
+            self._dispatch_locked()
+
     async def cancel(self, task_id: str) -> dict[str, Any]:
         async with self.guard:
             try:
@@ -1976,6 +2078,28 @@ class WebTaskManager:
                 state.completed_at = utc_now()
                 if self.active_by_project.get(state.project) == task_id:
                     self.active_by_project.pop(state.project, None)
+                return state.view()
+            if state.status == "running" and state.executor == "agent_mcp":
+                if state.run_id:
+                    from .execution import _interrupt_run
+
+                    def _interrupt_agent_run() -> None:
+                        with project_write_lock(state.project):
+                            manifest_path = (
+                                state.project / "runs" / str(state.run_id) / "manifest.json"
+                            )
+                            if record_exists(state.project, manifest_path):
+                                manifest = read_json(state.project, manifest_path)
+                                if manifest.get("status") == "running":
+                                    _interrupt_run(state.project, manifest, reason="cancelled")
+
+                    await run_blocking(_interrupt_agent_run)
+                state.status = "cancelled"
+                state.completed_at = utc_now()
+                self.running_task_ids.discard(task_id)
+                if self.active_by_project.get(state.project) == task_id:
+                    self.active_by_project.pop(state.project, None)
+                self._dispatch_locked()
                 return state.view()
             if state.status != "running" or state.asyncio_task is None:
                 raise UsageError("后台任务当前不可取消")

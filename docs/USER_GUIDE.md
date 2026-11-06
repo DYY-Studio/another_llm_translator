@@ -34,6 +34,16 @@ python -m app.web
 
 目前需要从源码构建，参见[开发指南](DEVELOPMENT.md#4-macos-桌面开发)。
 
+### Agent MCP 接入
+
+可在本地 Web 或桌面端运行期间，通过 `stdio` MCP 服务将工作台能力暴露给外部 Agent Harness（用于监督进度、触发与控制批量阶段运行、审查术语与重复译文草案、修正常规疑难段落，或由 Agent 直接领料并提交经宿主校验门控的阶段批次）：
+
+```bash
+python -m app.mcp --web-url http://127.0.0.1:8765
+```
+
+也可通过环境变量 `ANOTHER_LLM_WEB_URL` 或 `ANOTHER_LLM_WEB_PORT` 指定本地 Web 服务地址。本地 Web 服务未启动时，MCP 工具调用会直接返回明确错误，不会静默离线写入。
+
 ### 插件
 
 官方 SRT Adapter 和术语校验插件随应用提供。用户插件解压到 `<用户数据目录>/plugins/<插件目录>/`，重启应用后生效。
