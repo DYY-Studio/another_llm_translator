@@ -5,6 +5,7 @@ from collections import defaultdict
 from copy import deepcopy
 import json
 import unicodedata
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ from .repetition_consistency import (
 )
 from .sqlite_storage import (
     append_jsonl,
+    append_jsonl_records,
     append_stage_results,
     atomic_write_text,
     latest_stage_states,
@@ -49,6 +51,7 @@ from .sqlite_storage import (
     record_exists,
     record_header,
     segment_ids as query_segment_ids,
+    terminology_scan_state,
     utc_now,
     write_json,
     write_repetition_state,
@@ -1588,3 +1591,88 @@ def register_agent_routes(
             }
 
         return await run_blocking(_scan)
+
+    @app.post("/api/v1/projects/{name}/agent/terms/complete-scan")
+    async def complete_term_scan(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能标记术语扫描状态")
+        scope_payload = (
+            payload.get("scope")
+            if isinstance(payload.get("scope"), dict)
+            else {
+                k: payload[k]
+                for k in ("from_file", "only_file", "only_part", "only_segment", "segment_ids")
+                if k in payload and payload[k] is not None
+            }
+        )
+        scope = _parse_scope(root, {"scope": scope_payload})
+
+        def _mark() -> dict[str, Any]:
+            with project_write_lock(root, wait_seconds=15.0):
+                store = WebStore(root)
+                files = load_source_files(root)
+                segments = load_segments(root)
+                all_nonempty = [s for s in segments if not s["is_empty"]]
+                selected = select_scope(segments, files, scope)
+                active_path = root / "terminology" / "active_task.json"
+                active = (
+                    read_json(root, active_path)
+                    if record_exists(root, active_path)
+                    else None
+                )
+                reset_task = payload.get("reset_task") is True
+                if active is None or reset_task or not active.get("active_task_id"):
+                    task_id = f"TERM-TASK-{uuid.uuid4().hex[:10].upper()}"
+                else:
+                    task_id = str(active["active_task_id"])
+                all_ids = [str(s["segment_id"]) for s in all_nonempty]
+                done_ids, _ = terminology_scan_state(root, task_id, all_ids)
+                fingerprint = store._fingerprint("terminology")
+                new_records = [
+                    record_header(
+                        "terminology_scan",
+                        store.project_id,
+                        stage="terminology",
+                        segment_id=str(s["segment_id"]),
+                        status="completed",
+                        run_id=None,
+                        request_id=None,
+                        active_task_id=task_id,
+                        stage_fingerprint=fingerprint,
+                        origin="agent_mcp",
+                    )
+                    for s in selected
+                    if str(s["segment_id"]) not in done_ids
+                ]
+                if new_records:
+                    append_jsonl_records(
+                        root, root / "terminology" / "scans.jsonl", new_records
+                    )
+                    done_ids.update(r["segment_id"] for r in new_records)
+                all_done = len(done_ids) >= len(all_nonempty)
+                library = load_terms(root, resolve_knowledge=False)
+                revision = int(library["terms_revision"]) if library else 0
+                active_record = record_header(
+                    "terminology_task",
+                    store.project_id,
+                    record_id=task_id,
+                    active_task_id=task_id,
+                    status="completed" if all_done else "active",
+                    initial_stage_fingerprint=(active or {}).get("initial_stage_fingerprint")
+                    or fingerprint,
+                    terms_revision=revision,
+                )
+                write_json(root, active_path, active_record)
+                return {
+                    "active_task_id": task_id,
+                    "status": active_record["status"],
+                    "newly_marked": len(new_records),
+                    "completed_segments": len(done_ids),
+                    "total_segments": len(all_nonempty),
+                    "stage_completion": store.stage_completion()["terminology"],
+                }
+
+        return await run_blocking(_mark)

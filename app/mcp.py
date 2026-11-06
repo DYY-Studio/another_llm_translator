@@ -546,8 +546,9 @@ TOOLS: list[dict[str, Any]] = [
         "name": "edit_single_term",
         "description": (
             "Perform a controlled edit on terminology: save_term (single term or batch {'terms': [...]}), "
-            "import_terms ({'terms': [...]} or {'path': '...'}), set_primary, leave_group, group_related, "
-            "convert_to_alias, update_knowledge ({'normalized': str, 'action'?: 'save_items'|'confirm_keep'|'set_fragment_enabled', "
+            "import_terms ({'terms': [...]} or {'path': '...'}), complete_scan (mark terminology scan completed for full project or scope), "
+            "set_primary, leave_group, group_related, convert_to_alias, "
+            "update_knowledge ({'normalized': str, 'action'?: 'save_items'|'confirm_keep'|'set_fragment_enabled', "
             "'items'?: [{'text': str, 'fragment_ids': [str]}], 'expected_revision'?: int}), "
             "resolve_change, remove_terms, clear_terms, or publish_partial."
         ),
@@ -560,6 +561,7 @@ TOOLS: list[dict[str, Any]] = [
                     "enum": [
                         "save_term",
                         "import_terms",
+                        "complete_scan",
                         "set_primary",
                         "leave_group",
                         "group_related",
@@ -573,7 +575,7 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "payload": {
                     "type": "object",
-                    "description": "Action payload. For import_terms, pass {'terms': [{'source', 'preferred_translation', 'category', 'description', 'aliases', 'disabled', 'group_primary'}]}.",
+                    "description": "Action payload. For import_terms, pass {'terms': [{'source', 'preferred_translation', 'category', 'description', 'aliases', 'disabled', 'group_primary'}]}. For complete_scan, pass {} for full project or {'only_file': '...', 'only_part': '...'}.",
                 },
             },
             "required": ["project", "action", "payload"],
@@ -1255,6 +1257,10 @@ class MCPWebBridge:
                 )
             routes = {
                 "save_term": ("POST", f"/api/v1/projects/{proj}/terms"),
+                "complete_scan": (
+                    "POST",
+                    f"/api/v1/projects/{proj}/agent/terms/complete-scan",
+                ),
                 "set_primary": ("POST", f"/api/v1/projects/{proj}/terms/set-primary"),
                 "leave_group": ("POST", f"/api/v1/projects/{proj}/terms/leave-group"),
                 "group_related": ("POST", f"/api/v1/projects/{proj}/terms/group-related"),

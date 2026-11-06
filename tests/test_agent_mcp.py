@@ -544,6 +544,17 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
         {"project": "mcp-created"},
     )
     assert term_ov["total"] == 1
+    completed_scan = bridge.call_tool(
+        "edit_single_term",
+        {
+            "project": "mcp-created",
+            "action": "complete_scan",
+            "payload": {},
+        },
+    )
+    assert completed_scan["status"] == "completed"
+    assert completed_scan["completed_segments"] == 3
+    assert completed_scan["stage_completion"]["state"] == "complete"
 
     # 9. Configure project (get_config, update_config, delete_project)
     cfg = bridge.call_tool(
