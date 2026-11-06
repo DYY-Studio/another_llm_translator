@@ -1060,6 +1060,13 @@ def register_agent_routes(
         reason = payload.get("reason")
         if reason is not None and not isinstance(reason, str):
             raise UsageError("reason 必须是字符串")
+        accept_remaining = payload.get("accept_remaining", False)
+        if not isinstance(accept_remaining, bool):
+            raise UsageError("accept_remaining 必须是布尔值")
+        if reason == "accept_remaining" and action == "complete":
+            accept_remaining = True
+        if accept_remaining and action != "complete":
+            raise UsageError("accept_remaining 仅在 action='complete' 时可用")
 
         def _finish() -> dict[str, Any]:
             with project_write_lock(root, wait_seconds=15.0):
@@ -1073,19 +1080,64 @@ def register_agent_routes(
                 if manifest.get("status") != "running":
                     raise UsageError(f"Run {safe_id} 已处于 {manifest.get('status')} 状态")
                 stage = str(manifest["stage"])
-                _, _, files, segments = _project_context(root, stage=stage)
+                if accept_remaining and stage not in REVIEW_STAGES:
+                    raise UsageError("accept_remaining 仅支持 proofreading 或 polishing 阶段")
+                _, metadata, files, segments = _project_context(root, stage=stage)
                 scope = scope_from_run(root, safe_id, dry_run=False)
                 selected = select_scope(segments, files, scope)
-                _, completed_count, remaining_count = _agent_run_progress(
+                pending, completed_count, remaining_count = _agent_run_progress(
                     root, manifest, selected
                 )
-                reused_count = int(manifest.get("reused_segment_count", 0))
-                newly_completed = max(0, completed_count - reused_count)
+                accepted_remaining_count = 0
                 if action == "complete":
+                    if accept_remaining and pending:
+                        store = WebStore(root)
+                        continuations = manifest.get("continuations") or []
+                        fingerprint = str(
+                            (continuations[-1].get("stage_fingerprint") if continuations else None)
+                            or manifest.get("stage_fingerprint")
+                            or store._fingerprint(stage)
+                        )
+                        val_library = load_terms(root, resolve_knowledge=False)
+                        terms_revision = (
+                            int(val_library["terms_revision"]) if val_library else None
+                        )
+                        pending_ids = [str(item["segment_id"]) for item in pending]
+                        bases = _base_results(root, stage, segment_ids=pending_ids)
+                        missing_bases = [sid for sid in pending_ids if sid not in bases]
+                        if missing_bases:
+                            raise UsageError(
+                                f"部分待确认 Segment 缺少可用基准结果：{', '.join(missing_bases[:10])}"
+                            )
+                        records = [
+                            record_header(
+                                "stage_result",
+                                str(metadata["project_id"]),
+                                stage=stage,
+                                segment_id=sid,
+                                status="completed",
+                                review_status="accepted",
+                                suggested_text=None,
+                                reason=None,
+                                base_result_id=bases[sid]["record_id"],
+                                stage_fingerprint=fingerprint,
+                                terms_revision=terms_revision,
+                                run_id=safe_id,
+                                request_id=None,
+                                origin="agent_mcp",
+                            )
+                            for sid in pending_ids
+                        ]
+                        append_stage_results(root, records)
+                        accepted_remaining_count = len(records)
+                        completed_count += accepted_remaining_count
+                        remaining_count = 0
                     if remaining_count > 0:
                         raise IncompleteError(
                             f"Run {safe_id} 仍有 {remaining_count} 个待处理 Segment 未完成；请继续处理或使用 action='interrupt'"
                         )
+                    reused_count = int(manifest.get("reused_segment_count", 0))
+                    newly_completed = max(0, completed_count - reused_count)
                     finalize_run(
                         root,
                         run_dir,
@@ -1097,6 +1149,8 @@ def register_agent_routes(
                     )
                     final_status = "completed"
                 else:
+                    reused_count = int(manifest.get("reused_segment_count", 0))
+                    newly_completed = max(0, completed_count - reused_count)
                     _interrupt_run(
                         root,
                         manifest,
@@ -1111,6 +1165,7 @@ def register_agent_routes(
                     "completed": newly_completed,
                     "reused": reused_count,
                     "pending": remaining_count,
+                    "accepted_remaining": accepted_remaining_count,
                 }
 
         summary = await run_blocking(_finish)

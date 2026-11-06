@@ -475,7 +475,11 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "finish_agent_stage_run",
-        "description": "Pattern B: Complete or interrupt an active agent_mcp Run and release the active Web UI task.",
+        "description": (
+            "Pattern B: Complete or interrupt an active agent_mcp Run and release the active Web UI task. "
+            "For proofreading/polishing with action='complete', set accept_remaining=True to batch-confirm "
+            "all remaining pending segments in the Run as accepted (unchanged)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -486,6 +490,7 @@ TOOLS: list[dict[str, Any]] = [
                     "enum": ["complete", "interrupt"],
                     "default": "complete",
                 },
+                "accept_remaining": {"type": "boolean", "default": False},
                 "reason": {"type": "string"},
             },
             "required": ["project", "run_id"],
@@ -1135,6 +1140,7 @@ class MCPWebBridge:
                 f"/api/v1/projects/{proj}/agent/runs/{rid}/finish",
                 json_body={
                     "action": args.get("action", "complete"),
+                    "accept_remaining": bool(args.get("accept_remaining", False)),
                     "reason": args.get("reason"),
                 },
             )

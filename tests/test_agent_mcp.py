@@ -633,6 +633,45 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     assert rep_group["source"] == "待て！"
     assert "signature" not in rep_group["occurrences"][0]
 
+    # Proofreading Run with targeted suggestion + accept_remaining bulk confirmation
+    pr_run = bridge.call_tool(
+        "start_agent_stage_run",
+        {"project": "rep-mcp", "stage": "proofreading"},
+    )
+    assert pr_run["selected_count"] == 3
+    bridge.call_tool(
+        "submit_stage_batch",
+        {
+            "project": "rep-mcp",
+            "run_id": pr_run["run_id"],
+            "items": [
+                {
+                    "segment_id": rep_segs[2]["segment_id"],
+                    "review_status": "suggested",
+                    "suggested_text": "站住！",
+                    "reason": "与前文统一",
+                }
+            ],
+        },
+    )
+    pr_done = bridge.call_tool(
+        "finish_agent_stage_run",
+        {
+            "project": "rep-mcp",
+            "run_id": pr_run["run_id"],
+            "action": "complete",
+            "accept_remaining": True,
+        },
+    )
+    assert pr_done["status"] == "completed"
+    assert pr_done["accepted_remaining"] == 2
+    assert pr_done["completed"] == 3
+    applied_pr = bridge.call_tool(
+        "apply_stage_suggestions",
+        {"project": "rep-mcp", "stage": "proofreading", "confirm": True},
+    )
+    assert applied_pr["completed"] == 3
+
     deleted = bridge.call_tool(
         "configure_project",
         {"project": "rep-mcp", "action": "delete_project", "confirm": True},
