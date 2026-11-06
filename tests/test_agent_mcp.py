@@ -58,6 +58,8 @@ def test_mcp_jsonrpc_protocol_and_explicit_offline_failure() -> None:
     )
     assert init_resp is not None
     assert init_resp["result"]["serverInfo"]["name"] == "another-llm-translator"
+    assert "reference" in init_resp["result"]["instructions"]
+    assert "accept_remaining=True" in init_resp["result"]["instructions"]
 
     list_resp = handle_jsonrpc_message(
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
@@ -65,7 +67,9 @@ def test_mcp_jsonrpc_protocol_and_explicit_offline_failure() -> None:
     )
     assert list_resp is not None
     tool_names = {tool["name"] for tool in list_resp["result"]["tools"]}
+    assert "edit_single_term" not in tool_names
     assert {
+        "reference",
         "list_projects",
         "get_project_overview",
         "get_segment_context",
@@ -75,8 +79,17 @@ def test_mcp_jsonrpc_protocol_and_explicit_offline_failure() -> None:
         "submit_stage_batch",
         "finish_agent_stage_run",
         "get_terminology_overview",
+        "edit_terms",
         "get_repetition_overview",
     } <= tool_names
+
+    # reference tool works offline without requiring active Web service
+    ref_overview = offline_bridge.call_tool("reference", {})
+    assert ref_overview["topic"] == "overview"
+    assert "pattern_b" in ref_overview["available_topics"]
+    ref_term_tool = offline_bridge.call_tool("reference", {"topic": "edit_terms"})
+    assert ref_term_tool["topic"] == "edit_terms"
+    assert "edit_terms_actions" in ref_term_tool["guide"]
 
     call_resp = handle_jsonrpc_message(
         {
@@ -700,6 +713,22 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     assert rep_group["occurrences"][0]["translation"] == "站住！"
     assert rep_group["occurrences"][1]["translation"] == "等一下！"
     assert "live_scan" not in rep_overview
+    rep_prop = bridge.call_tool(
+        "update_repetition_draft",
+        {
+            "project": "rep-mcp",
+            "run_id": rep_overview["draft"]["run_id"],
+            "group_proposals": [
+                {
+                    "id": rep_group["id"],
+                    "groups": [],
+                    "keep": ["1", "2"],
+                    "uncertain": [],
+                }
+            ],
+        },
+    )
+    assert rep_prop["proposals"]["updated_group_ids"] == [rep_group["id"]]
 
     # Proofreading Run with targeted suggestion + accept_remaining bulk confirmation
     pr_run = bridge.call_tool(
