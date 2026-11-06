@@ -106,6 +106,9 @@ def test_pattern_a_context_and_strict_segment_fix_gatekeeping(tmp_path: Path) ->
     assert len(ctx["matched_terms"]) == 1
     assert ctx["matched_terms"][0]["source"] == "アリス"
     assert len(ctx["context"]["after"]) == 2
+    assert "reviews" not in ctx
+    assert "reviews" not in ctx["context"]["after"][0]
+    assert "document_adapter_requirements" not in ctx
 
     # Residual kana must be rejected by default (not persisted as warning)
     rejected = bridge.call_tool(
@@ -142,6 +145,17 @@ def test_pattern_a_context_and_strict_segment_fix_gatekeeping(tmp_path: Path) ->
     assert committed["status"] == "committed"
     assert committed["result"]["origin"] == "agent_mcp"
     assert committed["result"]["validation_status"] == "passed"
+    assert "validation_findings" not in committed["result"]
+    assert "findings" not in committed
+
+    # Query translated segment: must not duplicate translation inside reviews.*.base
+    queried_done = bridge.call_tool(
+        "query_segments",
+        {"project": "sample", "stage": "translation", "status": "completed"},
+    )
+    assert queried_done["total_segments"] == 1
+    assert "reviews" not in queried_done["segments"][0]
+    assert "validation_findings" not in queried_done["segments"][0]["translation"]
 
     # Proofreading suggestion with apply=True
     review_committed = bridge.call_tool(
@@ -159,6 +173,16 @@ def test_pattern_a_context_and_strict_segment_fix_gatekeeping(tmp_path: Path) ->
     assert review_committed["status"] == "committed"
     assert review_committed["suggestion"]["origin"] == "agent_mcp"
     assert review_committed["applied"]["text"] == "爱丽丝飞奔而去。"
+
+    # Query after review: proofreading review is present without duplicating base
+    queried_reviewed = bridge.call_tool(
+        "query_segments",
+        {"project": "sample", "stage": "translation", "status": "completed"},
+    )
+    pr_review = queried_reviewed["segments"][0]["reviews"]["proofreading"]
+    assert "base" not in pr_review
+    assert pr_review["applied"]["text"] == "爱丽丝飞奔而去。"
+    assert "polishing" not in queried_reviewed["segments"][0]["reviews"]
 
 
 def test_pattern_b_agent_stage_run_lifecycle_and_web_visibility(tmp_path: Path) -> None:
@@ -300,7 +324,7 @@ def test_terminology_and_repetition_mcp_collaboration(
     )
     assert entity["knowledge"]["entity_key"] == "承诺"
 
-    bridge.call_tool(
+    saved_term = bridge.call_tool(
         "edit_single_term",
         {
             "project": "repetition",
@@ -315,6 +339,8 @@ def test_terminology_and_repetition_mcp_collaboration(
             },
         },
     )
+    assert "description_items" not in saved_term["terms"][0]
+    assert "conflicts" not in saved_term["terms"][0]
 
     # Repetition overview & group inspection with custom window
     rep_ov = bridge.call_tool(
@@ -333,6 +359,8 @@ def test_terminology_and_repetition_mcp_collaboration(
         {"project": "repetition", "group_id": group_id, "window": 2},
     )
     assert len(inspected["occurrences"]) == 3
+    assert "occurrences" not in inspected["draft_group"]
+    assert "files" not in inspected["draft_group"]
 
     # Update repetition draft proposals to resolve the uncertain occurrence '3' into subgroup 1
     bridge.call_tool(

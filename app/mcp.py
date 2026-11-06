@@ -53,6 +53,106 @@ def _deep_merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, A
     return merged
 
 
+_FALSY_TASK_KEYS = {
+    "current_stage",
+    "steps",
+    "final_review",
+    "knowledge_only",
+    "all_terms",
+    "include_summaries",
+    "include_draft_translation",
+    "aggregate_full_summaries",
+    "draft_progress",
+    "summary_selection",
+    "summary_selection_progress",
+    "failure_counts",
+}
+
+
+def _compact_task(task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        k: v
+        for k, v in task.items()
+        if not (k in _FALSY_TASK_KEYS and not v)
+    }
+
+
+def _compact_result_view(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return result
+    return {
+        k: v
+        for k, v in result.items()
+        if v is not None and v != []
+    }
+
+
+def _compact_segment_row(seg: dict[str, Any]) -> dict[str, Any]:
+    row = dict(seg)
+    if row.get("model_source") is None or row.get("model_source") == row.get("source"):
+        row.pop("model_source", None)
+    if not row.get("stage_errors"):
+        row.pop("stage_errors", None)
+    trans = row.get("translation")
+    trans_record_id = trans.get("record_id") if isinstance(trans, dict) else None
+    if isinstance(trans, dict):
+        row["translation"] = _compact_result_view(trans)
+    reviews = row.get("reviews")
+    if isinstance(reviews, dict):
+        compact_reviews: dict[str, Any] = {}
+        for rev_stage, rev_val in reviews.items():
+            if not isinstance(rev_val, dict):
+                continue
+            if rev_val.get("suggestion") is None and rev_val.get("applied") is None:
+                continue
+            entry: dict[str, Any] = {}
+            base = rev_val.get("base")
+            if isinstance(base, dict) and base.get("record_id") != trans_record_id:
+                entry["base"] = _compact_result_view(base)
+            if rev_val.get("suggestion") is not None:
+                entry["suggestion"] = _compact_result_view(rev_val["suggestion"])
+            if rev_val.get("applied") is not None:
+                entry["applied"] = _compact_result_view(rev_val["applied"])
+            if rev_val.get("outdated"):
+                entry["outdated"] = True
+            if rev_val.get("applied_current"):
+                entry["applied_current"] = True
+            compact_reviews[rev_stage] = entry
+        if compact_reviews:
+            row["reviews"] = compact_reviews
+        else:
+            row.pop("reviews", None)
+    return row
+
+
+def _compact_term_row(
+    term: dict[str, Any], *, keep_candidates: bool = False
+) -> dict[str, Any]:
+    row = {
+        k: v
+        for k, v in term.items()
+        if k not in {"description_items", "pending_change"}
+        and not (k == "conflicts" and not term.get("has_conflicts"))
+    }
+    pc = term.get("pending_change")
+    if isinstance(pc, dict):
+        if keep_candidates:
+            row["pending_change"] = {
+                **pc,
+                "candidates": [
+                    {k: v for k, v in c.items() if k != "source_range"}
+                    for c in pc.get("candidates", [])
+                    if isinstance(c, dict)
+                ],
+            }
+        else:
+            row["pending_change"] = {
+                "kind": pc.get("kind"),
+                "candidate_count": len(pc.get("candidates", [])),
+            }
+    return row
+
+
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "list_projects",
@@ -771,7 +871,11 @@ class MCPWebBridge:
         if name == "list_projects":
             projects = self._request("GET", "/api/v1/projects")
             active = self._request("GET", "/api/v1/tasks/active")
-            return {**projects, "active_tasks": active.get("tasks", [])}
+            tasks = [
+                _compact_task(t) if isinstance(t, dict) else t
+                for t in active.get("tasks", [])
+            ]
+            return {**projects, "active_tasks": tasks}
 
         if name == "create_project":
             empty = bool(args.get("empty", False))
@@ -961,26 +1065,6 @@ class MCPWebBridge:
 
         if name == "get_task_and_diagnostics":
             project_name = str(args["project"])
-            _falsy_task_keys = {
-                "current_stage",
-                "steps",
-                "final_review",
-                "knowledge_only",
-                "all_terms",
-                "include_summaries",
-                "include_draft_translation",
-                "aggregate_full_summaries",
-                "draft_progress",
-                "summary_selection",
-                "summary_selection_progress",
-                "failure_counts",
-            }
-            def _compact_task(t: dict[str, Any]) -> dict[str, Any]:
-                return {
-                    k: v
-                    for k, v in t.items()
-                    if not (k in _falsy_task_keys and not v)
-                }
             active = self._request("GET", "/api/v1/tasks/active").get("tasks", [])
             project_tasks = [
                 _compact_task(t)
@@ -1082,32 +1166,18 @@ class MCPWebBridge:
                 "POST", f"/api/v1/projects/{proj}/segments/query", json_body=body
             )
             if isinstance(data, dict) and isinstance(data.get("segments"), list):
-                compact_segs = []
-                for seg in data["segments"]:
-                    if not isinstance(seg, dict):
-                        compact_segs.append(seg)
-                        continue
-                    row = dict(seg)
-                    if row.get("model_source") is None:
-                        row.pop("model_source", None)
-                    if not row.get("stage_errors"):
-                        row.pop("stage_errors", None)
-                    reviews = row.get("reviews")
-                    if stage == "translation" and isinstance(reviews, dict):
-                        has_review = any(
-                            isinstance(v, dict)
-                            and (v.get("base") or v.get("suggestion") or v.get("applied"))
-                            for v in reviews.values()
-                        )
-                        if not has_review:
-                            row.pop("reviews", None)
-                    compact_segs.append(row)
-                data = {**data, "segments": compact_segs}
+                data = {
+                    **data,
+                    "segments": [
+                        _compact_segment_row(seg) if isinstance(seg, dict) else seg
+                        for seg in data["segments"]
+                    ],
+                }
             return data
 
         if name == "get_segment_context":
             proj = quote(str(args["project"]), safe="")
-            return self._request(
+            ctx = self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/agent/segments/context",
                 json_body={
@@ -1115,6 +1185,28 @@ class MCPWebBridge:
                     "window": int(args.get("window", 5)),
                 },
             )
+            if isinstance(ctx, dict):
+                ctx = _compact_segment_row(ctx)
+                neighbors = ctx.get("context")
+                if isinstance(neighbors, dict):
+                    ctx["context"] = {
+                        side: [
+                            _compact_segment_row(s) if isinstance(s, dict) else s
+                            for s in neighbors.get(side, [])
+                        ]
+                        for side in ("before", "after")
+                        if side in neighbors
+                    }
+                if not ctx.get("term_warnings"):
+                    ctx.pop("term_warnings", None)
+                dar = ctx.get("document_adapter_requirements")
+                if isinstance(dar, dict):
+                    non_empty = [v for v in dar.values() if v]
+                    if not non_empty:
+                        ctx.pop("document_adapter_requirements", None)
+                    elif len({json.dumps(v, sort_keys=True, ensure_ascii=False) for v in non_empty}) == 1:
+                        ctx["document_adapter_requirements"] = non_empty[0]
+            return ctx
 
         if name == "preflight_stage_run":
             proj = quote(str(args["project"]), safe="")
@@ -1146,18 +1238,28 @@ class MCPWebBridge:
                 for k, v in args.items()
                 if k != "project" and v is not None
             }
-            return self._request("POST", f"/api/v1/projects/{proj}/tasks", json_body=body)
+            res = self._request("POST", f"/api/v1/projects/{proj}/tasks", json_body=body)
+            return _compact_task(res) if isinstance(res, dict) else res
 
         if name == "cancel_stage_run":
             tid = quote(str(args["task_id"]), safe="")
-            return self._request("POST", f"/api/v1/tasks/{tid}/cancel")
+            res = self._request("POST", f"/api/v1/tasks/{tid}/cancel")
+            return _compact_task(res) if isinstance(res, dict) else res
 
         if name == "submit_segment_fix":
             proj = quote(str(args["project"]), safe="")
             body = {k: v for k, v in args.items() if k != "project" and v is not None}
-            return self._request(
+            res = self._request(
                 "POST", f"/api/v1/projects/{proj}/agent/segments/fix", json_body=body
             )
+            if isinstance(res, dict):
+                res = dict(res)
+                for key in ("result", "suggestion", "applied"):
+                    if isinstance(res.get(key), dict):
+                        res[key] = _compact_result_view(res[key])
+                if not res.get("findings"):
+                    res.pop("findings", None)
+            return res
 
         if name == "apply_stage_suggestions":
             proj = quote(str(args["project"]), safe="")
@@ -1348,34 +1450,12 @@ class MCPWebBridge:
                     for t in items
                     if t.get("knowledge_status") in {"stale", "pending"}
                 ]
-            compact_terms = []
-            for t in items[offset : offset + limit]:
-                if not isinstance(t, dict):
-                    compact_terms.append(t)
-                    continue
-                row = {
-                    k: v
-                    for k, v in t.items()
-                    if k not in {"description_items", "pending_change"}
-                    and not (k == "conflicts" and not t.get("has_conflicts"))
-                }
-                pc = t.get("pending_change")
-                if isinstance(pc, dict):
-                    if flt == "changes":
-                        row["pending_change"] = {
-                            **pc,
-                            "candidates": [
-                                {k: v for k, v in c.items() if k != "source_range"}
-                                for c in pc.get("candidates", [])
-                                if isinstance(c, dict)
-                            ],
-                        }
-                    else:
-                        row["pending_change"] = {
-                            "kind": pc.get("kind"),
-                            "candidate_count": len(pc.get("candidates", [])),
-                        }
-                compact_terms.append(row)
+            compact_terms = [
+                _compact_term_row(t, keep_candidates=(flt == "changes"))
+                if isinstance(t, dict)
+                else t
+                for t in items[offset : offset + limit]
+            ]
             return {
                 "total": len(items),
                 "terms": compact_terms,
@@ -1486,30 +1566,37 @@ class MCPWebBridge:
                 raise UsageError(f"不支持的术语编辑动作：{action}")
             method, path = routes[action]
             res = self._request(method, path, json_body=payload)
-            if isinstance(res, dict) and isinstance(res.get("terms"), list) and len(res["terms"]) > 5:
+            if isinstance(res, dict) and isinstance(res.get("terms"), list):
                 terms_list = res["terms"]
-                target_keys = {
-                    str(v)
-                    for k in ("normalized", "source", "old_normalized", "primary")
-                    if (v := payload.get(k))
-                }
-                if isinstance(payload.get("related_normalized"), list):
-                    target_keys.update(str(x) for x in payload["related_normalized"])
-                matched = [
-                    t
-                    for t in terms_list
-                    if isinstance(t, dict)
-                    and (
-                        t.get("normalized") in target_keys
-                        or t.get("source") in target_keys
-                        or t.get("group_primary") in target_keys
-                    )
-                ]
+                selected_terms = terms_list
+                truncated = False
+                if len(terms_list) > 5:
+                    target_keys = {
+                        str(v)
+                        for k in ("normalized", "source", "old_normalized", "primary")
+                        if (v := payload.get(k))
+                    }
+                    if isinstance(payload.get("related_normalized"), list):
+                        target_keys.update(str(x) for x in payload["related_normalized"])
+                    matched = [
+                        t
+                        for t in terms_list
+                        if isinstance(t, dict)
+                        and (
+                            t.get("normalized") in target_keys
+                            or t.get("source") in target_keys
+                            or t.get("group_primary") in target_keys
+                        )
+                    ]
+                    selected_terms = matched if matched else terms_list[:5]
+                    truncated = True
                 res = {
                     **res,
-                    "total_terms": len(terms_list),
-                    "terms_truncated": True,
-                    "terms": matched if matched else terms_list[:5],
+                    **({"total_terms": len(terms_list), "terms_truncated": True} if truncated else {}),
+                    "terms": [
+                        _compact_term_row(t) if isinstance(t, dict) else t
+                        for t in selected_terms
+                    ],
                 }
             return res
 
@@ -1628,7 +1715,7 @@ class MCPWebBridge:
 
         if name == "inspect_repetition_group":
             proj = quote(str(args["project"]), safe="")
-            return self._request(
+            res = self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/agent/repetition/inspect",
                 json_body={
@@ -1637,6 +1724,16 @@ class MCPWebBridge:
                     "window": int(args.get("window", 5)),
                 },
             )
+            if isinstance(res, dict) and isinstance(res.get("draft_group"), dict):
+                res = {
+                    **res,
+                    "draft_group": {
+                        k: v
+                        for k, v in res["draft_group"].items()
+                        if k not in {"files", "occurrences"}
+                    },
+                }
+            return res
 
         if name == "update_repetition_draft":
             proj = quote(str(args["project"]), safe="")
