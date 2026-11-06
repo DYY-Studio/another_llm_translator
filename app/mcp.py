@@ -153,11 +153,296 @@ def _compact_term_row(
     return row
 
 
+MCP_INSTRUCTIONS = (
+    "Another LLM Translator (minimal-llm-translator) MCP Server.\n"
+    "Call `reference` (e.g. `reference(topic='workflows')`, `'pattern_b'`, `'terminology'`, `'repetition'`, `'config'`) "
+    "anytime you need workflow recipes or exact payload schemas.\n\n"
+    "Key Workflows:\n"
+    "1. Project Identification: Pass project `name` or `project_id` (`PRJ-...`) to `project` parameter in any tool.\n"
+    "2. Pattern B (Pure Agent Execution without external LLM):\n"
+    "   - Terminology: `edit_terms(action='save_term', payload={'terms': [{'source', 'preferred_translation', 'category', 'description', 'aliases'}]})` "
+    "-> `edit_terms(action='complete_scan', payload={})`.\n"
+    "   - Translation: `start_agent_stage_run(stage='translation')` -> loop `checkout_stage_batch` + "
+    "`submit_stage_batch(items=[{'segment_id': 'F0001-S000001', 'text': '...'}])` -> `finish_agent_stage_run(action='complete')`.\n"
+    "   - Proofreading / Polishing: `start_agent_stage_run(stage='proofreading'|'polishing')` -> loop `checkout_stage_batch(line_start=...)` + "
+    "`submit_stage_batch` (ONLY submit modified segments with `review_status='suggested'`, `suggested_text`, `reason`; advance window via `line_start` = last inspected `line_index + 1`) "
+    "-> `finish_agent_stage_run(action='complete', accept_remaining=True)` (bulk-confirms all remaining pending segments as `accepted`) "
+    "-> `apply_stage_suggestions(confirm=True)`.\n"
+    "   - Repetition Consistency: `get_repetition_overview(create_draft=True)` -> "
+    "`update_repetition_draft(run_id=..., group_proposals=[{'group_id': group_id, 'groups': [{'members': ['1','2'], 'target': '1', 'apply': ['2'], 'reason': '...'}], 'keep': [], 'uncertain': []}])` "
+    "-> `finalize_repetition_draft(run_id=..., action='apply', confirm=True)`.\n"
+    "3. Host LLM Mode: `preflight_stage_run` -> `start_host_stage_run` -> `get_task_and_diagnostics`."
+)
+
+REFERENCE_TOPICS: dict[str, dict[str, Any]] = {
+    "overview": {
+        "summary": "Core domain boundaries, execution modes, and available reference topics.",
+        "available_topics": [
+            "overview",
+            "workflows",
+            "pattern_b",
+            "terminology",
+            "repetition",
+            "config",
+        ],
+        "domain_concepts": {
+            "File": "Source document boundary (`F0001`, `F0002`, ...) for selection and export.",
+            "Segment": "Persistent translation/review unit (`F0001-S000001`, ...) with `part_id` and 0-based `line_index`.",
+            "Run": "Stage execution record (`run_id`). Pattern B runs use `executor='agent_mcp'`.",
+        },
+        "tool_groups": {
+            "project_and_files": [
+                "list_projects",
+                "create_project",
+                "open_project",
+                "add_project_files",
+                "manage_project_files",
+                "configure_project",
+                "get_project_overview",
+                "export_project",
+            ],
+            "segments_and_fixes": [
+                "query_segments",
+                "get_segment_context",
+                "submit_segment_fix",
+                "apply_stage_suggestions",
+            ],
+            "pattern_b_agent_runs": [
+                "start_agent_stage_run",
+                "checkout_stage_batch",
+                "submit_stage_batch",
+                "finish_agent_stage_run",
+            ],
+            "host_llm_runs": [
+                "preflight_stage_run",
+                "start_host_stage_run",
+                "get_task_and_diagnostics",
+                "cancel_stage_run",
+            ],
+            "terminology": [
+                "get_terminology_overview",
+                "inspect_term_entity",
+                "edit_terms",
+                "submit_term_decision_draft",
+                "finalize_term_decision_draft",
+            ],
+            "repetition": [
+                "get_repetition_overview",
+                "inspect_repetition_group",
+                "update_repetition_draft",
+                "finalize_repetition_draft",
+            ],
+        },
+    },
+    "workflows": {
+        "summary": "End-to-end workflows for Pattern B (Agent-driven) and Host LLM execution.",
+        "pattern_b_pure_agent": [
+            "1. Create/open project: `create_project(name='...', paths=['/abs/path/ch1.txt'])` or `open_project(path='/abs/path/proj')`.",
+            "2. Extract & save terms: read source segments via `query_segments`, then batch-import terms with descriptions via `edit_terms(action='save_term', payload={'terms': [...]})` and mark scan complete via `edit_terms(action='complete_scan', payload={})`.",
+            "3. Translate: `start_agent_stage_run(stage='translation')` -> repeat `checkout_stage_batch` + `submit_stage_batch(items=[{'segment_id': '...', 'text': '...'}])` until `remaining_pending_count == 0` -> `finish_agent_stage_run(action='complete')`.",
+            "4. Repetition check: `get_repetition_overview(create_draft=True)` -> if groups exist, inspect with `inspect_repetition_group`, submit subgroup unification via `update_repetition_draft`, and apply via `finalize_repetition_draft(action='apply', confirm=True)`.",
+            "5. Proofread / Polish: `start_agent_stage_run(stage='proofreading')` -> scan batches with `checkout_stage_batch(line_start=...)`, submit ONLY modified segments (`review_status='suggested'`) via `submit_stage_batch`, then call `finish_agent_stage_run(action='complete', accept_remaining=True)` and `apply_stage_suggestions(stage='proofreading', confirm=True)`.",
+            "6. Export: `export_project(stage='translated'|'proofread'|'polished', format='original'|'txt')`.",
+        ],
+        "host_llm_mode": [
+            "1. Check readiness: `preflight_stage_run(project='...', stage='...')`.",
+            "2. Launch background task: `start_host_stage_run(project='...', stage='...')`.",
+            "3. Monitor progress & diagnostics: `get_task_and_diagnostics(project='...', include_events=True)`.",
+        ],
+    },
+    "pattern_b": {
+        "summary": "Detailed contracts for Agent-driven stage runs (`start_agent_stage_run`, `checkout_stage_batch`, `submit_stage_batch`, `finish_agent_stage_run`).",
+        "slice_and_cursor_control": {
+            "description": "Both `checkout_stage_batch` and `submit_stage_batch` support scoping by `part_id`, `line_start` (inclusive), and `line_end` (exclusive), or via `run_id` shorthand `'<run_id>@<part_id>:<line_start>-<line_end>'`.",
+            "proofreading_cursor_tip": "In `proofreading`/`polishing`, unchanged segments are NOT submitted per batch, so they remain pending until `finish_agent_stage_run(accept_remaining=True)`. Pass `line_start = last_batch_segment['line_index'] + 1` to `checkout_stage_batch` (or `submit_stage_batch`) to advance to the next window.",
+        },
+        "submit_stage_batch_items": {
+            "translation": {
+                "segment_id": "F0001-S000001",
+                "text": "完整译文（也可使用字段名 translation）",
+            },
+            "proofreading_or_polishing_suggested": {
+                "segment_id": "F0001-S000001",
+                "review_status": "suggested",
+                "suggested_text": "修改后的完整译文",
+                "reason": "修改原因说明",
+            },
+            "proofreading_or_polishing_accepted_optional": {
+                "segment_id": "F0001-S000002",
+                "review_status": "accepted",
+                "note": "Normally omit accepted items during batch checkout and use finish_agent_stage_run(action='complete', accept_remaining=True) at the end.",
+            },
+        },
+        "validation_gate": "If `submit_stage_batch` or `submit_segment_fix` returns `status='rejected'`, inspect `rejected[].findings` and `repair_guidance`. Fix the text or pass `allow_warnings=True` if the warning is a false positive.",
+    },
+    "terminology": {
+        "summary": "Payload schemas for `edit_terms`, `submit_term_decision_draft`, and `finalize_term_decision_draft`.",
+        "edit_terms_actions": {
+            "save_term_batch": {
+                "description": "Recommended for adding/updating one or more terms with optional one-shot string `description`.",
+                "payload": {
+                    "terms": [
+                        {
+                            "source": "アリス",
+                            "preferred_translation": "爱丽丝",
+                            "category": "女性人名",
+                            "description": "本作女主角",
+                            "aliases": ["アリ"],
+                            "disabled": False,
+                            "group_primary": None,
+                        }
+                    ]
+                },
+            },
+            "save_term_single": {
+                "description": "Save a single term override. Note: single-term `save_term` does NOT accept string `description` (use batch `{'terms': [...]}` or `update_knowledge` for descriptions).",
+                "payload": {
+                    "source": "アリス",
+                    "old_normalized": "アリス",
+                    "preferred_translation": "爱丽丝",
+                    "category": "女性人名",
+                    "aliases": ["アリ"],
+                    "disabled": False,
+                },
+            },
+            "import_terms": {
+                "description": "Import terms from `{'terms': [...]}` list or local `.json`/`.csv` file `{'path': '/abs/path/terms.json'}`.",
+                "payload": {"path": "/abs/path/terms.json"},
+            },
+            "complete_scan": {
+                "description": "Mark terminology scan completed so Web UI shows terminology stage complete. Pass `{}` for full project or `{'only_file': 'F0001', 'only_part': 'part'}`.",
+                "payload": {},
+            },
+            "update_knowledge": {
+                "description": "Update entity knowledge items (`expected_revision` is optional and auto-filled when omitted).",
+                "payload": {
+                    "normalized": "アリス",
+                    "action": "save_items",
+                    "items": [{"text": "本作女主角，金发少女", "fragment_ids": []}],
+                },
+            },
+            "remove_terms": {
+                "description": "Disable terms by normalized keys.",
+                "payload": {"normalized": ["アリス"]},
+            },
+            "set_primary": {
+                "payload": {"normalized": "アリス", "confirm": True},
+            },
+            "leave_group": {
+                "payload": {"normalized": "アリ", "confirm": True},
+            },
+            "group_related": {
+                "payload": {
+                    "normalized": "アリス",
+                    "related_normalized": ["アリ"],
+                    "confirm": True,
+                },
+            },
+            "convert_to_alias": {
+                "payload": {
+                    "normalized": "アリス",
+                    "related_normalized": "アリ",
+                    "confirm": True,
+                },
+            },
+            "resolve_change": {
+                "payload": {
+                    "normalized": ["アリス"],
+                    "expected_revision": 2,
+                    "confirm": True,
+                },
+            },
+            "clear_terms": {"payload": {"confirm": True}},
+            "publish_partial": {"payload": {"confirm": True}},
+        },
+    },
+    "repetition": {
+        "summary": "Workflow and payload schemas for repetition consistency review.",
+        "workflow": [
+            "1. Call `get_repetition_overview(project='...', create_draft=True)` to scan repeated source segments with differing translations and create a local draft (`run_id`).",
+            "2. Inspect any group's surrounding context with `inspect_repetition_group(project='...', group_id='1', window=5)`.",
+            "3. Submit subgroup unification proposals via `update_repetition_draft(project='...', run_id=..., group_proposals=[...])` (each subgroup with non-empty `apply` defaults to accepted when finalizing; pass `choices` only to override acceptance or target).",
+            "4. Apply with `finalize_repetition_draft(project='...', run_id=..., action='apply', confirm=True)`.",
+        ],
+        "update_repetition_draft_schemas": {
+            "group_proposals": [
+                {
+                    "group_id": "1",
+                    "groups": [
+                        {
+                            "members": ["1", "2"],
+                            "target": "1",
+                            "apply": ["2"],
+                            "reason": "同一场景连续呼喊，统一为短 id '1' 的译文",
+                        }
+                    ],
+                    "keep": [],
+                    "uncertain": [],
+                }
+            ],
+            "choices": {
+                "1-1": {
+                    "accepted": True,
+                    "target": "1",
+                }
+            },
+            "notes": [
+                "Every occurrence short `id` in the repetition group (e.g. `'1'`, `'2'`) must appear in exactly one of `groups[].members`, `keep`, or `uncertain`.",
+                "`target` is the occurrence short `id` (e.g. `'1'`) whose existing translation is chosen, NOT the translation text itself.",
+                "`apply` lists occurrence short `id`s in `members` that should be updated.",
+            ],
+        },
+    },
+    "config": {
+        "summary": "Project configuration (`configure_project`) actions and structure.",
+        "actions": {
+            "get_config": "Returns `config`, `available_presets`, and `available_decision_presets`.",
+            "update_config": "Deep-merges `config` patch into `config.toml`. Example: `{'project': {'target_language': 'zh-CN'}, 'validation': {'translation': {'validators': ['japanese_kana']}}}`.",
+            "get_file_options": "Requires `file_id` (e.g. `'F0001'`). Returns Document Adapter run options for that file.",
+            "update_file_options": "Requires `file_id` and string key-value `options`.",
+            "delete_project": "Requires `confirm=True`.",
+        },
+    },
+}
+
+
 TOOLS: list[dict[str, Any]] = [
     {
+        "name": "reference",
+        "description": (
+            "Get on-demand usage documentation, end-to-end workflow recipes (Pattern B pure-Agent mode vs Host LLM mode), "
+            "and exact payload schemas/examples for terminology, repetition consistency, batch stage submission, or any specific tool."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": (
+                        "Reference topic or tool name: 'overview' (default), 'workflows', 'pattern_b', "
+                        "'terminology', 'repetition', 'config', or any MCP tool name (e.g. 'edit_terms', 'update_repetition_draft')."
+                    ),
+                    "default": "overview",
+                }
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "list_projects",
-        "description": "List all registered projects and currently active background tasks.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "description": "List registered projects (newest first, with optional keyword filter and pagination) and currently active background tasks.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "q": {
+                    "type": "string",
+                    "description": "Optional case-insensitive substring filter matching project name, project_id, selector, or path",
+                },
+                "offset": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 50},
+            },
+            "additionalProperties": False,
+        },
     },
     {
         "name": "create_project",
@@ -542,15 +827,29 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "checkout_stage_batch",
-        "description": "Pattern B: Pull the next batch of pending segments from an active agent_mcp Run, optionally filtered by part_id / line range (or via run_id@part_id:start-end), including matched terminology, entity knowledge, and preceding bilingual context.",
+        "description": (
+            "Pattern B: Pull the next batch of pending segments from an active agent_mcp Run, optionally filtered by "
+            "part_id / line range (or via run_id@part_id:start-end), including matched terminology, entity knowledge, "
+            "and preceding bilingual context. In proofreading/polishing, pass line_start = last_inspected_line_index + 1 "
+            "to advance past unchanged segments."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "project": {"type": "string"},
-                "run_id": {"type": "string"},
+                "run_id": {
+                    "type": "string",
+                    "description": "Active run_id, or slice shorthand '<run_id>@<part_id>:<line_start>-<line_end>'",
+                },
                 "part_id": {"type": "string"},
-                "line_start": {"type": "integer"},
-                "line_end": {"type": "integer"},
+                "line_start": {
+                    "type": "integer",
+                    "description": "Inclusive 0-based line_index lower bound (use in proofreading/polishing to advance past unchanged segments)",
+                },
+                "line_end": {
+                    "type": "integer",
+                    "description": "Exclusive 0-based line_index upper bound",
+                },
                 "max_segments": {"type": "integer", "default": 15},
                 "context_before": {"type": "integer", "default": 3},
             },
@@ -560,16 +859,31 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "submit_stage_batch",
-        "description": "Pattern B: Submit Agent-generated results for a batch of segments in an active agent_mcp Run. Validates via Document Adapter and 3-layer translation validators before committing.",
+        "description": (
+            "Pattern B: Submit Agent-generated results for a batch of segments in an active agent_mcp Run. "
+            "For translation: items=[{'segment_id': 'F0001-S000001', 'text': '...'}]. "
+            "For proofreading/polishing: ONLY submit modified segments as items=[{'segment_id': '...', 'review_status': 'suggested', 'suggested_text': '...', 'reason': '...'}], "
+            "then call finish_agent_stage_run(action='complete', accept_remaining=True) at the end."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "project": {"type": "string"},
-                "run_id": {"type": "string"},
+                "run_id": {
+                    "type": "string",
+                    "description": "Active run_id, or slice shorthand '<run_id>@<part_id>:<line_start>-<line_end>'",
+                },
                 "part_id": {"type": "string"},
                 "line_start": {"type": "integer"},
                 "line_end": {"type": "integer"},
-                "items": {"type": "array", "items": {"type": "object"}},
+                "items": {
+                    "type": "array",
+                    "description": (
+                        "Translation items: {'segment_id': str, 'text': str}. "
+                        "Proofreading/polishing items: {'segment_id': str, 'review_status': 'suggested'|'accepted', 'suggested_text'?: str, 'reason'?: str}."
+                    ),
+                    "items": {"type": "object"},
+                },
                 "allow_warnings": {"type": "boolean", "default": False},
             },
             "required": ["project", "run_id", "items"],
@@ -618,6 +932,10 @@ TOOLS: list[dict[str, Any]] = [
                     ],
                     "default": "all",
                 },
+                "q": {
+                    "type": "string",
+                    "description": "Optional case-insensitive substring search across source, normalized, preferred_translation, and aliases",
+                },
                 "offset": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 50},
             },
@@ -627,7 +945,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "inspect_term_entity",
-        "description": "Inspect a term/entity including group members, applied description items, source evidence fragments, and segment hits.",
+        "description": "Inspect a term/entity including its glossary entry, group members, applied description items, source evidence fragments, and segment hits.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -643,7 +961,7 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "edit_single_term",
+        "name": "edit_terms",
         "description": (
             "Perform a controlled edit on terminology: save_term (single term or batch {'terms': [...]}), "
             "import_terms ({'terms': [...]} or {'path': '...'}), complete_scan (mark terminology scan completed for full project or scope), "
@@ -675,7 +993,20 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "payload": {
                     "type": "object",
-                    "description": "Action payload. For import_terms, pass {'terms': [{'source', 'preferred_translation', 'category', 'description', 'aliases', 'disabled', 'group_primary'}]}. For complete_scan, pass {} for full project or {'only_file': '...', 'only_part': '...'}.",
+                    "description": (
+                        "Action payload: "
+                        "save_term (batch: {'terms': [{'source', 'preferred_translation', 'category', 'description'?, 'aliases'?, 'disabled'?, 'group_primary'?}]} "
+                        "or single: {'source', 'preferred_translation', 'category', 'aliases'?, 'old_normalized'?, 'disabled'?} without 'description'); "
+                        "import_terms ({'terms': [...]} or {'path': '/abs/path.json|.csv'}); "
+                        "complete_scan ({} for full project or {'only_file': 'F0001', 'only_part'?: '...'}); "
+                        "update_knowledge ({'normalized': str, 'action'?: 'save_items'|'confirm_keep'|'set_fragment_enabled', 'items'?: [{'text': str, 'fragment_ids': [str]}], 'expected_revision'?: int}); "
+                        "remove_terms ({'normalized': [str]}); "
+                        "set_primary / leave_group ({'normalized': str, 'confirm': True}); "
+                        "group_related ({'normalized': str, 'related_normalized': [str], 'confirm': True}); "
+                        "convert_to_alias ({'normalized': str, 'related_normalized': str, 'confirm': True}); "
+                        "resolve_change ({'normalized': [str], 'expected_revision': int, 'confirm': True}); "
+                        "clear_terms / publish_partial ({'confirm': True})."
+                    ),
                 },
             },
             "required": ["project", "action", "payload"],
@@ -775,14 +1106,28 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "update_repetition_draft",
-        "description": "Update review choices or subgroup proposals for a pending repetition consistency draft.",
+        "description": (
+            "Update review choices or subgroup proposals for a pending repetition consistency draft. "
+            "Pass group_proposals=[{'group_id': group_id, 'groups': [{'members': ['1','2'], 'target': '1', 'apply': ['2'], 'reason': '...'}], 'keep': [], 'uncertain': []}] "
+            "or choices={'<subgroup_id>': {'accepted': True, 'target': '1'}}."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "project": {"type": "string"},
                 "run_id": {"type": "string"},
-                "choices": {"type": "object"},
-                "group_proposals": {"type": "array", "items": {"type": "object"}},
+                "choices": {
+                    "type": "object",
+                    "description": "Map of subgroup_id (e.g. '1-1' or '1-manual') to {'accepted': bool, 'target': '<occurrence_short_id>'}",
+                },
+                "group_proposals": {
+                    "type": "array",
+                    "description": (
+                        "List of group proposals: [{'group_id': str, 'groups': [{'members': [str], 'target': str, 'apply': [str], 'reason': str}], "
+                        "'keep': [str], 'uncertain'?: [str]}]. Every occurrence short id must appear in exactly one of groups[].members, keep, or uncertain."
+                    ),
+                    "items": {"type": "object"},
+                },
             },
             "required": ["project", "run_id"],
             "additionalProperties": False,
@@ -790,7 +1135,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "finalize_repetition_draft",
-        "description": "Explicitly apply, discard, or rollback a repetition consistency draft (requires confirm=True).",
+        "description": "Explicitly apply, discard, or rollback a repetition consistency draft (requires confirm=True). When action='apply' and choices is omitted, uses the draft's currently saved choices.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -800,7 +1145,10 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": ["apply", "discard", "rollback"],
                 },
-                "choices": {"type": "object"},
+                "choices": {
+                    "type": "object",
+                    "description": "Optional override map of subgroup_id to {'accepted': bool, 'target': '<occurrence_short_id>'}",
+                },
                 "confirm": {"type": "boolean"},
             },
             "required": ["project", "run_id", "action", "confirm"],
@@ -868,14 +1216,96 @@ class MCPWebBridge:
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None) -> Any:
         args = dict(arguments or {})
+        if name == "reference":
+            topic = str(args.get("topic") or "overview").strip()
+            key = topic.casefold()
+            if key in REFERENCE_TOPICS:
+                return {"topic": key, **REFERENCE_TOPICS[key]}
+            for tool in TOOLS:
+                if str(tool.get("name", "")).casefold() == key:
+                    related_topic = None
+                    if "term" in key:
+                        related_topic = REFERENCE_TOPICS["terminology"]
+                    elif "repetition" in key:
+                        related_topic = REFERENCE_TOPICS["repetition"]
+                    elif key in {
+                        "start_agent_stage_run",
+                        "checkout_stage_batch",
+                        "submit_stage_batch",
+                        "finish_agent_stage_run",
+                        "submit_segment_fix",
+                        "apply_stage_suggestions",
+                    }:
+                        related_topic = REFERENCE_TOPICS["pattern_b"]
+                    elif key == "configure_project":
+                        related_topic = REFERENCE_TOPICS["config"]
+                    return {
+                        "topic": tool["name"],
+                        "tool": tool,
+                        **({"guide": related_topic} if related_topic else {}),
+                    }
+            return {
+                "topic": "overview",
+                "note": f"未知主题 '{topic}'，已返回 overview 及可用主题列表。",
+                **REFERENCE_TOPICS["overview"],
+            }
+
         if name == "list_projects":
-            projects = self._request("GET", "/api/v1/projects")
+            projects_data = self._request("GET", "/api/v1/projects")
             active = self._request("GET", "/api/v1/tasks/active")
             tasks = [
                 _compact_task(t) if isinstance(t, dict) else t
                 for t in active.get("tasks", [])
             ]
-            return {**projects, "active_tasks": tasks}
+            items = list(projects_data.get("projects", []))
+            items.sort(
+                key=lambda p: (
+                    str(p.get("created_at") or ""),
+                    str(p.get("name") or ""),
+                ),
+                reverse=True,
+            )
+            q_str = str(args.get("q") or "").strip().casefold()
+            if q_str:
+                items = [
+                    p
+                    for p in items
+                    if isinstance(p, dict)
+                    and any(
+                        q_str in str(p.get(k) or "").casefold()
+                        for k in ("name", "project_id", "selector", "path")
+                    )
+                ]
+            offset = max(0, int(args.get("offset", 0)))
+            limit = max(1, int(args.get("limit", 50)))
+            compact_projects = []
+            for p in items[offset : offset + limit]:
+                if not isinstance(p, dict):
+                    compact_projects.append(p)
+                    continue
+                row: dict[str, Any] = {
+                    "name": p.get("name"),
+                    "project_id": p.get("project_id"),
+                    "created_at": p.get("created_at"),
+                    "file_count": p.get("file_count"),
+                    "segment_count": p.get("segment_count"),
+                }
+                if p.get("selector") and p.get("selector") != p.get("name"):
+                    row["selector"] = p["selector"]
+                if p.get("external"):
+                    row["external"] = True
+                    row["path"] = p.get("path")
+                if p.get("repair_needed"):
+                    row["repair_needed"] = True
+                compact_projects.append(row)
+            return {
+                "total": len(items),
+                "offset": offset,
+                "limit": limit,
+                "default_projects_path": projects_data.get("default_projects_path"),
+                "projects": compact_projects,
+                "active_tasks": tasks,
+            }
 
         if name == "create_project":
             empty = bool(args.get("empty", False))
@@ -1305,9 +1735,41 @@ class MCPWebBridge:
         if name == "start_agent_stage_run":
             proj = quote(str(args["project"]), safe="")
             body = {k: v for k, v in args.items() if k != "project" and v is not None}
-            return self._request(
+            res = self._request(
                 "POST", f"/api/v1/projects/{proj}/agent/runs/start", json_body=body
             )
+            if isinstance(res, dict) and isinstance(res.get("prompt"), str):
+                prompt_text = res["prompt"]
+                for marker in (
+                    "segments[] 每项一条",
+                    "Return one type=segment",
+                    "每个 segments[] 恰好输出",
+                    "Output exactly one type=segment",
+                ):
+                    idx = prompt_text.rfind(marker)
+                    if idx != -1:
+                        prompt_text = prompt_text[:idx].rstrip()
+                        break
+                stage_name = str(res.get("stage") or args.get("stage") or "translation")
+                if stage_name == "translation":
+                    mcp_footer = (
+                        "Agent MCP 提交方式：通过 submit_stage_batch 提交 "
+                        'items=[{"segment_id": "F0001-S000001", "text": "完整译文"}]'
+                        "（必须使用 checkout_stage_batch 返回的完整 segment_id，不要输出 JSONL 或短 id）。"
+                        '全部批次提交完毕后调用 finish_agent_stage_run(action="complete")。'
+                    )
+                else:
+                    mcp_footer = (
+                        "Agent MCP 提交方式：通过 checkout_stage_batch 拉取待审批次"
+                        "（建议传入上批末尾的 line_start 推进窗口），仅需将有修改建议的条目通过 "
+                        'submit_stage_batch 提交：items=[{"segment_id": "F0001-S000001", '
+                        '"review_status": "suggested", "suggested_text": "完整修改后译文", '
+                        '"reason": "修改原因"}]；无需逐条提交无修改条目，全部审阅后调用 '
+                        'finish_agent_stage_run(action="complete", accept_remaining=True) '
+                        "即可批量确认其余条目为 accepted，最后调用 apply_stage_suggestions(confirm=True) 应用建议。"
+                    )
+                res = {**res, "prompt": f"{prompt_text}\n\n{mcp_footer}"}
+            return res
 
         if name == "checkout_stage_batch":
             proj = quote(str(args["project"]), safe="")
@@ -1450,6 +1912,23 @@ class MCPWebBridge:
                     for t in items
                     if t.get("knowledge_status") in {"stale", "pending"}
                 ]
+            q_str = str(args.get("q") or "").strip().casefold()
+            if q_str:
+                items = [
+                    t
+                    for t in items
+                    if isinstance(t, dict)
+                    and (
+                        any(
+                            q_str in str(t.get(k) or "").casefold()
+                            for k in ("source", "normalized", "preferred_translation")
+                        )
+                        or any(
+                            q_str in str(a).casefold()
+                            for a in (t.get("aliases") or [])
+                        )
+                    )
+                ]
             compact_terms = [
                 _compact_term_row(t, keep_candidates=(flt == "changes"))
                 if isinstance(t, dict)
@@ -1481,6 +1960,19 @@ class MCPWebBridge:
             normalized = args.get("normalized")
             if not normalized:
                 raise UsageError("必须提供 normalized 或 (run_id + proposal_id)")
+            terms_data = self._request("GET", f"/api/v1/projects/{proj}/terms")
+            matched_term = next(
+                (
+                    _compact_term_row(t)
+                    for t in terms_data.get("terms", [])
+                    if isinstance(t, dict)
+                    and (
+                        t.get("normalized") == normalized
+                        or t.get("source") == normalized
+                    )
+                ),
+                None,
+            )
             knowledge = self._request(
                 "GET",
                 f"/api/v1/projects/{proj}/terms/knowledge",
@@ -1499,13 +1991,15 @@ class MCPWebBridge:
                 if args.get("include_hits", True)
                 else None
             )
-            return {"knowledge": knowledge, "hits": hits}
+            return {"term": matched_term, "knowledge": knowledge, "hits": hits}
 
-        if name == "edit_single_term":
+        if name == "edit_terms":
             proj = quote(str(args["project"]), safe="")
             action = str(args["action"])
             payload = dict(args["payload"])
-            if action == "import_terms":
+            if action == "import_terms" or (
+                action == "save_term" and isinstance(payload.get("terms"), list)
+            ):
                 if isinstance(payload.get("terms"), list):
                     doc = {
                         "schema_version": 2,
@@ -1681,16 +2175,39 @@ class MCPWebBridge:
                 compact_groups = []
                 for g in groups[offset : offset + limit]:
                     cg = {k: v for k, v in g.items() if k != "files"}
+                    translations = (
+                        g.get("translations")
+                        if isinstance(g.get("translations"), list)
+                        else []
+                    )
                     if isinstance(cg.get("occurrences"), list):
-                        cg["occurrences"] = [
-                            {
+                        compact_occs = []
+                        for occ in cg["occurrences"]:
+                            if not isinstance(occ, dict):
+                                continue
+                            c_occ = {
                                 k: v
                                 for k, v in occ.items()
-                                if k in {"id", "segment_id", "part_id", "line_index", "text"}
+                                if k
+                                in {
+                                    "id",
+                                    "segment_id",
+                                    "file_id",
+                                    "part_id",
+                                    "line_index",
+                                    "variant",
+                                    "text",
+                                }
                             }
-                            for occ in cg["occurrences"]
-                            if isinstance(occ, dict)
-                        ]
+                            v_idx = occ.get("variant")
+                            if (
+                                "text" not in c_occ
+                                and isinstance(v_idx, int)
+                                and 0 <= v_idx < len(translations)
+                            ):
+                                c_occ["translation"] = translations[v_idx]
+                            compact_occs.append(c_occ)
+                        cg["occurrences"] = compact_occs
                     compact_groups.append(cg)
                 draft = {
                     **{k: v for k, v in draft.items() if k not in {"evidence", "sources"}},
@@ -1698,7 +2215,11 @@ class MCPWebBridge:
                     "groups": compact_groups,
                 }
             result_state: dict[str, Any] = {**state, "draft": draft}
-            if draft is None or args.get("only_file") or args.get("only_part"):
+            if (
+                draft is None
+                or args.get("only_part")
+                or (args.get("only_file") and not args.get("create_draft"))
+            ):
                 result_state["live_scan"] = self._request(
                     "POST",
                     f"/api/v1/projects/{proj}/agent/repetition/scan",
@@ -1800,6 +2321,7 @@ def handle_jsonrpc_message(
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
                 "serverInfo": SERVER_INFO,
+                "instructions": MCP_INSTRUCTIONS,
             },
         }
 

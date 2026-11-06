@@ -1305,9 +1305,13 @@ def register_agent_routes(
                 groups_by_id = {str(g["id"]): g for g in draft["groups"]}
                 updated_ids: list[str] = []
                 for entry in updates:
-                    if not isinstance(entry, dict) or not isinstance(entry.get("group_id"), str):
+                    gid = (
+                        entry.get("group_id") or entry.get("id")
+                        if isinstance(entry, dict)
+                        else None
+                    )
+                    if not isinstance(gid, str) or not gid:
                         raise UsageError("每个 group_proposals 项必须包含字符串 group_id")
-                    gid = entry["group_id"]
                     group = groups_by_id.get(gid)
                     if group is None:
                         raise UsageError(f"草案中不存在重复组：{gid}")

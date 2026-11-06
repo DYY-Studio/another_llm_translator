@@ -559,6 +559,7 @@ class WebStore:
         ]
         return {
             "name": self.metadata["name"],
+            "project_id": self.project_id,
             "path": str(self.project),
             "nonempty_segment_count": segment_count(self.project),
             **page,
