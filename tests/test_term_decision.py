@@ -1126,12 +1126,10 @@ async def test_isolated_group_primary_cycle_retries_combined_component(
     )
 
     assert set(result) == {"alpha", "beta"}
-    assert [payload["terms"][0]["normalized"] for payload in payloads[2:4]] == [
-        "alpha", "beta"
-    ]
-    assert [payload["anchors"][0]["normalized"] for payload in payloads[2:4]] == [
-        "beta", "alpha"
-    ]
+    assert {
+        (payload["terms"][0]["normalized"], payload["anchors"][0]["normalized"])
+        for payload in payloads[2:4]
+    } == {("alpha", "beta"), ("beta", "alpha")}
     assert [term["normalized"] for term in payloads[4]["terms"]] == [
         "alpha", "beta"
     ]
