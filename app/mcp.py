@@ -878,12 +878,29 @@ class MCPWebBridge:
                 decision_presets = self._request(
                     "GET", "/api/v1/global/decision-presets"
                 )
+                def _compact_preset(item: dict[str, Any]) -> dict[str, Any]:
+                    out = {
+                        k: item[k]
+                        for k in ("preset_id", "adapter_id", "protocol", "model", "valid")
+                        if k in item
+                    }
+                    if item.get("missing_fields"):
+                        out["missing_fields"] = item["missing_fields"]
+                    if item.get("error"):
+                        out["error"] = item["error"]
+                    return out
                 return {
                     **cfg,
-                    "available_presets": presets.get("presets", []),
-                    "available_decision_presets": decision_presets.get(
-                        "presets", []
-                    ),
+                    "available_presets": [
+                        _compact_preset(p)
+                        for p in presets.get("presets", [])
+                        if isinstance(p, dict)
+                    ],
+                    "available_decision_presets": [
+                        _compact_preset(p)
+                        for p in decision_presets.get("presets", [])
+                        if isinstance(p, dict)
+                    ],
                 }
             if action == "update_config":
                 patch = args.get("config")
@@ -944,24 +961,65 @@ class MCPWebBridge:
 
         if name == "get_task_and_diagnostics":
             project_name = str(args["project"])
+            _falsy_task_keys = {
+                "current_stage",
+                "steps",
+                "final_review",
+                "knowledge_only",
+                "all_terms",
+                "include_summaries",
+                "include_draft_translation",
+                "aggregate_full_summaries",
+                "draft_progress",
+                "summary_selection",
+                "summary_selection_progress",
+                "failure_counts",
+            }
+            def _compact_task(t: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    k: v
+                    for k, v in t.items()
+                    if not (k in _falsy_task_keys and not v)
+                }
             active = self._request("GET", "/api/v1/tasks/active").get("tasks", [])
             project_tasks = [
-                t for t in active if t.get("project") == project_name or t.get("project_id") == project_name
+                _compact_task(t)
+                for t in active
+                if isinstance(t, dict)
+                and (t.get("project") == project_name or t.get("project_id") == project_name)
             ]
-            task_detail = (
+            raw_detail = (
                 self._request("GET", f"/api/v1/tasks/{quote(str(args['task_id']), safe='')}")
                 if args.get("task_id")
                 else None
             )
+            task_detail = _compact_task(raw_detail) if isinstance(raw_detail, dict) else raw_detail
             runs = self._request(
                 "GET",
                 "/api/v1/runs",
-                params={"project": project_name, "limit": 10, **({"stage": args["stage"]} if args.get("stage") else {})},
+                params={"project": project_name, "limit": 5, **({"stage": args["stage"]} if args.get("stage") else {})},
             )
+            _strip_run_keys = {
+                "document_adapter_prompt_requirements",
+                "document_adapters",
+                "document_adapter_options",
+                "translation_validators",
+                "stage_fingerprint",
+            }
+            recent_runs = [
+                {
+                    k: v
+                    for k, v in r.items()
+                    if k not in _strip_run_keys
+                    and not (k in {"failure_counts", "warnings"} and not v)
+                }
+                for r in runs.get("items", [])
+                if isinstance(r, dict)
+            ]
             result: dict[str, Any] = {
                 "active_tasks": project_tasks,
                 "task_detail": task_detail,
-                "recent_runs": runs.get("items", []),
+                "recent_runs": recent_runs,
             }
             if args.get("include_events"):
                 diag = self._request(
@@ -969,6 +1027,42 @@ class MCPWebBridge:
                     "/api/v1/diagnostics",
                     json_body={"project": project_name, "stage": args.get("stage")},
                 )
+                if isinstance(diag, dict):
+                    logs = diag.get("logs")
+                    if isinstance(logs, list) and len(logs) > 20:
+                        diag = {**diag, "total_logs": len(logs), "logs": logs[-20:]}
+                    reqs = diag.get("requests")
+                    if isinstance(reqs, dict) and isinstance(reqs.get("items"), list):
+                        req_items = reqs["items"]
+                        _req_keys = {
+                            "request_id",
+                            "stage",
+                            "request_kind",
+                            "segment_id",
+                            "status",
+                            "attempt_count",
+                            "last_http_status",
+                            "latency_ms",
+                            "usage",
+                            "stream_event_count",
+                            "stream_received_bytes",
+                            "error",
+                            "timestamp",
+                            "finished_at",
+                        }
+                        compact_reqs = [
+                            {k: v for k, v in item.items() if k in _req_keys}
+                            for item in req_items[-15:]
+                            if isinstance(item, dict)
+                        ]
+                        diag = {
+                            **diag,
+                            "requests": {
+                                **{k: v for k, v in reqs.items() if k != "items"},
+                                "total_items": len(req_items),
+                                "items": compact_reqs,
+                            },
+                        }
                 result["diagnostics"] = diag
             return result
 
@@ -1029,12 +1123,16 @@ class MCPWebBridge:
                 return self._request(
                     "GET",
                     f"/api/v1/projects/{proj}/repetition/options",
-                    params={"final_review": bool(args.get("final_review", False))},
+                    params={
+                        "estimate_usage": True,
+                        "final_review": bool(args.get("final_review", False)),
+                    },
                 )
             return self._request(
                 "GET",
                 f"/api/v1/projects/{proj}/task-options/{quote(stage, safe='')}",
                 params={
+                    "estimate_usage": True,
                     "final_review": bool(args.get("final_review", False)),
                     "knowledge_only": bool(args.get("knowledge_only", False)),
                     "all_terms": bool(args.get("all_terms", False)),
@@ -1161,6 +1259,82 @@ class MCPWebBridge:
             limit = int(args.get("limit", 50))
             decision = self._request("GET", f"/api/v1/projects/{proj}/terms/decision")
             if flt == "draft":
+                draft = decision.get("draft")
+                if isinstance(draft, dict) and isinstance(draft.get("proposals"), list):
+                    proposals = draft["proposals"]
+                    compact_proposals = []
+                    for p in proposals[offset : offset + limit]:
+                        if not isinstance(p, dict):
+                            compact_proposals.append(p)
+                            continue
+                        cp = {
+                            k: v
+                            for k, v in p.items()
+                            if k
+                            not in {
+                                "before",
+                                "after",
+                                "conflicts",
+                                "knowledge_before",
+                                "knowledge_after",
+                                "evidence",
+                                "knowledge_evidence",
+                            }
+                        }
+                        for side in ("before", "after"):
+                            if isinstance(p.get(side), list):
+                                cp[side] = [
+                                    {
+                                        k: v
+                                        for k, v in st.items()
+                                        if k
+                                        in {
+                                            "normalized",
+                                            "source",
+                                            "preferred_translation",
+                                            "category",
+                                            "aliases",
+                                            "group_primary",
+                                            "disabled",
+                                        }
+                                        and (
+                                            v not in (None, [], False)
+                                            or k
+                                            in {
+                                                "normalized",
+                                                "source",
+                                                "preferred_translation",
+                                                "category",
+                                            }
+                                        )
+                                    }
+                                    for st in p[side]
+                                    if isinstance(st, dict)
+                                ]
+                        if p.get("conflicts"):
+                            cp["conflict_count"] = len(p["conflicts"])
+                        compact_proposals.append(cp)
+                    decision = {
+                        **decision,
+                        "draft": {
+                            **{
+                                k: v
+                                for k, v in draft.items()
+                                if k
+                                not in {
+                                    "proposals",
+                                    "decision_targets",
+                                    "reviewed_terms",
+                                    "model_fingerprint",
+                                    "prompt_fingerprint",
+                                }
+                            },
+                            "total_proposals": len(proposals),
+                            "offset": offset,
+                            "limit": limit,
+                            "proposals": compact_proposals,
+                        },
+                    }
                 return decision
             terms_data = self._request("GET", f"/api/v1/projects/{proj}/terms")
             items = list(terms_data.get("terms", []))
@@ -1174,16 +1348,44 @@ class MCPWebBridge:
                     for t in items
                     if t.get("knowledge_status") in {"stale", "pending"}
                 ]
+            compact_terms = []
+            for t in items[offset : offset + limit]:
+                if not isinstance(t, dict):
+                    compact_terms.append(t)
+                    continue
+                row = {
+                    k: v
+                    for k, v in t.items()
+                    if k not in {"description_items", "pending_change"}
+                    and not (k == "conflicts" and not t.get("has_conflicts"))
+                }
+                pc = t.get("pending_change")
+                if isinstance(pc, dict):
+                    if flt == "changes":
+                        row["pending_change"] = {
+                            **pc,
+                            "candidates": [
+                                {k: v for k, v in c.items() if k != "source_range"}
+                                for c in pc.get("candidates", [])
+                                if isinstance(c, dict)
+                            ],
+                        }
+                    else:
+                        row["pending_change"] = {
+                            "kind": pc.get("kind"),
+                            "candidate_count": len(pc.get("candidates", [])),
+                        }
+                compact_terms.append(row)
             return {
                 "total": len(items),
-                "terms": items[offset : offset + limit],
+                "terms": compact_terms,
                 "terms_revision": terms_data.get("terms_revision"),
                 "conflict_count": terms_data.get("conflict_count", 0),
                 "scan": terms_data.get("scan"),
                 "decision_state": {
                     "has_pending_draft": decision.get("draft") is not None,
                     "manual_review": decision.get("manual_review"),
-                    "can_rollback": decision.get("can_rollback", False),
+                    "can_rollback": decision.get("rollback") is not None,
                 },
             }
 
@@ -1315,11 +1517,19 @@ class MCPWebBridge:
             proj = quote(str(args["project"]), safe="")
             result = {}
             if "rejected_proposal_ids" in args and args["rejected_proposal_ids"] is not None:
-                result["rejections"] = self._request(
+                rej = self._request(
                     "PUT",
                     f"/api/v1/projects/{proj}/terms/decision/rejections",
                     json_body={"rejected_proposal_ids": args["rejected_proposal_ids"]},
                 )
+                if isinstance(rej, dict) and isinstance(rej.get("draft"), dict):
+                    draft_obj = rej["draft"]
+                    rej = {
+                        "run_id": draft_obj.get("run_id"),
+                        "rejected_proposal_ids": draft_obj.get("rejected_proposal_ids", []),
+                        "total_proposals": len(draft_obj.get("proposals", [])),
+                    }
+                result["rejections"] = rej
             if "manual_reviews" in args and args["manual_reviews"]:
                 resolved_results = []
                 for entry in args["manual_reviews"]:
@@ -1340,11 +1550,19 @@ class MCPWebBridge:
             action = str(args["action"])
             if action not in {"apply", "discard", "rollback"}:
                 raise UsageError(f"不支持的术语决策收尾动作：{action}")
-            return self._request(
+            res = self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/terms/decision/{action}",
                 json_body={"confirm": bool(args.get("confirm", False))},
             )
+            if isinstance(res, dict) and isinstance(res.get("terms"), dict):
+                terms_summary = res["terms"]
+                res = {
+                    **{k: v for k, v in res.items() if k != "terms"},
+                    "conflict_count": terms_summary.get("conflict_count", 0),
+                    "total_terms": len(terms_summary.get("terms", [])),
+                }
+            return res
 
         if name == "get_repetition_overview":
             proj = quote(str(args["project"]), safe="")
@@ -1388,7 +1606,7 @@ class MCPWebBridge:
                         ]
                     compact_groups.append(cg)
                 draft = {
-                    **{k: v for k, v in draft.items() if k != "evidence"},
+                    **{k: v for k, v in draft.items() if k not in {"evidence", "sources"}},
                     "total_groups": len(groups),
                     "groups": compact_groups,
                 }

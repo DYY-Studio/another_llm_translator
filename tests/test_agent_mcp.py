@@ -185,6 +185,7 @@ def test_pattern_b_agent_stage_run_lifecycle_and_web_visibility(tmp_path: Path) 
     assert len(diag["active_tasks"]) == 1
     assert diag["active_tasks"][0]["executor"] == "agent_mcp"
     assert diag["active_tasks"][0]["run_id"] == run_id
+    assert "final_review" not in diag["active_tasks"][0]
 
     # Host preflight sees the running agent_mcp run and marks it non-resumable by host LLM
     preflight = bridge.call_tool(
@@ -262,6 +263,7 @@ def test_pattern_b_agent_stage_run_lifecycle_and_web_visibility(tmp_path: Path) 
     assert diag_after["active_tasks"] == []
     assert diag_after["recent_runs"][0]["run_id"] == run_id
     assert diag_after["recent_runs"][0]["executor"] == "agent_mcp"
+    assert "document_adapter_prompt_requirements" not in diag_after["recent_runs"][0]
 
 
 def test_terminology_and_repetition_mcp_collaboration(
@@ -544,6 +546,8 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
         {"project": "mcp-created"},
     )
     assert term_ov["total"] == 1
+    assert "description_items" not in term_ov["terms"][0]
+    assert "conflicts" not in term_ov["terms"][0]
     completed_scan = bridge.call_tool(
         "edit_single_term",
         {
@@ -563,6 +567,9 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     )
     assert "config" in cfg
     assert "available_presets" in cfg
+    if cfg["available_presets"]:
+        assert "digest" not in cfg["available_presets"][0]
+        assert "warnings" not in cfg["available_presets"][0]
     updated_cfg = bridge.call_tool(
         "configure_project",
         {
@@ -639,6 +646,7 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     )
     assert rep_overview["draft"] is not None
     assert "evidence" not in rep_overview["draft"]
+    assert "sources" not in rep_overview["draft"]
     assert rep_overview["draft"]["total_groups"] == 1
     rep_group = rep_overview["draft"]["groups"][0]
     assert rep_group["source"] == "待て！"
