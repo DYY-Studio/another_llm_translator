@@ -531,7 +531,13 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "edit_single_term",
-        "description": "Perform a controlled edit on terminology: single term save/group/alias/knowledge/change/remove, or batch import_terms / clear_terms / publish_partial.",
+        "description": (
+            "Perform a controlled edit on terminology: save_term (single term or batch {'terms': [...]}), "
+            "import_terms ({'terms': [...]} or {'path': '...'}), set_primary, leave_group, group_related, "
+            "convert_to_alias, update_knowledge ({'normalized': str, 'action'?: 'save_items'|'confirm_keep'|'set_fragment_enabled', "
+            "'items'?: [{'text': str, 'fragment_ids': [str]}], 'expected_revision'?: int}), "
+            "resolve_change, remove_terms, clear_terms, or publish_partial."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -953,8 +959,9 @@ class MCPWebBridge:
 
         if name == "query_segments":
             proj = quote(str(args["project"]), safe="")
+            stage = str(args.get("stage", "translation"))
             body = {
-                "stage": args.get("stage", "translation"),
+                "stage": stage,
                 "status": args.get("status", ""),
                 "q": args.get("q", ""),
                 "file_id": args.get("file_id", ""),
@@ -962,7 +969,32 @@ class MCPWebBridge:
                 "offset": int(args.get("offset", 0)),
                 "limit": int(args.get("limit", 50)),
             }
-            return self._request("POST", f"/api/v1/projects/{proj}/segments/query", json_body=body)
+            data = self._request(
+                "POST", f"/api/v1/projects/{proj}/segments/query", json_body=body
+            )
+            if isinstance(data, dict) and isinstance(data.get("segments"), list):
+                compact_segs = []
+                for seg in data["segments"]:
+                    if not isinstance(seg, dict):
+                        compact_segs.append(seg)
+                        continue
+                    row = dict(seg)
+                    if row.get("model_source") is None:
+                        row.pop("model_source", None)
+                    if not row.get("stage_errors"):
+                        row.pop("stage_errors", None)
+                    reviews = row.get("reviews")
+                    if stage == "translation" and isinstance(reviews, dict):
+                        has_review = any(
+                            isinstance(v, dict)
+                            and (v.get("base") or v.get("suggestion") or v.get("applied"))
+                            for v in reviews.values()
+                        )
+                        if not has_review:
+                            row.pop("reviews", None)
+                    compact_segs.append(row)
+                data = {**data, "segments": compact_segs}
+            return data
 
         if name == "get_segment_context":
             proj = quote(str(args["project"]), safe="")
@@ -1031,7 +1063,7 @@ class MCPWebBridge:
 
         if name == "export_project":
             proj = quote(str(args["project"]), safe="")
-            return self._request(
+            data = self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/export",
                 json_body={
@@ -1042,6 +1074,16 @@ class MCPWebBridge:
                     "file_ids": args.get("file_ids"),
                 },
             )
+            if isinstance(data, dict) and isinstance(data.get("fallback_segments"), list):
+                fallback = data["fallback_segments"]
+                data = {
+                    **data,
+                    "fallback_segment_count": len(fallback),
+                }
+                if len(fallback) > 50:
+                    data["fallback_segments"] = fallback[:50]
+                    data["fallback_segments_truncated"] = True
+            return data
 
         if name == "start_agent_stage_run":
             proj = quote(str(args["project"]), safe="")
@@ -1155,7 +1197,9 @@ class MCPWebBridge:
             proj = quote(str(args["project"]), safe="")
             action = str(args["action"])
             payload = dict(args["payload"])
-            if action == "import_terms":
+            if action == "import_terms" or (
+                action == "save_term" and isinstance(payload.get("terms"), list)
+            ):
                 if isinstance(payload.get("terms"), list):
                     doc = {
                         "schema_version": 2,

@@ -496,15 +496,17 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     assert opened["name"] == "ext-proj"
     assert opened["external"] is True
 
-    # 7. Query segments by file_id alone (without part_id)
+    # 7. Query segments by file_id alone (without part_id) and verify compact payload
     queried = bridge.call_tool(
         "query_segments",
         {"project": "mcp-created", "file_id": "F0001"},
     )
     assert queried["total_segments"] == 2
     assert len(queried["segments"]) == 2
+    assert "reviews" not in queried["segments"][0]
+    assert "model_source" not in queried["segments"][0]
 
-    # 8. Batch import terms with unsourced knowledge descriptions
+    # 8. Batch import terms with unsourced knowledge descriptions & update_knowledge without expected_revision
     imported = bridge.call_tool(
         "edit_single_term",
         {
@@ -525,6 +527,18 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
         },
     )
     assert imported["imported"] == 1
+    updated_know = bridge.call_tool(
+        "edit_single_term",
+        {
+            "project": "mcp-created",
+            "action": "update_knowledge",
+            "payload": {
+                "normalized": "第一行",
+                "items": [{"text": "更新后的首行说明", "fragment_ids": []}],
+            },
+        },
+    )
+    assert updated_know["terms"][0]["description"] == "更新后的首行说明"
     term_ov = bridge.call_tool(
         "get_terminology_overview",
         {"project": "mcp-created"},
@@ -598,6 +612,13 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
             "text": "等一下！",
         },
     )
+    # Inspect repetition group by source before any formal draft exists
+    live_inspected = bridge.call_tool(
+        "inspect_repetition_group",
+        {"project": "rep-mcp", "source": "待て！", "window": 1},
+    )
+    assert len(live_inspected["occurrences"]) == 2
+
     rep_overview = bridge.call_tool(
         "get_repetition_overview",
         {"project": "rep-mcp", "create_draft": True},

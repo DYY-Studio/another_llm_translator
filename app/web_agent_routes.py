@@ -1077,6 +1077,7 @@ def register_agent_routes(
             raise UsageError("window 必须是 1 到 30 之间的整数")
 
         def _inspect() -> dict[str, Any]:
+            nonlocal source_text
             draft = current_repetition_draft(root)
             target_group: dict[str, Any] | None = None
             if draft is not None:
