@@ -6,7 +6,7 @@ import os
 from collections import Counter
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app.config import load_global_config
@@ -542,16 +542,16 @@ async def test_stage_storage_error_finalizes_run_without_dispatch(
     )
     requests = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal requests
         requests += 1
-        return httpx.Response(500)
+        return httpx2.Response(500)
 
     def fail_debug(*_: object) -> None:
         raise StorageError("duplicate debug chunk")
 
     monkeypatch.setattr("app.stage_runtime.save_debug_chunks", fail_debug)
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
 
     async def noop_one(_: object) -> None:
         return None
@@ -1079,20 +1079,20 @@ async def test_llm_client_retries_429_and_saves_debug(tmp_path: Path) -> None:
     calls = 0
     request_headers: list[tuple[str, str]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         request_headers.append(
             (request.headers["x-opencode-session"], request.headers["x-opencode-request"])
         )
         if calls == 1:
-            return httpx.Response(429, headers={"Retry-After": "0"}, text="slow")
-        return httpx.Response(
+            return httpx2.Response(429, headers={"Retry-After": "0"}, text="slow")
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     limiter = SlidingWindowLimiter(0, 0)
     os.environ["LLM_API_KEY"] = "test"
     try:
@@ -1131,12 +1131,12 @@ async def test_llm_client_changes_key_after_auth_failure_without_retry_budget(
     current["execution"]["max_parallel_per_key"] = 1
     calls: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         authorization = request.headers["Authorization"]
         calls.append(authorization)
         if authorization == "Bearer bad-key":
-            return httpx.Response(401, text="invalid key")
-        return httpx.Response(
+            return httpx2.Response(401, text="invalid key")
+        return httpx2.Response(
             200,
             json={
                 "choices": [{"message": {"content": '{"type":"end"}'}}],
@@ -1148,7 +1148,7 @@ async def test_llm_client_changes_key_after_auth_failure_without_retry_budget(
             },
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "bad-key\ngood-key"
     try:
         async with LLMClient(
@@ -1188,11 +1188,11 @@ async def test_llm_client_rotates_keys_on_429_without_consuming_round(
     current["retry"]["jitter_seconds"] = 0
     calls: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls.append(request.headers["Authorization"])
         if len(calls) == 1:
-            return httpx.Response(429, headers={"Retry-After": "later"}, text="slow")
-        return httpx.Response(
+            return httpx2.Response(429, headers={"Retry-After": "later"}, text="slow")
+        return httpx2.Response(
             200,
             json={
                 "choices": [{"message": {"content": '{"type":"end"}'}}],
@@ -1204,7 +1204,7 @@ async def test_llm_client_rotates_keys_on_429_without_consuming_round(
             },
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "first-key\nsecond-key"
     try:
         async with LLMClient(
@@ -1270,11 +1270,11 @@ async def test_llm_client_bounds_all_key_429_by_retry_rounds(tmp_path: Path) -> 
     current["retry"]["jitter_seconds"] = 0
     calls: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls.append(request.headers["Authorization"])
-        return httpx.Response(429, headers={"Retry-After": "0"}, text="slow")
+        return httpx2.Response(429, headers={"Retry-After": "0"}, text="slow")
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "first-key\nsecond-key"
     try:
         with pytest.raises(ExternalError, match="限流"):
@@ -1310,11 +1310,11 @@ async def test_llm_client_does_not_switch_key_for_configuration_error(
     current = config()
     calls: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls.append(request.headers["Authorization"])
-        return httpx.Response(400, text="invalid request")
+        return httpx2.Response(400, text="invalid request")
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "first-key\nsecond-key"
     try:
         with pytest.raises(FatalExternalError, match="配置错误"):
@@ -1343,8 +1343,8 @@ async def test_llm_client_extracts_embedded_reasoning(tmp_path: Path) -> None:
     current = config()
     current["debug"]["enabled"] = True
 
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -1360,7 +1360,7 @@ async def test_llm_client_extracts_embedded_reasoning(tmp_path: Path) -> None:
             },
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -1396,8 +1396,8 @@ async def test_llm_client_rejects_structured_and_embedded_reasoning_together(
     tmp_path: Path,
 ) -> None:
     current = config()
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -1414,7 +1414,7 @@ async def test_llm_client_rejects_structured_and_embedded_reasoning_together(
             },
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -1448,15 +1448,15 @@ async def test_llm_client_sends_preset_extra_body(tmp_path: Path) -> None:
     }
     sent_payload: dict | None = None
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal sent_payload
         sent_payload = json.loads(request.content)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -1489,12 +1489,12 @@ async def test_llm_client_stops_on_auth_and_normal_mode_has_no_payloads(
     current["debug"]["enabled"] = False
     calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(401, text="unauthorized")
+        return httpx2.Response(401, text="unauthorized")
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -1531,15 +1531,15 @@ async def test_llm_client_clamps_max_tokens_to_remaining_context(
     current["debug"]["enabled"] = False
     sent_payload: dict | None = None
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal sent_payload
         sent_payload = json.loads(request.content)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -1652,11 +1652,11 @@ async def test_llm_client_accumulates_usage_across_requests(tmp_path: Path) -> N
     calls = 0
     observed: list[dict[str, object] | None] = []
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         usage = responses[min(calls - 1, len(responses) - 1)]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [{"message": {"content": '{"type":"end"}'}}],
@@ -1664,7 +1664,7 @@ async def test_llm_client_accumulates_usage_across_requests(tmp_path: Path) -> N
             },
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -1703,13 +1703,13 @@ async def test_llm_client_marks_usage_unavailable_when_omitted(
 ) -> None:
     current = config()
 
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -1751,7 +1751,7 @@ async def test_llm_client_preserves_observed_usage_as_partial(
     current = config()
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         payload: dict[str, object] = {
@@ -1764,9 +1764,9 @@ async def test_llm_client_preserves_observed_usage_as_partial(
         )
         if usage is not None:
             payload["usage"] = usage
-        return httpx.Response(200, json=payload)
+        return httpx2.Response(200, json=payload)
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -1806,12 +1806,12 @@ async def test_llm_client_marks_missing_usage_on_failed_attempt_as_partial(
     current["retry"]["jitter_seconds"] = 0
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(500, text="temporary")
-        return httpx.Response(
+            return httpx2.Response(500, text="temporary")
+        return httpx2.Response(
             200,
             json={
                 "choices": [{"message": {"content": '{"type":"end"}'}}],
@@ -1823,7 +1823,7 @@ async def test_llm_client_marks_missing_usage_on_failed_attempt_as_partial(
             },
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -1860,18 +1860,18 @@ async def test_diagnostics_records_retry_round_at_send_time(tmp_path: Path) -> N
     current["retry"]["jitter_seconds"] = 0
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(500, text="temporary")
-        return httpx.Response(
+            return httpx2.Response(500, text="temporary")
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
         )
 
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         with diagnostics.activate("sample", "translation"):
@@ -1909,13 +1909,13 @@ async def test_llm_client_without_usage_mapping_has_no_summary(
     adapter_file.write_text(json.dumps(definition), encoding="utf-8")
     current["_llm_adapter"] = load_json_adapter(adapter_file)
 
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -2090,16 +2090,16 @@ async def test_llm_client_sends_anthropic_format_request(tmp_path: Path) -> None
     sent: dict | None = None
     sent_headers: dict[str, str] = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal sent, sent_headers
         sent = json.loads(request.content)
         sent_headers = dict(request.headers)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"content": [{"type": "text", "text": '{"type":"end"}'}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -2143,11 +2143,11 @@ async def test_llm_client_sends_gemini_format_request(tmp_path: Path) -> None:
     sent: dict | None = None
     sent_url = ""
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal sent, sent_url
         sent_url = str(request.url)
         sent = json.loads(request.content)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "candidates": [
@@ -2165,7 +2165,7 @@ async def test_llm_client_sends_gemini_format_request(tmp_path: Path) -> None:
             },
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -2212,10 +2212,10 @@ async def test_llm_client_sends_openai_responses_format_request(
     current["llm"]["endpoint"] = "/responses"
     sent: dict | None = None
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal sent
         sent = json.loads(request.content)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "output": [
@@ -2239,7 +2239,7 @@ async def test_llm_client_sends_openai_responses_format_request(
             },
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test"
     try:
         async with LLMClient(
@@ -2312,7 +2312,7 @@ async def test_llm_client_rejects_hard_overflow_before_sending(tmp_path: Path) -
     current = config()
     current["chunking"]["max_input_tokens"] = 50
     calls = []
-    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: calls.append(request)))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(lambda request: calls.append(request)))
     try:
         async with LLMClient(current, SlidingWindowLimiter(0, 0), run_dir=tmp_path,
                              project_id="P", run_id="R", stage="translation", client=client) as llm:

@@ -22,7 +22,7 @@ from pathlib import Path
 
 from typing import Any
 
-import httpx
+import httpx2
 
 from .config import load_project_config
 
@@ -77,7 +77,7 @@ async def run_all(
     project: Path,
     scope: Scope,
     *,
-    http_client: httpx.AsyncClient | None = None,
+    http_client: httpx2.AsyncClient | None = None,
     reuse_mixed_fingerprints: bool = False,
     prompt_language: str | None = None,
     limiters: Mapping[tuple[str, str], SlidingWindowLimiter | KeyPool] | None = None,
@@ -130,9 +130,9 @@ async def run_all(
         raise ConfigError("run-all 缺少阶段共享限流器")
 
     async def execute(
-        clients: dict[tuple[str, str], httpx.AsyncClient] | None,
+        clients: dict[tuple[str, str], httpx2.AsyncClient] | None,
     ) -> dict[str, Any]:
-        def client_for(stage: str) -> httpx.AsyncClient | None:
+        def client_for(stage: str) -> httpx2.AsyncClient | None:
             if http_client is not None:
                 return http_client
             return clients[resource_keys[stage]] if clients is not None else None
@@ -302,16 +302,16 @@ async def run_all(
     if http_client is not None or scope.dry_run:
         return await execute(None)
     async with AsyncExitStack() as stack:
-        clients: dict[tuple[str, str], httpx.AsyncClient] = {}
+        clients: dict[tuple[str, str], httpx2.AsyncClient] = {}
         for stage, key in resource_keys.items():
             if key in clients:
                 continue
             config = configs[stage]
             maximum = int(config["execution"]["max_parallel"])
             clients[key] = await stack.enter_async_context(
-                httpx.AsyncClient(
+                httpx2.AsyncClient(
                     timeout=float(config["execution"]["request_timeout_seconds"]),
-                    limits=httpx.Limits(
+                    limits=httpx2.Limits(
                         max_connections=maximum,
                         max_keepalive_connections=maximum,
                     ),

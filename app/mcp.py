@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-import httpx
+import httpx2
 
 from .errors import AppError, UsageError
 
@@ -1163,7 +1163,7 @@ class MCPWebBridge:
         self,
         base_url: str | None = None,
         *,
-        client: httpx.Client | None = None,
+        client: httpx2.Client | None = None,
     ) -> None:
         self.base_url = (base_url or default_base_url()).rstrip("/")
         self._client = client
@@ -1189,7 +1189,7 @@ class MCPWebBridge:
                     files=files,
                 )
             else:
-                with httpx.Client(base_url=self.base_url, timeout=60.0) as client:
+                with httpx2.Client(base_url=self.base_url, timeout=60.0) as client:
                     response = client.request(
                         method,
                         path,
@@ -1198,7 +1198,7 @@ class MCPWebBridge:
                         data=form_data,
                         files=files,
                     )
-        except httpx.RequestError as exc:
+        except httpx2.RequestError as exc:
             raise UsageError(
                 f"无法连接本地 Another LLM Translator 服务 ({self.base_url})；请先启动 Web 或桌面端服务后再调用 MCP 工具：{exc}"
             ) from exc

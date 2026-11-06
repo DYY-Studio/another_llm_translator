@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 from .config import load_project_config
 from .diagnostics import current_diagnostics
 
@@ -282,7 +282,7 @@ async def run_terminology(
     project: Path,
     scope: Scope,
     *,
-    http_client: httpx.AsyncClient | None = None,
+    http_client: httpx2.AsyncClient | None = None,
     limiter: SlidingWindowLimiter | KeyPool | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,

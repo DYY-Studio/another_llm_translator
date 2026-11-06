@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app.errors import ConfigError, UsageError
@@ -62,7 +62,7 @@ def _source_text(value: object) -> str:
     return str(value["text"]) if isinstance(value, dict) else str(value)
 
 
-def _joint_handler(request: httpx.Request) -> httpx.Response:
+def _joint_handler(request: httpx2.Request) -> httpx2.Response:
     body = json.loads(request.content)
     payload = json.loads(body["messages"][1]["content"])
     source_segments = payload["source_segments"]
@@ -87,7 +87,7 @@ def _joint_handler(request: httpx.Request) -> httpx.Response:
     for source in ("Alice", "Bob"):
         if any(source in value for value in source_texts):
             records.append({"type": "term", "source": source, "category": "人物"})
-    return httpx.Response(
+    return httpx2.Response(
         200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
     )
 
@@ -151,7 +151,7 @@ async def test_summary_opt_in_uses_joint_request_and_persists_fragment(
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
     progress: list[tuple[int, int, int]] = []
-    client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(_joint_handler))
     try:
         result = await run_terminology(
             project,
@@ -255,7 +255,7 @@ async def test_auto_adopted_full_surfaces_cleanup_warning_and_keeps_history(
     )
     write_content_summary(project, old_reduction)
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(_joint_handler))
     try:
         result = await run_terminology(
             project,
@@ -293,7 +293,7 @@ async def test_summary_opt_in_rejects_partial_scope_after_full_fragment_exists(
         project,
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
-    first_client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    first_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_joint_handler))
     try:
         first = await run_terminology(
             project,
@@ -307,8 +307,8 @@ async def test_summary_opt_in_rejects_partial_scope_after_full_fragment_exists(
     assert first["failed"] == 0
     before = read_content_summaries(project, kind="fragment")
     selected_segment = "F0001-S000001"
-    second_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(_joint_handler)
+    second_client = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(_joint_handler)
     )
     try:
         with pytest.raises(UsageError, match="完整项目范围"):
@@ -338,7 +338,7 @@ async def test_joint_partitioned_summaries_persist_separate_fragments(
 
     requests: list[dict[str, object]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         requests.append(payload)
         if len(requests) == 2:
@@ -357,12 +357,12 @@ async def test_joint_partitioned_summaries_persist_separate_fragments(
         ]
         if missing_declaration and len(requests) == 1:
             records.pop()
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         result = await run_terminology(
             project,
@@ -397,7 +397,7 @@ async def test_summary_rerun_replaces_obsolete_fragments_and_keeps_reusable_ones
     write_summary_participation(project, [{**selection[0], "selected": True}])
     requests: list[list[str]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         payload = json.loads(body["messages"][1]["content"])
         if include_draft and "segment" in response_record_types(payload["response_mode"]):
@@ -417,11 +417,11 @@ async def test_summary_rerun_replaces_obsolete_fragments_and_keeps_reusable_ones
                 {"type": "segment", "id": item["id"], "translation": "人物行动"}
                 for item in payload["segments"]
             )
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         first = await run_terminology(
             project, Scope(), http_client=client, include_summaries=True,
             include_draft_translation=include_draft,
@@ -468,7 +468,7 @@ async def test_forced_summary_redo_marks_old_fragments_stale_before_partitioned_
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
 
-    first_client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    first_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_joint_handler))
     try:
         await run_terminology(
             project,
@@ -484,7 +484,7 @@ async def test_forced_summary_redo_marks_old_fragments_stale_before_partitioned_
 
     modes: list[str] = []
 
-    def forced_handler(request: httpx.Request) -> httpx.Response:
+    def forced_handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         prompt = body["messages"][0]["content"]
         payload = json.loads(body["messages"][1]["content"])
@@ -508,12 +508,12 @@ async def test_forced_summary_redo_marks_old_fragments_stale_before_partitioned_
         for source in ("Alice", "Bob"):
             if any(source in value for value in source_texts):
                 records.append({"type": "term", "source": source, "category": "人物"})
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(forced_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(forced_handler))
     try:
         result = await run_terminology(
             project,
@@ -561,7 +561,7 @@ async def test_forced_summary_redo_clears_only_selected_boundaries(
         ],
     )
 
-    def initial_handler(request: httpx.Request) -> httpx.Response:
+    def initial_handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         payload = json.loads(body["messages"][1]["content"])
         source_segments = payload["source_segments"]
@@ -576,12 +576,12 @@ async def test_forced_summary_redo_clears_only_selected_boundaries(
         for source in ("Alice", "Bob"):
             if any(source in value for value in source_texts):
                 records.append({"type": "term", "source": source, "category": "人物"})
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(initial_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(initial_handler))
     try:
         await run_terminology(
             project,
@@ -600,7 +600,7 @@ async def test_forced_summary_redo_clears_only_selected_boundaries(
         ],
     )
 
-    def forced_handler(request: httpx.Request) -> httpx.Response:
+    def forced_handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         prompt = body["messages"][0]["content"]
         payload = json.loads(body["messages"][1]["content"])
@@ -615,12 +615,12 @@ async def test_forced_summary_redo_clears_only_selected_boundaries(
         for source in ("Alice", "Bob"):
             if any(source in value for value in source_texts):
                 records.append({"type": "term", "source": source, "category": "人物"})
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(forced_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(forced_handler))
     try:
         result = await run_terminology(
             project,
@@ -653,7 +653,7 @@ async def test_forced_summary_redo_does_not_restore_old_fragments_after_failure(
         project,
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
-    first_client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    first_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_joint_handler))
     try:
         await run_terminology(
             project,
@@ -664,15 +664,15 @@ async def test_forced_summary_redo_does_not_restore_old_fragments_after_failure(
     finally:
         await first_client.aclose()
 
-    def invalid_handler(_request: httpx.Request) -> httpx.Response:
+    def invalid_handler(_request: httpx2.Request) -> httpx2.Response:
         if cancelled:
             raise asyncio.CancelledError
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl([{"type": "end"}])}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(invalid_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(invalid_handler))
     try:
         if cancelled:
             with pytest.raises(asyncio.CancelledError):
@@ -715,7 +715,7 @@ async def test_forced_summary_dry_run_keeps_existing_fragments(
         project,
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
-    first_client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    first_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_joint_handler))
     try:
         await run_terminology(
             project,
@@ -726,10 +726,10 @@ async def test_forced_summary_dry_run_keeps_existing_fragments(
     finally:
         await first_client.aclose()
 
-    def fail_if_called(_request: httpx.Request) -> httpx.Response:
+    def fail_if_called(_request: httpx2.Request) -> httpx2.Response:
         raise AssertionError("dry-run 不应调用模型")
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(fail_if_called))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(fail_if_called))
     try:
         await run_terminology(
             project,
@@ -754,7 +754,7 @@ async def test_forced_summary_prompt_preflight_failure_keeps_existing_fragments(
         project,
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
-    first_client = httpx.AsyncClient(transport=httpx.MockTransport(_joint_handler))
+    first_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_joint_handler))
     try:
         await run_terminology(
             project,
@@ -770,8 +770,8 @@ async def test_forced_summary_prompt_preflight_failure_keeps_existing_fragments(
     (project / "prompts" / "terminology.en.middle.txt").unlink()
     (project / "prompts" / "fragment_summary.en.middle.txt").unlink()
 
-    client = httpx.AsyncClient(
-        transport=httpx.MockTransport(
+    client = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(
             lambda _request: pytest.fail("Prompt 预检失败时不应调用模型")
         )
     )
@@ -797,8 +797,8 @@ async def test_epub_summary_only_uses_fragment_adapter_requirements(
 ) -> None:
     project = _epub_marker_project(tmp_path)
 
-    def terms_handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def terms_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -820,7 +820,7 @@ async def test_epub_summary_only_uses_fragment_adapter_requirements(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(terms_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(terms_handler))
     try:
         first = await run_terminology(project, Scope(), http_client=client)
     finally:
@@ -833,11 +833,11 @@ async def test_epub_summary_only_uses_fragment_adapter_requirements(
     )
     prompts: list[str] = []
 
-    def summary_handler(request: httpx.Request) -> httpx.Response:
+    def summary_handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         prompts.append(body["messages"][0]["content"])
         payload = json.loads(body["messages"][1]["content"])
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -864,7 +864,7 @@ async def test_epub_summary_only_uses_fragment_adapter_requirements(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(summary_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(summary_handler))
     try:
         result = await run_terminology(
             project,
@@ -918,8 +918,8 @@ async def test_summary_only_fragment_context_uses_terminology_preset(
         encoding="utf-8",
     )
 
-    def terms_handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def terms_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -941,7 +941,7 @@ async def test_summary_only_fragment_context_uses_terminology_preset(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(terms_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(terms_handler))
     try:
         first = await run_terminology(project, Scope(), http_client=client)
     finally:
@@ -961,9 +961,9 @@ async def test_summary_only_fragment_context_uses_terminology_preset(
         [{"file_id": "F0001", "part_id": "OEBPS/text/ch1.xhtml", "selected": True}],
     )
 
-    def summary_handler(request: httpx.Request) -> httpx.Response:
+    def summary_handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -990,7 +990,7 @@ async def test_summary_only_fragment_context_uses_terminology_preset(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(summary_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(summary_handler))
     try:
         result = await run_terminology(
             project,
@@ -1018,13 +1018,13 @@ async def test_epub_joint_prompt_combines_only_terminology_adapter_requirements(
     )
     prompts: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         prompts.append(body["messages"][0]["content"])
         return _joint_handler(request)
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         result = await run_terminology(
             project,
@@ -1100,7 +1100,7 @@ async def test_mixed_terms_and_joint_run_prefers_joint_primary_snapshot(
     )
     request_modes: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         system_prompt = body["messages"][0]["content"]
         payload = json.loads(body["messages"][1]["content"])
@@ -1133,12 +1133,12 @@ async def test_mixed_terms_and_joint_run_prefers_joint_primary_snapshot(
                 "category": "人物",
             }
         )
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         result = await run_terminology(
             project,
@@ -1201,13 +1201,13 @@ async def test_preflight_interception_does_not_create_unused_prompt_variants(
     config_path.write_text(dump_config(config), encoding="utf-8")
     calls = 0
 
-    def fail_if_called(_request: httpx.Request) -> httpx.Response:
+    def fail_if_called(_request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         raise AssertionError("前置校验拦截后不应请求模型")
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(fail_if_called))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(fail_if_called))
     try:
         result = await run_terminology(
             project,
@@ -1254,13 +1254,13 @@ async def test_preflight_interception_selects_primary_mode_from_actual_requests(
     config_path.write_text(dump_config(config), encoding="utf-8")
     request_modes: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         system_prompt = body["messages"][0]["content"]
         request_modes.append(
             "joint" if 'type="summary"' in system_prompt else "terms-only"
         )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -1281,7 +1281,7 @@ async def test_preflight_interception_selects_primary_mode_from_actual_requests(
             },
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         result = await run_terminology(
             project,
@@ -1313,8 +1313,8 @@ async def test_single_mode_run_does_not_read_unused_prompt(
 ) -> None:
     project = _project(tmp_path, "Alice entered.")
 
-    def terms_handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def terms_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -1330,7 +1330,7 @@ async def test_single_mode_run_does_not_read_unused_prompt(
         )
 
     if mode == "summary-only":
-        client = httpx.AsyncClient(transport=httpx.MockTransport(terms_handler))
+        client = httpx2.AsyncClient(transport=httpx2.MockTransport(terms_handler))
         try:
             first = await run_terminology(project, Scope(), http_client=client)
         finally:
@@ -1344,9 +1344,9 @@ async def test_single_mode_run_does_not_read_unused_prompt(
         for language in ("zh-CN", "en"):
             (project / "prompts" / f"terminology.{language}.middle.txt").unlink()
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             payload = json.loads(json.loads(request.content)["messages"][1]["content"])
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "choices": [
@@ -1380,7 +1380,7 @@ async def test_single_mode_run_does_not_read_unused_prompt(
         reuse = False
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         result = await run_terminology(
             project,
@@ -1404,8 +1404,8 @@ async def test_summary_format_retry_adds_no_guidance(
 ) -> None:
     project = _project(tmp_path, "Alice entered.")
 
-    def terms_handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def terms_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -1427,7 +1427,7 @@ async def test_summary_format_retry_adds_no_guidance(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(terms_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(terms_handler))
     try:
         first = await run_terminology(project, Scope(), http_client=client)
     finally:
@@ -1440,13 +1440,13 @@ async def test_summary_format_retry_adds_no_guidance(
     )
     calls = 0
 
-    def summary_handler(request: httpx.Request) -> httpx.Response:
+    def summary_handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         body = json.loads(request.content)
         payload = json.loads(body["messages"][1]["content"])
         if calls == 1:
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "choices": [
@@ -1466,7 +1466,7 @@ async def test_summary_format_retry_adds_no_guidance(
                 },
             )
         assert "format_correction" not in payload
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -1491,7 +1491,7 @@ async def test_summary_format_retry_adds_no_guidance(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(summary_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(summary_handler))
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
     try:
         with diagnostics.activate("sample", "terminology"):
@@ -1556,17 +1556,17 @@ async def test_standard_terminology_keeps_cross_boundary_batching(
     )
     requested: list[list[str]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         payload = json.loads(body["messages"][1]["content"])
         requested.append(payload["source_segments"])
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl([])}}]},
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         result = await run_terminology(project, Scope(), http_client=client)
     finally:
@@ -1593,7 +1593,7 @@ async def test_joint_response_retries_failed_class_and_tracks_prompt_digest(
     prompts: dict[str, str] = {}
     progress: list[tuple[int, int, int]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         prompt_text = body["messages"][0]["content"]
         if 'type="summary"' in prompt_text and 'type="term"' in prompt_text:
@@ -1615,13 +1615,13 @@ async def test_joint_response_retries_failed_class_and_tracks_prompt_digest(
                 if failed_class == "term"
                 else [{"type": "summary", "text": "Alice 进入。", "refs": ["1"]}]
             )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         result = await run_terminology(
             project,
@@ -1671,8 +1671,8 @@ async def test_completed_terms_and_summary_are_reused_without_new_request(
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
 
-    def first_handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def first_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -1698,7 +1698,7 @@ async def test_completed_terms_and_summary_are_reused_without_new_request(
             },
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(first_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(first_handler))
     try:
         await run_terminology(
             project, Scope(), http_client=client, include_summaries=True
@@ -1710,12 +1710,12 @@ async def test_completed_terms_and_summary_are_reused_without_new_request(
     os.environ["LLM_API_KEY"] = "test"
     calls = 0
 
-    def fail_if_called(_request: httpx.Request) -> httpx.Response:
+    def fail_if_called(_request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         raise AssertionError("已完成的术语和概括不应再次请求模型")
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(fail_if_called))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(fail_if_called))
     try:
         result = await run_terminology(
             project, Scope(), http_client=client, include_summaries=True
@@ -1738,7 +1738,7 @@ async def test_summary_reuse_includes_project_target_language(
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
 
-    def summary_handler(request: httpx.Request) -> httpx.Response:
+    def summary_handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         payload = json.loads(body["messages"][1]["content"])
         records = [
@@ -1752,7 +1752,7 @@ async def test_summary_reuse_includes_project_target_language(
             records.append(
                 {"type": "term", "source": "Alice", "category": "人物"}
             )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -1766,7 +1766,7 @@ async def test_summary_reuse_includes_project_target_language(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(summary_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(summary_handler))
     try:
         _first = await run_terminology(
             project, Scope(), http_client=client, include_summaries=True
@@ -1786,7 +1786,7 @@ async def test_summary_reuse_includes_project_target_language(
     )
     calls = 0
 
-    def changed_language_handler(request: httpx.Request) -> httpx.Response:
+    def changed_language_handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -1794,8 +1794,8 @@ async def test_summary_reuse_includes_project_target_language(
         return summary_handler(request)
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(
-        transport=httpx.MockTransport(changed_language_handler)
+    client = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(changed_language_handler)
     )
     try:
         result = await run_terminology(
@@ -1854,8 +1854,8 @@ async def test_summary_run_tracks_only_missing_summary_requests(
     second.write_text("Bob waved.", encoding="utf-8")
     add_project_files(project, [str(second)])
 
-    def terms_handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def terms_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -1877,19 +1877,19 @@ async def test_summary_run_tracks_only_missing_summary_requests(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(terms_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(terms_handler))
     try:
         await run_terminology(project, Scope(), http_client=client)
     finally:
         await client.aclose()
         os.environ.pop("LLM_API_KEY", None)
 
-    def summary_handler(request: httpx.Request) -> httpx.Response:
+    def summary_handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(request.content)
         source_segments = json.loads(payload["messages"][1]["content"])[
             "source_segments"
         ]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -1918,7 +1918,7 @@ async def test_summary_run_tracks_only_missing_summary_requests(
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(summary_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(summary_handler))
     try:
         await run_terminology(
             project, Scope(), http_client=client, include_summaries=True
@@ -1935,7 +1935,7 @@ async def test_summary_run_tracks_only_missing_summary_requests(
         ],
     )
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(summary_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(summary_handler))
     try:
         result = await run_terminology(
             project, Scope(), http_client=client, include_summaries=True
@@ -1966,16 +1966,16 @@ async def test_summary_runtime_split_persists_stable_slice_provenance_and_reuses
     )
     requested_sources: list[str] = []
 
-    def split_handler(request: httpx.Request) -> httpx.Response:
+    def split_handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         source = _source_text(payload["source_segments"][0])
         requested_sources.append(source)
         if len(source) > 3:
-            return httpx.Response(
+            return httpx2.Response(
                 400,
                 text="context_length_exceeded: maximum context tokens",
             )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -1998,7 +1998,7 @@ async def test_summary_runtime_split_persists_stable_slice_provenance_and_reuses
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(split_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(split_handler))
     try:
         first = await run_terminology(
             project, Scope(), http_client=client, include_summaries=True
@@ -2031,10 +2031,10 @@ async def test_summary_runtime_split_persists_stable_slice_provenance_and_reuses
         "segment_ids": ["F0001-S000001"],
     }]
 
-    def fail_if_called(_request: httpx.Request) -> httpx.Response:
+    def fail_if_called(_request: httpx2.Request) -> httpx2.Response:
         raise AssertionError("稳定摘要切片应被复用")
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(fail_if_called))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(fail_if_called))
     os.environ["LLM_API_KEY"] = "test"
     try:
         second = await run_terminology(
@@ -2073,16 +2073,16 @@ async def test_external_model_source_refuses_unsafe_oversized_split(
 
     requests: list[list[dict[str, str]]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         requests.append(payload["source_segments"])
-        return httpx.Response(
+        return httpx2.Response(
             400,
             text="context_length_exceeded: maximum context tokens",
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         with pytest.raises(
             ConfigError,
@@ -2131,12 +2131,12 @@ async def test_summary_prompt_digest_changes_when_adapter_requirements_change(
         terminology_module, "_project_context", context_with_requirement
     )
 
-    def summary_handler(request: httpx.Request) -> httpx.Response:
+    def summary_handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(request.content)
         source_segments = json.loads(payload["messages"][1]["content"])[
             "source_segments"
         ]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -2167,7 +2167,7 @@ async def test_summary_prompt_digest_changes_when_adapter_requirements_change(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(summary_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(summary_handler))
     try:
         first = await run_terminology(
             project, Scope(), http_client=client, include_summaries=True
@@ -2179,13 +2179,13 @@ async def test_summary_prompt_digest_changes_when_adapter_requirements_change(
     requirement = "Adapter requirement B"
     calls = 0
 
-    def changed_summary_handler(request: httpx.Request) -> httpx.Response:
+    def changed_summary_handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         return summary_handler(request)
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(changed_summary_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(changed_summary_handler))
     try:
         await run_terminology(
             project,
@@ -2208,8 +2208,8 @@ async def test_summary_external_failure_is_counted_as_external_error(
 ) -> None:
     project = _project(tmp_path, "Alice entered.")
 
-    def terms_handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def terms_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -2231,7 +2231,7 @@ async def test_summary_external_failure_is_counted_as_external_error(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(terms_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(terms_handler))
     try:
         await run_terminology(project, Scope(), http_client=client)
     finally:
@@ -2242,11 +2242,11 @@ async def test_summary_external_failure_is_counted_as_external_error(
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
 
-    def failing_summary_handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(502, text="upstream unavailable")
+    def failing_summary_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(502, text="upstream unavailable")
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(failing_summary_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(failing_summary_handler))
     try:
         result = await run_terminology(
             project, Scope(), http_client=client, include_summaries=True
@@ -2268,8 +2268,8 @@ async def test_summary_backfill_preserves_terminology_state(
 ) -> None:
     project = _project(tmp_path, "Alice entered.")
 
-    def terms_handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def terms_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -2291,7 +2291,7 @@ async def test_summary_backfill_preserves_terminology_state(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(terms_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(terms_handler))
     try:
         await run_terminology(project, Scope(), http_client=client)
     finally:
@@ -2314,10 +2314,10 @@ async def test_summary_backfill_preserves_terminology_state(
     )
     modes: list[str] = []
 
-    def summary_handler(request: httpx.Request) -> httpx.Response:
+    def summary_handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         modes.append(body["messages"][0]["content"])
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -2339,7 +2339,7 @@ async def test_summary_backfill_preserves_terminology_state(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(summary_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(summary_handler))
     try:
         result = await run_terminology(
             project, Scope(), http_client=client, include_summaries=True
@@ -2377,13 +2377,13 @@ async def test_summary_run_is_not_left_running_on_cancel_or_exception(
         [{"file_id": "F0001", "part_id": "document", "selected": True}],
     )
 
-    def failing_handler(_request: httpx.Request) -> httpx.Response:
+    def failing_handler(_request: httpx2.Request) -> httpx2.Response:
         if failure == "cancel":
             raise asyncio.CancelledError
         raise RuntimeError("test summary failure")
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(failing_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(failing_handler))
     try:
         with pytest.raises(
             asyncio.CancelledError if failure == "cancel" else RuntimeError
@@ -2429,7 +2429,7 @@ async def test_external_adapter_parts_use_generic_summary_boundaries(
     second_request_started = asyncio.Event()
     release_second_response = asyncio.Event()
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         requests.append(payload)
         if len(requests) == 2:
@@ -2449,12 +2449,12 @@ async def test_external_adapter_parts_use_generic_summary_boundaries(
                 "category": "人物",
             },
         ]
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     task = asyncio.create_task(
         run_terminology(
             project,

@@ -4,7 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app.config import dump_config, load_config
@@ -42,14 +42,14 @@ def test_temporary_segment_uses_project_terms_without_persisting(tmp_path: Path,
             write_json(project, project / "terminology/terms.json", library)
         requests = []
 
-        def respond(request: httpx.Request) -> httpx.Response:
+        def respond(request: httpx2.Request) -> httpx2.Response:
             body = json.loads(json.loads(request.content)["messages"][1]["content"])
             requests.append(body)
-            return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+            return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
                 dict(type="segment", id=body["segments"][0]["id"], translation="爱丽丝\n你好")
             ])}}], "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}})
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             result = await translate_text(project, "  Alice\nHello", http_client=client)
         assert result["text"] == "  爱丽丝\n你好"
         assert result["usage"]["total_tokens"] == 15
@@ -78,14 +78,14 @@ def test_temporary_translation_repairs_and_reports_validation(tmp_path: Path, wa
         (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
         bodies = []
 
-        def respond(request: httpx.Request) -> httpx.Response:
+        def respond(request: httpx2.Request) -> httpx2.Response:
             body = json.loads(json.loads(request.content)["messages"][1]["content"])
             bodies.append(body)
-            return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+            return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
                 dict(type="segment", id=body["segments"][0]["id"], translation="こんにちは")
             ])}}]})
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             if warning:
                 result = await translate_text(project, "こんにちは", http_client=client)
                 assert result["validation_findings"]
@@ -115,19 +115,19 @@ def test_temporary_translation_recovers_and_reassembles_one_segment(tmp_path: Pa
         project = await create_project(tmp_path, "existing")
         bodies = []
 
-        def respond(request: httpx.Request) -> httpx.Response:
+        def respond(request: httpx2.Request) -> httpx2.Response:
             body = json.loads(json.loads(request.content)["messages"][1]["content"])
             bodies.append(body)
             if len(bodies) == 1:
                 if rejection == "format":
-                    return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([])}}]})
-                return httpx.Response(400, json={"error": {"message": "context length exceeded", "code": "context_length_exceeded"}})
+                    return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([])}}]})
+                return httpx2.Response(400, json={"error": {"message": "context length exceeded", "code": "context_length_exceeded"}})
             item = body["segments"][0]
-            return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+            return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
                 dict(type="segment", id=item["id"], translation=item["source"].upper())
             ])}}]})
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             result = await translate_text(project, "hello world", http_client=client)
         assert result["text"] == "HELLO WORLD"
         assert len(bodies) == (3 if rejection == "context" else 2)

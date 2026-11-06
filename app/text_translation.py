@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 
 from .async_utils import run_blocking
 from .config import load_project_config
@@ -32,7 +32,7 @@ async def translate_text(
     project: Path, source: str, *,
     config: dict[str, Any] | None = None,
     limiter: KeyPool | None = None,
-    http_client: httpx.AsyncClient | None = None,
+    http_client: httpx2.AsyncClient | None = None,
 ) -> dict[str, Any]:
     if not source.strip():
         raise UsageError("翻译文本不能为空")

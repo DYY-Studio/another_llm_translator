@@ -5,7 +5,7 @@ import json
 import time
 from urllib.parse import parse_qs, urlsplit
 
-import httpx
+import httpx2
 import pytest
 
 from app.chatgpt_oauth import ChatGPTConnection, ISSUER, RESOURCE
@@ -26,23 +26,23 @@ def oauth_server(monkeypatch):
     def handler(request):
         calls.append(request)
         if request.url.path.endswith("openid-configuration"):
-            return httpx.Response(200, json={"issuer": ISSUER, "jwks_uri": ISSUER + "/jwks", "revocation_endpoint": ISSUER + "/revoke"})
+            return httpx2.Response(200, json={"issuer": ISSUER, "jwks_uri": ISSUER + "/jwks", "revocation_endpoint": ISSUER + "/revoke"})
         if request.url.path == "/jwks":
-            return httpx.Response(200, json={"keys": [public]})
+            return httpx2.Response(200, json={"keys": [public]})
         if request.url.path == "/revoke":
-            return httpx.Response(200)
+            return httpx2.Response(200)
         if request.url.path == "/v1/models":
-            return httpx.Response(200, json={"models": [{"slug": "visible", "display_name": "Visible model", "visibility": "list"}, {"slug": "hidden", "visibility": "hidden"}]})
+            return httpx2.Response(200, json={"models": [{"slug": "visible", "display_name": "Visible model", "visibility": "list"}, {"slug": "hidden", "visibility": "hidden"}]})
         form = parse_qs(request.content.decode())
         if options.get("refresh_transient") and form["grant_type"] == ["refresh_token"]:
-            return httpx.Response(503, json={"error": "temporarily_unavailable"})
+            return httpx2.Response(503, json={"error": "temporarily_unavailable"})
         if options.get("refresh_error") and form["grant_type"] == ["refresh_token"]:
-            return httpx.Response(400, json={"error": "invalid_grant"})
+            return httpx2.Response(400, json={"error": "invalid_grant"})
         token = jwt.encode({"iss": ISSUER, "aud": options.get("audience", form["client_id"][0]), "sub": options["subject"], "email": "test@example.com", "exp": options.get("expiry", time.time() + 3600), "nonce": options["nonce"]}, key, algorithm="RS256", headers={"kid": "test"})
-        return httpx.Response(200, json={"access_token": "access-secret", "refresh_token": "refresh-secret", "id_token": token, "token_type": "Bearer", "expires_in": 3600, "scope": options["scope"]})
+        return httpx2.Response(200, json={"access_token": "access-secret", "refresh_token": "refresh-secret", "id_token": token, "token_type": "Bearer", "expires_in": 3600, "scope": options["scope"]})
 
-    original = httpx.AsyncClient
-    monkeypatch.setattr("app.chatgpt_oauth.httpx.AsyncClient", lambda **kw: original(**kw, transport=httpx.MockTransport(handler)))
+    original = httpx2.AsyncClient
+    monkeypatch.setattr("app.chatgpt_oauth.httpx2.AsyncClient", lambda **kw: original(**kw, transport=httpx2.MockTransport(handler)))
     return calls, options, original
 
 
@@ -121,7 +121,7 @@ def test_loopback_state_cancel_and_browser_failure(monkeypatch):
         query = parse_qs(urlsplit(urls[0]).query)
         assert query["client_id"] == ["dynamic_agent_client"]
         assert query["code_challenge_method"] == ["S256"]
-        original = httpx.AsyncClient
+        original = httpx2.AsyncClient
         async with original(trust_env=False) as client:
             response = await client.get(query["redirect_uri"][0], params={"state": "wrong", "code": "secret"})
         assert response.status_code == 400
@@ -150,7 +150,7 @@ def test_loopback_success_and_single_login(oauth_server, monkeypatch):
         assert response.status_code == 200
         await connection.task
         assert connection.summary()["plan_enabled"]
-        with pytest.raises(httpx.ConnectError):
+        with pytest.raises(httpx2.ConnectError):
             async with oauth_server[2](trust_env=False) as client:
                 await client.get(query["redirect_uri"][0])
     asyncio.run(run())

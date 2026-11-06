@@ -4,7 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app import config
@@ -40,7 +40,7 @@ def repetition_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, sourc
 
 
 def transport(*, choice: str = "compare", invalid: bool = False, requests: list | None = None, apply_members: list[str] | None = None, uncertain: bool = False):
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         if requests is not None:
             requests.append(body)
@@ -49,7 +49,7 @@ def transport(*, choice: str = "compare", invalid: bool = False, requests: list 
                 "type": "choice", "choice": choice, "confidence": 1,
                 "probabilities": {"compare": int(choice == "compare"),
                                   "skip": int(choice == "skip")}}
-            return httpx.Response(200, json={"model": "test-model", "answers": {"value": answer}})
+            return httpx2.Response(200, json={"model": "test-model", "answers": {"value": answer}})
         result = {"groups": [{"members": ["1", "2"], "target": "1", "apply": ["1", "2"], "reason": "同一承诺重现"}],
                   "keep": ["3"], "uncertain": []}
         if apply_members is not None:
@@ -58,9 +58,9 @@ def transport(*, choice: str = "compare", invalid: bool = False, requests: list 
             result["uncertain"], result["keep"] = result["keep"], []
         if invalid:
             result["groups"][0]["members"] = ["1", "unknown"]
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"repetitions": [{"id": group["id"], **result} for group in json.loads(body["messages"][-1]["content"])["repetitions"]]})}, "finish_reason": "stop"}],
+        return httpx2.Response(200, json={"choices": [{"message": {"content": json.dumps({"repetitions": [{"id": group["id"], **result} for group in json.loads(body["messages"][-1]["content"])["repetitions"]]})}, "finish_reason": "stop"}],
                                        "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}})
-    return httpx.MockTransport(respond)
+    return httpx2.MockTransport(respond)
 
 
 def test_generation_detects_groups_and_sends_shared_evidence(tmp_path, monkeypatch):
@@ -71,7 +71,7 @@ def test_generation_detects_groups_and_sends_shared_evidence(tmp_path, monkeypat
     assert plan["selected"] == 3
     requests = []
     async def run():
-        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+        async with httpx2.AsyncClient(transport=transport(requests=requests)) as client:
             return await run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     result = asyncio.run(run())
     assert result["completed"] == 3
@@ -111,9 +111,9 @@ def test_final_review_joins_uncertain_without_changing_anchor(tmp_path, monkeypa
         assert payload["repetitions"][0]["uncertain"] == ["3"]
         result = {"repetitions": [{"id": "1", "groups": [{"members": ["1", "2", "3"],
             "target": "1", "apply": ["2", "3"], "reason": "相同承诺"}], "keep": []}]}
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}, "finish_reason": "stop"}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}, "finish_reason": "stop"}]})
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             return await run_repetition(project, Scope(), http_client=client, final_review=True)
     asyncio.run(run())
     group = current_draft(project)["groups"][0]
@@ -143,7 +143,7 @@ def test_final_review_failure_and_cancel_preserve_resumable_results(tmp_path, mo
     from app.repetition_consistency import current_draft, repetition_plan, repetition_resume, run_repetition
     project = repetition_project(tmp_path, monkeypatch)
     async def initial():
-        async with httpx.AsyncClient(transport=transport()) as client:
+        async with httpx2.AsyncClient(transport=transport()) as client:
             await run_repetition(project, Scope(), http_client=client)
     asyncio.run(initial())
     old_id = current_draft(project)["run_id"]
@@ -158,9 +158,9 @@ def test_final_review_failure_and_cancel_preserve_resumable_results(tmp_path, mo
             return first.handle_request(request)
         if cancel:
             raise asyncio.CancelledError()
-        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]})
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             await run_repetition(project, Scope(), http_client=client, prepared_plan=plan, replace_draft=True, final_review=True)
     with pytest.raises(asyncio.CancelledError if cancel else ExternalError):
         asyncio.run(run())
@@ -194,9 +194,9 @@ def test_final_review_rejects_anchor_changes_and_resumes_only_final_phase(tmp_pa
                 group["uncertain"] = []
             else:
                 group["groups"][0][change] = "2" if change == "target" else ["1", "2"]
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"repetitions": [group]})}, "finish_reason": "stop"}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": json.dumps({"repetitions": [group]})}, "finish_reason": "stop"}]})
     async def run(action=None):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             return await run_repetition(project, Scope(), http_client=client, prepared_plan=plan, run_action=action)
     with pytest.raises(ExternalError):
         asyncio.run(run())
@@ -240,9 +240,9 @@ def test_final_review_expands_context_and_keeps_full_group_when_over_budget(tmp_
             return first.handle_request(request)
         assert len(occurrence["previous"]) == len(occurrence["next"]) == 10
         group = payload["repetitions"][0]
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"repetitions": [{"id": "1", "groups": group["groups"], "keep": ["3"]}]})}, "finish_reason": "stop"}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": json.dumps({"repetitions": [{"id": "1", "groups": group["groups"], "keep": ["3"]}]})}, "finish_reason": "stop"}]})
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             await run_repetition(project, Scope(), http_client=client, prepared_plan=plan)
     asyncio.run(run())
     group = current_draft(project)["groups"][0]
@@ -256,8 +256,8 @@ def test_screening_preserves_skip_and_refusal(tmp_path, monkeypatch, choice):
     from app.repetition_consistency import current_draft, run_repetition
     project = repetition_project(tmp_path, monkeypatch)
     requests = []
-    original_client = httpx.AsyncClient
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(
+    original_client = httpx2.AsyncClient
+    monkeypatch.setattr(httpx2, "AsyncClient", lambda **kwargs: original_client(
         transport=transport(choice=choice, requests=requests), **kwargs))
     result = asyncio.run(run_repetition(project, Scope(), screening_enabled=True))
     assert result["completed"] == 3
@@ -281,10 +281,10 @@ def test_comparison_format_retry_recovers_and_links_requests(tmp_path, monkeypat
     def respond(request):
         response = valid_transport.handle_request(request)
         if len(requests) == 2:
-            return httpx.Response(200, json={"choices": [{"message": {"content": invalid_content}, "finish_reason": "stop"}]})
+            return httpx2.Response(200, json={"choices": [{"message": {"content": invalid_content}, "finish_reason": "stop"}]})
         return response
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             return await run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     result = asyncio.run(run())
     assert result["completed"] == 3
@@ -302,7 +302,7 @@ def test_comparison_format_retry_exhaustion_preserves_screening(tmp_path, monkey
     plan["config"]["retry"]["format_max_attempts"] = limit
     requests = []
     async def run():
-        async with httpx.AsyncClient(transport=transport(invalid=True, requests=requests)) as client:
+        async with httpx2.AsyncClient(transport=transport(invalid=True, requests=requests)) as client:
             await run_repetition(project, Scope(), prepared_plan=plan, http_client=client, screening_enabled=True)
     with pytest.raises(ExternalError, match="响应无效"):
         asyncio.run(run())
@@ -332,7 +332,7 @@ def test_over_budget_group_is_visible_without_sending_requests(tmp_path, monkeyp
     def unexpected(request):
         pytest.fail("over-budget group must not send a request")
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(unexpected)) as client:
             await run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     asyncio.run(run())
     draft = current_draft(project)
@@ -352,7 +352,7 @@ def test_over_budget_group_is_visible_without_sending_requests(tmp_path, monkeyp
 def generate(project):
     from app.repetition_consistency import run_repetition
     async def run():
-        async with httpx.AsyncClient(transport=transport()) as client:
+        async with httpx2.AsyncClient(transport=transport()) as client:
             await run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     asyncio.run(run())
 
@@ -495,10 +495,10 @@ def test_managed_generation_publishes_draft_and_does_not_retain_queued_evidence(
     from app.web_tasks import WebTaskManager
     from app.repetition_consistency import current_draft
     project = repetition_project(tmp_path, monkeypatch)
-    original_client = httpx.AsyncClient
+    original_client = httpx2.AsyncClient
     def client(*args, **kwargs):
         return original_client(*args, **kwargs, transport=transport())
-    monkeypatch.setattr(httpx, "AsyncClient", client)
+    monkeypatch.setattr(httpx2, "AsyncClient", client)
     async def run():
         manager = WebTaskManager()
         state = await manager.start(project, "repetition_consistency", scope=Scope(),
@@ -534,7 +534,7 @@ def test_comparison_injects_context_terms_with_local_relations_and_shared_snapsh
     monkeypatch.setattr(repetition, "load_terms", lambda _: library)
     requests = []
     async def run():
-        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+        async with httpx2.AsyncClient(transport=transport(requests=requests)) as client:
             return await repetition.run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     result = asyncio.run(run())
     payload = json.loads(requests[1]["messages"][-1]["content"])
@@ -567,7 +567,7 @@ def test_comparison_obeys_character_knowledge_state(tmp_path, monkeypatch, statu
             repetition.repetition_plan(project, Scope(), screening_enabled=True)
     else:
         async def run():
-            async with httpx.AsyncClient(transport=transport()) as client:
+            async with httpx2.AsyncClient(transport=transport()) as client:
                 return await repetition.run_repetition(project, Scope(), http_client=client, screening_enabled=True)
         assert any("待聚合" in warning for warning in asyncio.run(run())["warnings"])
 
@@ -607,7 +607,7 @@ def test_repetition_prompts_are_editable_and_frozen_in_actual_requests(tmp_path,
     assert plan["fingerprint"] != initial
     requests = []
     async def run():
-        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+        async with httpx2.AsyncClient(transport=transport(requests=requests)) as client:
             return await run_repetition(project, Scope(), prompt_language="en", http_client=client, screening_enabled=True)
     result = asyncio.run(run())
     assert requests[0]["questions"]["value"]["instructions"] == custom["instructions"]
@@ -709,7 +709,7 @@ def test_partial_application_and_manual_skipped_group(tmp_path, monkeypatch):
     save_choices(project, {"1-1": {"accepted": True, "target": "1", "apply": []}})
     assert asyncio.run(apply_draft(project, confirm=True))["changed"] == 0
     async def skipped():
-        async with httpx.AsyncClient(transport=transport(choice="skip")) as client:
+        async with httpx2.AsyncClient(transport=transport(choice="skip")) as client:
             await run_repetition(project, Scope(), http_client=client, screening_enabled=True)
     asyncio.run(skipped())
     draft = current_draft(project)
@@ -724,7 +724,7 @@ def test_partial_application_and_manual_skipped_group(tmp_path, monkeypatch):
     assert rollback_draft(project, confirm=True)["changed"] == 1
 
     async def uncertain():
-        async with httpx.AsyncClient(transport=transport(uncertain=True)) as client:
+        async with httpx2.AsyncClient(transport=transport(uncertain=True)) as client:
             await run_repetition(project, Scope(), http_client=client)
     asyncio.run(uncertain())
     save_choices(project, {"1-1": {"accepted": True, "target": "1", "apply": ["3"]}})
@@ -769,7 +769,7 @@ def test_disabled_screening_needs_no_decision_resources_and_preserves_model_subs
     assert plan["estimated_requests"] == 1
     requests = []
     async def run():
-        async with httpx.AsyncClient(transport=transport(requests=requests, apply_members=[])) as client:
+        async with httpx2.AsyncClient(transport=transport(requests=requests, apply_members=[])) as client:
             return await run_repetition(project, Scope(), http_client=client)
     result = asyncio.run(run())
     assert len(requests) == 1 and "messages" in requests[0]
@@ -785,7 +785,7 @@ def test_resume_rejects_changed_inputs_and_decline_starts_new_run(tmp_path, monk
     from app.repetition_consistency import run_repetition, repetition_plan, repetition_resume
     project = repetition_project(tmp_path, monkeypatch)
     async def run(invalid, action=None):
-        async with httpx.AsyncClient(transport=transport(invalid=invalid)) as client:
+        async with httpx2.AsyncClient(transport=transport(invalid=invalid)) as client:
             return await run_repetition(project, Scope(), http_client=client, run_action=action, screening_enabled=True)
     with pytest.raises(ExternalError):
         asyncio.run(run(True))
@@ -815,7 +815,7 @@ def test_completed_checkpoint_resume_needs_no_requests_and_keeps_usage(tmp_path,
         return original_write(path, text)
     monkeypatch.setattr(repetition, "atomic_write_text", fail_publish)
     async def run(action=None, requests=None):
-        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+        async with httpx2.AsyncClient(transport=transport(requests=requests)) as client:
             return await repetition.run_repetition(project, Scope(), run_action=action, http_client=client, screening_enabled=True)
     with pytest.raises(StorageError, match="publication probe"):
         asyncio.run(run())
@@ -846,7 +846,7 @@ def test_web_resume_options_and_managed_start(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     project = repetition_project(tmp_path, monkeypatch)
     async def fail():
-        async with httpx.AsyncClient(transport=transport(invalid=True)) as client:
+        async with httpx2.AsyncClient(transport=transport(invalid=True)) as client:
             await run_repetition(project, Scope(), http_client=client, screening_enabled=False, prompt_language="en")
     with pytest.raises(ExternalError):
         asyncio.run(fail())
@@ -857,9 +857,9 @@ def test_web_resume_options_and_managed_start(tmp_path, monkeypatch):
         assert options["run_action"] == "resume" and options["screening_enabled"] is False
         assert options["running_run"]["resume_compatible"] and options["running_run"]["execution_changed"]
         assert options["estimated_requests"] is None
-    original_client = httpx.AsyncClient
+    original_client = httpx2.AsyncClient
     requests = []
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: original_client(*args, **kwargs, transport=transport(requests=requests)))
+    monkeypatch.setattr(httpx2, "AsyncClient", lambda *args, **kwargs: original_client(*args, **kwargs, transport=transport(requests=requests)))
     async def resume():
         manager = WebTaskManager()
         with pytest.raises(UsageError, match="必须选择"):
@@ -888,7 +888,7 @@ def test_multiple_groups_share_request_evidence_and_exact_budget(tmp_path, monke
     plan = repetition.repetition_plan(project, Scope())
     requests = []
     async def run():
-        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+        async with httpx2.AsyncClient(transport=transport(requests=requests)) as client:
             return await repetition.run_repetition(project, Scope(), prepared_plan=plan, http_client=client)
     result = asyncio.run(run())
     assert result["completed"] == 6
@@ -923,14 +923,14 @@ def test_batch_retry_preserves_valid_group_and_sends_only_invalid_group(tmp_path
             else:
                 output["repetitions"][1]["keep"] = ["unknown"]
             body["choices"][0]["message"]["content"] = json.dumps(output)
-            return httpx.Response(200, json=body)
+            return httpx2.Response(200, json=body)
         run_dir = next((project / "runs").iterdir())
         saved = json.loads(checkpoint_path(run_dir, "1").read_text())
         assert "result" in saved and not checkpoint_path(run_dir, "2").exists()
         assert [g["id"] for g in json.loads(requests[-1]["messages"][-1]["content"])["repetitions"]] == ["2"]
         return response
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             return await run_repetition(project, Scope(), http_client=client)
     assert asyncio.run(run())["completed"] == 6
     assert len(requests) == 2 and len(current_draft(project)["groups"]) == 2
@@ -948,9 +948,9 @@ def test_batch_exhaustion_resumes_only_incomplete_group(tmp_path, monkeypatch):
             if group["id"] == "2":
                 group["keep"] = ["unknown"]
         body["choices"][0]["message"]["content"] = json.dumps(output)
-        return httpx.Response(200, json=body)
+        return httpx2.Response(200, json=body)
     async def run(handler, action=None):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             return await run_repetition(project, Scope(), run_action=action, http_client=client)
     with pytest.raises(ExternalError):
         asyncio.run(run(fail_second))
@@ -974,7 +974,7 @@ def test_batch_budget_keeps_groups_whole_and_reuses_configured_target(tmp_path, 
     assert plan["estimated_requests"] == 2 and plan["fingerprint"] != initial["fingerprint"]
     requests = []
     async def run():
-        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+        async with httpx2.AsyncClient(transport=transport(requests=requests)) as client:
             return await repetition.run_repetition(project, Scope(), prepared_plan=plan, http_client=client)
     assert asyncio.run(run())["completed"] == 6
     assert len(requests) == 2
@@ -989,7 +989,7 @@ def test_resume_changed_execution_preserves_phase_sources(tmp_path, monkeypatch,
     from tests.helpers import use_llm_preset
     project = repetition_project(tmp_path, monkeypatch)
     async def run(invalid=False, action=None, requests=None):
-        async with httpx.AsyncClient(transport=transport(invalid=invalid, requests=requests)) as client:
+        async with httpx2.AsyncClient(transport=transport(invalid=invalid, requests=requests)) as client:
             return await run_repetition(project, Scope(), screening_enabled=True, run_action=action, http_client=client)
     with pytest.raises(ExternalError):
         asyncio.run(run(invalid=True))
@@ -1024,7 +1024,7 @@ def test_resume_rejects_evidence_or_protocol_changes(tmp_path, monkeypatch, chan
     from app import repetition_consistency as repetition
     project = repetition_project(tmp_path, monkeypatch)
     async def run():
-        async with httpx.AsyncClient(transport=transport(invalid=True)) as client:
+        async with httpx2.AsyncClient(transport=transport(invalid=True)) as client:
             await repetition.run_repetition(project, Scope(), screening_enabled=True, http_client=client)
     with pytest.raises(ExternalError):
         asyncio.run(run())
@@ -1059,7 +1059,7 @@ def test_budget_increase_revisits_deferred_group_on_resume(tmp_path, monkeypatch
         return original_write(path, text)
     monkeypatch.setattr(repetition, "atomic_write_text", fail_publish)
     async def run(action=None, requests=None):
-        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+        async with httpx2.AsyncClient(transport=transport(requests=requests)) as client:
             return await repetition.run_repetition(project, Scope(), run_action=action, http_client=client)
     with pytest.raises(StorageError):
         asyncio.run(run())
@@ -1100,11 +1100,11 @@ def test_comparison_splits_complete_groups_and_links_children(tmp_path, monkeypa
         response = respond_valid.handle_request(request)
         if len(requests) == 1:
             if kind == "context":
-                return httpx.Response(400, text="context_length_exceeded: maximum context tokens")
-            return httpx.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "length" if kind == "truncated" else "stop"}]})
+                return httpx2.Response(400, text="context_length_exceeded: maximum context tokens")
+            return httpx2.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "length" if kind == "truncated" else "stop"}]})
         return response
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             return await run_repetition(project, Scope(), http_client=client)
     assert asyncio.run(run())["completed"] == 6
     assert len(requests) == 3
@@ -1122,10 +1122,10 @@ def test_single_comparison_group_is_not_split(tmp_path, monkeypatch, kind):
     def respond(request):
         requests.append(request)
         if kind == "context":
-            return httpx.Response(400, text="context_length_exceeded: maximum context tokens")
-        return httpx.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
+            return httpx2.Response(400, text="context_length_exceeded: maximum context tokens")
+        return httpx2.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             await run_repetition(project, Scope(), http_client=client)
     with pytest.raises(ExternalError, match="不能继续拆分"):
         asyncio.run(run())
@@ -1141,9 +1141,9 @@ def test_empty_split_budget_is_inherited(tmp_path, monkeypatch):
     calls = []
     def respond(request):
         calls.append(request)
-        return httpx.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             await run_repetition(project, Scope(), prepared_plan=plan, http_client=client)
     with pytest.raises(ExternalError, match="预算已耗尽"):
         asyncio.run(run())
@@ -1164,10 +1164,10 @@ def test_run_collects_warnings_usage_audit_and_interruption(tmp_path, monkeypatc
         if len(requests) == 1:
             body = response.json()
             body["choices"][0].update(message={"content": ""}, finish_reason="length")
-            return httpx.Response(200, json=body)
+            return httpx2.Response(200, json=body)
         return response
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             return await repetition.run_repetition(project, Scope(), http_client=client)
     if invalid:
         with pytest.raises(ExternalError):
@@ -1220,12 +1220,12 @@ async def test_continuous_repetition_applies_or_stops_for_review(tmp_path, monke
             data = json.loads(body["choices"][0]["message"]["content"])
             data["repetitions"][0].update(keep=[], uncertain=["3"])
             body["choices"][0]["message"]["content"] = json.dumps(data)
-            return httpx.Response(200, json=body)
+            return httpx2.Response(200, json=body)
         return response
 
     async def repetition(*args, **kwargs):
         events.append("repetition")
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             return await run_repetition(*args, **kwargs, http_client=client)
 
     monkeypatch.setattr("app.web_continuous.run_translation", translate)
@@ -1278,11 +1278,11 @@ async def test_continuous_repetition_kept_groups_do_not_require_manual_applicati
             result = json.loads(body["choices"][0]["message"]["content"])
             result["repetitions"][0].update(groups=[], keep=["1", "2", "3"], uncertain=[])
             body["choices"][0]["message"]["content"] = json.dumps(result)
-            return httpx.Response(200, json=body)
+            return httpx2.Response(200, json=body)
         return response
 
     async def repetition(*args, **kwargs):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             return await run_repetition(*args, **kwargs, http_client=client)
 
     monkeypatch.setattr("app.web_continuous.run_translation", translate)
@@ -1315,7 +1315,7 @@ def test_continuous_repetition_preflight_permissions_and_deferred_count(tmp_path
         inspect_continuous(project, ("proofreading",), include_repetition_consistency=True)
     from app.repetition_consistency import run_repetition
     async def generate():
-        async with httpx.AsyncClient(transport=transport()) as client:
+        async with httpx2.AsyncClient(transport=transport()) as client:
             await run_repetition(project, Scope(), http_client=client)
     asyncio.run(generate())
     options = inspect_continuous(project, ("translation",), include_repetition_consistency=True,
@@ -1328,7 +1328,7 @@ async def test_continuous_repetition_resume_restores_filters_and_screening(tmp_p
     from app.repetition_consistency import run_repetition, repetition_plan, repetition_resume
     from tests.helpers import use_llm_preset
     project = repetition_project(tmp_path, monkeypatch)
-    async with httpx.AsyncClient(transport=transport(invalid=True)) as client:
+    async with httpx2.AsyncClient(transport=transport(invalid=True)) as client:
         with pytest.raises(ExternalError):
             await run_repetition(project, Scope(), screening_enabled=True, exclude_punctuation_only=False, http_client=client)
     use_llm_preset(tmp_path, model="changed")
@@ -1340,7 +1340,7 @@ async def test_continuous_repetition_resume_restores_filters_and_screening(tmp_p
     async def resume(*args, **kwargs):
         assert kwargs["prepared_plan"]["screening_enabled"] is True
         assert kwargs["prepared_plan"]["exclude_punctuation_only"] is False
-        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+        async with httpx2.AsyncClient(transport=transport(requests=requests)) as client:
             return await run_repetition(*args, **kwargs, http_client=client)
     async def review(*args, **kwargs):
         return {"selected": 8, "completed": 8, "failed": 0, "pending": 0}
@@ -1366,7 +1366,7 @@ async def test_continuous_repetition_empty_or_apply_failure(tmp_path, monkeypatc
     events = []
     async def repetition(*args, **kwargs):
         events.append("comparison")
-        async with httpx.AsyncClient(transport=transport()) as client:
+        async with httpx2.AsyncClient(transport=transport()) as client:
             return await run_repetition(*args, **kwargs, http_client=client)
     async def apply(*args, **kwargs):
         raise UsageError("application failure probe")
@@ -1414,7 +1414,7 @@ async def test_continuous_repetition_checks_resume_evidence_after_translation(tm
     append_stage_results(project, [record_header("stage_result", project_id, stage="translation",
         segment_id=s["segment_id"], status="completed", text=states[s["segment_id"]]["completed"]["text"],
         origin="web", stage_fingerprint=fingerprint) for s in segments])
-    async with httpx.AsyncClient(transport=transport(invalid=True)) as client:
+    async with httpx2.AsyncClient(transport=transport(invalid=True)) as client:
         with pytest.raises(ExternalError):
             await run_repetition(project, Scope(), http_client=client)
     old = repetition_resume(project, repetition_plan(project, Scope()))
@@ -1447,7 +1447,7 @@ async def test_continuous_terminal_repetition_optional_application(tmp_path, mon
     async def translate(*args, **kwargs):
         return {"selected": 8, "completed": 8, "failed": 0, "pending": 0}
     async def repetition(*args, **kwargs):
-        async with httpx.AsyncClient(transport=transport()) as client:
+        async with httpx2.AsyncClient(transport=transport()) as client:
             return await run_repetition(*args, **kwargs, http_client=client)
     async def forbidden_apply(*args, **kwargs):
         pytest.fail("terminal repetition review must not apply its draft")
@@ -1476,8 +1476,8 @@ async def test_empty_application_group_does_not_block_other_groups_when_stale(tm
         answer = json.loads(body["choices"][0]["message"]["content"])
         answer["repetitions"][0]["groups"][0]["apply"] = []
         body["choices"][0]["message"]["content"] = json.dumps(answer)
-        return httpx.Response(200, json=body)
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        return httpx2.Response(200, json=body)
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
         await run_repetition(project, Scope(), http_client=client)
     draft = current_draft(project)
     first = draft["groups"][0]["occurrences"][0]["segment_id"]
@@ -1534,7 +1534,7 @@ def test_replacement_cleanup_failure_does_not_reopen_published_run(tmp_path, mon
         return original_unlink(path, *args, **kwargs)
     monkeypatch.setattr(Path, "unlink", deny_old_draft)
     async def replace():
-        async with httpx.AsyncClient(transport=transport()) as client:
+        async with httpx2.AsyncClient(transport=transport()) as client:
             return await run_repetition(project, Scope(), http_client=client, screening_enabled=True, replace_draft=True)
     result = asyncio.run(replace())
     assert result["warnings"] and "draft removal denied" in result["warnings"][0]
@@ -1593,7 +1593,7 @@ def test_repetition_uses_its_own_model_and_temperature(tmp_path, monkeypatch, mo
             return acquire(config)
 
         async def repetition(*args, **kwargs):
-            async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+            async with httpx2.AsyncClient(transport=transport(requests=requests)) as client:
                 return await run_repetition(*args, **kwargs, http_client=client)
 
         async def translate(*args, **kwargs):
@@ -1615,7 +1615,7 @@ def test_repetition_uses_its_own_model_and_temperature(tmp_path, monkeypatch, mo
             assert view["status"] == "completed", view.get("error")
             assert "repetition" in acquired
             return view["summary"]["summaries"]["repetition_consistency"] if mode == "continuous" else view["summary"]
-        async with httpx.AsyncClient(transport=transport(requests=requests)) as client:
+        async with httpx2.AsyncClient(transport=transport(requests=requests)) as client:
             return await run_repetition(project, Scope(), prepared_plan=plan, http_client=client)
 
     assert asyncio.run(run())["completed"] == 3

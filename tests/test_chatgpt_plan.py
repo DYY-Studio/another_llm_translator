@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app.chatgpt_oauth import ChatGPTConnection
@@ -48,7 +48,7 @@ async def test_plan_inference_refreshes_each_attempt_without_changing_key_identi
     def handler(request):
         seen.append(request)
         return stream_response({"type": "response.output_text.delta", "delta": "translation"}, {"type": "response.completed", "response": {"usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}})
-    async with oauth_server[2](transport=httpx.MockTransport(handler)) as client:
+    async with oauth_server[2](transport=httpx2.MockTransport(handler)) as client:
         async with LLMClient(current, SlidingWindowLimiter(0, 0), run_dir=tmp_path / "run", project_id="PRJ", run_id="RUN", stage="translation", client=client) as llm:
             result, _ = await llm.chat(messages=[{"role": "user", "content": "source"}], temperature=0, estimated_input_tokens=10)
             assert result.content == "translation"
@@ -77,8 +77,8 @@ async def test_plan_usage_limit_is_fatal_without_retry(tmp_path, oauth_server, i
     def handler(request):
         requests.append(request)
         error = {"code": "subscription_sharing_usage_limit_exceeded", "message": "limit"}
-        return stream_response({"type": "error", **error}) if in_stream else httpx.Response(429, json={"error": error})
-    async with oauth_server[2](transport=httpx.MockTransport(handler)) as client:
+        return stream_response({"type": "error", **error}) if in_stream else httpx2.Response(429, json={"error": error})
+    async with oauth_server[2](transport=httpx2.MockTransport(handler)) as client:
         async with LLMClient(current, SlidingWindowLimiter(0, 0), run_dir=tmp_path / "run", project_id="PRJ", run_id="RUN", stage="translation", client=client) as llm:
             with pytest.raises(FatalExternalError, match="管理用量"):
                 await llm.chat(messages=[], temperature=0, estimated_input_tokens=1)
@@ -135,7 +135,7 @@ async def test_plan_refresh_transient_errors_obey_retry_limit(tmp_path, oauth_se
     oauth_server[1]["refresh_transient"] = True
     current = plan_config(tmp_path)
     current["retry"].update(http_max_attempts=2, base_delay_seconds=0, jitter_seconds=0)
-    async with oauth_server[2](transport=httpx.MockTransport(lambda r: pytest.fail("inference before refresh"))) as client:
+    async with oauth_server[2](transport=httpx2.MockTransport(lambda r: pytest.fail("inference before refresh"))) as client:
         async with LLMClient(current, SlidingWindowLimiter(0, 0), run_dir=tmp_path / "run", project_id="PRJ", run_id="RUN", stage="translation", client=client) as llm:
             with pytest.raises(ExternalError, match="503"):
                 await llm.chat(messages=[], temperature=0, estimated_input_tokens=1)
@@ -169,7 +169,7 @@ async def test_plan_missing_content_type_warns_but_explicit_wrong_type_fails(tmp
         if content_type is not None:
             response.headers["content-type"] = content_type
         return response
-    async with oauth_server[2](transport=httpx.MockTransport(handler)) as client:
+    async with oauth_server[2](transport=httpx2.MockTransport(handler)) as client:
         async with LLMClient(plan_config(tmp_path), SlidingWindowLimiter(0, 0), run_dir=tmp_path / "run", project_id="PRJ", run_id="RUN", stage="translation", client=client) as llm:
             if content_type is None:
                 response, _ = await llm.chat(messages=[{"role": "user", "content": "test"}], temperature=0, estimated_input_tokens=1)

@@ -6,7 +6,7 @@ from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-import httpx
+import httpx2
 from .errors import (
     ContextLengthError,
     EmptyResponseSplitError,
@@ -118,7 +118,7 @@ async def run_review(
     stage: str,
     scope: Scope,
     *,
-    http_client: httpx.AsyncClient | None = None,
+    http_client: httpx2.AsyncClient | None = None,
     limiter: SlidingWindowLimiter | KeyPool | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,

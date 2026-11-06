@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-import httpx
+import httpx2
 
 from app.execution import Scope
 from app.plugins import get_document_adapter, get_document_adapter_for_extension
@@ -44,7 +44,7 @@ def test_srt_entrypoint_runs_host_import_translate_and_exports(
         "第二 cue",
     ]
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         payload = json.loads(body["messages"][1]["content"])
         records = [
@@ -55,13 +55,13 @@ def test_srt_entrypoint_runs_host_import_translate_and_exports(
             }
             for item in payload["segments"]
         ]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         result = asyncio.run(run_translation(project, Scope(), http_client=client))
     finally:

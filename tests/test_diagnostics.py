@@ -6,7 +6,7 @@ import os
 from contextlib import ExitStack
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -157,7 +157,7 @@ async def test_format_retry_reports_parent_result_and_direct_source(tmp_path: Pa
     diagnostics = DiagnosticsHub(tmp_path / "logs" / "app.log")
     calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -167,10 +167,10 @@ async def test_format_retry_reports_parent_result_and_direct_source(tmp_path: Pa
             [{"type": "segment", "id": "1", "translation": "你好"}]
             if stage == "translation" else []
         )
-        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": content}}]})
 
     with diagnostics.activate("sample", stage, task_id="retry-check"):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             run_stage = run_translation if stage == "translation" else run_terminology
             result = await run_stage(project, Scope(), http_client=client)
         assert result["failed"] == 0
@@ -1097,12 +1097,12 @@ async def test_llm_runtime_reports_safe_diagnostics(tmp_path: Path) -> None:
     current["retry"]["jitter_seconds"] = 0
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(429, headers={"Retry-After": "0"}, text="slow")
-        return httpx.Response(
+            return httpx2.Response(429, headers={"Retry-After": "0"}, text="slow")
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -1124,7 +1124,7 @@ async def test_llm_runtime_reports_safe_diagnostics(tmp_path: Path) -> None:
         )
 
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "never-log-this-secret"
     try:
         with diagnostics.activate("sample", "translation"):
@@ -1184,16 +1184,16 @@ async def test_429_wait_is_reported_only_while_sleeping(tmp_path: Path) -> None:
     wait_started = asyncio.Event()
     release = asyncio.Event()
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(
+            return httpx2.Response(
                 429,
                 headers={"Retry-After": "5"},
                 text="rate limited",
             )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
         )
@@ -1203,7 +1203,7 @@ async def test_429_wait_is_reported_only_while_sleeping(tmp_path: Path) -> None:
         await release.wait()
 
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "never-log-this-secret"
     try:
         with diagnostics.activate("sample", "translation"):
@@ -1258,12 +1258,12 @@ async def test_regular_retry_backoff_is_not_rate_limit_wait(
     wait_started = asyncio.Event()
     release = asyncio.Event()
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(500, text="temporary")
-        return httpx.Response(
+            return httpx2.Response(500, text="temporary")
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
         )
@@ -1273,7 +1273,7 @@ async def test_regular_retry_backoff_is_not_rate_limit_wait(
         await release.wait()
 
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "never-log-this-secret"
     try:
         with diagnostics.activate("sample", "translation"):
@@ -1328,15 +1328,15 @@ async def test_llm_runtime_reports_safe_failure_categories(
     current = config()
     current["retry"]["http_max_attempts"] = 1
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if failure == "authentication":
-            return httpx.Response(401, text="secret provider response")
+            return httpx2.Response(401, text="secret provider response")
         if failure == "network":
-            raise httpx.ReadTimeout("secret network detail", request=request)
-        return httpx.Response(200, json={"choices": []})
+            raise httpx2.ReadTimeout("secret network detail", request=request)
+        return httpx2.Response(200, json={"choices": []})
 
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "never-log-this-secret"
     try:
         with diagnostics.activate("sample", "translation"):

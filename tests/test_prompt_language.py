@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -120,14 +120,14 @@ async def test_run_translation_uses_requested_language_and_records_it(
     project = await create_project(tmp_path)
     seen_system: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         seen_system.append(body["messages"][0]["content"])
         records = [
             {"type": "segment", "id": item["id"], "translation": f"译:{item['source']}"}
             for item in json.loads(body["messages"][1]["content"])["segments"]
         ]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [{"message": {"content": llm_jsonl(records)}}],
@@ -139,7 +139,7 @@ async def test_run_translation_uses_requested_language_and_records_it(
             },
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         summary = await run_translation(
             project,
@@ -440,7 +440,7 @@ async def test_english_validation_repair_sends_self_contained_guidance(
     )
     repairs = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal repairs
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         if "validation_repair" in payload:
@@ -459,12 +459,12 @@ async def test_english_validation_repair_sends_self_contained_guidance(
             }
             for item in payload["segments"]
         ]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         summary = await run_translation(
             project,
@@ -740,8 +740,8 @@ async def test_inherited_translation_request_freezes_prompt_across_global_update
         observed.append(body["messages"][0]["content"])
         records = [{"type": "segment", "id": item["id"], "translation": f"译:{item['source']}"}
             for item in json.loads(body["messages"][1]["content"])["segments"]]
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         result = await run_translation(project, Scope(), http_client=client, prompt_language="en")
     assert observed and all("Global policy one" in prompt for prompt in observed)
     snapshot = project / "runs" / result["run_id"] / "prompt.txt"

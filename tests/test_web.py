@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import unquote
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -4509,7 +4509,7 @@ def test_web_preset_models_discovery_fetches_and_parses(
         fake.kwargs = kwargs
         return fake
 
-    monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", fake_client)
+    monkeypatch.setattr("app.web_resource_routes.httpx2.AsyncClient", fake_client)
     client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
     preset = client.get("/api/v1/global/presets/default").json()["preset"]
     saved_definition = dict(preset)
@@ -4603,8 +4603,8 @@ def test_web_preset_models_discovery_fails_fast(
     os.environ["LLM_API_KEY"] = "test"
     try:
         fake = FakeModelsClient()
-        fake.raise_error = httpx.ConnectError("no route")
-        monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", lambda **kwargs: fake)
+        fake.raise_error = httpx2.ConnectError("no route")
+        monkeypatch.setattr("app.web_resource_routes.httpx2.AsyncClient", lambda **kwargs: fake)
         network = client.post(
             "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
@@ -4613,7 +4613,7 @@ def test_web_preset_models_discovery_fails_fast(
 
         fake = FakeModelsClient()
         fake.response = FakeModelsResponse(status_code=500)
-        monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", lambda **kwargs: fake)
+        monkeypatch.setattr("app.web_resource_routes.httpx2.AsyncClient", lambda **kwargs: fake)
         http_error = client.post(
             "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
@@ -4622,7 +4622,7 @@ def test_web_preset_models_discovery_fails_fast(
 
         fake = FakeModelsClient()
         fake.response = FakeModelsResponse(json_error=True)
-        monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", lambda **kwargs: fake)
+        monkeypatch.setattr("app.web_resource_routes.httpx2.AsyncClient", lambda **kwargs: fake)
         bad_json = client.post(
             "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
@@ -4631,7 +4631,7 @@ def test_web_preset_models_discovery_fails_fast(
 
         fake = FakeModelsClient()
         fake.response = FakeModelsResponse(payload={"data": {"id": "x"}})
-        monkeypatch.setattr("app.web_resource_routes.httpx.AsyncClient", lambda **kwargs: fake)
+        monkeypatch.setattr("app.web_resource_routes.httpx2.AsyncClient", lambda **kwargs: fake)
         bad_shape = client.post(
             "/api/v1/global/presets/default/models?key_index=1", json=preset
         )
@@ -5891,24 +5891,24 @@ async def test_draft_scan_task_reports_both_result_classes(
 
     _, project = make_project(tmp_path, "Alice entered.")
     monkeypatch.setenv("LLM_API_KEY", "test")
-    original_client = httpx.AsyncClient
+    original_client = httpx2.AsyncClient
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         records = [
             {"type": "segment", "id": item["id"], "translation": "爱丽丝进来了。"}
             for item in payload["segments"]
         ]
         records.insert(0, {"type": "no_terms"})
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
         )
 
-    def client(*args: object, **kwargs: object) -> httpx.AsyncClient:
-        kwargs["transport"] = httpx.MockTransport(handler)
+    def client(*args: object, **kwargs: object) -> httpx2.AsyncClient:
+        kwargs["transport"] = httpx2.MockTransport(handler)
         return original_client(*args, **kwargs)
 
-    monkeypatch.setattr(httpx, "AsyncClient", client)
+    monkeypatch.setattr(httpx2, "AsyncClient", client)
     manager = WebTaskManager()
     started = await manager.start(
         project,
@@ -6182,7 +6182,7 @@ async def test_continuous_joint_draft_ends_on_last_executed_stage(
 def test_segment_read_keeps_task_status_responsive(tmp_path: Path, monkeypatch) -> None:
     import asyncio
     import threading
-    import httpx
+    import httpx2
     from app.web_store import WebStore
     from tests.test_web_store import create_web_store_project
 
@@ -6199,7 +6199,7 @@ def test_segment_read_keeps_task_status_responsive(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(WebStore, "segment_query", blocked_query)
 
     async def exercise():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://testserver") as client:
             heavy = asyncio.create_task(client.post('/api/v1/projects/web-demo/segments/query', json={"stage": "translation"}))
             try:
                 assert await asyncio.to_thread(entered.wait, 2)

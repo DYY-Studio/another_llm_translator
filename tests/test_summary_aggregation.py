@@ -6,7 +6,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app.errors import ExportError, FatalExternalError, UsageError
@@ -120,8 +120,8 @@ def _fragment(
     )
 
 
-def _summary_response(request: httpx.Request) -> httpx.Response:
-    return httpx.Response(
+def _summary_response(request: httpx2.Request) -> httpx2.Response:
+    return httpx2.Response(
         200,
         json={
             "choices": [
@@ -265,12 +265,12 @@ async def test_aggregation_uses_requested_language_adapter_requirements_and_stan
     )
     requests: list[dict[str, object]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(json.loads(request.content))
         return _summary_response(request)
 
     try:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             result = await aggregate_summaries(
                 project,
                 [{"file_id": "F0001", "part_id": "a"}],
@@ -325,7 +325,7 @@ async def test_aggregation_runs_boundaries_concurrently_up_to_max_parallel(
     active = 0
     maximum = 0
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal active, maximum
         active += 1
         maximum = max(maximum, active)
@@ -339,8 +339,8 @@ async def test_aggregation_runs_boundaries_concurrently_up_to_max_parallel(
         else KeyPool(0, 0, 2, 2)
     )
     try:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(handler)
+        async with httpx2.AsyncClient(
+            transport=httpx2.MockTransport(handler)
         ) as client:
             result = await aggregate_summaries(
                 project,
@@ -387,7 +387,7 @@ async def test_recursive_reduction_runs_left_and_right_subtrees_concurrently(
     active = 0
     maximum = 0
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal active, maximum
         active += 1
         maximum = max(maximum, active)
@@ -396,8 +396,8 @@ async def test_recursive_reduction_runs_left_and_right_subtrees_concurrently(
         return _summary_response(request)
 
     try:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(handler)
+        async with httpx2.AsyncClient(
+            transport=httpx2.MockTransport(handler)
         ) as client:
             result = await aggregate_summaries(
                 project,
@@ -438,7 +438,7 @@ async def test_shared_request_limit_covers_recursive_requests_across_boundaries(
     active = 0
     maximum = 0
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal active, maximum
         active += 1
         maximum = max(maximum, active)
@@ -447,8 +447,8 @@ async def test_shared_request_limit_covers_recursive_requests_across_boundaries(
         return _summary_response(request)
 
     try:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(handler)
+        async with httpx2.AsyncClient(
+            transport=httpx2.MockTransport(handler)
         ) as client:
             result = await aggregate_summaries(
                 project,
@@ -497,13 +497,13 @@ async def test_fatal_recursive_child_cancels_sibling_before_it_completes(
     allow_right_response = asyncio.Event()
     right_cancelled = asyncio.Event()
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         body = request.content.decode("utf-8")
         if "LEFT" in body:
             left_started.set()
             await allow_left_response.wait()
             fatal_seen.set()
-            return httpx.Response(401)
+            return httpx2.Response(401)
         right_started.set()
         try:
             await allow_right_response.wait()
@@ -511,7 +511,7 @@ async def test_fatal_recursive_child_cancels_sibling_before_it_completes(
         finally:
             right_cancelled.set()
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     task = asyncio.create_task(
         aggregate_summaries(
             project,
@@ -557,12 +557,12 @@ def test_single_full_fragment_is_adopted_without_llm_call(tmp_path: Path) -> Non
     )
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         return _summary_response(_)
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         result = asyncio.run(
             aggregate_summaries(
@@ -665,7 +665,7 @@ def test_aggregation_cleans_valid_boundary_when_another_boundary_is_skipped(
     )
     write_content_summary(project, old_reduction_two)
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(_summary_response))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(_summary_response))
     try:
         result = asyncio.run(
             aggregate_summaries(
@@ -717,7 +717,7 @@ def test_aggregation_reports_and_persists_exact_usage(tmp_path: Path) -> None:
         "partial": False,
     }
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         response = _summary_response(request)
         payload = response.json()
         payload["usage"] = {
@@ -725,10 +725,10 @@ def test_aggregation_reports_and_persists_exact_usage(tmp_path: Path) -> None:
             "completion_tokens": 4,
             "total_tokens": 15,
         }
-        return httpx.Response(200, json=payload)
+        return httpx2.Response(200, json=payload)
 
     reported: list[dict[str, object] | None] = []
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         result = asyncio.run(
             aggregate_summaries(
@@ -754,11 +754,11 @@ def test_multiple_fragments_are_aggregated_and_keep_references(tmp_path: Path) -
     _fragment(project, summary_id="SUMMARY-FRAGMENT-2", segment_indexes=[1], text="Bob 挥手。")
     requests: list[dict[str, object]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(json.loads(request.content))
         return _summary_response(request)
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         result = asyncio.run(
             aggregate_summaries(
@@ -791,17 +791,17 @@ def test_aggregation_counts_multiple_summary_records_as_boundary_failure(
     _fragment(project, summary_id="SUMMARY-FRAGMENT-1", segment_indexes=[0], text="Alice 出现。")
     _fragment(project, summary_id="SUMMARY-FRAGMENT-2", segment_indexes=[1], text="Bob 挥手。")
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         records = [
             {"type": "summary", "text": "Alice 出现。", "refs": ["1"]},
             {"type": "summary", "text": "Bob 挥手。", "refs": ["2"]},
         ]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         result = asyncio.run(
             aggregate_summaries(
@@ -841,7 +841,7 @@ def test_multiple_boundaries_isolate_publication_and_failures(
         _fragment(project, summary_id=f"{file_id}-1", segment_indexes=[0], file_id=file_id, text="片段一。")
         _fragment(project, summary_id=f"{file_id}-2", segment_indexes=[1], file_id=file_id, text="片段二。")
 
-    initial_client = httpx.AsyncClient(transport=httpx.MockTransport(_summary_response))
+    initial_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_summary_response))
     try:
         asyncio.run(
             aggregate_summaries(
@@ -867,12 +867,12 @@ def test_multiple_boundaries_isolate_publication_and_failures(
 
     progress: list[tuple[int, int, int]] = []
 
-    def fail_on_second_boundary(request: httpx.Request) -> httpx.Response:
+    def fail_on_second_boundary(request: httpx2.Request) -> httpx2.Response:
         if "F0002" in request.content.decode("utf-8"):
-            return httpx.Response(500)
+            return httpx2.Response(500)
         return _summary_response(request)
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(fail_on_second_boundary))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(fail_on_second_boundary))
     try:
         result = asyncio.run(
             aggregate_summaries(
@@ -1051,7 +1051,7 @@ async def test_cancelled_recursive_aggregation_cleans_children_and_can_restart(
     started_count = 0
     active = 0
 
-    async def slow(_: httpx.Request) -> httpx.Response:
+    async def slow(_: httpx2.Request) -> httpx2.Response:
         nonlocal active, started_count
         active += 1
         started_count += 1
@@ -1063,7 +1063,7 @@ async def test_cancelled_recursive_aggregation_cleans_children_and_can_restart(
         finally:
             active -= 1
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(slow))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(slow))
     try:
         task = asyncio.create_task(
             aggregate_summaries(
@@ -1089,7 +1089,7 @@ async def test_cancelled_recursive_aggregation_cleans_children_and_can_restart(
     assert read_content_summaries(project, kind="full", status="completed") == []
     assert read_summary_runs(project, mode="aggregation")[0]["status"] == "interrupted"
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(_summary_response))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(_summary_response))
     try:
         result = await aggregate_summaries(
             project,
@@ -1165,7 +1165,7 @@ def test_summary_soft_target_reduces_whole_children(tmp_path: Path, monkeypatch)
         def handler(request):
             requests.append(json.loads(request.content))
             return _summary_response(request)
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             return await aggregate_summaries(project, [{"file_id": "F0001", "part_id": "document"}], http_client=client)
 
     result = asyncio.run(run())
@@ -1191,7 +1191,7 @@ def test_summary_hard_limit_prevents_send(tmp_path: Path, monkeypatch, limit_kin
     async def run():
         def handler(request):
             pytest.fail("hard-overflow summaries must not be sent")
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             return await aggregate_summaries(project, [{"file_id": "F0001", "part_id": "document"}], http_client=client)
 
     result = asyncio.run(run())

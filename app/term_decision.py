@@ -19,7 +19,7 @@ from pathlib import Path
 
 from typing import Any
 
-import httpx
+import httpx2
 
 from .prompt_resources import ProjectPrompts
 from .config import load_config, load_project_config
@@ -743,7 +743,7 @@ async def run_terminology_decision(
     replace_draft: bool = False,
     resume_run_id: str | None = None,
     prompt_language: str | None = None,
-    http_client: httpx.AsyncClient | None = None,
+    http_client: httpx2.AsyncClient | None = None,
     limiter: SlidingWindowLimiter | KeyPool | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     on_usage: Callable[[dict[str, Any] | None], None] | None = None,

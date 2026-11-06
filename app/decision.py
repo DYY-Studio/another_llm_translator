@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2
 
 from .diagnostics import current_diagnostics
 from .credentials import resolve_api_keys
@@ -181,7 +181,7 @@ def load_decision_preset(path: Path, *, snapshot: bool = False, warnings: list[s
 
 
 class DecisionClient:
-    def __init__(self, preset: dict[str, Any], *, http_client: httpx.AsyncClient | None = None,
+    def __init__(self, preset: dict[str, Any], *, http_client: httpx2.AsyncClient | None = None,
                  retry: dict[str, Any] | None = None, debug_directory: Path | None = None,
                  project_id: str = "", run_id: str = "", stage: str = "",
                  context_reserve_tokens: int | None = None) -> None:
@@ -270,7 +270,7 @@ class DecisionClient:
                                               request_id, requested, len(context), overview)
             if self.http_client is not None:
                 return await self._request(self.http_client, body, questions, segment_id, request_id, requested, len(context), overview)
-            async with httpx.AsyncClient(proxy=self.preset["proxy_url"] or None) as http:
+            async with httpx2.AsyncClient(proxy=self.preset["proxy_url"] or None) as http:
                 return await self._request(http, body, questions, segment_id, request_id, requested, len(context), overview)
         except asyncio.CancelledError:
             if diagnostics is not None:
@@ -281,7 +281,7 @@ class DecisionClient:
                 diagnostics.fail_request(request_id, str(exc))
             raise
 
-    async def _request(self, http: httpx.AsyncClient, body: dict[str, Any],
+    async def _request(self, http: httpx2.AsyncClient, body: dict[str, Any],
                        questions: list[DecisionQuestion], segment_id: str | None, request_id: str,
                        context_segments_requested: int, context_segments_used: int,
                        overview: dict[str, Any]) -> dict[str, DecisionAnswer]:
@@ -313,7 +313,7 @@ class DecisionClient:
                 record["http_status"] = response.status_code
                 if response.status_code == 429 or 500 <= response.status_code <= 599:
                     outcome = "rate_limit_error" if response.status_code == 429 else "http_error"
-                    raise httpx.HTTPStatusError("Decision 暂时不可用", request=response.request, response=response)
+                    raise httpx2.HTTPStatusError("Decision 暂时不可用", request=response.request, response=response)
                 if not response.is_success:
                     outcome = "http_error"
                     raise FatalExternalError(f"Decision 请求失败：HTTP {response.status_code}")
@@ -338,10 +338,10 @@ class DecisionClient:
                 outcome = "cancelled"
                 record["error"] = "cancelled"
                 raise
-            except (httpx.TransportError, httpx.HTTPStatusError, ValueError, TypeError, KeyError) as exc:
+            except (httpx2.TransportError, httpx2.HTTPStatusError, ValueError, TypeError, KeyError) as exc:
                 if isinstance(exc, (ValueError, TypeError, KeyError)) and outcome != "response_parse_error":
                     raise
-                if isinstance(exc, httpx.TransportError):
+                if isinstance(exc, httpx2.TransportError):
                     outcome = "network_error"
                 retrying = attempt + 1 < self.retry["http_max_attempts"]
                 record["error"] = type(exc).__name__

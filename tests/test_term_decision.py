@@ -9,7 +9,7 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -556,11 +556,11 @@ async def test_decision_carries_fragment_descriptions_through_final_review(tmp_p
                 else:
                     record.update(action="update", changes={"preferred_translation": "爱丽丝"})
             records.append(record)
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}],
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}],
                                          "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}})
 
     monkeypatch.setenv("LLM_API_KEY", "test")
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         review_run_id = None
         if standalone:
             await run_terminology_decision(project, http_client=client)
@@ -1807,7 +1807,7 @@ async def test_cross_batch_group_cycle_becomes_manual_review(
 
     monkeypatch.setattr("app.term_decision_batches._pack_batches", cross_referenced_batches)
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         term = payload["terms"][0]
         if payload["phase"] == "adjudication":
@@ -1822,14 +1822,14 @@ async def test_cross_batch_group_cycle_becomes_manual_review(
         else:
             primary = "bob" if term["normalized"] == "alice" else "alice"
             records = [_update_decision(term["normalized"], primary)]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
     os.environ["LLM_API_KEY"] = "test"
     try:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             summary = await run_terminology_decision(project, http_client=client)
     finally:
         del os.environ["LLM_API_KEY"]
@@ -1858,7 +1858,7 @@ async def test_unknown_decision_is_warned_without_format_retry(
     monkeypatch.setattr("app.term_decision_batches._pack_batches", single_term_batches)
     calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -1874,13 +1874,13 @@ async def test_unknown_decision_is_warned_without_format_retry(
                 },
             ]
         )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": content}}]},
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         summary = await run_terminology_decision(
             project, prompt_language="zh-CN", http_client=client
         )
@@ -1904,7 +1904,7 @@ async def test_decision_document_error_retries_without_feedback(
     monkeypatch.setattr("app.term_decision_batches._pack_batches", one_batch)
     calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -1924,13 +1924,13 @@ async def test_decision_document_error_retries_without_feedback(
             assert "format_correction" not in payload
             assert "validation_repair" not in payload
             content = llm_jsonl(decision_response(payload))
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": content}}]}
         )
 
     os.environ["LLM_API_KEY"] = "test"
     try:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             summary = await run_terminology_decision(
                 project, prompt_language="zh-CN", http_client=client
             )
@@ -1954,7 +1954,7 @@ async def test_format_repair_preserves_valid_records_and_retries_only_unresolved
     monkeypatch.setattr("app.term_decision_batches._pack_batches", one_batch)
     adjudication_scopes: list[list[str]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         scope = [item["normalized"] for item in payload["terms"]]
         if payload["phase"] == "adjudication":
@@ -1982,13 +1982,13 @@ async def test_format_repair_preserves_valid_records_and_retries_only_unresolved
                 content = llm_jsonl(decision_response(payload))
         else:
             content = llm_jsonl(decision_response(payload))
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": content}}]}
         )
 
     os.environ["LLM_API_KEY"] = "test"
     try:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             await run_terminology_decision(project, http_client=client)
     finally:
         del os.environ["LLM_API_KEY"]
@@ -2006,7 +2006,7 @@ async def test_redundant_simple_fields_are_logged_without_format_repair(
     calls = 0
     corrections = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls, corrections
         calls += 1
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -2026,7 +2026,7 @@ async def test_redundant_simple_fields_are_logged_without_format_repair(
                         "group_primary": term["group_primary"],
                     }
                 )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
@@ -2042,7 +2042,7 @@ async def test_redundant_simple_fields_are_logged_without_format_repair(
     decision_logger.addHandler(capture_handler)
     os.environ["LLM_API_KEY"] = "test"
     try:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             summary = await run_terminology_decision(project, http_client=client)
     finally:
         del os.environ["LLM_API_KEY"]
@@ -2069,7 +2069,7 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
     phases: list[str] = []
     request_samples: list[dict[str, object]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         payload = json.loads(body["messages"][1]["content"])
         phases.append(payload["phase"])
@@ -2078,7 +2078,7 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
             for term in [*payload["terms"], *payload["anchors"]]
             for sample in term["evidence"]["samples"]
         )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -2093,7 +2093,7 @@ async def test_decision_generates_persistent_two_pass_draft_and_applies(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         summary = await run_terminology_decision(project, http_client=client)
     del os.environ["LLM_API_KEY"]
 
@@ -2199,7 +2199,7 @@ async def test_final_review_resolves_pending_without_losing_phase_one_change(
         return result
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         summary = await run_terminology_decision(
             project, final_review=True, http_client=client
         )
@@ -2275,7 +2275,7 @@ async def test_final_review_rechecks_local_relationships_before_targeting(
         return result
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         summary = await run_terminology_decision(
             project, final_review=True, http_client=client
         )
@@ -2300,7 +2300,7 @@ async def test_final_review_skips_model_when_no_term_needs_review(
         }
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", keep_batch)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         summary = await run_terminology_decision(
             project, final_review=True, http_client=client
         )
@@ -2335,7 +2335,7 @@ async def test_final_review_cancel_resumes_with_same_option_and_checkpoint(
         return {normalized: {"action": "keep", "reason": "保持"}}
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", interrupted)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         task = asyncio.create_task(
             run_terminology_decision(
                 project,
@@ -2403,7 +2403,7 @@ async def test_final_review_failure_saves_draft_and_resumes_same_run(
         }
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", initial_keep)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         await run_terminology_decision(project, http_client=client)
         old_draft = current_decision_draft(project)
         assert old_draft is not None
@@ -2442,7 +2442,7 @@ async def test_final_review_failure_saves_draft_and_resumes_same_run(
         return {str(item["normalized"]): {"action": "keep", "reason": "确认"} for item in kwargs["focus"]}
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", finish_review)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         result = await run_terminology_decision(project, final_review=True, resume_run_id=failed_run_id, http_client=client)
     assert resumed == ["final_review"]
     assert result["run_id"] == failed_run_id
@@ -2465,7 +2465,7 @@ async def test_conflict_candidates_reach_both_phases_and_new_resolution_applies(
     write_term_library(project, project / "terminology" / "terms.json", library)
     seen: dict[str, dict[str, list[object]]] = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         records = []
         for term in payload["terms"]:
@@ -2493,12 +2493,12 @@ async def test_conflict_candidates_reach_both_phases_and_new_resolution_applies(
                     "reason": "保持当前有效裁决",
                 }
             )
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
         )
 
     monkeypatch.setenv("LLM_API_KEY", "test")
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         summary = await run_terminology_decision(project, http_client=client)
 
     expected = {
@@ -2555,7 +2555,7 @@ async def test_decision_ignores_extra_read_only_anchor_records(
     monkeypatch.setattr("app.term_decision_batches._pack_batches", scoped_batches)
     calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -2581,7 +2581,7 @@ async def test_decision_ignores_extra_read_only_anchor_records(
                     ),
                 }
             )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [{"message": {"content": llm_jsonl(records)}}],
@@ -2594,7 +2594,7 @@ async def test_decision_ignores_extra_read_only_anchor_records(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         summary = await run_terminology_decision(project, http_client=client)
     del os.environ["LLM_API_KEY"]
 
@@ -2641,7 +2641,7 @@ async def test_decision_runs_batches_concurrently_with_phase_barrier(
         return {normalized: {"action": "keep", "reason": "保持"}}
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         task = asyncio.create_task(
             run_terminology_decision(project, http_client=client)
         )
@@ -2681,7 +2681,7 @@ async def test_phase_one_needs_review_is_not_a_phase_two_anchor(
         "app.term_decision_batches._pack_batches", single_term_batches_with_anchors
     )
     monkeypatch.setattr("app.term_decision_batches._request_batch", request_batch)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         await run_terminology_decision(project, http_client=client)
 
     assert observed["alice"] == ["bob"]
@@ -2731,7 +2731,7 @@ async def test_decision_cancel_checkpoints_completed_batches_and_resumes(
         return {normalized: {"action": "keep", "reason": "保持"}}
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", interrupted_batch)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         task = asyncio.create_task(
             run_terminology_decision(project, http_client=client)
         )
@@ -2841,7 +2841,7 @@ async def test_decision_second_phase_error_reuses_both_phase_checkpoints(
         return {normalized: {"action": "keep", "reason": "保持"}}
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", failing_review)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         with pytest.raises(UsageError, match="一致性协议错误"):
             await run_terminology_decision(project, http_client=client)
 
@@ -2897,7 +2897,7 @@ async def test_decision_draft_write_error_resumes_without_model_requests(
         original_atomic_write(path, value, compact=compact)
 
     monkeypatch.setattr("app.term_decision.atomic_write_json", fail_draft_write)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         with pytest.raises(StorageError, match="草案写入失败"):
             await run_terminology_decision(project, http_client=client)
 
@@ -2939,7 +2939,7 @@ async def test_complete_legacy_checkpoint_recovers_invalid_group_without_request
         raise AssertionError("完整检查点恢复不得重新请求模型")
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", unexpected_request)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         summary = await run_terminology_decision(
             project, resume_run_id=run_id, http_client=client
         )
@@ -2974,7 +2974,7 @@ async def test_manual_review_queue_survives_apply_and_revision_change(
 ) -> None:
     project = create_decision_project(tmp_path)
     run_id, run_dir, _, _ = create_complete_legacy_group_run(project)
-    async with httpx.AsyncClient() as http_client:
+    async with httpx2.AsyncClient() as http_client:
         await run_terminology_decision(
             project, resume_run_id=run_id, http_client=http_client
         )
@@ -3108,26 +3108,26 @@ def test_web_decision_start_reuses_plan_and_saves_draft(
     plans: list[dict] = []
     phases: list[str] = []
     original_plan = decision_plan
-    original_client = httpx.AsyncClient
+    original_client = httpx2.AsyncClient
 
     def counting_plan(*args: object, **kwargs: object) -> dict:
         plan = original_plan(*args, **kwargs)
         plans.append(plan)
         return plan
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         phases.append(payload["phase"])
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(decision_response(payload))}}]},
         )
 
-    def http_client(*args: object, **kwargs: object) -> httpx.AsyncClient:
-        return original_client(*args, **kwargs, transport=httpx.MockTransport(handler))
+    def http_client(*args: object, **kwargs: object) -> httpx2.AsyncClient:
+        return original_client(*args, **kwargs, transport=httpx2.MockTransport(handler))
 
     monkeypatch.setattr("app.web_tasks.decision_plan", counting_plan)
     monkeypatch.setattr("app.term_decision.decision_plan", counting_plan)
-    monkeypatch.setattr(httpx, "AsyncClient", http_client)
+    monkeypatch.setattr(httpx2, "AsyncClient", http_client)
     with TestClient(create_app(projects_root=project.parent)) as client:
         started = client.post(
             "/api/v1/projects/decision-demo/tasks",
@@ -3312,18 +3312,18 @@ async def test_format_exhaustion_records_only_safe_request_diagnostics(
 
     monkeypatch.setattr("app.term_decision_batches._pack_batches", one_batch)
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         records = decision_response(payload)
         for record in records:
             record.pop("reason")
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
         )
 
     monkeypatch.setenv("LLM_API_KEY", "test")
     with pytest.raises(UsageError, match="格式修正重试耗尽") as caught:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             await run_terminology_decision(project, http_client=client)
 
     request_id = caught.value.params["request_id"]
@@ -3726,10 +3726,10 @@ async def test_decision_protects_override_and_replacement_failure_keeps_draft(
     WebStore(project).resolve_term_changes({"normalized": ["bob"], "expected_revision": library["terms_revision"], "confirm": True})
     seen_terms: list[list[str]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         seen_terms.append([item["normalized"] for item in payload["terms"]])
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -3739,19 +3739,19 @@ async def test_decision_protects_override_and_replacement_failure_keeps_draft(
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         await run_terminology_decision(project, http_client=client)
     assert all(values == ["alice"] for values in seen_terms)
     old = current_decision_draft(project)
     assert old is not None
 
-    def invalid_handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def invalid_handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl([])}}]}
         )
 
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(invalid_handler)
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(invalid_handler)
     ) as client:
         with pytest.raises(UsageError, match="重试耗尽"):
             await run_terminology_decision(
@@ -3903,7 +3903,7 @@ async def test_alias_transfer_and_disable_form_one_relationship_proposal(
 ) -> None:
     project = create_decision_project(tmp_path)
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         records = []
         for term in payload["terms"]:
@@ -3938,12 +3938,12 @@ async def test_alias_transfer_and_disable_form_one_relationship_proposal(
                         "reason": "关系一致",
                     }
                 )
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         await run_terminology_decision(project, http_client=client)
     del os.environ["LLM_API_KEY"]
 
@@ -3962,7 +3962,7 @@ async def test_provable_alias_theft_exhausts_local_repair_without_implicit_group
 ) -> None:
     project = create_decision_project(tmp_path)
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         records = []
         for term in payload["terms"]:
@@ -3988,13 +3988,13 @@ async def test_provable_alias_theft_exhausts_local_repair_without_implicit_group
                         "reason": "保留原状态",
                     }
                 )
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]}
         )
 
     os.environ["LLM_API_KEY"] = "test"
     with pytest.raises(UsageError, match="格式修正重试耗尽"):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             await run_terminology_decision(project, http_client=client)
     del os.environ["LLM_API_KEY"]
 
@@ -4198,8 +4198,8 @@ async def test_automatic_decision_resolves_existing_group_alias_overlap(tmp_path
             else:
                 record = dict(type="decision", normalized=key, action="keep", reason="保持")
             records.append(record)
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
         await run_terminology_decision(project, http_client=http)
     draft = current_decision_draft(project)
     assert draft is not None
@@ -4237,8 +4237,8 @@ async def test_group_alias_partial_rejection_cannot_publish_invalid_combination(
             else:
                 record = dict(type="decision", normalized=key, action="keep", reason="保持")
             records.append(record)
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
         await run_terminology_decision(project, http_client=http)
     draft = current_decision_draft(project)
     assert len(draft["proposals"]) == 1
@@ -4270,8 +4270,8 @@ async def test_group_alias_conflict_on_confirmed_root_requires_review(tmp_path):
     def respond(request):
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         records = [dict(type="decision", normalized=item["normalized"], action="keep", reason="保持") for item in payload["terms"]]
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
         await run_terminology_decision(project, http_client=http)
     draft = current_decision_draft(project)
     assert draft["proposals"] == []
@@ -4311,10 +4311,10 @@ async def test_containment_review_uses_final_spelling_and_keeps_changes_atomic(t
                 elif outcome == 'independent':
                     record['reason'] = '节目使用独立的正式译名'
             records.append(record)
-        return httpx.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}],
+        return httpx2.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}],
                                          'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         result = await run_terminology_decision(project, http_client=client, final_review=final_review)
     assert phases == ['adjudication', 'consistency', 'containment']
     draft = current_decision_draft(project)
@@ -4367,9 +4367,9 @@ async def test_containment_review_keeps_out_of_scope_spelling_read_only(tmp_path
         record = dict(type='decision', normalized='alice show', action='keep', reason='保持')
         if payload['phase'] == 'containment':
             record.update(action='update', changes={'preferred_translation': '艾丽丝节目'})
-        return httpx.Response(200, json={'choices': [{'message': {'content': llm_jsonl([record])}}]})
+        return httpx2.Response(200, json={'choices': [{'message': {'content': llm_jsonl([record])}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         await run_terminology_decision(project, http_client=client)
     apply_decision_draft(project, confirm_all=True)
     after_overrides = read_json(project, project / 'terminology' / 'overrides.json')
@@ -4397,9 +4397,9 @@ async def test_containment_repair_cannot_create_new_unreviewed_conflict(tmp_path
             if payload['phase'] == 'containment' and term['normalized'] == 'alice':
                 record.update(action='update', changes={'preferred_translation': '爱丽丝'})
             records.append(record)
-        return httpx.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}]})
+        return httpx2.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         result = await run_terminology_decision(project, http_client=client)
     assert result['needs_review'] == 3
     assert current_decision_draft(project)['proposals'] == []
@@ -4543,7 +4543,7 @@ async def test_failed_final_review_retains_safe_proposals_for_manual_apply(tmp_p
         phase = payload["phase"]
         phases.append(phase)
         if phase == "final_review" and failure == "http":
-            return httpx.Response(503, json={"error": "unavailable"})
+            return httpx2.Response(503, json={"error": "unavailable"})
         records = []
         for term in payload["terms"]:
             record = dict(type="decision", normalized=term["normalized"], action="keep", reason="确认")
@@ -4554,10 +4554,10 @@ async def test_failed_final_review_retains_safe_proposals_for_manual_apply(tmp_p
             if phase == "final_review" and failure == "format":
                 record["action"] = "needs_review"
             records.append(record)
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
 
     from app.errors import AppError
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         with pytest.raises(AppError):
             await run_terminology_decision(project, final_review=True, plan=plan, http_client=client)
     draft = current_decision_draft(project)
@@ -4608,7 +4608,7 @@ async def test_final_review_failure_does_not_apply_partial_relationship_componen
         return {key: {"action": "keep", "reason": "保持"}}
 
     monkeypatch.setattr("app.term_decision_batches._request_batch", respond)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         with pytest.raises(UsageError, match="成员终审失败"):
             await run_terminology_decision(project, final_review=True, http_client=client)
     draft = current_decision_draft(project)
@@ -4635,17 +4635,17 @@ async def test_containment_request_failure_keeps_prior_changes_and_resumes(tmp_p
         phase = payload['phase']
         phases.append(phase)
         if phase == 'containment' and fail:
-            return httpx.Response(503, json={'error': 'unavailable'})
+            return httpx2.Response(503, json={'error': 'unavailable'})
         records = []
         for term in payload['terms']:
             record = dict(type='decision', normalized=term['normalized'], action='keep', reason='确认')
             if phase == 'consistency' and term['normalized'] == 'alice':
                 record.update(action='update', changes={'preferred_translation': '艾丽丝'})
             records.append(record)
-        return httpx.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}]})
+        return httpx2.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}]})
 
     from app.errors import ExternalError
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         with pytest.raises(ExternalError):
             await run_terminology_decision(project, final_review=True, plan=plan, http_client=client)
         draft = current_decision_draft(project)
@@ -4679,9 +4679,9 @@ async def test_final_scalar_conflict_is_excluded_from_failed_draft_proposals(tmp
             elif payload['phase'] == 'consistency' and term['normalized'] == 'alice':
                 record.update(action='update', changes={'preferred_translation': None})
             records.append(record)
-        return httpx.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}]})
+        return httpx2.Response(200, json={'choices': [{'message': {'content': llm_jsonl(records)}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         with pytest.raises(UsageError, match='终审后仍有未解决冲突'):
             await run_terminology_decision(project, final_review=True, http_client=client)
     draft = current_decision_draft(project)
@@ -4707,7 +4707,7 @@ async def test_replacement_cleanup_failure_preserves_completed_decision_and_warn
     async def keep_batch(*args, **kwargs):
         return {str(item["normalized"]): {"action": "keep", "reason": "保持"} for item in kwargs["focus"]}
     monkeypatch.setattr("app.term_decision_batches._request_batch", keep_batch)
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         first = await run_terminology_decision(project, http_client=client)
         old_draft = project / "runs" / first["run_id"] / "terminology_decision_draft.json"
         original_unlink = Path.unlink
@@ -4915,9 +4915,9 @@ async def test_final_review_includes_windows_for_readonly_related_anchors(tmp_pa
         records = [{"type": "decision", "normalized": term["normalized"],
                     "action": "keep" if payload["phase"] == "final_review" else "needs_review",
                     "reason": "确认"} for term in payload["terms"]]
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         run_id = None
         if standalone:
             await run_terminology_decision(project, http_client=client)

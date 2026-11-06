@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app.config import load_global_config
@@ -18,7 +18,7 @@ from app.llm_client import LLMClient, SlidingWindowLimiter
 ROOT = Path(__file__).parents[1]
 
 
-class ByteChunks(httpx.AsyncByteStream):
+class ByteChunks(httpx2.AsyncByteStream):
     def __init__(self, chunks: list[bytes]) -> None:
         self.chunks = chunks
 
@@ -30,7 +30,7 @@ class ByteChunks(httpx.AsyncByteStream):
         return None
 
 
-class ErrorStream(httpx.AsyncByteStream):
+class ErrorStream(httpx2.AsyncByteStream):
     def __init__(self, error: Exception) -> None:
         self.error = error
 
@@ -50,11 +50,11 @@ def event(value: object) -> str:
     return f"data: {data}\n\n"
 
 
-def stream_response(*values: object, line_ending: str = "\n") -> httpx.Response:
+def stream_response(*values: object, line_ending: str = "\n") -> httpx2.Response:
     body = "".join(
         event(value).replace("\n", line_ending) for value in values
     ).encode("utf-8")
-    return httpx.Response(
+    return httpx2.Response(
         200,
         headers={"content-type": "text/event-stream; charset=utf-8"},
         content=body,
@@ -127,9 +127,9 @@ async def run_client(
     handler,
     *,
     diagnostics: Diagnostics | None = None,
-) -> tuple[object, LLMClient, httpx.AsyncClient]:
-    transport = httpx.MockTransport(handler)
-    client = httpx.AsyncClient(transport=transport)
+) -> tuple[object, LLMClient, httpx2.AsyncClient]:
+    transport = httpx2.MockTransport(handler)
+    client = httpx2.AsyncClient(transport=transport)
     os.environ["LLM_API_KEY"] = "test-key"
     llm = LLMClient(
         current,
@@ -164,7 +164,7 @@ async def run_client(
 async def test_stream_accepts_comma_separated_jsonl_and_records_warning(tmp_path: Path) -> None:
     current = streaming_config(tmp_path)
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         return stream_response(
             {"choices": [{"delta": {"content": '{"type":"segment","id":"S1","translation":"译文"},'}}]},
             {"choices": [{"delta": {"content": '{"type":"end"}'}}]},
@@ -190,14 +190,14 @@ async def test_stream_http_error_reuses_decoded_response_without_double_decompre
     calls = 0
     request_headers: list[tuple[str, str]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         request_headers.append(
             (request.headers["x-opencode-session"], request.headers["x-opencode-request"])
         )
         if calls == 1:
-            return httpx.Response(
+            return httpx2.Response(
                 503,
                 headers={
                     "content-type": "application/json; charset=utf-8",
@@ -236,10 +236,10 @@ async def test_corrupt_compression_fails_without_retry(
     current["retry"]["http_max_attempts"] = 2
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(
+        return httpx2.Response(
             status_code,
             headers={
                 "content-type": content_type,
@@ -270,25 +270,25 @@ async def test_remote_protocol_error_retries(
     current["retry"]["http_max_attempts"] = 2
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 headers={
                     "content-type": (
                         "text/event-stream" if stream else "application/json"
                     )
                 },
-                stream=ErrorStream(httpx.RemoteProtocolError("peer closed")),
+                stream=ErrorStream(httpx2.RemoteProtocolError("peer closed")),
             )
         if stream:
             return stream_response(
                 {"choices": [{"delta": {"content": "ok"}}]},
                 "[DONE]",
             )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": "ok"}}]},
         )
@@ -307,13 +307,13 @@ async def test_stream_remote_protocol_error_exhausts_retry_budget(
     current["retry"]["http_max_attempts"] = 2
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(
+        return httpx2.Response(
             200,
             headers={"content-type": "text/event-stream"},
-            stream=ErrorStream(httpx.RemoteProtocolError("peer closed")),
+            stream=ErrorStream(httpx2.RemoteProtocolError("peer closed")),
         )
 
     with pytest.raises(ExternalError, match="流式请求重试耗尽"):
@@ -330,8 +330,8 @@ async def test_nonstream_response_parse_failure_is_not_reported_as_success(
     current["retry"]["http_max_attempts"] = 1
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
 
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": 42}}]},
         )
@@ -352,9 +352,9 @@ async def test_openai_stream_aggregates_split_utf8_reasoning_and_usage(
     tmp_path: Path,
 ) -> None:
     current = streaming_config(tmp_path)
-    calls: list[httpx.Request] = []
+    calls: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls.append(request)
         body = (
             event({"choices": [{"delta": {"reasoning_content": "思"}}]})
@@ -372,7 +372,7 @@ async def test_openai_stream_aggregates_split_utf8_reasoning_and_usage(
             + event("[DONE]")
         ).encode("utf-8")
         marker = body.index("界".encode()) + 1
-        return httpx.Response(
+        return httpx2.Response(
             200,
             headers={"content-type": "text/event-stream"},
             stream=ByteChunks([body[:marker], body[marker : marker + 1], body[marker + 1 :]]),
@@ -418,7 +418,7 @@ async def test_openai_stream_uses_first_present_reasoning_field(
 ) -> None:
     current = streaming_config(tmp_path)
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         return stream_response(
             {"choices": [{"delta": delta}]},
             {"choices": [{"delta": {"content": "完成"}}]},
@@ -439,7 +439,7 @@ async def test_openai_stream_accepts_clean_eof_and_trailing_usage(
     current = streaming_config(tmp_path)
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         return stream_response(
@@ -494,11 +494,11 @@ async def test_clean_eof_requires_at_least_one_event(tmp_path: Path) -> None:
     current = streaming_config(tmp_path)
     current["retry"]["http_max_attempts"] = 1
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         return stream_response()
 
-    transport = httpx.MockTransport(handler)
-    client = httpx.AsyncClient(transport=transport)
+    transport = httpx2.MockTransport(handler)
+    client = httpx2.AsyncClient(transport=transport)
     os.environ["LLM_API_KEY"] = "test-key"
     try:
         async with LLMClient(
@@ -531,7 +531,7 @@ async def test_stream_retry_discards_partial_output_and_saves_failed_events(
     current["debug"]["enabled"] = True
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -567,7 +567,7 @@ async def test_stream_finish_reason_error_is_retryable_and_reports_provider_stat
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         return stream_response(
@@ -588,8 +588,8 @@ async def test_stream_finish_reason_error_is_retryable_and_reports_provider_stat
             "[DONE]",
         )
 
-    transport = httpx.MockTransport(handler)
-    client = httpx.AsyncClient(transport=transport)
+    transport = httpx2.MockTransport(handler)
+    client = httpx2.AsyncClient(transport=transport)
     os.environ["LLM_API_KEY"] = "test-key"
     try:
         with diagnostics.activate("sample", "translation"):
@@ -667,7 +667,7 @@ async def test_stream_finish_reason_error_discards_partial_output_before_success
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -710,11 +710,11 @@ async def test_stream_retry_preserves_retry_after_headers(tmp_path: Path) -> Non
     calls = 0
     delays: list[float] = []
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(
+            return httpx2.Response(
                 429,
                 headers={"Retry-After": "3"},
                 text="slow down",
@@ -729,8 +729,8 @@ async def test_stream_retry_preserves_retry_after_headers(tmp_path: Path) -> Non
     async def sleeper(delay: float) -> None:
         delays.append(delay)
 
-    transport = httpx.MockTransport(handler)
-    client = httpx.AsyncClient(transport=transport)
+    transport = httpx2.MockTransport(handler)
+    client = httpx2.AsyncClient(transport=transport)
     os.environ["LLM_API_KEY"] = "test-key"
     try:
         async with LLMClient(
@@ -766,7 +766,7 @@ async def test_stream_provider_rate_limit_rotates_key_without_retry_round(
     current["retry"]["base_delay_seconds"] = 5
     calls: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls.append(request.headers["Authorization"])
         if len(calls) == 1:
             body = event(
@@ -777,7 +777,7 @@ async def test_stream_provider_rate_limit_rotates_key_without_retry_round(
                     "error": {"status": 429, "message": "slow"},
                 }
             ).encode("utf-8")
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 headers={
                     "content-type": "text/event-stream",
@@ -790,7 +790,7 @@ async def test_stream_provider_rate_limit_rotates_key_without_retry_round(
             "[DONE]",
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "first-key\nsecond-key"
     try:
         async with LLMClient(
@@ -822,11 +822,11 @@ async def test_stream_exhaustion_is_failed_not_left_retrying(tmp_path: Path) -> 
     current["retry"]["http_max_attempts"] = 2
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         return stream_response({"choices": [{"delta": {"content": "partial"}}]})
 
-    transport = httpx.MockTransport(handler)
-    client = httpx.AsyncClient(transport=transport)
+    transport = httpx2.MockTransport(handler)
+    client = httpx2.AsyncClient(transport=transport)
     os.environ["LLM_API_KEY"] = "test-key"
     try:
         with diagnostics.activate("sample", "translation"):
@@ -867,13 +867,13 @@ async def test_malformed_stream_fails_immediately_with_http_status(
     current["retry"]["http_max_attempts"] = 3
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         return stream_response("not-json")
 
-    transport = httpx.MockTransport(handler)
-    client = httpx.AsyncClient(transport=transport)
+    transport = httpx2.MockTransport(handler)
+    client = httpx2.AsyncClient(transport=transport)
     os.environ["LLM_API_KEY"] = "test-key"
     try:
         async with LLMClient(
@@ -905,7 +905,7 @@ async def test_stream_protocol_error_keeps_usage_seen_before_error(
     current = streaming_config(tmp_path)
     current["retry"]["http_max_attempts"] = 1
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         return stream_response(
             {
                 "usage": {
@@ -917,7 +917,7 @@ async def test_stream_protocol_error_keeps_usage_seen_before_error(
             "not-json",
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "test-key"
     try:
         llm = LLMClient(
@@ -986,7 +986,7 @@ async def test_builtin_provider_stream_protocols(
     if adapter_name == "google-gemini":
         current["llm"]["stream_endpoint"] = "/models/${model}:streamGenerateContent?alt=sse"
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if adapter_name == "google-gemini":
             assert ":streamGenerateContent?alt=sse" in str(request.url)
         return stream_response(*events, line_ending="\r\n")

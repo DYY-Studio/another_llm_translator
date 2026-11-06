@@ -103,7 +103,7 @@ def test_run_prompt_snapshot_and_fingerprint(tmp_path):
 @pytest.mark.parametrize("validator_id", ["preferred_term_usage", "segment_alignment"])
 async def test_custom_prompt_reaches_both_apis_and_keeps_outcome(protocol, validator_id, monkeypatch):
     import json
-    import httpx
+    import httpx2
     from app.decision import DecisionClient
     from app.decision_prompt import get_declaration
     from app.translation_validation import SegmentAlignmentValidator, TranslationTermMatch, TranslationValidationContext
@@ -125,8 +125,8 @@ async def test_custom_prompt_reaches_both_apis_and_keeps_outcome(protocol, valid
         else:
             assert all(question["choices"] == [{"value": key, "description": value} for key, value in content["criteria"].items()] for question in questions)
             answers = [{"name": question["name"], "type": "choice", "choice": choice, "confidence": .9, "probabilities": [{"value": key, "probability": int(key == choice)} for key in declaration.choice_ids]} for question in questions]
-        return httpx.Response(200, json={"model": "test-model", "answers": answers})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        return httpx2.Response(200, json={"model": "test-model", "answers": answers})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
         client = DecisionClient(preset(protocol), http_client=http)
         context = TranslationValidationContext("Alice arrived", "她到了", terms=(TranslationTermMatch("Alice", "Alice", "source", "爱丽丝"),), segment_id="S1", decision=client, decision_prompts={validator_id: content})
         if validator_id == "preferred_term_usage":

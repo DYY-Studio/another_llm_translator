@@ -323,7 +323,7 @@ async def test_response_validation_orders_phases_and_blocks_whole_response():
 @pytest.mark.parametrize("instruction", ["Use the source meaning in this request.", "", None])
 async def test_external_validator_controls_retry_instruction(tmp_path, monkeypatch, instruction):
     import json
-    import httpx
+    import httpx2
     from app.execution import Scope
     from app.stage_translation import run_translation
     from tests.helpers import llm_jsonl
@@ -368,9 +368,9 @@ async def test_external_validator_controls_retry_instruction(tmp_path, monkeypat
         records = [{"type": "segment", "id": item["id"],
                     "translation": "candidate" if len(calls) == 1 and item["source"] == "First source." else "译文"}
                    for item in payload["segments"]]
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
         if instruction is None:
             with pytest.raises(ProjectError, match="修复指令"):
                 await run_translation(project, Scope(), http_client=client, prompt_language="en")

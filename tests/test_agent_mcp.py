@@ -4,7 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -318,7 +318,7 @@ def test_terminology_and_repetition_mcp_collaboration(
     )
 
     async def _gen_draft() -> None:
-        async with httpx.AsyncClient(transport=transport(uncertain=True)) as http_client:
+        async with httpx2.AsyncClient(transport=transport(uncertain=True)) as http_client:
             await run_repetition(
                 project, Scope(), http_client=http_client, screening_enabled=True
             )

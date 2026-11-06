@@ -7,7 +7,7 @@ import re
 from dataclasses import replace
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -878,7 +878,7 @@ def test_contract_translation_uses_model_source_and_normalizes_output(
     assert project is not None
     seen_sources: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         payload = json.loads(body["messages"][1]["content"])
         records = []
@@ -892,13 +892,13 @@ def test_contract_translation_uses_model_source_and_normalizes_output(
                     "translation": f"<k{index + 1}>译文:{cleaned}</k{index + 1}>",
                 }
             )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         summary = asyncio.run(run_translation(project, Scope(), http_client=client))
     finally:
@@ -946,7 +946,7 @@ def test_contract_run_options_do_not_change_adapter_export_state(
     )
     assert project is not None
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         payload = json.loads(body["messages"][1]["content"])
         records = [
@@ -957,13 +957,13 @@ def test_contract_run_options_do_not_change_adapter_export_state(
             }
             for item in payload["segments"]
         ]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
     os.environ["LLM_API_KEY"] = "test"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         summary = asyncio.run(run_translation(project, Scope(), http_client=client))
     finally:

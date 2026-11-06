@@ -240,7 +240,7 @@ def test_migration_preserves_old_explanations_without_fabricating_sources(tmp_pa
 @pytest.mark.asyncio
 async def test_protected_explanation_updates_through_decision_and_rollback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
-    import httpx
+    import httpx2
     from app.config import load_project_config
     from app.sqlite_storage import read_json, write_json
     from app.term_library import term_normalization, load_terms
@@ -268,7 +268,7 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
     overrides["overrides"] = [{"normalized": "alpha", "preferred_translation": "阿尔法"}]
     write_json(project, project / "terminology" / "overrides.json", overrides)
     attempts = []
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         messages = json.loads(request.content)["messages"]
         payload = json.loads(messages[1]["content"])
         assert payload["phase"] == "knowledge"
@@ -284,8 +284,8 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
         content = llm_jsonl([{"type": "entity_knowledge", "entity": "alpha", "reason": "补充身份", "items": [
             {"text": "船长，保留人工说明", "refs": ["unknown"] if len(attempts) == 1 else refs},
         ]}])
-        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        return httpx2.Response(200, json={"choices": [{"message": {"content": content}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         result = await run_terminology_decision(project, http_client=client)
     assert len(attempts) == 2
     assert result["failed"] == 0
@@ -310,7 +310,7 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
 @pytest.mark.asyncio
 async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
-    import httpx
+    import httpx2
     from app.config import load_project_config
     from app.sqlite_storage import read_json, write_json
     from app.term_library import term_normalization
@@ -341,7 +341,7 @@ async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(
     write_json(project, project / "terminology" / "terms.json", record_header("terminology_library", meta["project_id"], **data))
     calls = []
     allow_alpha = False
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         calls.append((payload["phase"], tuple(e["entity"] for e in payload.get("entities", []))))
         if payload["phase"] == "knowledge":
@@ -356,8 +356,8 @@ async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(
             records = [{"type":"decision","normalized":s["normalized"],"reason":"译名",
                         **({"action":"update","changes":{"preferred_translation":"阿尔法" if s["normalized"]=="alpha" else "贝塔"}}
                            if payload["phase"]=="adjudication" else {"action":"keep"})} for s in payload["terms"]]
-        return httpx.Response(200,json={"choices":[{"message":{"content":llm_jsonl(records)}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        return httpx2.Response(200,json={"choices":[{"message":{"content":llm_jsonl(records)}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         with pytest.raises(UsageError, match="聚合失败"):
             await run_terminology_decision(project,http_client=client)
         draft = current_decision_draft(project)
@@ -414,7 +414,7 @@ def test_group_changes_invalidate_shared_explanation_and_cross_entity_refs(tmp_p
 @pytest.mark.asyncio
 async def test_sibling_name_updates_share_one_review_unit_through_protected_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
-    import httpx
+    import httpx2
     from app.sqlite_storage import read_json, write_json
     from app.term_decision import run_terminology_decision
     from app.term_decision_drafts import current_decision_draft, apply_decision_draft
@@ -436,8 +436,8 @@ async def test_sibling_name_updates_share_one_review_unit_through_protected_root
         rows = [dict(type="decision",normalized=s["normalized"],reason="译名",**(
             {"action":"update","changes":{"preferred_translation":s["source"]+"译"}} if payload["phase"]=="adjudication" else {"action":"keep"}
         )) for s in payload["terms"]]
-        return httpx.Response(200,json={"choices":[{"message":{"content":llm_jsonl(rows)}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        return httpx2.Response(200,json={"choices":[{"message":{"content":llm_jsonl(rows)}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         await run_terminology_decision(project,all_terms=True,http_client=client)
     proposals = current_decision_draft(project)["proposals"]
     assert len(proposals)==1
@@ -540,7 +540,7 @@ def test_knowledge_api_checks_revision_and_explicit_fragment_operations(tmp_path
 async def test_decision_application_keeps_other_requests_responsive(tmp_path, monkeypatch):
     import asyncio
     import threading
-    import httpx
+    import httpx2
     from app.web import create_app
 
     project = make_project(tmp_path)
@@ -554,7 +554,7 @@ async def test_decision_application_keeps_other_requests_responsive(tmp_path, mo
         return {"run_id": "test", "applied": 0, "rejected": 0, "terms_revision": 0}
 
     monkeypatch.setattr("app.web_term_routes.apply_decision_draft", apply)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://testserver") as client:
         pending = asyncio.create_task(client.post("/api/v1/projects/terms/terms/decision/apply", json={"confirm": True}))
         try:
             assert await asyncio.to_thread(entered.wait, 2), (await pending).text
@@ -569,7 +569,7 @@ async def test_decision_application_keeps_other_requests_responsive(tmp_path, mo
 @pytest.mark.asyncio
 async def test_force_scan_requires_replacement_confirmation_and_empty_results_retire_old_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
-    import httpx
+    import httpx2
     from app.execution import Scope
     from app.stage_terminology import run_terminology
     from app.term_library import load_terms
@@ -582,8 +582,8 @@ async def test_force_scan_requires_replacement_confirmation_and_empty_results_re
         nonlocal calls
         calls+=1
         records=[dict(type="term",source="Alpha",category="name",description="船长")] if calls==1 else []
-        return httpx.Response(200,json={"choices":[{"message":{"content":llm_jsonl(records)}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        return httpx2.Response(200,json={"choices":[{"message":{"content":llm_jsonl(records)}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         await run_terminology(project,Scope(),http_client=client)
         with pytest.raises(UsageError,match="确认"):
             await run_terminology(project,Scope(force=True),http_client=client)

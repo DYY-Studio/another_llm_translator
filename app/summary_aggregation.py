@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 
 from .config import load_project_config
 from .request_budget import resolve_request_budget, request_input_limit
@@ -343,7 +343,7 @@ async def aggregate_summaries(
     project: Path,
     selected: Iterable[dict[str, Any]],
     *,
-    http_client: httpx.AsyncClient | None = None,
+    http_client: httpx2.AsyncClient | None = None,
     limiter: SlidingWindowLimiter | KeyPool | None = None,
     prompt_language: str | None = None,
     on_progress: Any = None,

@@ -5,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app.execution import Scope
@@ -327,7 +327,7 @@ async def test_translation_accepts_embedded_thought_content_without_retry(
     project = await create_project(tmp_path, "one")
     calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -341,7 +341,7 @@ async def test_translation_accepts_embedded_thought_content_without_retry(
                 }
             ]
         )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -350,7 +350,7 @@ async def test_translation_accepts_embedded_thought_content_without_retry(
             },
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         summary = await run_translation(project, Scope(), http_client=client)
     finally:
@@ -371,7 +371,7 @@ async def test_partial_truncated_translation_is_buffered_before_format_retry(
     project = await create_project(tmp_path, "one\ntwo")
     calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -393,11 +393,11 @@ async def test_partial_truncated_translation_is_buffered_before_format_retry(
                     }
                 ]
             )
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": content}}]}
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         summary = await run_translation(project, Scope(), http_client=client)
     finally:
@@ -414,7 +414,7 @@ async def test_incomplete_terms_do_not_publish_candidates_or_advance_scan(
     project = await create_project(tmp_path, "Alice")
     calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -431,11 +431,11 @@ async def test_incomplete_terms_do_not_publish_candidates_or_advance_scan(
             scans = read_jsonl(project, project / "terminology" / "scans.jsonl")
             assert not any(item["status"] == "completed" for item in scans)
             content = llm_jsonl([{"type": "term", "source": "Alice", "category": "人物", "description": "", "aliases": []}])
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": content}}]}
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         summary = await run_terminology(project, Scope(), http_client=client)
     finally:
@@ -454,7 +454,7 @@ async def test_malformed_end_does_not_publish_candidates_and_marks_scan_failed(
     project = await create_project(tmp_path, "Alice")
     calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         content = (
@@ -462,12 +462,12 @@ async def test_malformed_end_does_not_publish_candidates_and_marks_scan_failed(
             '"description":"人物","aliases":[]}\n'
             '{"type":"type":"end"}'
         )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": content}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         summary = await run_terminology(project, Scope(), http_client=client)
     finally:
@@ -508,7 +508,7 @@ async def test_llm_runtime_logs_are_live_and_do_not_expose_content_or_secrets(
     )
     config_path.write_text(text, encoding="utf-8")
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         system = body["messages"][0]["content"]
         payload = json.loads(body["messages"][1]["content"])
@@ -533,13 +533,13 @@ async def test_llm_runtime_logs_are_live_and_do_not_expose_content_or_secrets(
                 for item in payload["segments"]
             ]
         content = llm_jsonl(records)
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": content}}]}
         )
 
     configure_cli_logging()
     attach_project_log(project)
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         summary = await run_translation(project, Scope(), http_client=client)
         review_summary = await run_review(

@@ -80,7 +80,7 @@ async def test_batch_response_failure_scope(tmp_path, damage):
 @pytest.mark.asyncio
 async def test_knowledge_run_uses_bounded_parallel_batches(tmp_path, monkeypatch):
     import asyncio
-    import httpx
+    import httpx2
     from app.sqlite_storage import read_json, write_json, record_header
     from app.term_knowledge import add_unsourced, empty_knowledge, entity_view, knowledge_payload
     from app.term_decision import run_terminology_decision, _prompt
@@ -126,13 +126,13 @@ async def test_knowledge_run_uses_bounded_parallel_batches(tmp_path, monkeypatch
         try:
             await asyncio.wait_for(first_pair.wait(), 3)
             await asyncio.sleep(0)
-            return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+            return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
                 {"type": "entity_knowledge", "entity": e["entity"], "reason": "整理", "items": []}
                 for e in payload["entities"]])}}]})
         finally:
             active -= 1
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         result = await run_terminology_decision(project, http_client=client)
     assert maximum == 2
     assert sorted(calls) == ["a", "b", "c", "d"]
@@ -143,7 +143,7 @@ async def test_knowledge_run_uses_bounded_parallel_batches(tmp_path, monkeypatch
 @pytest.mark.parametrize("knowledge_only", [False, True])
 async def test_cancelled_retry_preserves_checkpoint_and_resume_requests_only_unfinished(tmp_path, monkeypatch, knowledge_only):
     import asyncio
-    import httpx
+    import httpx2
     from app.sqlite_storage import read_json, write_json, record_header
     from app.term_knowledge import add_unsourced, empty_knowledge
     from app.term_decision import run_terminology_decision, decision_resume_compatibility, decision_plan, _decision_fingerprint
@@ -173,9 +173,9 @@ async def test_cancelled_retry_preserves_checkpoint_and_resume_requests_only_unf
         records = [{"type": "entity_knowledge", "entity": e["entity"], "reason": "整理",
                     "items": [{"text": "身份", "refs": [e["fragments"][0]["id"] if resumed or e["entity"] == "beta" else "unknown"]}]}
                    for e in entities]
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         with pytest.raises(asyncio.CancelledError):
             await run_terminology_decision(project, knowledge_only=knowledge_only, http_client=client)
         run_id = next((project / "runs").glob("*/terminology_decision_checkpoint.json")).parent.name
@@ -245,7 +245,7 @@ async def test_request_failure_preserves_prior_success_and_fatal_errors_propagat
 
 @pytest.mark.asyncio
 async def test_description_generation_modes_apply_without_growing_evidence(tmp_path, monkeypatch):
-    import httpx
+    import httpx2
     from app.config import dump_config, load_config
     from app.sqlite_storage import read_json, write_json, record_header
     from app.term_decision import run_terminology_decision
@@ -278,9 +278,9 @@ async def test_description_generation_modes_apply_without_growing_evidence(tmp_p
             record["items"] = [{"text": "详细身份说明", "refs": [entity["fragments"][0]["id"]]}]
         if mode != "sourced":
             record["summary"] = "船长"
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([record])}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([record])}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         for mode, expected in [("sourced", ["详细身份说明"]),
                                ("sourced_and_summary", ["详细身份说明", "船长"]),
                                ("summary_only", ["船长"])]:
@@ -322,7 +322,7 @@ def test_description_generation_rejects_invalid_model_output(mode, items, summar
 
 @pytest.mark.asyncio
 async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_lifecycle(tmp_path, monkeypatch):
-    import httpx
+    import httpx2
     from copy import deepcopy
     from app.sqlite_storage import read_json, write_json, record_header
     from app.term_knowledge import add_unsourced, empty_knowledge, save_items, entity_view
@@ -353,7 +353,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
         calls.append(payload["phase"])
         assert payload["phase"] == "knowledge"
         entity = payload["entities"][0]
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
             {"type": "entity_knowledge", "entity": "alpha", "reason": "重新整理说明",
              "items": [{"text": "更新说明", "refs": ["unknown" if invalid_output else entity["fragments"][0]["id"]]}]}])}}]})
 
@@ -370,7 +370,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     assert api.get("/api/v1/projects/terms/task-options/terminology_decision?knowledge_only=true&final_review=true").status_code == 400
 
     async def execute(*args, **kwargs):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             return await run_terminology_decision(*args, http_client=client, **kwargs)
 
     monkeypatch.setattr("app.web_tasks.run_terminology_decision", execute)
@@ -409,7 +409,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     assert calls == ["knowledge"]
     from app.errors import UsageError
     invalid_output = True
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         with pytest.raises(UsageError, match="实体说明聚合失败"):
             await run_terminology_decision(project, knowledge_only=True, all_terms=True, http_client=client)
     assert current_decision_draft(project) is None
@@ -418,7 +418,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
 @pytest.mark.asyncio
 @pytest.mark.parametrize("schema_version", [7, 8])
 async def test_sidecar_migration_preserves_real_draft_apply_and_rollback(tmp_path, monkeypatch, schema_version):
-    import httpx
+    import httpx2
     import sqlite3
     from copy import deepcopy
     from app.config import load_project_config
@@ -482,9 +482,9 @@ async def test_sidecar_migration_preserves_real_draft_apply_and_rollback(tmp_pat
             entity = payload["entities"][0]
             records = [{"type": "entity_knowledge", "entity": "alpha", "reason": "整理",
                         "items": [{"text": "合并说明", "refs": [f["id"] for f in entity["fragments"]]}]}]
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         result = await run_terminology_decision(project, all_terms=True, http_client=client)
     run_dir = project / "runs" / result["run_id"]
     draft_path = run_dir / "terminology_decision_draft.json"
@@ -566,7 +566,7 @@ async def test_sidecar_migration_preserves_real_draft_apply_and_rollback(tmp_pat
     assert manifest["status"] == "interrupted"
     assert manifest["decision_status"] == "pending"
     with pytest.raises(UsageError, match="旧 Run 已结束"):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             await run_terminology_decision(
                 project, resume_run_id=result["run_id"], http_client=client,
             )
@@ -581,7 +581,7 @@ async def test_sidecar_migration_preserves_real_draft_apply_and_rollback(tmp_pat
     rollback_decision(project, confirm=True)
     rolled_back = load_terms(project)
     assert next(term for term in rolled_back["terms"] if term["normalized"] == "beta")["group_primary"] is None
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         next_run = await run_terminology_decision(project, replace_draft=True, all_terms=True, http_client=client)
     assert next_run["run_id"] != result["run_id"]
     assert calls == 6
@@ -589,7 +589,7 @@ async def test_sidecar_migration_preserves_real_draft_apply_and_rollback(tmp_pat
 
 @pytest.mark.asyncio
 async def test_knowledge_only_partial_failure_preserves_reviewable_success(tmp_path, monkeypatch):
-    import httpx
+    import httpx2
     from app.errors import UsageError
     from app.sqlite_storage import read_json, write_json, record_header
     from app.term_knowledge import add_unsourced, empty_knowledge
@@ -611,9 +611,9 @@ async def test_knowledge_only_partial_failure_preserves_reviewable_success(tmp_p
         records = [{"type": "entity_knowledge", "entity": e["entity"], "reason": "整理",
                     "items": [{"text": "更新说明", "refs": [e["fragments"][0]["id"] if e["entity"] == "alpha" else "unknown"]}]}
                    for e in payload["entities"]]
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         with pytest.raises(UsageError, match="实体说明聚合失败"):
             await run_terminology_decision(project, knowledge_only=True, http_client=client)
     draft = current_decision_draft(project)

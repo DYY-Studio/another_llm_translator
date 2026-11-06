@@ -14,7 +14,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 
 from . import config as config_module
 from .config import load_project_config
@@ -529,7 +529,7 @@ def final_review_messages(group: dict[str, Any], plan: dict[str, Any], first: di
 
 @blocking_scope
 async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | None = None, exclude_punctuation_only: bool = True, screening_enabled: bool = False, final_review: bool = False, replace_draft: bool = False, run_action: str | None = None,
-                         http_client: httpx.AsyncClient | None = None,
+                         http_client: httpx2.AsyncClient | None = None,
                          limiter: SlidingWindowLimiter | KeyPool | None = None,
                          on_progress: Callable[[int, int, int], None] | None = None,
                          on_usage: Callable[[dict[str, Any] | None], None] | None = None,
@@ -624,7 +624,7 @@ async def run_repetition(project: Path, scope: Scope, *, prompt_language: str | 
         return warnings
 
     try:
-        async with httpx.AsyncClient(proxy=plan["decision_preset"]["proxy_url"] or None) if decision and decision.llm_config is None and http_client is None else _borrow_client(http_client) as decision_http:
+        async with httpx2.AsyncClient(proxy=plan["decision_preset"]["proxy_url"] or None) if decision and decision.llm_config is None and http_client is None else _borrow_client(http_client) as decision_http:
             if decision:
                 decision.http_client = decision_http
             async with LLMClient(config, limiter, run_dir=run_dir, project_id=metadata["project_id"],

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
-import httpx
+import httpx2
 
 from .decision import DecisionClient
 from .diagnostics import current_diagnostics
@@ -580,7 +580,7 @@ async def _execute_stage_run(
     exception_completed: Callable[[], int],
     exception_failed: Callable[[], int],
     failure_counts: Counter[str],
-    http_client: httpx.AsyncClient | None = None,
+    http_client: httpx2.AsyncClient | None = None,
     runtime_parts_kwargs: dict[str, Any] | None = None,
     runtime_request_observer: Callable[[list[dict[str, Any]]], None] | None = None,
     runtime_split_observer: Callable[

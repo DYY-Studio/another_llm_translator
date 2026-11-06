@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app.errors import UsageError
@@ -241,11 +241,11 @@ async def test_old_candidates_fail_before_publication_or_scan(tmp_path: Path, op
         "terminology_candidates", project_id, active_task_id="OLD", terms=[term("Alpha")],
     ))
 
-    def handler(_request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx2.Request) -> httpx2.Response:
         pytest.fail("旧候选校验必须在模型请求前完成")
 
     os.environ["LLM_API_KEY"] = "test"
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         with pytest.raises(UsageError, match="源文排序.*重新扫描"):
             if operation == "publish":
                 publish_partial_terms(project)
@@ -472,11 +472,11 @@ async def test_forced_rescan_merges_with_published_library(tmp_path: Path) -> No
     os.environ["LLM_API_KEY"] = "test"
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         source = "Alpha" if calls == 1 else "Beta"
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -496,8 +496,8 @@ async def test_forced_rescan_merges_with_published_library(tmp_path: Path) -> No
             },
         )
 
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler)
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(handler)
     ) as client:
         await run_terminology(project, Scope(), http_client=client)
         await run_terminology(

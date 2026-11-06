@@ -104,7 +104,7 @@ async def test_decision_acknowledges_changes_only_on_apply_and_rollback_restores
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change_name: bool | str,
 ) -> None:
     import json
-    import httpx
+    import httpx2
     from app.term_decision import run_terminology_decision
     from app.term_decision_drafts import apply_decision_draft, current_decision_draft, rollback_decision
     from app.term_knowledge import save_items
@@ -117,16 +117,16 @@ async def test_decision_acknowledges_changes_only_on_apply_and_rollback_restores
     save_items(project, library, "alice", [])
     write_json(project, project / "terminology" / "terms.json", library)
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         decisions = [{"type": "decision", "normalized": item["normalized"], "action": "keep", "reason": "保持当前"} for item in payload["terms"]]
         if change_name in {"review", "alias_review"}:
             decisions[0].update(action="needs_review", reason="需要人工处理")
         elif change_name and payload["phase"] == "adjudication":
             decisions[0].update(action="update", changes={"preferred_translation": "爱丽丝"})
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(decisions)}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(decisions)}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         await run_terminology_decision(project, http_client=client)
     assert "alice" in load_terms(project)["knowledge"]["pending_changes"]
     draft = current_decision_draft(project)
