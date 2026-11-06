@@ -377,3 +377,121 @@ def test_terminology_and_repetition_mcp_collaboration(
         },
     )
     assert rolled_back["changed"] == 2
+
+
+def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    projects_root = tmp_path / "projects"
+    client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
+    bridge = MCPWebBridge(client=client)
+
+    ch1 = tmp_path / "ch1.txt"
+    ch1.write_text("第一行原文。\n第二行原文。", encoding="utf-8")
+    folder = tmp_path / "extra_dir"
+    folder.mkdir()
+    (folder / "ch2.txt").write_text("第三行原文。", encoding="utf-8")
+
+    # 1. Create project from local file + directory
+    created = bridge.call_tool(
+        "create_project",
+        {
+            "name": "mcp-created",
+            "paths": [str(ch1), str(folder)],
+        },
+    )
+    assert created["project_selector"] == "mcp-created"
+    assert created["file_count"] == 2
+
+    # 2. Add another local file
+    ch3 = tmp_path / "ch3.txt"
+    ch3.write_text("第四行原文。", encoding="utf-8")
+    added = bridge.call_tool(
+        "add_project_files",
+        {
+            "project": "mcp-created",
+            "paths": [str(ch3)],
+        },
+    )
+    assert added["added_files"] == 1
+
+    ov = bridge.call_tool("get_project_overview", {"project": "mcp-created"})
+    file_ids = [f["file_id"] for f in ov["files"]]
+    assert file_ids == ["F0001", "F0002", "F0003"]
+
+    # 3. Reorder files
+    bridge.call_tool(
+        "manage_project_files",
+        {
+            "project": "mcp-created",
+            "action": "reorder",
+            "file_ids": ["F0002", "F0001", "F0003"],
+        },
+    )
+
+    # 4. Preview & confirm single-file replacement
+    ch1_v2 = tmp_path / "ch1_v2.txt"
+    ch1_v2.write_text("第一行原文。\n第二行修改后原文。", encoding="utf-8")
+    preview = bridge.call_tool(
+        "manage_project_files",
+        {
+            "project": "mcp-created",
+            "action": "replace_preview",
+            "file_id": "F0001",
+            "path": str(ch1_v2),
+        },
+    )
+    assert preview["preview_id"]
+
+    with pytest.raises(Exception, match="confirm=True"):
+        bridge.call_tool(
+            "manage_project_files",
+            {
+                "project": "mcp-created",
+                "action": "replace_confirm",
+                "file_id": "F0001",
+                "preview_id": preview["preview_id"],
+                "confirm": False,
+            },
+        )
+
+    confirmed = bridge.call_tool(
+        "manage_project_files",
+        {
+            "project": "mcp-created",
+            "action": "replace_confirm",
+            "file_id": "F0001",
+            "preview_id": preview["preview_id"],
+            "confirm": True,
+        },
+    )
+    assert confirmed["file_id"] == "F0001"
+
+    # 5. Remove file (requires confirm=True)
+    removed = bridge.call_tool(
+        "manage_project_files",
+        {
+            "project": "mcp-created",
+            "action": "remove",
+            "file_ids": ["F0003"],
+            "confirm": True,
+        },
+    )
+    assert removed["removed_file_ids"] == ["F0003"]
+
+    # 6. Open existing external project directory
+    ext_root = tmp_path / "external_projects"
+    ext_root.mkdir()
+    ext_created = bridge.call_tool(
+        "create_project",
+        {
+            "name": "ext-proj",
+            "paths": [str(ch1)],
+            "parent_dir": str(ext_root),
+        },
+    )
+    opened = bridge.call_tool(
+        "open_project",
+        {"path": ext_created["project_path"]},
+    )
+    assert opened["name"] == "ext-proj"
+    assert opened["external"] is True

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -24,11 +25,138 @@ def default_base_url(port: int | None = None) -> str:
     return f"http://127.0.0.1:{resolved_port}"
 
 
+def _resolve_server_inputs(paths: Any) -> tuple[list[str], list[str]]:
+    if (
+        not isinstance(paths, list)
+        or not paths
+        or not all(isinstance(p, str) and p.strip() for p in paths)
+    ):
+        raise UsageError("paths 必须是非空字符串数组")
+    resolved_paths: list[str] = []
+    kinds: list[str] = []
+    for raw in paths:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            raise UsageError(f"输入路径必须是本机绝对路径：{raw}")
+        resolved_paths.append(str(candidate))
+        kinds.append("folder" if candidate.is_dir() else "file")
+    return resolved_paths, kinds
+
+
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "list_projects",
         "description": "List all registered projects and currently active background tasks.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "create_project",
+        "description": "Create a new project from local file/folder paths (or an empty project when empty=True) and register it in the Web workbench.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Project name"},
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Absolute local file or directory paths to import",
+                },
+                "empty": {"type": "boolean", "default": False},
+                "parent_dir": {
+                    "type": "string",
+                    "description": "Optional custom parent directory (absolute path)",
+                },
+                "adapter_options": {
+                    "type": "object",
+                    "description": "Optional Document Adapter import options {adapter_id: {option_id: value}}",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "open_project",
+        "description": "Open, verify, and register an existing project directory on disk in the Web workbench.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path to the existing project directory",
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "add_project_files",
+        "description": "Import and append local files or directories into an existing project.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project name or ID"},
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Absolute local file or directory paths to import",
+                },
+                "adapter_options": {
+                    "type": "object",
+                    "description": "Optional Document Adapter import options {adapter_id: {option_id: value}}",
+                },
+            },
+            "required": ["project", "paths"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "manage_project_files",
+        "description": "Manage project files: remove files (requires confirm=True), reorder files, or preview/confirm/cancel single-file replacement.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project name or ID"},
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "remove",
+                        "reorder",
+                        "replace_preview",
+                        "replace_confirm",
+                        "replace_cancel",
+                    ],
+                },
+                "file_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Target file IDs for remove or full ordered file IDs for reorder",
+                },
+                "file_id": {
+                    "type": "string",
+                    "description": "Target file ID for replace_preview, replace_confirm, or replace_cancel",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Absolute local file path for replace_preview",
+                },
+                "preview_id": {
+                    "type": "string",
+                    "description": "Replacement preview_id returned by replace_preview",
+                },
+                "adapter_options": {
+                    "type": "object",
+                    "description": "Optional Document Adapter options for replace_preview",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Explicit confirmation required for remove and replace_confirm",
+                },
+            },
+            "required": ["project", "action"],
+            "additionalProperties": False,
+        },
     },
     {
         "name": "get_project_overview",
@@ -503,16 +631,17 @@ class MCPWebBridge:
         *,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        form_data: dict[str, Any] | None = None,
     ) -> Any:
         try:
             if self._client is not None:
                 response = self._client.request(
-                    method, path, params=params, json=json_body
+                    method, path, params=params, json=json_body, data=form_data
                 )
             else:
                 with httpx.Client(base_url=self.base_url, timeout=60.0) as client:
                     response = client.request(
-                        method, path, params=params, json=json_body
+                        method, path, params=params, json=json_body, data=form_data
                     )
         except httpx.RequestError as exc:
             raise UsageError(
@@ -536,6 +665,102 @@ class MCPWebBridge:
             projects = self._request("GET", "/api/v1/projects")
             active = self._request("GET", "/api/v1/tasks/active")
             return {**projects, "active_tasks": active.get("tasks", [])}
+
+        if name == "create_project":
+            empty = bool(args.get("empty", False))
+            raw_paths = args.get("paths")
+            form: dict[str, Any] = {
+                "name": str(args["name"]),
+                "empty": "true" if empty else "false",
+                "parent_dir": str(args.get("parent_dir") or ""),
+                "adapter_options": json.dumps(
+                    args.get("adapter_options") or {}, ensure_ascii=False
+                ),
+            }
+            if raw_paths:
+                server_paths, server_kinds = _resolve_server_inputs(raw_paths)
+                form["server_paths"] = server_paths
+                form["server_input_kinds"] = server_kinds
+            elif not empty:
+                raise UsageError("必须提供 paths 导入文件，或显式设置 empty=True 创建空项目")
+            return self._request("POST", "/api/v1/projects", form_data=form)
+
+        if name == "open_project":
+            raw_path = args.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                raise UsageError("path 必须是非空字符串")
+            return self._request(
+                "POST",
+                "/api/v1/projects/open",
+                json_body={"path": str(Path(raw_path).expanduser())},
+            )
+
+        if name == "add_project_files":
+            proj = quote(str(args["project"]), safe="")
+            server_paths, server_kinds = _resolve_server_inputs(args.get("paths"))
+            form = {
+                "server_paths": server_paths,
+                "server_input_kinds": server_kinds,
+                "adapter_options": json.dumps(
+                    args.get("adapter_options") or {}, ensure_ascii=False
+                ),
+            }
+            return self._request("POST", f"/api/v1/projects/{proj}/files", form_data=form)
+
+        if name == "manage_project_files":
+            proj = quote(str(args["project"]), safe="")
+            action = str(args["action"])
+            if action == "remove":
+                if args.get("confirm") is not True:
+                    raise UsageError("移除项目文件必须显式指定 confirm=True")
+                return self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/files/remove",
+                    json_body={"file_ids": args.get("file_ids")},
+                )
+            if action == "reorder":
+                return self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/files/reorder",
+                    json_body={"file_ids": args.get("file_ids")},
+                )
+            file_id = args.get("file_id")
+            if not isinstance(file_id, str) or not file_id:
+                raise UsageError(f"{action} 必须提供 file_id")
+            fid = quote(file_id, safe="")
+            if action == "replace_preview":
+                server_paths, server_kinds = _resolve_server_inputs([args.get("path")])
+                if server_kinds[0] != "file":
+                    raise UsageError("单文件替换的 path 必须是文件路径")
+                form = {
+                    "server_path": server_paths[0],
+                    "adapter_options": json.dumps(
+                        args.get("adapter_options") or {}, ensure_ascii=False
+                    ),
+                }
+                return self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/files/{fid}/replacement-preview",
+                    form_data=form,
+                )
+            preview_id = args.get("preview_id")
+            if not isinstance(preview_id, str) or not preview_id:
+                raise UsageError(f"{action} 必须提供 preview_id")
+            if action == "replace_confirm":
+                if args.get("confirm") is not True:
+                    raise UsageError("确认替换文件必须显式指定 confirm=True")
+                return self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/files/{fid}/replacement-confirm",
+                    json_body={"preview_id": preview_id},
+                )
+            if action == "replace_cancel":
+                pid = quote(preview_id, safe="")
+                return self._request(
+                    "DELETE",
+                    f"/api/v1/projects/{proj}/files/{fid}/replacement-preview/{pid}",
+                )
+            raise UsageError(f"不支持的文件管理动作：{action}")
 
         if name == "get_project_overview":
             proj = quote(str(args["project"]), safe="")
