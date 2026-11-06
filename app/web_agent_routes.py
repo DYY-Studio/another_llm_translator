@@ -159,6 +159,16 @@ def _parse_slice_spec(
     part_spec = payload.get("part_id")
     line_start = payload.get("line_start")
     line_end = payload.get("line_end")
+    if part_spec is not None and (not isinstance(part_spec, str) or not part_spec):
+        raise UsageError("part_id 必须是非空字符串")
+    if line_start is not None and (
+        not isinstance(line_start, int) or isinstance(line_start, bool) or line_start < 0
+    ):
+        raise UsageError("line_start 必须是非负整数")
+    if line_end is not None and (
+        not isinstance(line_end, int) or isinstance(line_end, bool) or line_end < 0
+    ):
+        raise UsageError("line_end 必须是非负整数")
     if "@" in run_id:
         run_id, spec = run_id.split("@", 1)
         if ":" in spec:
@@ -1063,8 +1073,6 @@ def register_agent_routes(
         accept_remaining = payload.get("accept_remaining", False)
         if not isinstance(accept_remaining, bool):
             raise UsageError("accept_remaining 必须是布尔值")
-        if reason == "accept_remaining" and action == "complete":
-            accept_remaining = True
         if accept_remaining and action != "complete":
             raise UsageError("accept_remaining 仅在 action='complete' 时可用")
 
@@ -1184,17 +1192,6 @@ def register_agent_routes(
         root = project(name)
         group_id = payload.get("group_id")
         source_text = payload.get("source")
-        if source_text in {"__scan__", "__create_draft__"} or group_id in {
-            "__scan__",
-            "__create_draft__",
-        }:
-            return await scan_repetition_live(
-                name,
-                {
-                    "create_draft": "__create_draft__" in {source_text, group_id},
-                    "replace_draft": True,
-                },
-            )
         if not group_id and not source_text:
             raise UsageError("必须提供 group_id 或 source")
         window = payload.get("window", 5)

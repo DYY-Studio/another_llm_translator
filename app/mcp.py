@@ -466,6 +466,9 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "project": {"type": "string"},
                 "run_id": {"type": "string"},
+                "part_id": {"type": "string"},
+                "line_start": {"type": "integer"},
+                "line_end": {"type": "integer"},
                 "items": {"type": "array", "items": {"type": "object"}},
                 "allow_warnings": {"type": "boolean", "default": False},
             },
@@ -1123,13 +1126,17 @@ class MCPWebBridge:
         if name == "submit_stage_batch":
             proj = quote(str(args["project"]), safe="")
             rid = quote(str(args["run_id"]), safe="")
+            body = {
+                "items": args["items"],
+                "allow_warnings": bool(args.get("allow_warnings", False)),
+            }
+            for opt_key in ("part_id", "line_start", "line_end"):
+                if args.get(opt_key) is not None:
+                    body[opt_key] = args[opt_key]
             return self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/agent/runs/{rid}/submit",
-                json_body={
-                    "items": args["items"],
-                    "allow_warnings": bool(args.get("allow_warnings", False)),
-                },
+                json_body=body,
             )
 
         if name == "finish_agent_stage_run":

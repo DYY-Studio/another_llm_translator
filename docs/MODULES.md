@@ -70,7 +70,7 @@ FastAPI 应用装配、鉴权、生命周期、静态资源和 route 注册。�
 - `web_term_routes.py`：术语扫描、编辑、交换、发布与自动决策入口。
 - `web_summary_routes.py`：内容概括选择、运行、聚合、阅读和 Markdown 导出。
 - `web_task_routes.py`：阶段任务启动、状态、诊断和取消。
-- `web_agent_routes.py`：面向 Agent MCP 桥接的局部上下文读取、经由 Document Adapter 与翻译校验器严格门控的单段修正、以及 `executor="agent_mcp"` 外部阶段批次的创建、领料、校验提交与收尾入口。
+- `web_agent_routes.py`：面向 Agent MCP 桥接的局部上下文读取、经由 Document Adapter 与翻译校验器严格门控的单段修正、重复译文本地扫描与草案提案更新、以及 `executor="agent_mcp"` 外部阶段批次的创建、分片领料、校验提交与收尾入口。
 - `web_continuous.py`：连续运行阶段区间、预检快照、阶段选项摘要和运行编排；复用共享阶段入口，按显式选项插入一致性审查，在阶段边界装配证据并判断自动应用或待审停止，不拥有第二套阶段语义。
 - `web_export_routes.py`：项目导出、下载和桌面保存位置。
 - `web_storage_routes.py`：存储占用查询以及需要明确确认的可清理项入口。
