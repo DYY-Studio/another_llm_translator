@@ -181,9 +181,15 @@ class WebStore:
         return int(library["terms_revision"]) if library else None
 
     def _translation_validation_context(
-        self, segment: dict[str, Any], text: str
+        self,
+        segment: dict[str, Any],
+        text: str,
+        *,
+        library: dict[str, Any] | None = None,
+        load_library: bool = True,
     ) -> TranslationValidationContext:
-        library = load_terms(self.project)
+        if library is None and load_library:
+            library = load_terms(self.project, resolve_knowledge=False)
         terms = match_term_validation(
             str(segment["source"]),
             library,

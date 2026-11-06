@@ -55,11 +55,19 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
 
     @app.put("/api/v1/projects/{name}/terms/knowledge")
     def put_knowledge(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from .sqlite_storage import read_json, record_exists
         from .term_knowledge import update_entity
         root = project(name)
         if app.state.tasks.is_project_running(root):
             raise UsageError("项目存在运行中的任务，不能修改实体说明")
-        update_entity(root, payload)
+        norm_payload = dict(payload)
+        if "expected_revision" not in norm_payload or norm_payload["expected_revision"] is None:
+            path = root / "terminology" / "terms.json"
+            if record_exists(root, path):
+                norm_payload["expected_revision"] = read_json(root, path)["terms_revision"]
+        if "action" not in norm_payload and isinstance(norm_payload.get("items"), list):
+            norm_payload["action"] = "save_items"
+        update_entity(root, norm_payload)
         return WebStore(root).terms()
 
     @app.post("/api/v1/projects/{name}/terms/hits")

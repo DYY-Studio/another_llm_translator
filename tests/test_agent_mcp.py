@@ -106,6 +106,9 @@ def test_pattern_a_context_and_strict_segment_fix_gatekeeping(tmp_path: Path) ->
     assert len(ctx["matched_terms"]) == 1
     assert ctx["matched_terms"][0]["source"] == "アリス"
     assert len(ctx["context"]["after"]) == 2
+    assert "reviews" not in ctx
+    assert "reviews" not in ctx["context"]["after"][0]
+    assert "document_adapter_requirements" not in ctx
 
     # Residual kana must be rejected by default (not persisted as warning)
     rejected = bridge.call_tool(
@@ -142,6 +145,17 @@ def test_pattern_a_context_and_strict_segment_fix_gatekeeping(tmp_path: Path) ->
     assert committed["status"] == "committed"
     assert committed["result"]["origin"] == "agent_mcp"
     assert committed["result"]["validation_status"] == "passed"
+    assert "validation_findings" not in committed["result"]
+    assert "findings" not in committed
+
+    # Query translated segment: must not duplicate translation inside reviews.*.base
+    queried_done = bridge.call_tool(
+        "query_segments",
+        {"project": "sample", "stage": "translation", "status": "completed"},
+    )
+    assert queried_done["total_segments"] == 1
+    assert "reviews" not in queried_done["segments"][0]
+    assert "validation_findings" not in queried_done["segments"][0]["translation"]
 
     # Proofreading suggestion with apply=True
     review_committed = bridge.call_tool(
@@ -159,6 +173,16 @@ def test_pattern_a_context_and_strict_segment_fix_gatekeeping(tmp_path: Path) ->
     assert review_committed["status"] == "committed"
     assert review_committed["suggestion"]["origin"] == "agent_mcp"
     assert review_committed["applied"]["text"] == "爱丽丝飞奔而去。"
+
+    # Query after review: proofreading review is present without duplicating base
+    queried_reviewed = bridge.call_tool(
+        "query_segments",
+        {"project": "sample", "stage": "translation", "status": "completed"},
+    )
+    pr_review = queried_reviewed["segments"][0]["reviews"]["proofreading"]
+    assert "base" not in pr_review
+    assert pr_review["applied"]["text"] == "爱丽丝飞奔而去。"
+    assert "polishing" not in queried_reviewed["segments"][0]["reviews"]
 
 
 def test_pattern_b_agent_stage_run_lifecycle_and_web_visibility(tmp_path: Path) -> None:
@@ -185,6 +209,7 @@ def test_pattern_b_agent_stage_run_lifecycle_and_web_visibility(tmp_path: Path) 
     assert len(diag["active_tasks"]) == 1
     assert diag["active_tasks"][0]["executor"] == "agent_mcp"
     assert diag["active_tasks"][0]["run_id"] == run_id
+    assert "final_review" not in diag["active_tasks"][0]
 
     # Host preflight sees the running agent_mcp run and marks it non-resumable by host LLM
     preflight = bridge.call_tool(
@@ -262,6 +287,7 @@ def test_pattern_b_agent_stage_run_lifecycle_and_web_visibility(tmp_path: Path) 
     assert diag_after["active_tasks"] == []
     assert diag_after["recent_runs"][0]["run_id"] == run_id
     assert diag_after["recent_runs"][0]["executor"] == "agent_mcp"
+    assert "document_adapter_prompt_requirements" not in diag_after["recent_runs"][0]
 
 
 def test_terminology_and_repetition_mcp_collaboration(
@@ -298,7 +324,7 @@ def test_terminology_and_repetition_mcp_collaboration(
     )
     assert entity["knowledge"]["entity_key"] == "承诺"
 
-    bridge.call_tool(
+    saved_term = bridge.call_tool(
         "edit_single_term",
         {
             "project": "repetition",
@@ -313,6 +339,8 @@ def test_terminology_and_repetition_mcp_collaboration(
             },
         },
     )
+    assert "description_items" not in saved_term["terms"][0]
+    assert "conflicts" not in saved_term["terms"][0]
 
     # Repetition overview & group inspection with custom window
     rep_ov = bridge.call_tool(
@@ -331,6 +359,8 @@ def test_terminology_and_repetition_mcp_collaboration(
         {"project": "repetition", "group_id": group_id, "window": 2},
     )
     assert len(inspected["occurrences"]) == 3
+    assert "occurrences" not in inspected["draft_group"]
+    assert "files" not in inspected["draft_group"]
 
     # Update repetition draft proposals to resolve the uncertain occurrence '3' into subgroup 1
     bridge.call_tool(
@@ -377,3 +407,320 @@ def test_terminology_and_repetition_mcp_collaboration(
         },
     )
     assert rolled_back["changed"] == 2
+
+
+def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
+    app_root = make_app_root(tmp_path)
+    projects_root = tmp_path / "projects"
+    client = TestClient(create_app(projects_root=projects_root, app_root=app_root))
+    bridge = MCPWebBridge(client=client)
+
+    ch1 = tmp_path / "ch1.txt"
+    ch1.write_text("第一行原文。\n第二行原文。", encoding="utf-8")
+    folder = tmp_path / "extra_dir"
+    folder.mkdir()
+    (folder / "ch2.txt").write_text("第三行原文。", encoding="utf-8")
+
+    # 1. Create project from local file + directory
+    created = bridge.call_tool(
+        "create_project",
+        {
+            "name": "mcp-created",
+            "paths": [str(ch1), str(folder)],
+        },
+    )
+    assert created["project_selector"] == "mcp-created"
+    assert created["file_count"] == 2
+
+    # 2. Add another local file
+    ch3 = tmp_path / "ch3.txt"
+    ch3.write_text("第四行原文。", encoding="utf-8")
+    added = bridge.call_tool(
+        "add_project_files",
+        {
+            "project": "mcp-created",
+            "paths": [str(ch3)],
+        },
+    )
+    assert added["added_files"] == 1
+
+    ov = bridge.call_tool("get_project_overview", {"project": "mcp-created"})
+    file_ids = [f["file_id"] for f in ov["files"]]
+    assert file_ids == ["F0001", "F0002", "F0003"]
+
+    # 3. Reorder files
+    bridge.call_tool(
+        "manage_project_files",
+        {
+            "project": "mcp-created",
+            "action": "reorder",
+            "file_ids": ["F0002", "F0001", "F0003"],
+        },
+    )
+
+    # 4. Preview & confirm single-file replacement
+    ch1_v2 = tmp_path / "ch1_v2.txt"
+    ch1_v2.write_text("第一行原文。\n第二行修改后原文。", encoding="utf-8")
+    preview = bridge.call_tool(
+        "manage_project_files",
+        {
+            "project": "mcp-created",
+            "action": "replace_preview",
+            "file_id": "F0001",
+            "path": str(ch1_v2),
+        },
+    )
+    assert preview["preview_id"]
+
+    with pytest.raises(Exception, match="confirm=True"):
+        bridge.call_tool(
+            "manage_project_files",
+            {
+                "project": "mcp-created",
+                "action": "replace_confirm",
+                "file_id": "F0001",
+                "preview_id": preview["preview_id"],
+                "confirm": False,
+            },
+        )
+
+    confirmed = bridge.call_tool(
+        "manage_project_files",
+        {
+            "project": "mcp-created",
+            "action": "replace_confirm",
+            "file_id": "F0001",
+            "preview_id": preview["preview_id"],
+            "confirm": True,
+        },
+    )
+    assert confirmed["file_id"] == "F0001"
+
+    # 5. Remove file (requires confirm=True)
+    removed = bridge.call_tool(
+        "manage_project_files",
+        {
+            "project": "mcp-created",
+            "action": "remove",
+            "file_ids": ["F0003"],
+            "confirm": True,
+        },
+    )
+    assert removed["removed_file_ids"] == ["F0003"]
+
+    # 6. Open existing external project directory
+    ext_root = tmp_path / "external_projects"
+    ext_root.mkdir()
+    ext_created = bridge.call_tool(
+        "create_project",
+        {
+            "name": "ext-proj",
+            "paths": [str(ch1)],
+            "parent_dir": str(ext_root),
+        },
+    )
+    opened = bridge.call_tool(
+        "open_project",
+        {"path": ext_created["project_path"]},
+    )
+    assert opened["name"] == "ext-proj"
+    assert opened["external"] is True
+
+    # 7. Query segments by file_id alone (without part_id) and verify compact payload
+    queried = bridge.call_tool(
+        "query_segments",
+        {"project": "mcp-created", "file_id": "F0001"},
+    )
+    assert queried["total_segments"] == 2
+    assert len(queried["segments"]) == 2
+    assert "reviews" not in queried["segments"][0]
+    assert "model_source" not in queried["segments"][0]
+
+    # 8. Batch import terms with unsourced knowledge descriptions & update_knowledge without expected_revision
+    imported = bridge.call_tool(
+        "edit_single_term",
+        {
+            "project": "mcp-created",
+            "action": "import_terms",
+            "payload": {
+                "terms": [
+                    {
+                        "source": "第一行",
+                        "preferred_translation": "首行",
+                        "category": "general",
+                        "description": "项目测试首行术语",
+                        "aliases": [],
+                        "disabled": False,
+                    }
+                ]
+            },
+        },
+    )
+    assert imported["imported"] == 1
+    updated_know = bridge.call_tool(
+        "edit_single_term",
+        {
+            "project": "mcp-created",
+            "action": "update_knowledge",
+            "payload": {
+                "normalized": "第一行",
+                "items": [{"text": "更新后的首行说明", "fragment_ids": []}],
+            },
+        },
+    )
+    assert updated_know["terms"][0]["description"] == "更新后的首行说明"
+    term_ov = bridge.call_tool(
+        "get_terminology_overview",
+        {"project": "mcp-created"},
+    )
+    assert term_ov["total"] == 1
+    assert "description_items" not in term_ov["terms"][0]
+    assert "conflicts" not in term_ov["terms"][0]
+    completed_scan = bridge.call_tool(
+        "edit_single_term",
+        {
+            "project": "mcp-created",
+            "action": "complete_scan",
+            "payload": {},
+        },
+    )
+    assert completed_scan["status"] == "completed"
+    assert completed_scan["completed_segments"] == 3
+    assert completed_scan["stage_completion"]["state"] == "complete"
+
+    # 9. Configure project (get_config, update_config, delete_project)
+    cfg = bridge.call_tool(
+        "configure_project",
+        {"project": "mcp-created", "action": "get_config"},
+    )
+    assert "config" in cfg
+    assert "available_presets" in cfg
+    if cfg["available_presets"]:
+        assert "digest" not in cfg["available_presets"][0]
+        assert "warnings" not in cfg["available_presets"][0]
+    updated_cfg = bridge.call_tool(
+        "configure_project",
+        {
+            "project": "mcp-created",
+            "action": "update_config",
+            "config": {"validation": {"translation": {"validators": ["japanese_kana"]}}},
+        },
+    )
+    assert updated_cfg["config"]["validation"]["translation"]["validators"] == ["japanese_kana"]
+
+    # 10. Pure Agent repetition live scan & local draft creation
+    rep_proj = tmp_path / "rep.txt"
+    rep_proj.write_text("待て！\n進め。\n待て！", encoding="utf-8")
+    bridge.call_tool(
+        "create_project",
+        {"name": "rep-mcp", "paths": [str(rep_proj)]},
+    )
+    rep_segs = bridge.call_tool(
+        "query_segments", {"project": "rep-mcp", "file_id": "F0001"}
+    )["segments"]
+    part_run = bridge.call_tool(
+        "start_agent_stage_run",
+        {
+            "project": "rep-mcp",
+            "stage": "translation",
+            "scope": {"only_file": "F0001", "only_part": rep_segs[0]["part_id"]},
+        },
+    )
+    assert part_run["selected_count"] == 3
+    slice_id = f"{part_run['run_id']}@{rep_segs[0]['part_id']}:0-2"
+    slice_co = bridge.call_tool(
+        "checkout_stage_batch",
+        {"project": "rep-mcp", "run_id": slice_id, "max_segments": 5},
+    )
+    assert len(slice_co["batch"]) == 2
+    assert slice_co["remaining_pending_count"] == 2
+    assert slice_co["total_remaining_pending_count"] == 3
+    slice_sub = bridge.call_tool(
+        "submit_stage_batch",
+        {
+            "project": "rep-mcp",
+            "run_id": slice_id,
+            "items": [
+                {"segment_id": rep_segs[0]["segment_id"], "translation": "站住！"},
+                {"segment_id": rep_segs[1]["segment_id"], "text": "前进。"},
+            ],
+        },
+    )
+    assert slice_sub["remaining_pending_count"] == 0
+    assert slice_sub["total_remaining_pending_count"] == 1
+    bridge.call_tool(
+        "finish_agent_stage_run",
+        {"project": "rep-mcp", "run_id": part_run["run_id"], "action": "interrupt"},
+    )
+    bridge.call_tool(
+        "submit_segment_fix",
+        {
+            "project": "rep-mcp",
+            "segment_id": rep_segs[2]["segment_id"],
+            "stage": "translation",
+            "text": "等一下！",
+        },
+    )
+    # Inspect repetition group by source before any formal draft exists
+    live_inspected = bridge.call_tool(
+        "inspect_repetition_group",
+        {"project": "rep-mcp", "source": "待て！", "window": 1},
+    )
+    assert len(live_inspected["occurrences"]) == 2
+
+    rep_overview = bridge.call_tool(
+        "get_repetition_overview",
+        {"project": "rep-mcp", "create_draft": True},
+    )
+    assert rep_overview["draft"] is not None
+    assert "evidence" not in rep_overview["draft"]
+    assert "sources" not in rep_overview["draft"]
+    assert rep_overview["draft"]["total_groups"] == 1
+    rep_group = rep_overview["draft"]["groups"][0]
+    assert rep_group["source"] == "待て！"
+    assert "signature" not in rep_group["occurrences"][0]
+
+    # Proofreading Run with targeted suggestion + accept_remaining bulk confirmation
+    pr_run = bridge.call_tool(
+        "start_agent_stage_run",
+        {"project": "rep-mcp", "stage": "proofreading"},
+    )
+    assert pr_run["selected_count"] == 3
+    bridge.call_tool(
+        "submit_stage_batch",
+        {
+            "project": "rep-mcp",
+            "run_id": pr_run["run_id"],
+            "items": [
+                {
+                    "segment_id": rep_segs[2]["segment_id"],
+                    "review_status": "suggested",
+                    "suggested_text": "站住！",
+                    "reason": "与前文统一",
+                }
+            ],
+        },
+    )
+    pr_done = bridge.call_tool(
+        "finish_agent_stage_run",
+        {
+            "project": "rep-mcp",
+            "run_id": pr_run["run_id"],
+            "action": "complete",
+            "accept_remaining": True,
+        },
+    )
+    assert pr_done["status"] == "completed"
+    assert pr_done["accepted_remaining"] == 2
+    assert pr_done["completed"] == 3
+    applied_pr = bridge.call_tool(
+        "apply_stage_suggestions",
+        {"project": "rep-mcp", "stage": "proofreading", "confirm": True},
+    )
+    assert applied_pr["completed"] == 3
+
+    deleted = bridge.call_tool(
+        "configure_project",
+        {"project": "rep-mcp", "action": "delete_project", "confirm": True},
+    )
+    assert deleted["deleted"] is True

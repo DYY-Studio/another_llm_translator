@@ -3440,8 +3440,15 @@ def _stage_cte(
 ) -> tuple[str, list[Any]]:
     if not stage:
         return "", []
-    boundary = " AND segment_id IN (SELECT segment_id FROM segments WHERE file_id = ? AND part_id = ?)" if file_id else ""
-    params = [stage, file_id, part_id] if file_id else [stage]
+    if file_id and part_id:
+        boundary = " AND segment_id IN (SELECT segment_id FROM segments WHERE file_id = ? AND part_id = ?)"
+        params = [stage, file_id, part_id]
+    elif file_id:
+        boundary = " AND segment_id IN (SELECT segment_id FROM segments WHERE file_id = ?)"
+        params = [stage, file_id]
+    else:
+        boundary = ""
+        params = [stage]
     return (
         f"""
         LEFT JOIN (
@@ -3570,11 +3577,14 @@ def segment_count(
             status=status, search=search, stage=stage, file_id=file_id, part_id=part_id
         )
         clauses = ["segments.is_empty = 0", *stage_clauses]
-        if bool(file_id) != bool(part_id):
+        if part_id and not file_id:
             raise ProjectError("file_id 与 part_id 必须同时提供")
         if file_id and part_id:
             clauses.extend(["segments.file_id = ?", "segments.part_id = ?"])
             params.extend([file_id, part_id])
+        elif file_id:
+            clauses.append("segments.file_id = ?")
+            params.append(file_id)
         query = f"SELECT COUNT(*) FROM segments {join} WHERE {' AND '.join(clauses)}"
         return int(connection.execute(query, params).fetchone()[0])
     finally:
@@ -3600,11 +3610,14 @@ def query_segments(
             status=status, search=search, stage=stage, file_id=file_id, part_id=part_id
         )
         clauses = ["segments.is_empty = 0", *stage_clauses]
-        if bool(file_id) != bool(part_id):
+        if part_id and not file_id:
             raise ProjectError("file_id 与 part_id 必须同时提供")
         if file_id and part_id:
             clauses.extend(["segments.file_id = ?", "segments.part_id = ?"])
             params.extend([file_id, part_id])
+        elif file_id:
+            clauses.append("segments.file_id = ?")
+            params.append(file_id)
         params.extend([limit, offset])
         query = f"""
             SELECT segments.segment_id, segments.file_id, segments.line_index,
@@ -3687,11 +3700,14 @@ def segment_ids(
             status=status, search=search, stage=stage, file_id=file_id, part_id=part_id
         )
         clauses = ["segments.is_empty = 0", *stage_clauses]
-        if bool(file_id) != bool(part_id):
+        if part_id and not file_id:
             raise ProjectError("file_id 与 part_id 必须同时提供")
         if file_id and part_id:
             clauses.extend(["segments.file_id = ?", "segments.part_id = ?"])
             params.extend([file_id, part_id])
+        elif file_id:
+            clauses.append("segments.file_id = ?")
+            params.append(file_id)
         query = f"""
             SELECT segments.segment_id
             FROM files CROSS JOIN segments ON segments.file_id = files.file_id
@@ -4065,7 +4081,7 @@ def segment_page_counts(
     status: str | None = None, search: str | None = None, stage: str = "translation",
 ) -> tuple[int, int]:
     """Return matching total and completed count from one aggregation."""
-    if bool(file_id) != bool(part_id):
+    if part_id and not file_id:
         raise ProjectError("file_id 与 part_id 必须同时提供")
     if status == "completed":
         count = segment_count(project, file_id=file_id, part_id=part_id, status=status, search=search, stage=stage)
@@ -4073,8 +4089,15 @@ def segment_page_counts(
     if status is None and not search:
         # Avoid materializing a LEFT JOIN for the unfiltered first page.
         join, params = _stage_cte(stage, file_id=file_id, part_id=part_id)
-        boundary = " AND segments.file_id = ? AND segments.part_id = ?" if file_id else ""
-        bounds = [file_id, part_id] if file_id else []
+        if file_id and part_id:
+            boundary = " AND segments.file_id = ? AND segments.part_id = ?"
+            bounds = [file_id, part_id]
+        elif file_id:
+            boundary = " AND segments.file_id = ?"
+            bounds = [file_id]
+        else:
+            boundary = ""
+            bounds = []
         connection = _with_db(project)
         try:
             row = connection.execute(
@@ -4101,6 +4124,9 @@ def segment_page_counts(
     if file_id and part_id:
         clauses.extend(["segments.file_id = ?", "segments.part_id = ?"])
         params.extend([file_id, part_id])
+    elif file_id:
+        clauses.append("segments.file_id = ?")
+        params.append(file_id)
     connection = _with_db(project)
     try:
         row = connection.execute(

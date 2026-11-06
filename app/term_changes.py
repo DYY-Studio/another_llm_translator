@@ -62,7 +62,7 @@ def change_details(project: Path, library: dict[str, Any]) -> dict[str, Any]:
                 "category": term.get("category"), "aliases": term.get("aliases", []),
                 "candidate_id": record_id, "source_range": [],
             })
-            for source in records[record_id]["source_range"]:
+            for source in records[record_id]["source_range"][:1]:
                 location = {name: source[name] for name in ("segment_id", "file_id", "part_id", "start", "end")}
                 identity = tuple(location.values())
                 seen = locations.setdefault(signature, set())

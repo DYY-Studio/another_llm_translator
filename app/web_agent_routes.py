@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
+from copy import deepcopy
 import json
+import unicodedata
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -23,6 +27,7 @@ from .execution import (
     select_scope,
     stage_fingerprint,
     stage_result_path,
+    unavailable_usage,
 )
 from .locking import project_write_lock
 from .plugins import normalize_model_text
@@ -32,9 +37,11 @@ from .repetition_consistency import (
     draft_path as repetition_draft_path,
     parse_comparison,
     read_draft as read_repetition_draft,
+    repetition_plan,
 )
 from .sqlite_storage import (
     append_jsonl,
+    append_jsonl_records,
     append_stage_results,
     atomic_write_text,
     latest_stage_states,
@@ -43,6 +50,10 @@ from .sqlite_storage import (
     read_repetition_run,
     record_exists,
     record_header,
+    segment_ids as query_segment_ids,
+    terminology_scan_state,
+    utc_now,
+    write_json,
     write_repetition_state,
 )
 from .stage_runtime import (
@@ -85,7 +96,7 @@ def _repair_guidance(
     return instructions
 
 
-def _parse_scope(payload: dict[str, Any]) -> Scope:
+def _parse_scope(root: Path, payload: dict[str, Any]) -> Scope:
     raw = payload.get("scope") or {}
     if not isinstance(raw, dict):
         raise UsageError("scope 必须是对象")
@@ -99,9 +110,22 @@ def _parse_scope(payload: dict[str, Any]) -> Scope:
     force = raw.get("force", False)
     if not isinstance(force, bool):
         raise UsageError("scope.force 必须是布尔值")
+    only_file = raw.get("only_file")
+    only_part = raw.get("only_part")
+    if only_part is not None:
+        if not isinstance(only_part, str) or not only_part:
+            raise UsageError("scope.only_part 必须是非空字符串")
+        if not isinstance(only_file, str) or not only_file:
+            raise UsageError("scope.only_part 必须与 scope.only_file 同时提供")
+        if segment_ids is not None or raw.get("from_file") or raw.get("only_segment"):
+            raise UsageError("scope.only_part 不能与 from_file、only_segment 或 segment_ids 同时使用")
+        resolved_ids = query_segment_ids(root, file_id=only_file, part_id=only_part)
+        if not resolved_ids:
+            raise UsageError(f"指定章节范围为空或不存在：{only_file} / {only_part}")
+        return Scope(segment_ids=tuple(resolved_ids), force=force)
     return Scope(
         from_file=raw.get("from_file"),
-        only_file=raw.get("only_file"),
+        only_file=only_file,
         only_segment=raw.get("only_segment"),
         segment_ids=tuple(dict.fromkeys(segment_ids)) if segment_ids else None,
         force=force,
@@ -130,6 +154,57 @@ def _agent_run_progress(
         else:
             pending.append(item)
     return pending, completed_count, len(pending)
+
+
+def _parse_slice_spec(
+    run_id: str, payload: dict[str, Any]
+) -> tuple[str, str | None, int | None, int | None]:
+    part_spec = payload.get("part_id")
+    line_start = payload.get("line_start")
+    line_end = payload.get("line_end")
+    if part_spec is not None and (not isinstance(part_spec, str) or not part_spec):
+        raise UsageError("part_id 必须是非空字符串")
+    if line_start is not None and (
+        not isinstance(line_start, int) or isinstance(line_start, bool) or line_start < 0
+    ):
+        raise UsageError("line_start 必须是非负整数")
+    if line_end is not None and (
+        not isinstance(line_end, int) or isinstance(line_end, bool) or line_end < 0
+    ):
+        raise UsageError("line_end 必须是非负整数")
+    if "@" in run_id:
+        run_id, spec = run_id.split("@", 1)
+        if ":" in spec:
+            spec_part, rng = spec.rsplit(":", 1)
+            if "-" in rng:
+                s_str, e_str = rng.split("-", 1)
+                if s_str.isdigit() and e_str.isdigit():
+                    part_spec = spec_part
+                    line_start = int(s_str)
+                    line_end = int(e_str)
+        if not part_spec:
+            part_spec = spec
+    return run_id, part_spec, line_start, line_end
+
+
+def _filter_slice(
+    items: list[dict[str, Any]],
+    part_spec: str | None,
+    line_start: int | None,
+    line_end: int | None,
+) -> list[dict[str, Any]]:
+    if isinstance(part_spec, str) and part_spec:
+        items = [
+            item
+            for item in items
+            if str(item["part_id"]) == part_spec
+            or str(item["part_id"]).endswith("/" + part_spec)
+        ]
+    if isinstance(line_start, int) and not isinstance(line_start, bool):
+        items = [item for item in items if int(item["line_index"]) >= line_start]
+    if isinstance(line_end, int) and not isinstance(line_end, bool):
+        items = [item for item in items if int(item["line_index"]) < line_end]
+    return items
 
 
 def register_agent_routes(
@@ -244,7 +319,7 @@ def register_agent_routes(
             raise UsageError("allow_warnings 必须是布尔值")
 
         def _execute() -> dict[str, Any]:
-            with project_write_lock(root):
+            with project_write_lock(root, wait_seconds=15.0):
                 store = WebStore(root)
                 files = load_source_files(root)
                 segment = store._require_segment(segment_id, files=files, with_adapter_state=True)
@@ -402,7 +477,7 @@ def register_agent_routes(
         stage = payload.get("stage")
         if stage not in AGENT_STAGES:
             raise UsageError(f"Agent 批次执行仅支持 translation、proofreading 或 polishing：{stage}")
-        scope = _parse_scope(payload)
+        scope = _parse_scope(root, payload)
         run_action = payload.get("run_action")
         if run_action not in {None, "resume", "decline"}:
             raise UsageError("run_action 必须是 resume、decline 或 null")
@@ -593,6 +668,7 @@ def register_agent_routes(
         name: str, run_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         root = project(name)
+        run_id, part_spec, line_start, line_end = _parse_slice_spec(run_id, payload)
         safe_id = _safe_run_id(run_id)
         if app.state.tasks.has_conflicting_task(root, safe_id):
             raise UsageError("项目存在其他运行中的后台任务")
@@ -630,6 +706,8 @@ def register_agent_routes(
             pending, completed_count, remaining_count = _agent_run_progress(
                 root, manifest, selected
             )
+            pending = _filter_slice(pending, part_spec, line_start, line_end)
+            slice_remaining = len(pending)
             if not pending:
                 return {
                     "run_id": safe_id,
@@ -639,6 +717,7 @@ def register_agent_routes(
                     "reference_context": [],
                     "completed_count": completed_count,
                     "remaining_pending_count": 0,
+                    "total_remaining_pending_count": remaining_count,
                 }
             first = pending[0]
             boundary = (str(first["file_id"]), str(first["part_id"]))
@@ -710,14 +789,15 @@ def register_agent_routes(
             batch_items = []
             for item in batch:
                 sid = str(item["segment_id"])
+                src = str(item["source"])
+                ms = segment_model_source(item)
                 entry: dict[str, Any] = {
                     "segment_id": sid,
-                    "file_id": boundary[0],
-                    "part_id": boundary[1],
                     "line_index": int(item["line_index"]),
-                    "source": str(item["source"]),
-                    "model_source": segment_model_source(item),
+                    "source": src,
                 }
+                if ms is not None and ms != src:
+                    entry["model_source"] = ms
                 if stage in REVIEW_STAGES and sid in bases:
                     entry["current_text"] = bases[sid]["text"]
                 batch_items.append(entry)
@@ -732,7 +812,8 @@ def register_agent_routes(
                 "terms": terms,
                 "reference_context": reference_context,
                 "completed_count": completed_count,
-                "remaining_pending_count": remaining_count,
+                "remaining_pending_count": slice_remaining,
+                "total_remaining_pending_count": remaining_count,
                 "warnings": warnings,
             }
 
@@ -743,6 +824,7 @@ def register_agent_routes(
         name: str, run_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         root = project(name)
+        run_id, part_spec, line_start, line_end = _parse_slice_spec(run_id, payload)
         safe_id = _safe_run_id(run_id)
         if app.state.tasks.has_conflicting_task(root, safe_id):
             raise UsageError("项目存在其他运行中的后台任务")
@@ -754,7 +836,7 @@ def register_agent_routes(
             raise UsageError("allow_warnings 必须是布尔值")
 
         def _submit() -> dict[str, Any]:
-            with project_write_lock(root):
+            with project_write_lock(root, wait_seconds=15.0):
                 manifest_path = root / "runs" / safe_id / "manifest.json"
                 if not record_exists(root, manifest_path):
                     raise UsageError(f"Run 不存在：{safe_id}")
@@ -780,7 +862,8 @@ def register_agent_routes(
                     or manifest.get("stage_fingerprint")
                     or store._fingerprint(stage)
                 )
-                terms_revision = store._terms_revision()
+                val_library = load_terms(root, resolve_knowledge=False)
+                terms_revision = int(val_library["terms_revision"]) if val_library else None
                 bases = (
                     _base_results(root, stage, segment_ids=list(selected_by_id))
                     if stage in REVIEW_STAGES
@@ -804,7 +887,11 @@ def register_agent_routes(
                     segment = selected_by_id[sid]
 
                     if stage == "translation":
-                        raw_text = entry.get("text")
+                        raw_text = (
+                            entry.get("text")
+                            if "text" in entry
+                            else entry.get("translation")
+                        )
                         if not isinstance(raw_text, str) or not raw_text.strip():
                             rejected_items.append(
                                 {
@@ -829,7 +916,9 @@ def register_agent_routes(
                                 }
                             )
                             continue
-                        context = store._translation_validation_context(segment, text)
+                        context = store._translation_validation_context(
+                            segment, text, library=val_library, load_library=False
+                        )
                         findings = asyncio.run(validate_translation_text(context, validators))
                         guidance = _repair_guidance(findings, validators, language)
                         if findings and not allow_warnings:
@@ -905,7 +994,9 @@ def register_agent_routes(
                                     }
                                 )
                                 continue
-                            context = store._translation_validation_context(segment, suggested_text)
+                            context = store._translation_validation_context(
+                                segment, suggested_text, library=val_library, load_library=False
+                            )
                             findings = asyncio.run(validate_translation_text(context, validators))
                             guidance = _repair_guidance(findings, validators, language)
                             if findings and not allow_warnings:
@@ -945,16 +1036,18 @@ def register_agent_routes(
 
                 if records:
                     append_stage_results(root, records)
-                _, completed_count, remaining_count = _agent_run_progress(
+                pending, completed_count, remaining_count = _agent_run_progress(
                     root, manifest, selected
                 )
+                slice_pending = _filter_slice(pending, part_spec, line_start, line_end)
                 return {
                     "run_id": safe_id,
                     "stage": stage,
                     "committed_ids": committed_ids,
                     "rejected_items": rejected_items,
                     "completed_count": completed_count,
-                    "remaining_pending_count": remaining_count,
+                    "remaining_pending_count": len(slice_pending),
+                    "total_remaining_pending_count": remaining_count,
                 }
 
         result = await run_blocking(_submit)
@@ -980,9 +1073,14 @@ def register_agent_routes(
         reason = payload.get("reason")
         if reason is not None and not isinstance(reason, str):
             raise UsageError("reason 必须是字符串")
+        accept_remaining = payload.get("accept_remaining", False)
+        if not isinstance(accept_remaining, bool):
+            raise UsageError("accept_remaining 必须是布尔值")
+        if accept_remaining and action != "complete":
+            raise UsageError("accept_remaining 仅在 action='complete' 时可用")
 
         def _finish() -> dict[str, Any]:
-            with project_write_lock(root):
+            with project_write_lock(root, wait_seconds=15.0):
                 run_dir = root / "runs" / safe_id
                 manifest_path = run_dir / "manifest.json"
                 if not record_exists(root, manifest_path):
@@ -993,19 +1091,64 @@ def register_agent_routes(
                 if manifest.get("status") != "running":
                     raise UsageError(f"Run {safe_id} 已处于 {manifest.get('status')} 状态")
                 stage = str(manifest["stage"])
-                _, _, files, segments = _project_context(root, stage=stage)
+                if accept_remaining and stage not in REVIEW_STAGES:
+                    raise UsageError("accept_remaining 仅支持 proofreading 或 polishing 阶段")
+                _, metadata, files, segments = _project_context(root, stage=stage)
                 scope = scope_from_run(root, safe_id, dry_run=False)
                 selected = select_scope(segments, files, scope)
-                _, completed_count, remaining_count = _agent_run_progress(
+                pending, completed_count, remaining_count = _agent_run_progress(
                     root, manifest, selected
                 )
-                reused_count = int(manifest.get("reused_segment_count", 0))
-                newly_completed = max(0, completed_count - reused_count)
+                accepted_remaining_count = 0
                 if action == "complete":
+                    if accept_remaining and pending:
+                        store = WebStore(root)
+                        continuations = manifest.get("continuations") or []
+                        fingerprint = str(
+                            (continuations[-1].get("stage_fingerprint") if continuations else None)
+                            or manifest.get("stage_fingerprint")
+                            or store._fingerprint(stage)
+                        )
+                        val_library = load_terms(root, resolve_knowledge=False)
+                        terms_revision = (
+                            int(val_library["terms_revision"]) if val_library else None
+                        )
+                        pending_ids = [str(item["segment_id"]) for item in pending]
+                        bases = _base_results(root, stage, segment_ids=pending_ids)
+                        missing_bases = [sid for sid in pending_ids if sid not in bases]
+                        if missing_bases:
+                            raise UsageError(
+                                f"部分待确认 Segment 缺少可用基准结果：{', '.join(missing_bases[:10])}"
+                            )
+                        records = [
+                            record_header(
+                                "stage_result",
+                                str(metadata["project_id"]),
+                                stage=stage,
+                                segment_id=sid,
+                                status="completed",
+                                review_status="accepted",
+                                suggested_text=None,
+                                reason=None,
+                                base_result_id=bases[sid]["record_id"],
+                                stage_fingerprint=fingerprint,
+                                terms_revision=terms_revision,
+                                run_id=safe_id,
+                                request_id=None,
+                                origin="agent_mcp",
+                            )
+                            for sid in pending_ids
+                        ]
+                        append_stage_results(root, records)
+                        accepted_remaining_count = len(records)
+                        completed_count += accepted_remaining_count
+                        remaining_count = 0
                     if remaining_count > 0:
                         raise IncompleteError(
                             f"Run {safe_id} 仍有 {remaining_count} 个待处理 Segment 未完成；请继续处理或使用 action='interrupt'"
                         )
+                    reused_count = int(manifest.get("reused_segment_count", 0))
+                    newly_completed = max(0, completed_count - reused_count)
                     finalize_run(
                         root,
                         run_dir,
@@ -1017,6 +1160,8 @@ def register_agent_routes(
                     )
                     final_status = "completed"
                 else:
+                    reused_count = int(manifest.get("reused_segment_count", 0))
+                    newly_completed = max(0, completed_count - reused_count)
                     _interrupt_run(
                         root,
                         manifest,
@@ -1031,6 +1176,7 @@ def register_agent_routes(
                     "completed": newly_completed,
                     "reused": reused_count,
                     "pending": remaining_count,
+                    "accepted_remaining": accepted_remaining_count,
                 }
 
         summary = await run_blocking(_finish)
@@ -1056,6 +1202,7 @@ def register_agent_routes(
             raise UsageError("window 必须是 1 到 30 之间的整数")
 
         def _inspect() -> dict[str, Any]:
+            nonlocal source_text
             draft = current_repetition_draft(root)
             target_group: dict[str, Any] | None = None
             if draft is not None:
@@ -1192,3 +1339,340 @@ def register_agent_routes(
                 }
 
         return await run_blocking(_update)
+
+    @app.post("/api/v1/projects/{name}/agent/repetition/scan")
+    async def scan_repetition_live(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        only_file = payload.get("only_file")
+        if only_file is not None and (not isinstance(only_file, str) or not only_file):
+            raise UsageError("only_file 必须是非空字符串")
+        only_part = payload.get("only_part")
+        if only_part is not None:
+            if not isinstance(only_part, str) or not only_part:
+                raise UsageError("only_part 必须是非空字符串")
+            if not only_file:
+                raise UsageError("only_part 必须与 only_file 同时提供")
+        exclude_punctuation_only = payload.get("exclude_punctuation_only", True)
+        if not isinstance(exclude_punctuation_only, bool):
+            raise UsageError("exclude_punctuation_only 必须是布尔值")
+        create_draft = payload.get("create_draft", False)
+        if not isinstance(create_draft, bool):
+            raise UsageError("create_draft 必须是布尔值")
+        replace_draft = payload.get("replace_draft", False)
+        if not isinstance(replace_draft, bool):
+            raise UsageError("replace_draft 必须是布尔值")
+        offset = payload.get("offset", 0)
+        limit = payload.get("limit", 50)
+        if (
+            not isinstance(offset, int)
+            or isinstance(offset, bool)
+            or offset < 0
+            or not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 200
+        ):
+            raise UsageError("offset/limit 分页参数无效")
+
+        def _scan() -> dict[str, Any]:
+            if create_draft:
+                if only_part:
+                    raise UsageError(
+                        "正式重复译文草案仅支持整个项目或单个 File（only_file），章节级范围请使用实时扫描（create_draft=False）"
+                    )
+                if app.state.tasks.is_project_running(root):
+                    raise UsageError("项目存在后台任务，结束后才能创建重复译文草案")
+                with project_write_lock(root):
+                    old = read_repetition_run(root, ("pending",))
+                    if old is not None and not replace_draft:
+                        raise UsageError(
+                            "存在未处理的重复译文草案，请先应用、丢弃或指定 replace_draft=True"
+                        )
+                    for running in find_running_runs(root, "repetition_consistency"):
+                        _interrupt_run(root, running, reason="resume_declined")
+                    plan = repetition_plan(
+                        root,
+                        Scope(only_file=only_file),
+                        exclude_punctuation_only=exclude_punctuation_only,
+                        screening_enabled=False,
+                        final_review=False,
+                        estimate_usage=False,
+                    )
+                    if not plan["groups"]:
+                        raise UsageError("所选范围内没有重复原文译文差异组")
+                    run_id, run_dir = create_run(
+                        root,
+                        config=plan["config"],
+                        stage="repetition_consistency",
+                        fingerprint=plan["fingerprint"],
+                        prompt=plan["prompt"],
+                        selected_count=plan["selected"],
+                        requested_count=plan["selected"],
+                        reused_count=0,
+                        details={
+                            "executor": "agent_mcp",
+                            "final_review": False,
+                            "screening_enabled": False,
+                            "exclude_punctuation_only": exclude_punctuation_only,
+                            "excluded_punctuation_groups": plan[
+                                "excluded_punctuation_groups"
+                            ],
+                            "prompt_language": plan["language"],
+                            "terms_revision": plan["terms_revision"],
+                            "repetition_checkpoint": 2,
+                            "repetition_protocol": 3,
+                            "repetition_input_fingerprint": plan[
+                                "input_fingerprint"
+                            ],
+                            "usage_invocation_count": 0,
+                            "draft_status": "generating",
+                            "scope": {"only_file": only_file},
+                            "choices": {},
+                        },
+                    )
+                    atomic_write_text(
+                        run_dir / "repetition_terms.json",
+                        json.dumps(
+                            {
+                                "terms_revision": plan["terms_revision"],
+                                "terms": plan["terms"],
+                                "groups": {
+                                    g["id"]: {
+                                        o["id"]: o["terms"]
+                                        for o in g["occurrences"]
+                                    }
+                                    for g in plan["groups"]
+                                },
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        + "\n",
+                    )
+                    finalize_run(
+                        root,
+                        run_dir,
+                        status="completed",
+                        completed=plan["selected"],
+                        failed=0,
+                        usage=unavailable_usage(),
+                        usage_invoked=False,
+                        warnings=plan["warnings"],
+                    )
+                    draft_groups = deepcopy(plan["groups"])
+                    for group in draft_groups:
+                        for key in (
+                            "screening_execution_index",
+                            "screening_input_tokens",
+                            "comparison_input_tokens",
+                        ):
+                            group.pop(key, None)
+                        for occurrence in group["occurrences"]:
+                            occurrence.pop("terms", None)
+                        members = [o["id"] for o in group["occurrences"]]
+                        group.update(
+                            screening="disabled",
+                            confidence=None,
+                            over_budget=False,
+                            proposals=[],
+                            keep=[],
+                            uncertain=members,
+                        )
+                    draft = {
+                        "run_id": run_id,
+                        "groups": draft_groups,
+                        "evidence": plan["evidence"],
+                        "sources": plan["sources"],
+                        "context_segments": 3,
+                        "scope": {"only_file": only_file},
+                        "created_at": utc_now(),
+                    }
+                    atomic_write_text(
+                        repetition_draft_path(root, run_id),
+                        json.dumps(draft, ensure_ascii=False, separators=(",", ":")) + "\n",
+                    )
+                    manifest = read_json(root, run_dir / "manifest.json")
+                    manifest.update(draft_status="pending", choices={})
+                    manifests = [manifest]
+                    if old and old["run_id"] != run_id:
+                        old["draft_status"] = "replaced"
+                        manifests.append(old)
+                    warnings = write_repetition_state(
+                        root, records=[], manifests=manifests
+                    )
+                    if warnings:
+                        manifest["warnings"] = list(
+                            dict.fromkeys([*manifest.get("warnings", []), *warnings])
+                        )
+                        write_json(root, run_dir / "manifest.json", manifest)
+                    return {
+                        "created_draft_run_id": run_id,
+                        "total_groups": len(draft_groups),
+                        "excluded_punctuation_groups": plan["excluded_punctuation_groups"],
+                        "warnings": warnings,
+                    }
+
+            segments = load_segments(root)
+            selected = [
+                s
+                for s in segments
+                if not s["is_empty"]
+                and (only_file is None or s["file_id"] == only_file)
+                and (only_part is None or s["part_id"] == only_part)
+            ]
+            if not selected:
+                raise UsageError("指定扫描范围为空或不存在")
+            states = latest_stage_states(
+                root, "translation", [str(s["segment_id"]) for s in selected]
+            )
+            bases = {
+                sid: state["completed"]
+                for sid, state in states.items()
+                if state.get("completed") is not None
+            }
+            by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for s in selected:
+                sid = str(s["segment_id"])
+                if sid in bases:
+                    by_source[str(s["source"])].append(s)
+            candidates = [
+                items
+                for items in by_source.values()
+                if len(items) > 1
+                and len({bases[str(s["segment_id"])]["text"] for s in items}) > 1
+            ]
+            excluded_punctuation_groups = 0
+            if exclude_punctuation_only:
+                retained = []
+                for items in candidates:
+                    variants = {bases[str(s["segment_id"])]["text"] for s in items}
+                    bodies = {
+                        "".join(
+                            c for c in text if not unicodedata.category(c).startswith("P")
+                        )
+                        for text in variants
+                    }
+                    if len(bodies) == 1:
+                        excluded_punctuation_groups += 1
+                    else:
+                        retained.append(items)
+                candidates = retained
+
+            groups = []
+            for idx, items in enumerate(candidates, 1):
+                variants = list(
+                    dict.fromkeys(bases[str(s["segment_id"])]["text"] for s in items)
+                )
+                groups.append(
+                    {
+                        "group_index": idx,
+                        "source": str(items[0]["source"]),
+                        "translations": variants,
+                        "occurrences": [
+                            {
+                                "occurrence_id": str(occ_idx),
+                                "segment_id": str(s["segment_id"]),
+                                "file_id": s["file_id"],
+                                "part_id": s["part_id"],
+                                "line_index": s["line_index"],
+                                "translation": bases[str(s["segment_id"])]["text"],
+                            }
+                            for occ_idx, s in enumerate(items, 1)
+                        ],
+                    }
+                )
+            return {
+                "total_segments_in_scope": len(selected),
+                "translated_segments_in_scope": len(bases),
+                "excluded_punctuation_groups": excluded_punctuation_groups,
+                "total_groups": len(groups),
+                "groups": groups[offset : offset + limit],
+            }
+
+        return await run_blocking(_scan)
+
+    @app.post("/api/v1/projects/{name}/agent/terms/complete-scan")
+    async def complete_term_scan(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能标记术语扫描状态")
+        scope_payload = (
+            payload.get("scope")
+            if isinstance(payload.get("scope"), dict)
+            else {
+                k: payload[k]
+                for k in ("from_file", "only_file", "only_part", "only_segment", "segment_ids")
+                if k in payload and payload[k] is not None
+            }
+        )
+        scope = _parse_scope(root, {"scope": scope_payload})
+
+        def _mark() -> dict[str, Any]:
+            with project_write_lock(root, wait_seconds=15.0):
+                store = WebStore(root)
+                files = load_source_files(root)
+                segments = load_segments(root)
+                all_nonempty = [s for s in segments if not s["is_empty"]]
+                selected = select_scope(segments, files, scope)
+                active_path = root / "terminology" / "active_task.json"
+                active = (
+                    read_json(root, active_path)
+                    if record_exists(root, active_path)
+                    else None
+                )
+                reset_task = payload.get("reset_task") is True
+                if active is None or reset_task or not active.get("active_task_id"):
+                    task_id = f"TERM-TASK-{uuid.uuid4().hex[:10].upper()}"
+                else:
+                    task_id = str(active["active_task_id"])
+                all_ids = [str(s["segment_id"]) for s in all_nonempty]
+                done_ids, _ = terminology_scan_state(root, task_id, all_ids)
+                fingerprint = store._fingerprint("terminology")
+                new_records = [
+                    record_header(
+                        "terminology_scan",
+                        store.project_id,
+                        stage="terminology",
+                        segment_id=str(s["segment_id"]),
+                        status="completed",
+                        run_id=None,
+                        request_id=None,
+                        active_task_id=task_id,
+                        stage_fingerprint=fingerprint,
+                        origin="agent_mcp",
+                    )
+                    for s in selected
+                    if str(s["segment_id"]) not in done_ids
+                ]
+                if new_records:
+                    append_jsonl_records(
+                        root, root / "terminology" / "scans.jsonl", new_records
+                    )
+                    done_ids.update(r["segment_id"] for r in new_records)
+                all_done = len(done_ids) >= len(all_nonempty)
+                library = load_terms(root, resolve_knowledge=False)
+                revision = int(library["terms_revision"]) if library else 0
+                active_record = record_header(
+                    "terminology_task",
+                    store.project_id,
+                    record_id=task_id,
+                    active_task_id=task_id,
+                    status="completed" if all_done else "active",
+                    initial_stage_fingerprint=(active or {}).get("initial_stage_fingerprint")
+                    or fingerprint,
+                    terms_revision=revision,
+                )
+                write_json(root, active_path, active_record)
+                return {
+                    "active_task_id": task_id,
+                    "status": active_record["status"],
+                    "newly_marked": len(new_records),
+                    "completed_segments": len(done_ids),
+                    "total_segments": len(all_nonempty),
+                    "stage_completion": store.stage_completion()["terminology"],
+                }
+
+        return await run_blocking(_mark)
