@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
+from copy import deepcopy
 import json
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -23,6 +26,7 @@ from .execution import (
     select_scope,
     stage_fingerprint,
     stage_result_path,
+    unavailable_usage,
 )
 from .locking import project_write_lock
 from .plugins import normalize_model_text
@@ -32,6 +36,7 @@ from .repetition_consistency import (
     draft_path as repetition_draft_path,
     parse_comparison,
     read_draft as read_repetition_draft,
+    repetition_plan,
 )
 from .sqlite_storage import (
     append_jsonl,
@@ -43,6 +48,9 @@ from .sqlite_storage import (
     read_repetition_run,
     record_exists,
     record_header,
+    segment_ids as query_segment_ids,
+    utc_now,
+    write_json,
     write_repetition_state,
 )
 from .stage_runtime import (
@@ -85,7 +93,7 @@ def _repair_guidance(
     return instructions
 
 
-def _parse_scope(payload: dict[str, Any]) -> Scope:
+def _parse_scope(root: Path, payload: dict[str, Any]) -> Scope:
     raw = payload.get("scope") or {}
     if not isinstance(raw, dict):
         raise UsageError("scope 必须是对象")
@@ -99,9 +107,22 @@ def _parse_scope(payload: dict[str, Any]) -> Scope:
     force = raw.get("force", False)
     if not isinstance(force, bool):
         raise UsageError("scope.force 必须是布尔值")
+    only_file = raw.get("only_file")
+    only_part = raw.get("only_part")
+    if only_part is not None:
+        if not isinstance(only_part, str) or not only_part:
+            raise UsageError("scope.only_part 必须是非空字符串")
+        if not isinstance(only_file, str) or not only_file:
+            raise UsageError("scope.only_part 必须与 scope.only_file 同时提供")
+        if segment_ids is not None or raw.get("from_file") or raw.get("only_segment"):
+            raise UsageError("scope.only_part 不能与 from_file、only_segment 或 segment_ids 同时使用")
+        resolved_ids = query_segment_ids(root, file_id=only_file, part_id=only_part)
+        if not resolved_ids:
+            raise UsageError(f"指定章节范围为空或不存在：{only_file} / {only_part}")
+        return Scope(segment_ids=tuple(resolved_ids), force=force)
     return Scope(
         from_file=raw.get("from_file"),
-        only_file=raw.get("only_file"),
+        only_file=only_file,
         only_segment=raw.get("only_segment"),
         segment_ids=tuple(dict.fromkeys(segment_ids)) if segment_ids else None,
         force=force,
@@ -402,7 +423,7 @@ def register_agent_routes(
         stage = payload.get("stage")
         if stage not in AGENT_STAGES:
             raise UsageError(f"Agent 批次执行仅支持 translation、proofreading 或 polishing：{stage}")
-        scope = _parse_scope(payload)
+        scope = _parse_scope(root, payload)
         run_action = payload.get("run_action")
         if run_action not in {None, "resume", "decline"}:
             raise UsageError("run_action 必须是 resume、decline 或 null")
@@ -1192,3 +1213,255 @@ def register_agent_routes(
                 }
 
         return await run_blocking(_update)
+
+    @app.post("/api/v1/projects/{name}/agent/repetition/scan")
+    async def scan_repetition_live(
+        name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        root = project(name)
+        only_file = payload.get("only_file")
+        if only_file is not None and (not isinstance(only_file, str) or not only_file):
+            raise UsageError("only_file 必须是非空字符串")
+        only_part = payload.get("only_part")
+        if only_part is not None:
+            if not isinstance(only_part, str) or not only_part:
+                raise UsageError("only_part 必须是非空字符串")
+            if not only_file:
+                raise UsageError("only_part 必须与 only_file 同时提供")
+        exclude_punctuation_only = payload.get("exclude_punctuation_only", True)
+        if not isinstance(exclude_punctuation_only, bool):
+            raise UsageError("exclude_punctuation_only 必须是布尔值")
+        create_draft = payload.get("create_draft", False)
+        if not isinstance(create_draft, bool):
+            raise UsageError("create_draft 必须是布尔值")
+        replace_draft = payload.get("replace_draft", False)
+        if not isinstance(replace_draft, bool):
+            raise UsageError("replace_draft 必须是布尔值")
+        offset = payload.get("offset", 0)
+        limit = payload.get("limit", 50)
+        if (
+            not isinstance(offset, int)
+            or isinstance(offset, bool)
+            or offset < 0
+            or not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 200
+        ):
+            raise UsageError("offset/limit 分页参数无效")
+
+        def _scan() -> dict[str, Any]:
+            if create_draft:
+                if only_part:
+                    raise UsageError(
+                        "正式重复译文草案仅支持整个项目或单个 File（only_file），章节级范围请使用实时扫描（create_draft=False）"
+                    )
+                if app.state.tasks.is_project_running(root):
+                    raise UsageError("项目存在后台任务，结束后才能创建重复译文草案")
+                with project_write_lock(root):
+                    old = read_repetition_run(root, ("pending",))
+                    if old is not None and not replace_draft:
+                        raise UsageError(
+                            "存在未处理的重复译文草案，请先应用、丢弃或指定 replace_draft=True"
+                        )
+                    for running in find_running_runs(root, "repetition_consistency"):
+                        _interrupt_run(root, running, reason="resume_declined")
+                    plan = repetition_plan(
+                        root,
+                        Scope(only_file=only_file),
+                        exclude_punctuation_only=exclude_punctuation_only,
+                        screening_enabled=False,
+                        final_review=False,
+                        estimate_usage=False,
+                    )
+                    if not plan["groups"]:
+                        raise UsageError("所选范围内没有重复原文译文差异组")
+                    run_id, run_dir = create_run(
+                        root,
+                        config=plan["config"],
+                        stage="repetition_consistency",
+                        fingerprint=plan["fingerprint"],
+                        prompt=plan["prompt"],
+                        selected_count=plan["selected"],
+                        requested_count=plan["selected"],
+                        reused_count=0,
+                        details={
+                            "executor": "agent_mcp",
+                            "final_review": False,
+                            "screening_enabled": False,
+                            "exclude_punctuation_only": exclude_punctuation_only,
+                            "excluded_punctuation_groups": plan[
+                                "excluded_punctuation_groups"
+                            ],
+                            "prompt_language": plan["language"],
+                            "terms_revision": plan["terms_revision"],
+                            "repetition_checkpoint": 2,
+                            "repetition_protocol": 3,
+                            "repetition_input_fingerprint": plan[
+                                "input_fingerprint"
+                            ],
+                            "usage_invocation_count": 0,
+                            "draft_status": "generating",
+                            "scope": {"only_file": only_file},
+                            "choices": {},
+                        },
+                    )
+                    atomic_write_text(
+                        run_dir / "repetition_terms.json",
+                        json.dumps(
+                            {
+                                "terms_revision": plan["terms_revision"],
+                                "terms": plan["terms"],
+                                "groups": {
+                                    g["id"]: {
+                                        o["id"]: o["terms"]
+                                        for o in g["occurrences"]
+                                    }
+                                    for g in plan["groups"]
+                                },
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        + "\n",
+                    )
+                    finalize_run(
+                        root,
+                        run_dir,
+                        status="completed",
+                        completed=plan["selected"],
+                        failed=0,
+                        usage=unavailable_usage(),
+                        usage_invoked=False,
+                        warnings=plan["warnings"],
+                    )
+                    draft_groups = deepcopy(plan["groups"])
+                    for group in draft_groups:
+                        for key in (
+                            "screening_execution_index",
+                            "screening_input_tokens",
+                            "comparison_input_tokens",
+                        ):
+                            group.pop(key, None)
+                        for occurrence in group["occurrences"]:
+                            occurrence.pop("terms", None)
+                        members = [o["id"] for o in group["occurrences"]]
+                        group.update(
+                            screening="disabled",
+                            confidence=None,
+                            over_budget=False,
+                            proposals=[],
+                            keep=[],
+                            uncertain=members,
+                        )
+                    draft = {
+                        "run_id": run_id,
+                        "groups": draft_groups,
+                        "evidence": plan["evidence"],
+                        "sources": plan["sources"],
+                        "context_segments": 3,
+                        "scope": {"only_file": only_file},
+                        "created_at": utc_now(),
+                    }
+                    atomic_write_text(
+                        repetition_draft_path(root, run_id),
+                        json.dumps(draft, ensure_ascii=False, separators=(",", ":")) + "\n",
+                    )
+                    manifest = read_json(root, run_dir / "manifest.json")
+                    manifest.update(draft_status="pending", choices={})
+                    manifests = [manifest]
+                    if old and old["run_id"] != run_id:
+                        old["draft_status"] = "replaced"
+                        manifests.append(old)
+                    warnings = write_repetition_state(
+                        root, records=[], manifests=manifests
+                    )
+                    if warnings:
+                        manifest["warnings"] = list(
+                            dict.fromkeys([*manifest.get("warnings", []), *warnings])
+                        )
+                        write_json(root, run_dir / "manifest.json", manifest)
+                    return {
+                        "created_draft_run_id": run_id,
+                        "total_groups": len(draft_groups),
+                        "excluded_punctuation_groups": plan["excluded_punctuation_groups"],
+                        "warnings": warnings,
+                    }
+
+            segments = load_segments(root)
+            selected = [
+                s
+                for s in segments
+                if not s["is_empty"]
+                and (only_file is None or s["file_id"] == only_file)
+                and (only_part is None or s["part_id"] == only_part)
+            ]
+            if not selected:
+                raise UsageError("指定扫描范围为空或不存在")
+            states = latest_stage_states(
+                root, "translation", [str(s["segment_id"]) for s in selected]
+            )
+            bases = {
+                sid: state["completed"]
+                for sid, state in states.items()
+                if state.get("completed") is not None
+            }
+            by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for s in selected:
+                sid = str(s["segment_id"])
+                if sid in bases:
+                    by_source[str(s["source"])].append(s)
+            candidates = [
+                items
+                for items in by_source.values()
+                if len(items) > 1
+                and len({bases[str(s["segment_id"])]["text"] for s in items}) > 1
+            ]
+            excluded_punctuation_groups = 0
+            if exclude_punctuation_only:
+                retained = []
+                for items in candidates:
+                    variants = {bases[str(s["segment_id"])]["text"] for s in items}
+                    bodies = {
+                        "".join(
+                            c for c in text if not unicodedata.category(c).startswith("P")
+                        )
+                        for text in variants
+                    }
+                    if len(bodies) == 1:
+                        excluded_punctuation_groups += 1
+                    else:
+                        retained.append(items)
+                candidates = retained
+
+            groups = []
+            for idx, items in enumerate(candidates, 1):
+                variants = list(
+                    dict.fromkeys(bases[str(s["segment_id"])]["text"] for s in items)
+                )
+                groups.append(
+                    {
+                        "group_index": idx,
+                        "source": str(items[0]["source"]),
+                        "translations": variants,
+                        "occurrences": [
+                            {
+                                "occurrence_id": str(occ_idx),
+                                "segment_id": str(s["segment_id"]),
+                                "file_id": s["file_id"],
+                                "part_id": s["part_id"],
+                                "line_index": s["line_index"],
+                                "translation": bases[str(s["segment_id"])]["text"],
+                            }
+                            for occ_idx, s in enumerate(items, 1)
+                        ],
+                    }
+                )
+            return {
+                "total_segments_in_scope": len(selected),
+                "translated_segments_in_scope": len(bases),
+                "excluded_punctuation_groups": excluded_punctuation_groups,
+                "total_groups": len(groups),
+                "groups": groups[offset : offset + limit],
+            }
+
+        return await run_blocking(_scan)

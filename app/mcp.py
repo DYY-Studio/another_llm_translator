@@ -43,6 +43,16 @@ def _resolve_server_inputs(paths: Any) -> tuple[list[str], list[str]]:
     return resolved_paths, kinds
 
 
+def _deep_merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "list_projects",
@@ -159,6 +169,44 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "configure_project",
+        "description": "Inspect or update project settings (config.toml, LLM/Decision presets), Document Adapter file run options, or delete a project (requires confirm=True).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project name or ID"},
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "get_config",
+                        "update_config",
+                        "get_file_options",
+                        "update_file_options",
+                        "delete_project",
+                    ],
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Partial or full config object to merge and save when action='update_config'",
+                },
+                "file_id": {
+                    "type": "string",
+                    "description": "File ID for get_file_options or update_file_options",
+                },
+                "options": {
+                    "type": "object",
+                    "description": "String key-value options for update_file_options",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Explicit confirmation required for delete_project",
+                },
+            },
+            "required": ["project", "action"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "get_project_overview",
         "description": "Get project overview including files, per-stage progress counts, unfinished runs, and pending drafts.",
         "inputSchema": {
@@ -185,7 +233,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "query_segments",
-        "description": "Query project segments by stage, status (e.g. failed, pending, completed, warning), keyword, or file/part boundary.",
+        "description": "Query project segments by stage, status (e.g. failed, pending, completed, warning), keyword, file_id, or (file_id + part_id) chapter boundary.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -197,8 +245,14 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "status": {"type": "string"},
                 "q": {"type": "string"},
-                "file_id": {"type": "string"},
-                "part_id": {"type": "string"},
+                "file_id": {
+                    "type": "string",
+                    "description": "Optional file_id filter (can be used alone or paired with part_id)",
+                },
+                "part_id": {
+                    "type": "string",
+                    "description": "Optional part_id filter (requires file_id)",
+                },
                 "offset": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 50},
             },
@@ -371,7 +425,10 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": ["translation", "proofreading", "polishing"],
                 },
-                "scope": {"type": "object"},
+                "scope": {
+                    "type": "object",
+                    "description": "Optional scope selector: {only_file, only_part (requires only_file), from_file, only_segment, segment_ids, force}",
+                },
                 "run_action": {"type": "string", "enum": ["resume", "decline"]},
                 "reuse_mixed_fingerprints": {"type": "boolean", "default": False},
                 "prompt_language": {"type": "string"},
@@ -474,7 +531,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "edit_single_term",
-        "description": "Perform a controlled edit on a single term, term relationship, pending change, or entity knowledge.",
+        "description": "Perform a controlled edit on terminology: single term save/group/alias/knowledge/change/remove, or batch import_terms / clear_terms / publish_partial.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -483,6 +540,7 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": [
                         "save_term",
+                        "import_terms",
                         "set_primary",
                         "leave_group",
                         "group_related",
@@ -490,9 +548,14 @@ TOOLS: list[dict[str, Any]] = [
                         "update_knowledge",
                         "resolve_change",
                         "remove_terms",
+                        "clear_terms",
+                        "publish_partial",
                     ],
                 },
-                "payload": {"type": "object"},
+                "payload": {
+                    "type": "object",
+                    "description": "Action payload. For import_terms, pass {'terms': [{'source', 'preferred_translation', 'category', 'description', 'aliases', 'disabled', 'group_primary'}]}.",
+                },
             },
             "required": ["project", "action", "payload"],
             "additionalProperties": False,
@@ -545,7 +608,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "get_repetition_overview",
-        "description": "Get repetition consistency draft state, candidate groups, and uncertain/over-budget occurrences.",
+        "description": "Get repetition consistency draft state, live scan of repeated source segments with inconsistent translations, or create an agent_mcp repetition draft without calling host LLM.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -555,6 +618,18 @@ TOOLS: list[dict[str, Any]] = [
                     "enum": ["all", "uncertain_only", "over_budget_only"],
                     "default": "all",
                 },
+                "only_file": {"type": "string"},
+                "only_part": {
+                    "type": "string",
+                    "description": "Optional chapter part_id for live scan (requires only_file)",
+                },
+                "exclude_punctuation_only": {"type": "boolean", "default": True},
+                "create_draft": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Create a formal pending repetition_consistency draft locally without calling external LLM",
+                },
+                "replace_draft": {"type": "boolean", "default": False},
                 "offset": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 50},
             },
@@ -632,16 +707,27 @@ class MCPWebBridge:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
         form_data: dict[str, Any] | None = None,
+        files: Any = None,
     ) -> Any:
         try:
             if self._client is not None:
                 response = self._client.request(
-                    method, path, params=params, json=json_body, data=form_data
+                    method,
+                    path,
+                    params=params,
+                    json=json_body,
+                    data=form_data,
+                    files=files,
                 )
             else:
                 with httpx.Client(base_url=self.base_url, timeout=60.0) as client:
                     response = client.request(
-                        method, path, params=params, json=json_body, data=form_data
+                        method,
+                        path,
+                        params=params,
+                        json=json_body,
+                        data=form_data,
+                        files=files,
                     )
         except httpx.RequestError as exc:
             raise UsageError(
@@ -761,6 +847,70 @@ class MCPWebBridge:
                     f"/api/v1/projects/{proj}/files/{fid}/replacement-preview/{pid}",
                 )
             raise UsageError(f"不支持的文件管理动作：{action}")
+
+        if name == "configure_project":
+            proj = quote(str(args["project"]), safe="")
+            action = str(args["action"])
+            if action == "get_config":
+                cfg = self._request("GET", f"/api/v1/projects/{proj}/config")
+                presets = self._request("GET", "/api/v1/global/presets")
+                decision_presets = self._request(
+                    "GET", "/api/v1/global/decision-presets"
+                )
+                return {
+                    **cfg,
+                    "available_presets": presets.get("presets", []),
+                    "available_decision_presets": decision_presets.get(
+                        "presets", []
+                    ),
+                }
+            if action == "update_config":
+                patch = args.get("config")
+                if not isinstance(patch, dict) or not patch:
+                    raise UsageError("update_config 必须提供非空 config 对象")
+                current = self._request(
+                    "GET", f"/api/v1/projects/{proj}/config"
+                ).get("config", {})
+                merged = _deep_merge_dict(
+                    dict(current) if isinstance(current, dict) else {}, patch
+                )
+                saved = self._request(
+                    "PUT",
+                    f"/api/v1/projects/{proj}/config",
+                    json_body={"config": merged},
+                )
+                latest = self._request("GET", f"/api/v1/projects/{proj}/config")
+                return {**latest, **saved}
+            if action == "get_file_options":
+                file_id = args.get("file_id")
+                if not isinstance(file_id, str) or not file_id:
+                    raise UsageError("get_file_options 必须提供 file_id")
+                fid = quote(file_id, safe="")
+                return self._request(
+                    "GET", f"/api/v1/projects/{proj}/files/{fid}/run-options"
+                )
+            if action == "update_file_options":
+                file_id = args.get("file_id")
+                options = args.get("options")
+                if not isinstance(file_id, str) or not file_id:
+                    raise UsageError("update_file_options 必须提供 file_id")
+                if not isinstance(options, dict):
+                    raise UsageError("update_file_options 必须提供 options 对象")
+                fid = quote(file_id, safe="")
+                return self._request(
+                    "PUT",
+                    f"/api/v1/projects/{proj}/files/{fid}/run-options",
+                    json_body={"options": options},
+                )
+            if action == "delete_project":
+                if args.get("confirm") is not True:
+                    raise UsageError("删除项目必须显式指定 confirm=True")
+                return self._request(
+                    "DELETE",
+                    f"/api/v1/projects/{proj}",
+                    json_body={"confirm": True},
+                )
+            raise UsageError(f"不支持的项目配置动作：{action}")
 
         if name == "get_project_overview":
             proj = quote(str(args["project"]), safe="")
@@ -1005,6 +1155,36 @@ class MCPWebBridge:
             proj = quote(str(args["project"]), safe="")
             action = str(args["action"])
             payload = dict(args["payload"])
+            if action == "import_terms":
+                if isinstance(payload.get("terms"), list):
+                    doc = {
+                        "schema_version": 2,
+                        "record_type": "terminology_exchange",
+                        "terms": payload["terms"],
+                    }
+                    raw_bytes = json.dumps(doc, ensure_ascii=False).encode("utf-8")
+                    filename = "terms.json"
+                    content_type = "application/json"
+                elif isinstance(payload.get("path"), str) and payload["path"].strip():
+                    file_path = Path(payload["path"]).expanduser().resolve()
+                    if not file_path.is_file():
+                        raise UsageError(f"术语导入文件不存在：{file_path}")
+                    raw_bytes = file_path.read_bytes()
+                    filename = file_path.name
+                    content_type = (
+                        "text/csv"
+                        if filename.lower().endswith(".csv")
+                        else "application/json"
+                    )
+                else:
+                    raise UsageError(
+                        "import_terms 必须在 payload 中提供 terms 列表或本地文件 path"
+                    )
+                return self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/terms/import",
+                    files={"file": (filename, raw_bytes, content_type)},
+                )
             routes = {
                 "save_term": ("POST", f"/api/v1/projects/{proj}/terms"),
                 "set_primary": ("POST", f"/api/v1/projects/{proj}/terms/set-primary"),
@@ -1020,6 +1200,11 @@ class MCPWebBridge:
                     f"/api/v1/projects/{proj}/terms/changes/resolve",
                 ),
                 "remove_terms": ("POST", f"/api/v1/projects/{proj}/terms/remove"),
+                "clear_terms": ("POST", f"/api/v1/projects/{proj}/terms/clear"),
+                "publish_partial": (
+                    "POST",
+                    f"/api/v1/projects/{proj}/terms/publish-partial",
+                ),
             }
             if action not in routes:
                 raise UsageError(f"不支持的术语编辑动作：{action}")
@@ -1063,6 +1248,22 @@ class MCPWebBridge:
 
         if name == "get_repetition_overview":
             proj = quote(str(args["project"]), safe="")
+            offset = int(args.get("offset", 0))
+            limit = int(args.get("limit", 50))
+            exclude_punct = bool(args.get("exclude_punctuation_only", True))
+            if args.get("create_draft"):
+                self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/agent/repetition/scan",
+                    json_body={
+                        "only_file": args.get("only_file"),
+                        "exclude_punctuation_only": exclude_punct,
+                        "create_draft": True,
+                        "replace_draft": bool(args.get("replace_draft", False)),
+                        "offset": offset,
+                        "limit": limit,
+                    },
+                )
             state = self._request("GET", f"/api/v1/projects/{proj}/repetition")
             draft = state.get("draft")
             if draft and isinstance(draft.get("groups"), list):
@@ -1072,14 +1273,26 @@ class MCPWebBridge:
                     groups = [g for g in groups if g.get("uncertain")]
                 elif flt == "over_budget_only":
                     groups = [g for g in groups if g.get("over_budget")]
-                offset = int(args.get("offset", 0))
-                limit = int(args.get("limit", 50))
                 draft = {
                     **draft,
                     "total_groups": len(groups),
                     "groups": groups[offset : offset + limit],
                 }
-            return {**state, "draft": draft}
+            result_state: dict[str, Any] = {**state, "draft": draft}
+            if draft is None or args.get("only_file") or args.get("only_part"):
+                result_state["live_scan"] = self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/agent/repetition/scan",
+                    json_body={
+                        "only_file": args.get("only_file"),
+                        "only_part": args.get("only_part"),
+                        "exclude_punctuation_only": exclude_punct,
+                        "create_draft": False,
+                        "offset": offset,
+                        "limit": limit,
+                    },
+                )
+            return result_state
 
         if name == "inspect_repetition_group":
             proj = quote(str(args["project"]), safe="")

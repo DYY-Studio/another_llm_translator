@@ -495,3 +495,120 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     )
     assert opened["name"] == "ext-proj"
     assert opened["external"] is True
+
+    # 7. Query segments by file_id alone (without part_id)
+    queried = bridge.call_tool(
+        "query_segments",
+        {"project": "mcp-created", "file_id": "F0001"},
+    )
+    assert queried["total_segments"] == 2
+    assert len(queried["segments"]) == 2
+
+    # 8. Batch import terms with unsourced knowledge descriptions
+    imported = bridge.call_tool(
+        "edit_single_term",
+        {
+            "project": "mcp-created",
+            "action": "import_terms",
+            "payload": {
+                "terms": [
+                    {
+                        "source": "第一行",
+                        "preferred_translation": "首行",
+                        "category": "general",
+                        "description": "项目测试首行术语",
+                        "aliases": [],
+                        "disabled": False,
+                    }
+                ]
+            },
+        },
+    )
+    assert imported["imported"] == 1
+    term_ov = bridge.call_tool(
+        "get_terminology_overview",
+        {"project": "mcp-created"},
+    )
+    assert term_ov["total"] == 1
+
+    # 9. Configure project (get_config, update_config, delete_project)
+    cfg = bridge.call_tool(
+        "configure_project",
+        {"project": "mcp-created", "action": "get_config"},
+    )
+    assert "config" in cfg
+    assert "available_presets" in cfg
+    updated_cfg = bridge.call_tool(
+        "configure_project",
+        {
+            "project": "mcp-created",
+            "action": "update_config",
+            "config": {"validation": {"translation": {"validators": ["japanese_kana"]}}},
+        },
+    )
+    assert updated_cfg["config"]["validation"]["translation"]["validators"] == ["japanese_kana"]
+
+    # 10. Pure Agent repetition live scan & local draft creation
+    rep_proj = tmp_path / "rep.txt"
+    rep_proj.write_text("待て！\n進め。\n待て！", encoding="utf-8")
+    bridge.call_tool(
+        "create_project",
+        {"name": "rep-mcp", "paths": [str(rep_proj)]},
+    )
+    rep_segs = bridge.call_tool(
+        "query_segments", {"project": "rep-mcp", "file_id": "F0001"}
+    )["segments"]
+    part_run = bridge.call_tool(
+        "start_agent_stage_run",
+        {
+            "project": "rep-mcp",
+            "stage": "translation",
+            "scope": {"only_file": "F0001", "only_part": rep_segs[0]["part_id"]},
+        },
+    )
+    assert part_run["selected_count"] == 3
+    bridge.call_tool(
+        "finish_agent_stage_run",
+        {"project": "rep-mcp", "run_id": part_run["run_id"], "action": "interrupt"},
+    )
+    bridge.call_tool(
+        "submit_segment_fix",
+        {
+            "project": "rep-mcp",
+            "segment_id": rep_segs[0]["segment_id"],
+            "stage": "translation",
+            "text": "站住！",
+        },
+    )
+    bridge.call_tool(
+        "submit_segment_fix",
+        {
+            "project": "rep-mcp",
+            "segment_id": rep_segs[1]["segment_id"],
+            "stage": "translation",
+            "text": "前进。",
+        },
+    )
+    bridge.call_tool(
+        "submit_segment_fix",
+        {
+            "project": "rep-mcp",
+            "segment_id": rep_segs[2]["segment_id"],
+            "stage": "translation",
+            "text": "等一下！",
+        },
+    )
+    rep_overview = bridge.call_tool(
+        "get_repetition_overview",
+        {"project": "rep-mcp", "create_draft": True},
+    )
+    assert rep_overview["draft"] is not None
+    assert rep_overview["draft"]["total_groups"] == 1
+    rep_group = rep_overview["draft"]["groups"][0]
+    assert rep_group["source"] == "待て！"
+
+    deleted = bridge.call_tool(
+        "configure_project",
+        {"project": "rep-mcp", "action": "delete_project", "confirm": True},
+    )
+    assert deleted["deleted"] is True

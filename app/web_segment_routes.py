@@ -27,7 +27,7 @@ def register_segment_routes(*, app: FastAPI, projects_root: Path, app_root: Path
     async def overview_query(
         name: str, payload: SegmentQueryPayload
     ) -> dict[str, Any]:
-        if bool(payload.file_id) != bool(payload.part_id):
+        if payload.part_id and not payload.file_id:
             raise UsageError("file_id 与 part_id 必须同时提供")
         root = project(name)
         return (await run_blocking(lambda: WebStore(root).segment_query(
