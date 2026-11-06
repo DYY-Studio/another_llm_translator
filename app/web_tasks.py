@@ -138,20 +138,22 @@ def _running_run(
     manifest = candidates[0]
     run_id = str(manifest["run_id"])
     if manifest.get("executor") == "agent_mcp":
-        previous = {
-            "model": str(manifest.get("agent_model_hint") or "agent_mcp"),
-            "endpoint": "mcp://agent_harness",
-        }
-        return {
+        result = {
             "run_id": run_id,
             "executor": "agent_mcp",
             "started_at": manifest.get("started_at"),
             "scope": manifest.get("scope"),
-            "previous": previous,
+            "previous": {
+                "model": str(manifest.get("agent_model_hint") or "agent_mcp"),
+                "endpoint": "mcp://agent_harness",
+            },
             "current": _endpoint_summary(current_config),
             "resume_compatible": False,
             "resume_incompatibility_reason": "未完成 Run 由 Agent MCP 创建，请在 Agent 中续作或创建新 Run",
         }
+        if isinstance(manifest.get("last_interruption"), dict):
+            result["last_interruption"] = manifest["last_interruption"]
+        return result
     current_protocol = run_protocol_is_current(project, run_id)
     if current_protocol:
         previous = _endpoint_summary(load_run_config(project / "runs" / run_id))
@@ -1981,6 +1983,14 @@ class WebTaskManager:
             for state in self.tasks.values()
         )
 
+    def has_conflicting_task(self, project: Path, run_id: str) -> bool:
+        return any(
+            state.project == project
+            and state.status in {"queued", "running", "cancelling"}
+            and not (state.executor == "agent_mcp" and state.run_id == run_id)
+            for state in self.tasks.values()
+        )
+
     async def register_agent_task(
         self,
         project: Path,
@@ -2070,19 +2080,25 @@ class WebTaskManager:
                     self.active_by_project.pop(state.project, None)
                 return state.view()
             if state.status == "running" and state.executor == "agent_mcp":
+                if state.run_id:
+                    from .execution import _interrupt_run
+
+                    def _interrupt_agent_run() -> None:
+                        with project_write_lock(state.project):
+                            manifest_path = (
+                                state.project / "runs" / str(state.run_id) / "manifest.json"
+                            )
+                            if record_exists(state.project, manifest_path):
+                                manifest = read_json(state.project, manifest_path)
+                                if manifest.get("status") == "running":
+                                    _interrupt_run(state.project, manifest, reason="cancelled")
+
+                    await run_blocking(_interrupt_agent_run)
                 state.status = "cancelled"
                 state.completed_at = utc_now()
                 self.running_task_ids.discard(task_id)
                 if self.active_by_project.get(state.project) == task_id:
                     self.active_by_project.pop(state.project, None)
-                if state.run_id:
-                    from .execution import _interrupt_run
-                    with project_write_lock(state.project):
-                        manifest_path = state.project / "runs" / state.run_id / "manifest.json"
-                        if record_exists(state.project, manifest_path):
-                            manifest = read_json(state.project, manifest_path)
-                            if manifest.get("status") == "running":
-                                _interrupt_run(state.project, manifest, reason="cancelled")
                 self._dispatch_locked()
                 return state.view()
             if state.status != "running" or state.asyncio_task is None:

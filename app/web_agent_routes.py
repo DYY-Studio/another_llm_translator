@@ -115,7 +115,9 @@ def _agent_run_progress(
 ) -> tuple[list[dict[str, Any]], int, int]:
     run_id = str(manifest["run_id"])
     stage = str(manifest["stage"])
-    force = bool((manifest.get("scope") or {}).get("force", False))
+    force = bool((manifest.get("scope") or {}).get("force", False)) and not manifest.get(
+        "continuations"
+    )
     selected_ids = [str(item["segment_id"]) for item in selected]
     states = latest_stage_states(project, stage, selected_ids)
     pending: list[dict[str, Any]] = []
@@ -564,14 +566,26 @@ def register_agent_routes(
                 }
 
         prepared = await run_blocking(_prepare)
-        task_view = await app.state.tasks.register_agent_task(
-            root,
-            prepared["project_id"],
-            stage,
-            prepared["run_id"],
-            prepared["selected_count"],
-            prepared["completed_count"],
-        )
+        try:
+            task_view = await app.state.tasks.register_agent_task(
+                root,
+                prepared["project_id"],
+                stage,
+                prepared["run_id"],
+                prepared["selected_count"],
+                prepared["completed_count"],
+            )
+        except BaseException:
+            def _rollback_run() -> None:
+                with project_write_lock(root):
+                    manifest_path = root / "runs" / prepared["run_id"] / "manifest.json"
+                    if record_exists(root, manifest_path):
+                        manifest = read_json(root, manifest_path)
+                        if manifest.get("status") == "running":
+                            _interrupt_run(root, manifest, reason="task_registration_failed")
+
+            await run_blocking(_rollback_run)
+            raise
         return {**prepared, "task_id": task_view["task_id"]}
 
     @app.post("/api/v1/projects/{name}/agent/runs/{run_id}/checkout")
@@ -580,6 +594,8 @@ def register_agent_routes(
     ) -> dict[str, Any]:
         root = project(name)
         safe_id = _safe_run_id(run_id)
+        if app.state.tasks.has_conflicting_task(root, safe_id):
+            raise UsageError("项目存在其他运行中的后台任务")
         max_segments = payload.get("max_segments", 15)
         if (
             not isinstance(max_segments, int)
@@ -609,18 +625,7 @@ def register_agent_routes(
             config, _, files, segments = _project_context(
                 root, stage=stage, frozen_run_options=frozen_options
             )
-            raw_scope = manifest.get("scope") or {}
-            scope = Scope(
-                from_file=raw_scope.get("from_file"),
-                only_file=raw_scope.get("only_file"),
-                only_segment=raw_scope.get("only_segment"),
-                segment_ids=(
-                    tuple(str(v) for v in raw_scope["segment_ids"])
-                    if isinstance(raw_scope.get("segment_ids"), list)
-                    else None
-                ),
-                force=bool(raw_scope.get("force", False)),
-            )
+            scope = scope_from_run(root, safe_id, dry_run=False)
             selected = select_scope(segments, files, scope)
             pending, completed_count, remaining_count = _agent_run_progress(
                 root, manifest, selected
@@ -679,8 +684,12 @@ def register_agent_routes(
                 else ([], [])
             )
             neighbor_ids = [str(item["segment_id"]) for item in before_neighbors]
-            neighbor_states = (
-                latest_stage_states(root, "translation", neighbor_ids)
+            neighbor_bases = (
+                _base_results(
+                    root,
+                    "polishing" if stage == "polishing" else "proofreading",
+                    segment_ids=neighbor_ids,
+                )
                 if neighbor_ids
                 else {}
             )
@@ -688,11 +697,7 @@ def register_agent_routes(
                 {
                     "segment_id": str(item["segment_id"]),
                     "source": str(item["source"]),
-                    "translation": (
-                        neighbor_states.get(str(item["segment_id"]), {})
-                        .get("completed", {})
-                        or {}
-                    ).get("text"),
+                    "translation": (neighbor_bases.get(str(item["segment_id"])) or {}).get("text"),
                 }
                 for item in before_neighbors
             ]
@@ -739,6 +744,8 @@ def register_agent_routes(
     ) -> dict[str, Any]:
         root = project(name)
         safe_id = _safe_run_id(run_id)
+        if app.state.tasks.has_conflicting_task(root, safe_id):
+            raise UsageError("项目存在其他运行中的后台任务")
         items = payload.get("items")
         if not isinstance(items, list) or not items:
             raise UsageError("items 必须是非空数组")
@@ -762,24 +769,18 @@ def register_agent_routes(
                 config, metadata, files, segments = _project_context(
                     root, stage=stage, frozen_run_options=frozen_options
                 )
-                raw_scope = manifest.get("scope") or {}
-                scope = Scope(
-                    from_file=raw_scope.get("from_file"),
-                    only_file=raw_scope.get("only_file"),
-                    only_segment=raw_scope.get("only_segment"),
-                    segment_ids=(
-                        tuple(str(v) for v in raw_scope["segment_ids"])
-                        if isinstance(raw_scope.get("segment_ids"), list)
-                        else None
-                    ),
-                    force=bool(raw_scope.get("force", False)),
-                )
+                scope = scope_from_run(root, safe_id, dry_run=False)
                 selected = select_scope(segments, files, scope)
                 selected_by_id = {str(item["segment_id"]): item for item in selected}
                 language = str(manifest.get("prompt_language") or _prompt_language(root, stage, None))
                 validators = config["_translation_validator_instances"]
-                fingerprint = str(manifest.get("stage_fingerprint") or store._fingerprint(stage))
-                terms_revision = manifest.get("terms_revision")
+                continuations = manifest.get("continuations") or []
+                fingerprint = str(
+                    (continuations[-1].get("stage_fingerprint") if continuations else None)
+                    or manifest.get("stage_fingerprint")
+                    or store._fingerprint(stage)
+                )
+                terms_revision = store._terms_revision()
                 bases = (
                     _base_results(root, stage, segment_ids=list(selected_by_id))
                     if stage in REVIEW_STAGES
@@ -971,6 +972,8 @@ def register_agent_routes(
     ) -> dict[str, Any]:
         root = project(name)
         safe_id = _safe_run_id(run_id)
+        if app.state.tasks.has_conflicting_task(root, safe_id):
+            raise UsageError("项目存在其他运行中的后台任务")
         action = payload.get("action", "complete")
         if action not in {"complete", "interrupt"}:
             raise UsageError("action 必须是 complete 或 interrupt")
@@ -991,18 +994,7 @@ def register_agent_routes(
                     raise UsageError(f"Run {safe_id} 已处于 {manifest.get('status')} 状态")
                 stage = str(manifest["stage"])
                 _, _, files, segments = _project_context(root, stage=stage)
-                raw_scope = manifest.get("scope") or {}
-                scope = Scope(
-                    from_file=raw_scope.get("from_file"),
-                    only_file=raw_scope.get("only_file"),
-                    only_segment=raw_scope.get("only_segment"),
-                    segment_ids=(
-                        tuple(str(v) for v in raw_scope["segment_ids"])
-                        if isinstance(raw_scope.get("segment_ids"), list)
-                        else None
-                    ),
-                    force=bool(raw_scope.get("force", False)),
-                )
+                scope = scope_from_run(root, safe_id, dry_run=False)
                 selected = select_scope(segments, files, scope)
                 _, completed_count, remaining_count = _agent_run_progress(
                     root, manifest, selected

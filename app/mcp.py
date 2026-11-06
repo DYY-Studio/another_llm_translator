@@ -16,6 +16,10 @@ SERVER_INFO = {"name": "another-llm-translator", "version": "0.3.0"}
 
 
 def default_base_url(port: int | None = None) -> str:
+    if port is None:
+        env_url = os.environ.get("ANOTHER_LLM_WEB_URL", "").strip()
+        if env_url:
+            return env_url.rstrip("/")
     resolved_port = port or int(os.environ.get("ANOTHER_LLM_WEB_PORT", "8765"))
     return f"http://127.0.0.1:{resolved_port}"
 
@@ -123,17 +127,26 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "project": {"type": "string"},
                 "stage": {"type": "string"},
+                "language": {"type": "string"},
                 "from_file": {"type": "string"},
                 "only_file": {"type": "string"},
                 "only_segment": {"type": "string"},
                 "force": {"type": "boolean", "default": False},
+                "confirm_knowledge_replacement": {"type": "boolean", "default": False},
                 "reuse_mixed_fingerprints": {"type": "boolean", "default": False},
                 "run_action": {"type": "string", "enum": ["resume", "decline"]},
                 "replace_draft": {"type": "boolean", "default": False},
+                "include_summaries": {"type": "boolean", "default": False},
+                "include_draft_translation": {"type": "boolean", "default": False},
+                "aggregate_full_summaries": {"type": "boolean", "default": False},
                 "final_review": {"type": "boolean", "default": False},
                 "knowledge_only": {"type": "boolean", "default": False},
                 "all_terms": {"type": "boolean", "default": False},
+                "review_draft_run_id": {"type": "string"},
                 "acknowledge_manual_review": {"type": "boolean", "default": False},
+                "exclude_punctuation_only": {"type": "boolean", "default": True},
+                "screening_enabled": {"type": "boolean", "default": False},
+                "repetition_final_review": {"type": "boolean", "default": False},
             },
             "required": ["project", "stage"],
             "additionalProperties": False,
@@ -201,9 +214,9 @@ TOOLS: list[dict[str, Any]] = [
                 "stage": {
                     "type": "string",
                     "enum": [
-                        "translation",
-                        "proofreading_applied",
-                        "polishing_applied",
+                        "translated",
+                        "proofread",
+                        "polished",
                     ],
                 },
                 "format": {
@@ -526,7 +539,12 @@ class MCPWebBridge:
 
         if name == "get_project_overview":
             proj = quote(str(args["project"]), safe="")
-            return self._request("GET", f"/api/v1/projects/{proj}")
+            data = self._request("GET", f"/api/v1/projects/{proj}", params={"limit": 1})
+            if isinstance(data, dict):
+                data.pop("segments", None)
+                data.pop("offset", None)
+                data.pop("limit", None)
+            return data
 
         if name == "get_task_and_diagnostics":
             project_name = str(args["project"])
@@ -547,7 +565,7 @@ class MCPWebBridge:
             result: dict[str, Any] = {
                 "active_tasks": project_tasks,
                 "task_detail": task_detail,
-                "recent_runs": runs.get("runs", []),
+                "recent_runs": runs.get("items", []),
             }
             if args.get("include_events"):
                 diag = self._request(
@@ -704,7 +722,7 @@ class MCPWebBridge:
             terms_data = self._request("GET", f"/api/v1/projects/{proj}/terms")
             items = list(terms_data.get("terms", []))
             if flt == "conflicts":
-                items = [t for t in items if t.get("has_conflict")]
+                items = [t for t in items if t.get("has_conflicts")]
             elif flt == "changes":
                 items = [t for t in items if t.get("pending_change")]
             elif flt == "stale_knowledge":
@@ -716,7 +734,9 @@ class MCPWebBridge:
             return {
                 "total": len(items),
                 "terms": items[offset : offset + limit],
-                "summary": terms_data.get("summary"),
+                "terms_revision": terms_data.get("terms_revision"),
+                "conflict_count": terms_data.get("conflict_count", 0),
+                "scan": terms_data.get("scan"),
                 "decision_state": {
                     "has_pending_draft": decision.get("draft") is not None,
                     "manual_review": decision.get("manual_review"),
@@ -986,10 +1006,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="本地 Web 服务端口（默认读取 ANOTHER_LLM_WEB_PORT 或 8765）",
     )
     parser.add_argument(
+        "--web-url",
         "--url",
+        dest="url",
         type=str,
         default=None,
-        help="本地 Web 服务完整地址（优先于 --port）",
+        help="本地 Web 服务完整地址（优先于 --port，也可通过 ANOTHER_LLM_WEB_URL 指定）",
     )
     return parser
 

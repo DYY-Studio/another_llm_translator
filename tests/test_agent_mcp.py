@@ -260,6 +260,8 @@ def test_pattern_b_agent_stage_run_lifecycle_and_web_visibility(tmp_path: Path) 
 
     diag_after = bridge.call_tool("get_task_and_diagnostics", {"project": "sample"})
     assert diag_after["active_tasks"] == []
+    assert diag_after["recent_runs"][0]["run_id"] == run_id
+    assert diag_after["recent_runs"][0]["executor"] == "agent_mcp"
 
 
 def test_terminology_and_repetition_mcp_collaboration(
@@ -290,6 +292,7 @@ def test_terminology_and_repetition_mcp_collaboration(
     # Terminology overview & single term edit
     term_ov = bridge.call_tool("get_terminology_overview", {"project": "repetition"})
     assert term_ov["total"] == 1
+    assert term_ov["terms_revision"] == 1
     entity = bridge.call_tool(
         "inspect_term_entity", {"project": "repetition", "normalized": "承诺"}
     )
