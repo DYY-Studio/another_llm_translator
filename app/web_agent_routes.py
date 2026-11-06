@@ -153,6 +153,47 @@ def _agent_run_progress(
     return pending, completed_count, len(pending)
 
 
+def _parse_slice_spec(
+    run_id: str, payload: dict[str, Any]
+) -> tuple[str, str | None, int | None, int | None]:
+    part_spec = payload.get("part_id")
+    line_start = payload.get("line_start")
+    line_end = payload.get("line_end")
+    if "@" in run_id:
+        run_id, spec = run_id.split("@", 1)
+        if ":" in spec:
+            spec_part, rng = spec.rsplit(":", 1)
+            if "-" in rng:
+                s_str, e_str = rng.split("-", 1)
+                if s_str.isdigit() and e_str.isdigit():
+                    part_spec = spec_part
+                    line_start = int(s_str)
+                    line_end = int(e_str)
+        if not part_spec:
+            part_spec = spec
+    return run_id, part_spec, line_start, line_end
+
+
+def _filter_slice(
+    items: list[dict[str, Any]],
+    part_spec: str | None,
+    line_start: int | None,
+    line_end: int | None,
+) -> list[dict[str, Any]]:
+    if isinstance(part_spec, str) and part_spec:
+        items = [
+            item
+            for item in items
+            if str(item["part_id"]) == part_spec
+            or str(item["part_id"]).endswith("/" + part_spec)
+        ]
+    if isinstance(line_start, int) and not isinstance(line_start, bool):
+        items = [item for item in items if int(item["line_index"]) >= line_start]
+    if isinstance(line_end, int) and not isinstance(line_end, bool):
+        items = [item for item in items if int(item["line_index"]) < line_end]
+    return items
+
+
 def register_agent_routes(
     *,
     app: FastAPI,
@@ -265,7 +306,7 @@ def register_agent_routes(
             raise UsageError("allow_warnings 必须是布尔值")
 
         def _execute() -> dict[str, Any]:
-            with project_write_lock(root):
+            with project_write_lock(root, wait_seconds=15.0):
                 store = WebStore(root)
                 files = load_source_files(root)
                 segment = store._require_segment(segment_id, files=files, with_adapter_state=True)
@@ -614,6 +655,7 @@ def register_agent_routes(
         name: str, run_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         root = project(name)
+        run_id, part_spec, line_start, line_end = _parse_slice_spec(run_id, payload)
         safe_id = _safe_run_id(run_id)
         if app.state.tasks.has_conflicting_task(root, safe_id):
             raise UsageError("项目存在其他运行中的后台任务")
@@ -651,6 +693,8 @@ def register_agent_routes(
             pending, completed_count, remaining_count = _agent_run_progress(
                 root, manifest, selected
             )
+            pending = _filter_slice(pending, part_spec, line_start, line_end)
+            slice_remaining = len(pending)
             if not pending:
                 return {
                     "run_id": safe_id,
@@ -660,6 +704,7 @@ def register_agent_routes(
                     "reference_context": [],
                     "completed_count": completed_count,
                     "remaining_pending_count": 0,
+                    "total_remaining_pending_count": remaining_count,
                 }
             first = pending[0]
             boundary = (str(first["file_id"]), str(first["part_id"]))
@@ -731,14 +776,15 @@ def register_agent_routes(
             batch_items = []
             for item in batch:
                 sid = str(item["segment_id"])
+                src = str(item["source"])
+                ms = segment_model_source(item)
                 entry: dict[str, Any] = {
                     "segment_id": sid,
-                    "file_id": boundary[0],
-                    "part_id": boundary[1],
                     "line_index": int(item["line_index"]),
-                    "source": str(item["source"]),
-                    "model_source": segment_model_source(item),
+                    "source": src,
                 }
+                if ms is not None and ms != src:
+                    entry["model_source"] = ms
                 if stage in REVIEW_STAGES and sid in bases:
                     entry["current_text"] = bases[sid]["text"]
                 batch_items.append(entry)
@@ -753,7 +799,8 @@ def register_agent_routes(
                 "terms": terms,
                 "reference_context": reference_context,
                 "completed_count": completed_count,
-                "remaining_pending_count": remaining_count,
+                "remaining_pending_count": slice_remaining,
+                "total_remaining_pending_count": remaining_count,
                 "warnings": warnings,
             }
 
@@ -764,6 +811,7 @@ def register_agent_routes(
         name: str, run_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         root = project(name)
+        run_id, part_spec, line_start, line_end = _parse_slice_spec(run_id, payload)
         safe_id = _safe_run_id(run_id)
         if app.state.tasks.has_conflicting_task(root, safe_id):
             raise UsageError("项目存在其他运行中的后台任务")
@@ -775,7 +823,7 @@ def register_agent_routes(
             raise UsageError("allow_warnings 必须是布尔值")
 
         def _submit() -> dict[str, Any]:
-            with project_write_lock(root):
+            with project_write_lock(root, wait_seconds=15.0):
                 manifest_path = root / "runs" / safe_id / "manifest.json"
                 if not record_exists(root, manifest_path):
                     raise UsageError(f"Run 不存在：{safe_id}")
@@ -801,7 +849,8 @@ def register_agent_routes(
                     or manifest.get("stage_fingerprint")
                     or store._fingerprint(stage)
                 )
-                terms_revision = store._terms_revision()
+                val_library = load_terms(root, resolve_knowledge=False)
+                terms_revision = int(val_library["terms_revision"]) if val_library else None
                 bases = (
                     _base_results(root, stage, segment_ids=list(selected_by_id))
                     if stage in REVIEW_STAGES
@@ -825,7 +874,11 @@ def register_agent_routes(
                     segment = selected_by_id[sid]
 
                     if stage == "translation":
-                        raw_text = entry.get("text")
+                        raw_text = (
+                            entry.get("text")
+                            if "text" in entry
+                            else entry.get("translation")
+                        )
                         if not isinstance(raw_text, str) or not raw_text.strip():
                             rejected_items.append(
                                 {
@@ -850,7 +903,9 @@ def register_agent_routes(
                                 }
                             )
                             continue
-                        context = store._translation_validation_context(segment, text)
+                        context = store._translation_validation_context(
+                            segment, text, library=val_library, load_library=False
+                        )
                         findings = asyncio.run(validate_translation_text(context, validators))
                         guidance = _repair_guidance(findings, validators, language)
                         if findings and not allow_warnings:
@@ -926,7 +981,9 @@ def register_agent_routes(
                                     }
                                 )
                                 continue
-                            context = store._translation_validation_context(segment, suggested_text)
+                            context = store._translation_validation_context(
+                                segment, suggested_text, library=val_library, load_library=False
+                            )
                             findings = asyncio.run(validate_translation_text(context, validators))
                             guidance = _repair_guidance(findings, validators, language)
                             if findings and not allow_warnings:
@@ -966,16 +1023,18 @@ def register_agent_routes(
 
                 if records:
                     append_stage_results(root, records)
-                _, completed_count, remaining_count = _agent_run_progress(
+                pending, completed_count, remaining_count = _agent_run_progress(
                     root, manifest, selected
                 )
+                slice_pending = _filter_slice(pending, part_spec, line_start, line_end)
                 return {
                     "run_id": safe_id,
                     "stage": stage,
                     "committed_ids": committed_ids,
                     "rejected_items": rejected_items,
                     "completed_count": completed_count,
-                    "remaining_pending_count": remaining_count,
+                    "remaining_pending_count": len(slice_pending),
+                    "total_remaining_pending_count": remaining_count,
                 }
 
         result = await run_blocking(_submit)
@@ -1003,7 +1062,7 @@ def register_agent_routes(
             raise UsageError("reason 必须是字符串")
 
         def _finish() -> dict[str, Any]:
-            with project_write_lock(root):
+            with project_write_lock(root, wait_seconds=15.0):
                 run_dir = root / "runs" / safe_id
                 manifest_path = run_dir / "manifest.json"
                 if not record_exists(root, manifest_path):
@@ -1070,6 +1129,17 @@ def register_agent_routes(
         root = project(name)
         group_id = payload.get("group_id")
         source_text = payload.get("source")
+        if source_text in {"__scan__", "__create_draft__"} or group_id in {
+            "__scan__",
+            "__create_draft__",
+        }:
+            return await scan_repetition_live(
+                name,
+                {
+                    "create_draft": "__create_draft__" in {source_text, group_id},
+                    "replace_draft": True,
+                },
+            )
         if not group_id and not source_text:
             raise UsageError("必须提供 group_id 或 source")
         window = payload.get("window", 5)

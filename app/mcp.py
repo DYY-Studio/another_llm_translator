@@ -377,8 +377,10 @@ TOOLS: list[dict[str, Any]] = [
                 "project": {"type": "string"},
                 "stage": {"type": "string", "enum": ["proofreading", "polishing"]},
                 "only_file": {"type": "string"},
+                "only_part": {"type": "string"},
                 "only_segment": {"type": "string"},
                 "segment_ids": {"type": "array", "items": {"type": "string"}},
+                "scope": {"type": "object"},
                 "allow_outdated_base": {"type": "boolean", "default": False},
                 "confirm": {"type": "boolean"},
             },
@@ -440,12 +442,15 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "checkout_stage_batch",
-        "description": "Pattern B: Pull the next batch of pending segments from an active agent_mcp Run, including matched terminology, entity knowledge, and preceding bilingual context.",
+        "description": "Pattern B: Pull the next batch of pending segments from an active agent_mcp Run, optionally filtered by part_id / line range (or via run_id@part_id:start-end), including matched terminology, entity knowledge, and preceding bilingual context.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "project": {"type": "string"},
                 "run_id": {"type": "string"},
+                "part_id": {"type": "string"},
+                "line_start": {"type": "integer"},
+                "line_end": {"type": "integer"},
                 "max_segments": {"type": "integer", "default": 15},
                 "context_before": {"type": "integer", "default": 3},
             },
@@ -1048,14 +1053,16 @@ class MCPWebBridge:
 
         if name == "apply_stage_suggestions":
             proj = quote(str(args["project"]), safe="")
+            scope_arg = args.get("scope") if isinstance(args.get("scope"), dict) else {}
             return self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/apply",
                 json_body={
                     "stage": args["stage"],
-                    "only_file": args.get("only_file"),
-                    "only_segment": args.get("only_segment"),
-                    "segment_ids": args.get("segment_ids"),
+                    "only_file": args.get("only_file") or scope_arg.get("only_file"),
+                    "only_part": args.get("only_part") or scope_arg.get("only_part"),
+                    "only_segment": args.get("only_segment") or scope_arg.get("only_segment"),
+                    "segment_ids": args.get("segment_ids") or scope_arg.get("segment_ids"),
                     "allow_outdated_base": bool(args.get("allow_outdated_base", False)),
                     "all": bool(args.get("confirm", False)),
                 },
@@ -1095,13 +1102,17 @@ class MCPWebBridge:
         if name == "checkout_stage_batch":
             proj = quote(str(args["project"]), safe="")
             rid = quote(str(args["run_id"]), safe="")
+            body: dict[str, Any] = {
+                "max_segments": int(args.get("max_segments", 15)),
+                "context_before": int(args.get("context_before", 3)),
+            }
+            for opt_key in ("part_id", "line_start", "line_end"):
+                if args.get(opt_key) is not None:
+                    body[opt_key] = args[opt_key]
             return self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/agent/runs/{rid}/checkout",
-                json_body={
-                    "max_segments": int(args.get("max_segments", 15)),
-                    "context_before": int(args.get("context_before", 3)),
-                },
+                json_body=body,
             )
 
         if name == "submit_stage_batch":
@@ -1197,9 +1208,7 @@ class MCPWebBridge:
             proj = quote(str(args["project"]), safe="")
             action = str(args["action"])
             payload = dict(args["payload"])
-            if action == "import_terms" or (
-                action == "save_term" and isinstance(payload.get("terms"), list)
-            ):
+            if action == "import_terms":
                 if isinstance(payload.get("terms"), list):
                     doc = {
                         "schema_version": 2,
@@ -1207,9 +1216,12 @@ class MCPWebBridge:
                         "terms": payload["terms"],
                     }
                     raw_bytes = json.dumps(doc, ensure_ascii=False).encode("utf-8")
-                    filename = "terms.json"
-                    content_type = "application/json"
-                elif isinstance(payload.get("path"), str) and payload["path"].strip():
+                    return self._request(
+                        "POST",
+                        f"/api/v1/projects/{proj}/terms/import",
+                        files={"file": ("terms.json", raw_bytes, "application/json")},
+                    )
+                if isinstance(payload.get("path"), str) and payload["path"].strip():
                     file_path = Path(payload["path"]).expanduser().resolve()
                     if not file_path.is_file():
                         raise UsageError(f"术语导入文件不存在：{file_path}")
@@ -1220,14 +1232,13 @@ class MCPWebBridge:
                         if filename.lower().endswith(".csv")
                         else "application/json"
                     )
-                else:
-                    raise UsageError(
-                        "import_terms 必须在 payload 中提供 terms 列表或本地文件 path"
+                    return self._request(
+                        "POST",
+                        f"/api/v1/projects/{proj}/terms/import",
+                        files={"file": (filename, raw_bytes, content_type)},
                     )
-                return self._request(
-                    "POST",
-                    f"/api/v1/projects/{proj}/terms/import",
-                    files={"file": (filename, raw_bytes, content_type)},
+                raise UsageError(
+                    "import_terms 必须在 payload 中提供 terms 列表或本地文件 path"
                 )
             routes = {
                 "save_term": ("POST", f"/api/v1/projects/{proj}/terms"),
@@ -1253,7 +1264,33 @@ class MCPWebBridge:
             if action not in routes:
                 raise UsageError(f"不支持的术语编辑动作：{action}")
             method, path = routes[action]
-            return self._request(method, path, json_body=payload)
+            res = self._request(method, path, json_body=payload)
+            if isinstance(res, dict) and isinstance(res.get("terms"), list) and len(res["terms"]) > 5:
+                terms_list = res["terms"]
+                target_keys = {
+                    str(v)
+                    for k in ("normalized", "source", "old_normalized", "primary")
+                    if (v := payload.get(k))
+                }
+                if isinstance(payload.get("related_normalized"), list):
+                    target_keys.update(str(x) for x in payload["related_normalized"])
+                matched = [
+                    t
+                    for t in terms_list
+                    if isinstance(t, dict)
+                    and (
+                        t.get("normalized") in target_keys
+                        or t.get("source") in target_keys
+                        or t.get("group_primary") in target_keys
+                    )
+                ]
+                res = {
+                    **res,
+                    "total_terms": len(terms_list),
+                    "terms_truncated": True,
+                    "terms": matched if matched else terms_list[:5],
+                }
+            return res
 
         if name == "submit_term_decision_draft":
             proj = quote(str(args["project"]), safe="")
@@ -1317,10 +1354,24 @@ class MCPWebBridge:
                     groups = [g for g in groups if g.get("uncertain")]
                 elif flt == "over_budget_only":
                     groups = [g for g in groups if g.get("over_budget")]
+                compact_groups = []
+                for g in groups[offset : offset + limit]:
+                    cg = {k: v for k, v in g.items() if k != "files"}
+                    if isinstance(cg.get("occurrences"), list):
+                        cg["occurrences"] = [
+                            {
+                                k: v
+                                for k, v in occ.items()
+                                if k in {"id", "segment_id", "part_id", "line_index", "text"}
+                            }
+                            for occ in cg["occurrences"]
+                            if isinstance(occ, dict)
+                        ]
+                    compact_groups.append(cg)
                 draft = {
-                    **draft,
+                    **{k: v for k, v in draft.items() if k != "evidence"},
                     "total_groups": len(groups),
-                    "groups": groups[offset : offset + limit],
+                    "groups": compact_groups,
                 }
             result_state: dict[str, Any] = {**state, "draft": draft}
             if draft is None or args.get("only_file") or args.get("only_part"):

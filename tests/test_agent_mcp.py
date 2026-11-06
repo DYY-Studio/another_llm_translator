@@ -581,27 +581,30 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
         },
     )
     assert part_run["selected_count"] == 3
+    slice_id = f"{part_run['run_id']}@{rep_segs[0]['part_id']}:0-2"
+    slice_co = bridge.call_tool(
+        "checkout_stage_batch",
+        {"project": "rep-mcp", "run_id": slice_id, "max_segments": 5},
+    )
+    assert len(slice_co["batch"]) == 2
+    assert slice_co["remaining_pending_count"] == 2
+    assert slice_co["total_remaining_pending_count"] == 3
+    slice_sub = bridge.call_tool(
+        "submit_stage_batch",
+        {
+            "project": "rep-mcp",
+            "run_id": slice_id,
+            "items": [
+                {"segment_id": rep_segs[0]["segment_id"], "translation": "站住！"},
+                {"segment_id": rep_segs[1]["segment_id"], "text": "前进。"},
+            ],
+        },
+    )
+    assert slice_sub["remaining_pending_count"] == 0
+    assert slice_sub["total_remaining_pending_count"] == 1
     bridge.call_tool(
         "finish_agent_stage_run",
         {"project": "rep-mcp", "run_id": part_run["run_id"], "action": "interrupt"},
-    )
-    bridge.call_tool(
-        "submit_segment_fix",
-        {
-            "project": "rep-mcp",
-            "segment_id": rep_segs[0]["segment_id"],
-            "stage": "translation",
-            "text": "站住！",
-        },
-    )
-    bridge.call_tool(
-        "submit_segment_fix",
-        {
-            "project": "rep-mcp",
-            "segment_id": rep_segs[1]["segment_id"],
-            "stage": "translation",
-            "text": "前进。",
-        },
     )
     bridge.call_tool(
         "submit_segment_fix",
@@ -624,9 +627,11 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
         {"project": "rep-mcp", "create_draft": True},
     )
     assert rep_overview["draft"] is not None
+    assert "evidence" not in rep_overview["draft"]
     assert rep_overview["draft"]["total_groups"] == 1
     rep_group = rep_overview["draft"]["groups"][0]
     assert rep_group["source"] == "待て！"
+    assert "signature" not in rep_group["occurrences"][0]
 
     deleted = bridge.call_tool(
         "configure_project",
