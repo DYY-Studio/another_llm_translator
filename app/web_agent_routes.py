@@ -625,6 +625,7 @@ def register_agent_routes(
                             "warnings": warnings,
                         },
                     )
+                pending_id_set = {str(item["segment_id"]) for item in selection.work}
                 return {
                     "run_id": run_id,
                     "project_id": str(metadata["project_id"]),
@@ -633,6 +634,9 @@ def register_agent_routes(
                     "reused_count": len(selection.reusable),
                     "pending_count": len(selection.work),
                     "completed_count": len(selected) - len(selection.work),
+                    "_completed_ids": [
+                        sid for sid in selected_ids if sid not in pending_id_set
+                    ],
                     "prompt": prompt,
                     "document_adapter_requirements": config.get(
                         "_document_adapter_prompt_requirements", {}
@@ -641,6 +645,7 @@ def register_agent_routes(
                 }
 
         prepared = await run_blocking(_prepare)
+        completed_ids = prepared.pop("_completed_ids", [])
         try:
             task_view = await app.state.tasks.register_agent_task(
                 root,
@@ -649,6 +654,7 @@ def register_agent_routes(
                 prepared["run_id"],
                 prepared["selected_count"],
                 prepared["completed_count"],
+                checked_out_ids=completed_ids,
             )
         except BaseException:
             def _rollback_run() -> None:
@@ -824,7 +830,7 @@ def register_agent_routes(
             segment_ids=[item["segment_id"] for item in result.get("batch", [])],
             part_id=result.get("part_id"),
         )
-        result["checked_out_count"] = checked_out
+        result["checked_out_count"] = max(result["completed_count"], checked_out)
         return result
 
     @app.post("/api/v1/projects/{name}/agent/runs/{run_id}/submit")

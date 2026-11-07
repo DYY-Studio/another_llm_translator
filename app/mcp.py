@@ -1468,8 +1468,7 @@ class MCPWebBridge:
                         for k in ("name", "project_id", "selector", "path")
                     )
                 ]
-            offset = max(0, int(args.get("offset", 0)))
-            limit = max(1, int(args.get("limit", 50)))
+            offset, limit = _page_params(args, default_limit=50, max_limit=500)
             compact_projects = []
             for p in items[offset : offset + limit]:
                 if not isinstance(p, dict):
@@ -1814,14 +1813,15 @@ class MCPWebBridge:
         if name == "query_segments":
             proj = quote(str(args["project"]), safe="")
             stage = str(args.get("stage", "translation"))
+            offset, limit = _page_params(args, default_limit=50, max_limit=500)
             body = {
                 "stage": stage,
                 "status": args.get("status", ""),
                 "q": args.get("q", ""),
                 "file_id": args.get("file_id", ""),
                 "part_id": args.get("part_id", ""),
-                "offset": int(args.get("offset", 0)),
-                "limit": int(args.get("limit", 50)),
+                "offset": offset,
+                "limit": limit,
             }
             data = self._request(
                 "POST", f"/api/v1/projects/{proj}/segments/query", json_body=body
@@ -2280,10 +2280,15 @@ class MCPWebBridge:
                 ),
                 None,
             )
+            resolved_norm = (
+                str(matched_term.get("normalized") or normalized)
+                if isinstance(matched_term, dict)
+                else str(normalized)
+            )
             knowledge = self._request(
                 "GET",
                 f"/api/v1/projects/{proj}/terms/knowledge",
-                params={"normalized": normalized},
+                params={"normalized": resolved_norm},
             )
             if isinstance(knowledge, dict) and isinstance(
                 knowledge.get("fragments"), list
@@ -2312,7 +2317,7 @@ class MCPWebBridge:
                     "POST",
                     f"/api/v1/projects/{proj}/terms/hits",
                     json_body={
-                        "normalized": normalized,
+                        "normalized": resolved_norm,
                         "offset": h_offset,
                         "limit": h_limit,
                     },
@@ -2418,7 +2423,23 @@ class MCPWebBridge:
                     else:
                         raise
                 if isinstance(desc_text, str) and desc_text.strip():
-                    target_norm = str(save_body.get("source") or "").strip()
+                    raw_src = str(save_body.get("source") or "").strip()
+                    saved_terms = (
+                        res.get("terms", []) if isinstance(res, dict) else []
+                    )
+                    target_norm = next(
+                        (
+                            str(t["normalized"])
+                            for t in saved_terms
+                            if isinstance(t, dict)
+                            and (
+                                t.get("source") == raw_src
+                                or t.get("normalized") == raw_src
+                            )
+                            and t.get("normalized")
+                        ),
+                        raw_src,
+                    )
                     res = self._request(
                         "PUT",
                         f"/api/v1/projects/{proj}/terms/knowledge",

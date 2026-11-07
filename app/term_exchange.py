@@ -167,7 +167,17 @@ def import_terms(
     _seed_published_terms(merged, library, spec)
     for normalized, item in merged_import.items():
         if overwrite:
-            merged[normalized] = deepcopy(item)
+            existing = merged.get(normalized)
+            replaced = deepcopy(item)
+            if (
+                existing is not None
+                and not replaced["group_primary_set"]
+                and existing["group_primary_set"]
+            ):
+                replaced["group_primary"] = existing["group_primary"]
+                replaced["group_primary_set"] = True
+                replaced["group_primary_locked"] = existing["group_primary_locked"]
+            merged[normalized] = replaced
             continue
         target = merged.setdefault(normalized, _term_bucket())
         for key in (
@@ -256,12 +266,36 @@ def import_terms(
     previous_entities = entity_members(library) if library else {}
     known = evidence(project, library_record)
     for root, members in entity_members(library_record).items():
-        overwritten_texts = {
-            overwritten_descriptions[m]
-            for m in members
-            if m in overwritten_descriptions
-        }
-        if root not in previous_entities or overwritten_texts:
+        has_overwritten = any(m in overwritten_descriptions for m in members)
+        if has_overwritten:
+            items_to_save: list[dict[str, Any]] = []
+            for m in members:
+                if m in overwritten_descriptions:
+                    target_text = overwritten_descriptions[m]
+                    fids = [
+                        key
+                        for key, f in known.items()
+                        if f["owner"] == m
+                        and f["state"] == "active"
+                        and f["text"] == target_text
+                    ]
+                    items_to_save.append(
+                        {"text": target_text, "fragment_ids": fids}
+                    )
+                else:
+                    for key, f in known.items():
+                        if f["owner"] == m and f["state"] == "active":
+                            items_to_save.append(
+                                {"text": f["text"], "fragment_ids": [key]}
+                            )
+            save_items(
+                project,
+                library_record,
+                root,
+                items_to_save,
+                all_evidence=known,
+            )
+        elif root not in previous_entities:
             save_items(
                 project,
                 library_record,
@@ -269,13 +303,7 @@ def import_terms(
                 [
                     {"text": f["text"], "fragment_ids": [key]}
                     for key, f in known.items()
-                    if f["owner"] in members
-                    and f["state"] == "active"
-                    and (
-                        not overwritten_texts
-                        or f["source_range"] is not None
-                        or f["text"] in overwritten_texts
-                    )
+                    if f["owner"] in members and f["state"] == "active"
                 ],
                 all_evidence=known,
             )

@@ -3568,13 +3568,6 @@ def segment_part_counts(project: Path) -> dict[str, list[dict[str, Any]]]:
         connection.close()
 
 
-def segment_part_ids(project: Path) -> dict[str, list[str]]:
-    return {
-        file_id: [entry["part_id"] for entry in parts]
-        for file_id, parts in segment_part_counts(project).items()
-    }
-
-
 def segment_count(
     project: Path,
     *,

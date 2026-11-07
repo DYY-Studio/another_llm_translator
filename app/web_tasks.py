@@ -2018,6 +2018,7 @@ class WebTaskManager:
         run_id: str,
         total_segments: int,
         completed_segments: int = 0,
+        checked_out_ids: Iterable[str] = (),
     ) -> dict[str, Any]:
         async with self.guard:
             if self._shutting_down:
@@ -2038,6 +2039,7 @@ class WebTaskManager:
                 started_at=now,
                 total_segments=total_segments,
                 completed_segments=completed_segments,
+                _checked_out_segment_ids={str(sid) for sid in checked_out_ids if sid},
             )
             self.tasks[task_id] = state
             self.active_by_project[project] = task_id
