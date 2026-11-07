@@ -422,6 +422,17 @@ def test_terminology_and_repetition_mcp_collaboration(
     assert len(inspected_page["occurrences"]) == 1
     assert inspected_page["occurrences"][0]["occurrence_id"] == "2"
 
+    with pytest.raises(Exception, match="不支持的术语筛选类型"):
+        bridge.call_tool(
+            "get_terminology_overview",
+            {"project": "repetition", "filter": "invalid_filter"},
+        )
+    with pytest.raises(Exception, match="分页参数无效"):
+        bridge.call_tool(
+            "inspect_term_entity",
+            {"project": "repetition", "normalized": "承诺", "fragments_offset": -1},
+        )
+
     # Update repetition draft proposals to resolve the uncertain occurrence '3' into subgroup 1
     bridge.call_tool(
         "update_repetition_draft",

@@ -233,6 +233,29 @@ def _page_decision_items(
     ]
 
 
+def _page_params(
+    args: dict[str, Any],
+    offset_key: str = "offset",
+    limit_key: str = "limit",
+    default_limit: int = 50,
+    max_limit: int = 500,
+) -> tuple[int, int]:
+    raw_offset = args.get(offset_key)
+    raw_limit = args.get(limit_key)
+    offset = 0 if raw_offset is None else raw_offset
+    limit = default_limit if raw_limit is None else raw_limit
+    if (
+        not isinstance(offset, int)
+        or isinstance(offset, bool)
+        or offset < 0
+        or not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or not 1 <= limit <= max_limit
+    ):
+        raise UsageError(f"{offset_key}/{limit_key} 分页参数无效")
+    return offset, limit
+
+
 MCP_INSTRUCTIONS = (
     "Another LLM Translator (minimal-llm-translator) MCP Server.\n"
     "Call `reference` (e.g. `reference(topic='workflows')`, `'pattern_b'`, `'terminology'`, `'repetition'`, `'config'`) "
@@ -435,12 +458,16 @@ REFERENCE_TOPICS: dict[str, dict[str, Any]] = {
             "clear_terms": {"payload": {"confirm": True}},
             "publish_partial": {"payload": {"confirm": True}},
         },
+        "overview_and_inspection": {
+            "get_terminology_overview": "Supports `filter` ('all', 'conflicts', 'changes', 'stale_knowledge', 'draft', 'needs_review', 'manual_review'), keyword `q`, and `offset`/`limit`.",
+            "inspect_term_entity": "Supports independent pagination for evidence fragments (`fragments_offset`, `fragments_limit`, `include_fragments`) and segment hits (`hits_offset`, `hits_limit`, `include_hits`).",
+        },
     },
     "repetition": {
         "summary": "Workflow and payload schemas for repetition consistency review.",
         "workflow": [
-            "1. Call `get_repetition_overview(project='...', create_draft=True)` to scan repeated source segments with differing translations and create a local draft (`run_id`).",
-            "2. Inspect any group's surrounding context with `inspect_repetition_group(project='...', group_id='1', window=5)`.",
+            "1. Call `get_repetition_overview(project='...', create_draft=True, sort_by='occurrence_count')` to scan repeated source segments with differing translations (sorted by frequency by default; `include_occurrences=False` keeps overview compact) and optionally create a local draft (`run_id`).",
+            "2. Inspect a group's occurrences and surrounding context with `inspect_repetition_group(project='...', group_id='1', source='...', window=5, offset=0, limit=20)` (`window=0` omits neighbor lines).",
             "3. Submit subgroup unification proposals via `update_repetition_draft(project='...', run_id=..., group_proposals=[...])` (each subgroup with non-empty `apply` defaults to accepted when finalizing; pass `choices` only to override acceptance or target).",
             "4. Apply with `finalize_repetition_draft(project='...', run_id=..., action='apply', confirm=True)`.",
         ],
@@ -1633,8 +1660,9 @@ class MCPWebBridge:
 
         if name == "get_task_and_diagnostics":
             project_name = str(args["project"])
-            runs_offset = int(args.get("runs_offset", 0))
-            runs_limit = int(args.get("runs_limit", 5))
+            runs_offset, runs_limit = _page_params(
+                args, "runs_offset", "runs_limit", default_limit=5, max_limit=200
+            )
             active = self._request("GET", "/api/v1/tasks/active").get("tasks", [])
             project_tasks = [
                 _compact_task(t)
@@ -1992,8 +2020,17 @@ class MCPWebBridge:
         if name == "get_terminology_overview":
             proj = quote(str(args["project"]), safe="")
             flt = args.get("filter", "all")
-            offset = int(args.get("offset", 0))
-            limit = int(args.get("limit", 50))
+            if flt not in {
+                "all",
+                "conflicts",
+                "changes",
+                "stale_knowledge",
+                "draft",
+                "needs_review",
+                "manual_review",
+            }:
+                raise UsageError(f"不支持的术语筛选类型：{flt}")
+            offset, limit = _page_params(args, default_limit=50, max_limit=500)
             q_str = str(args.get("q") or "").strip().casefold()
             decision = self._request("GET", f"/api/v1/projects/{proj}/terms/decision")
             if flt == "draft":
@@ -2172,8 +2209,13 @@ class MCPWebBridge:
                 knowledge.get("fragments"), list
             ):
                 all_frags = knowledge["fragments"]
-                f_offset = int(args.get("fragments_offset", 0))
-                f_limit = int(args.get("fragments_limit", 50))
+                f_offset, f_limit = _page_params(
+                    args,
+                    "fragments_offset",
+                    "fragments_limit",
+                    default_limit=50,
+                    max_limit=500,
+                )
                 knowledge = {
                     **{k: v for k, v in knowledge.items() if k != "fragments"},
                     "total_fragments": len(all_frags),
@@ -2182,14 +2224,17 @@ class MCPWebBridge:
                     knowledge["fragments_offset"] = f_offset
                     knowledge["fragments_limit"] = f_limit
                     knowledge["fragments"] = all_frags[f_offset : f_offset + f_limit]
+            h_offset, h_limit = _page_params(
+                args, "hits_offset", "hits_limit", default_limit=20, max_limit=200
+            )
             hits = (
                 self._request(
                     "POST",
                     f"/api/v1/projects/{proj}/terms/hits",
                     json_body={
                         "normalized": normalized,
-                        "offset": int(args.get("hits_offset", 0)),
-                        "limit": int(args.get("hits_limit", 20)),
+                        "offset": h_offset,
+                        "limit": h_limit,
                     },
                 )
                 if args.get("include_hits", True)
@@ -2356,8 +2401,10 @@ class MCPWebBridge:
 
         if name == "get_repetition_overview":
             proj = quote(str(args["project"]), safe="")
-            offset = int(args.get("offset", 0))
-            limit = int(args.get("limit", 50))
+            offset, limit = _page_params(args, default_limit=50, max_limit=200)
+            flt = args.get("filter", "all")
+            if flt not in {"all", "uncertain_only", "over_budget_only"}:
+                raise UsageError(f"不支持的重复组筛选类型：{flt}")
             exclude_punct = bool(args.get("exclude_punctuation_only", True))
             include_occurrences = bool(args.get("include_occurrences", False))
             sort_by = str(args.get("sort_by", "occurrence_count"))
@@ -2381,7 +2428,6 @@ class MCPWebBridge:
             state = self._request("GET", f"/api/v1/projects/{proj}/repetition")
             draft = state.get("draft")
             if draft and isinstance(draft.get("groups"), list):
-                flt = args.get("filter", "all")
                 groups = list(draft["groups"])
                 if flt == "uncertain_only":
                     groups = [g for g in groups if g.get("uncertain")]
@@ -2493,15 +2539,18 @@ class MCPWebBridge:
 
         if name == "inspect_repetition_group":
             proj = quote(str(args["project"]), safe="")
+            offset, limit = _page_params(args, default_limit=20, max_limit=100)
+            raw_window = args.get("window")
+            window = 5 if raw_window is None else raw_window
             res = self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/agent/repetition/inspect",
                 json_body={
                     "group_id": args.get("group_id"),
                     "source": args.get("source"),
-                    "window": int(args.get("window", 5)),
-                    "offset": int(args.get("offset", 0)),
-                    "limit": int(args.get("limit", 20)),
+                    "window": window,
+                    "offset": offset,
+                    "limit": limit,
                 },
             )
             if isinstance(res, dict) and isinstance(res.get("draft_group"), dict):

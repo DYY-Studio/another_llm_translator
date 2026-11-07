@@ -1220,11 +1220,12 @@ def register_agent_routes(
                         break
             segments = load_segments(root)
             by_id = {str(s["segment_id"]): s for s in segments}
-            non_empty = [s for s in segments if not s["is_empty"]]
             if target_group is None:
                 if not isinstance(source_text, str) or not source_text:
                     raise UsageError(f"未在当前重复译文草案中找到组：{group_id}")
-                matched_segments = [s for s in non_empty if s["source"] == source_text]
+                matched_segments = [
+                    s for s in segments if not s["is_empty"] and s["source"] == source_text
+                ]
                 if len(matched_segments) < 2:
                     raise UsageError("指定 source 未找到重复出现的非空 Segment")
                 occ_pairs = [
@@ -1240,9 +1241,8 @@ def register_agent_routes(
                 source_text = source_text_val
 
             paged_pairs = occ_pairs[offset : offset + limit]
-            paged_ids = [sid for _, sid in paged_pairs]
-            states = latest_stage_states(root, "translation", paged_ids) if paged_ids else {}
-            occurrences = []
+            page_windows = []
+            needed_ids = [sid for _, sid in paged_pairs]
             for occ_id, sid in paged_pairs:
                 seg = by_id[sid]
                 if window == 0:
@@ -1256,40 +1256,46 @@ def register_agent_routes(
                         before_limit=window,
                         after_limit=window,
                     )
-                ctx_ids = [str(item["segment_id"]) for item in (*before, *after)]
-                ctx_states = latest_stage_states(root, "translation", ctx_ids) if ctx_ids else {}
-                occurrences.append(
-                    {
-                        "occurrence_id": occ_id,
-                        "segment_id": sid,
-                        "file_id": seg["file_id"],
-                        "part_id": seg["part_id"],
-                        "line_index": seg["line_index"],
-                        "translation": (states.get(sid, {}).get("completed") or {}).get("text"),
-                        "before": [
-                            {
-                                "segment_id": str(item["segment_id"]),
-                                "source": str(item["source"]),
-                                "translation": (
-                                    ctx_states.get(str(item["segment_id"]), {}).get("completed")
-                                    or {}
-                                ).get("text"),
-                            }
-                            for item in before
-                        ],
-                        "after": [
-                            {
-                                "segment_id": str(item["segment_id"]),
-                                "source": str(item["source"]),
-                                "translation": (
-                                    ctx_states.get(str(item["segment_id"]), {}).get("completed")
-                                    or {}
-                                ).get("text"),
-                            }
-                            for item in after
-                        ],
-                    }
-                )
+                needed_ids.extend(str(item["segment_id"]) for item in (*before, *after))
+                page_windows.append((occ_id, sid, seg, before, after))
+            states = (
+                latest_stage_states(root, "translation", list(dict.fromkeys(needed_ids)))
+                if needed_ids
+                else {}
+            )
+            occurrences = [
+                {
+                    "occurrence_id": occ_id,
+                    "segment_id": sid,
+                    "file_id": seg["file_id"],
+                    "part_id": seg["part_id"],
+                    "line_index": seg["line_index"],
+                    "translation": (states.get(sid, {}).get("completed") or {}).get("text"),
+                    "before": [
+                        {
+                            "segment_id": str(item["segment_id"]),
+                            "source": str(item["source"]),
+                            "translation": (
+                                states.get(str(item["segment_id"]), {}).get("completed")
+                                or {}
+                            ).get("text"),
+                        }
+                        for item in before
+                    ],
+                    "after": [
+                        {
+                            "segment_id": str(item["segment_id"]),
+                            "source": str(item["source"]),
+                            "translation": (
+                                states.get(str(item["segment_id"]), {}).get("completed")
+                                or {}
+                            ).get("text"),
+                        }
+                        for item in after
+                    ],
+                }
+                for occ_id, sid, seg, before, after in page_windows
+            ]
             return {
                 "group_id": target_group["id"] if target_group else None,
                 "source": source_text,
