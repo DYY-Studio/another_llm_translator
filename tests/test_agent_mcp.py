@@ -331,11 +331,32 @@ def test_terminology_and_repetition_mcp_collaboration(
     # Terminology overview & single term edit
     term_ov = bridge.call_tool("get_terminology_overview", {"project": "repetition"})
     assert term_ov["total"] == 1
+    assert term_ov["offset"] == 0
+    assert term_ov["limit"] == 50
     assert term_ov["terms_revision"] == 1
+    assert "items" not in term_ov["decision_state"]["manual_review"]
+    mr_view = bridge.call_tool(
+        "get_terminology_overview",
+        {"project": "repetition", "filter": "manual_review", "offset": 0, "limit": 10},
+    )
+    assert mr_view["total"] == 0
+    assert mr_view["items"] == []
     entity = bridge.call_tool(
-        "inspect_term_entity", {"project": "repetition", "normalized": "承诺"}
+        "inspect_term_entity",
+        {
+            "project": "repetition",
+            "normalized": "承诺",
+            "fragments_offset": 0,
+            "fragments_limit": 10,
+            "hits_offset": 1,
+            "hits_limit": 1,
+        },
     )
     assert entity["knowledge"]["entity_key"] == "承诺"
+    assert entity["knowledge"]["total_fragments"] == 0
+    assert entity["knowledge"]["fragments"] == []
+    assert entity["hits"]["total"] == 3
+    assert len(entity["hits"]["hits"]) == 1
     assert entity["term"]["source"] == "承诺"
 
     saved_term = bridge.call_tool(
@@ -367,14 +388,31 @@ def test_terminology_and_repetition_mcp_collaboration(
     group = draft["groups"][0]
     group_id = group["id"]
     assert group["uncertain"] == ["3"]
+    assert group["occurrence_count"] == 3
+    assert group["translation_counts"] == {"我会来接你": 1, "我会去接你": 2}
 
     inspected = bridge.call_tool(
         "inspect_repetition_group",
         {"project": "repetition", "group_id": group_id, "window": 2},
     )
+    assert inspected["total_occurrences"] == 3
     assert len(inspected["occurrences"]) == 3
     assert "occurrences" not in inspected["draft_group"]
     assert "files" not in inspected["draft_group"]
+
+    inspected_page = bridge.call_tool(
+        "inspect_repetition_group",
+        {
+            "project": "repetition",
+            "group_id": group_id,
+            "window": 2,
+            "offset": 1,
+            "limit": 1,
+        },
+    )
+    assert inspected_page["total_occurrences"] == 3
+    assert len(inspected_page["occurrences"]) == 1
+    assert inspected_page["occurrences"][0]["occurrence_id"] == "2"
 
     # Update repetition draft proposals to resolve the uncertain occurrence '3' into subgroup 1
     bridge.call_tool(
@@ -462,6 +500,13 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     assert ov["project_id"].startswith("PRJ-")
     file_ids = [f["file_id"] for f in ov["files"]]
     assert file_ids == ["F0001", "F0002", "F0003"]
+    assert ov["files"][0]["part_count"] == 1
+    assert "part_ids" not in ov["files"][0]
+    assert "knowledge_entities" not in ov["stage_completion"]["terminology"]
+    ov_with_parts = bridge.call_tool(
+        "get_project_overview", {"project": "mcp-created", "include_parts": True}
+    )
+    assert len(ov_with_parts["files"][0]["part_ids"]) == 1
 
     # 3. Reorder files
     bridge.call_tool(
@@ -616,6 +661,7 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     assert completed_scan["status"] == "completed"
     assert completed_scan["completed_segments"] == 3
     assert completed_scan["stage_completion"]["state"] == "complete"
+    assert "knowledge_entities" not in completed_scan["stage_completion"]
 
     # 9. Configure project (get_config, update_config, delete_project)
     cfg = bridge.call_tool(
