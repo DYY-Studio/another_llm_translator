@@ -126,12 +126,16 @@ def _compact_segment_row(seg: dict[str, Any]) -> dict[str, Any]:
 
 
 def _compact_term_row(
-    term: dict[str, Any], *, keep_candidates: bool = False
+    term: dict[str, Any],
+    *,
+    keep_candidates: bool = False,
+    include_description: bool = True,
 ) -> dict[str, Any]:
     row = {
         k: v
         for k, v in term.items()
         if k not in {"description_items", "pending_change"}
+        and not (k == "description" and not include_description)
         and not (k == "conflicts" and not term.get("has_conflicts"))
     }
     pc = term.get("pending_change")
@@ -150,6 +154,36 @@ def _compact_term_row(
                 "kind": pc.get("kind"),
                 "candidate_count": len(pc.get("candidates", [])),
             }
+    return row
+
+
+def _compact_matched_term(
+    term: dict[str, Any], *, include_description: bool = True
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "source": term.get("source"),
+        "preferred_translation": term.get("preferred_translation"),
+    }
+    if term.get("category"):
+        row["category"] = term["category"]
+    if term.get("aliases"):
+        row["aliases"] = term["aliases"]
+    if term.get("primary_source"):
+        row["primary_source"] = term["primary_source"]
+    if term.get("group_claims"):
+        row["group_claims"] = term["group_claims"]
+    if include_description:
+        desc = term.get("description")
+        if not desc and isinstance(term.get("entity_knowledge"), dict):
+            items = term["entity_knowledge"].get("items")
+            if isinstance(items, list):
+                desc = "；".join(
+                    str(it.get("text", "")).strip()
+                    for it in items
+                    if isinstance(it, dict) and str(it.get("text", "")).strip()
+                )
+        if desc:
+            row["description"] = desc
     return row
 
 
@@ -357,7 +391,7 @@ REFERENCE_TOPICS: dict[str, dict[str, Any]] = {
         "summary": "Detailed contracts for Agent-driven stage runs (`start_agent_stage_run`, `checkout_stage_batch`, `submit_stage_batch`, `finish_agent_stage_run`).",
         "slice_and_cursor_control": {
             "description": "Both `checkout_stage_batch` and `submit_stage_batch` support scoping by `part_id`, `line_start` (inclusive), and `line_end` (exclusive), or via `run_id` shorthand `'<run_id>@<part_id>:<line_start>-<line_end>'`.",
-            "proofreading_cursor_tip": "In `proofreading`/`polishing`, unchanged segments are NOT submitted per batch, so they remain pending until `finish_agent_stage_run(accept_remaining=True)`. Pass `line_start = last_batch_segment['line_index'] + 1` to `checkout_stage_batch` (or `submit_stage_batch`) to advance to the next window.",
+            "proofreading_cursor_tip": "In `proofreading`/`polishing`, unchanged segments are NOT submitted per batch, so they remain pending until `finish_agent_stage_run(accept_remaining=True)`. Pass `line_start = last_batch_segment['line_index'] + 1` to `checkout_stage_batch` (or `submit_stage_batch`) to advance to the next window. Live cursor scan progress (`checked_out` / `checked_out_segments` / `checked_out_parts`) is automatically tracked on the active task in `get_project_overview` and `get_task_and_diagnostics`.",
         },
         "submit_stage_batch_items": {
             "translation": {
@@ -382,7 +416,7 @@ REFERENCE_TOPICS: dict[str, dict[str, Any]] = {
         "summary": "Payload schemas for `edit_terms`, `submit_term_decision_draft`, and `finalize_term_decision_draft`.",
         "edit_terms_actions": {
             "save_term_batch": {
-                "description": "Recommended for adding/updating one or more terms with optional one-shot string `description`.",
+                "description": "Recommended for adding or overwriting one or more terms (including `aliases`, `preferred_translation`, `category`, and optional one-shot string `description`).",
                 "payload": {
                     "terms": [
                         {
@@ -398,12 +432,12 @@ REFERENCE_TOPICS: dict[str, dict[str, Any]] = {
                 },
             },
             "save_term_single": {
-                "description": "Save a single term override. Note: single-term `save_term` does NOT accept string `description` (use batch `{'terms': [...]}` or `update_knowledge` for descriptions).",
+                "description": "Create or overwrite a single term (`old_normalized` is optional when updating the same source; optional string `description` is also supported).",
                 "payload": {
                     "source": "アリス",
-                    "old_normalized": "アリス",
                     "preferred_translation": "爱丽丝",
                     "category": "女性人名",
+                    "description": "本作女主角",
                     "aliases": ["アリ"],
                     "disabled": False,
                 },
@@ -459,7 +493,7 @@ REFERENCE_TOPICS: dict[str, dict[str, Any]] = {
             "publish_partial": {"payload": {"confirm": True}},
         },
         "overview_and_inspection": {
-            "get_terminology_overview": "Supports `filter` ('all', 'conflicts', 'changes', 'stale_knowledge', 'draft', 'needs_review', 'manual_review'), keyword `q`, and `offset`/`limit`.",
+            "get_terminology_overview": "Supports `filter` ('all', 'conflicts', 'changes', 'stale_knowledge', 'draft', 'needs_review', 'manual_review'), keyword `q`, `include_description` (default False), and `offset`/`limit`.",
             "inspect_term_entity": "Supports independent pagination for evidence fragments (`fragments_offset`, `fragments_limit`, `include_fragments`) and segment hits (`hits_offset`, `hits_limit`, `include_hits`).",
         },
     },
@@ -708,7 +742,7 @@ TOOLS: list[dict[str, Any]] = [
                 "include_parts": {
                     "type": "boolean",
                     "default": False,
-                    "description": "Include full chapter part_ids list for each file (default False, returning part_count only)",
+                    "description": "Include full chapter part_ids list and per-part segment_count (`parts: [{'part_id', 'segment_count'}]`) for each file (default False, returning part_count only)",
                 },
             },
             "required": ["project"],
@@ -966,8 +1000,16 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "integer",
                     "description": "Exclusive 0-based line_index upper bound",
                 },
-                "max_segments": {"type": "integer", "default": 15},
+                "max_segments": {
+                    "type": "integer",
+                    "default": 15,
+                    "description": "Batch size (1..100, default 15; recommend <=25 for translation and <=20 for proofreading/polishing to keep responses compact)",
+                },
                 "context_before": {"type": "integer", "default": 3},
+                "include_term_descriptions": {
+                    "type": "boolean",
+                    "description": "Include entity descriptions on matched terms (defaults to True for translation and False for proofreading/polishing)",
+                },
             },
             "required": ["project", "run_id"],
             "additionalProperties": False,
@@ -1054,6 +1096,11 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Optional case-insensitive substring search across source, normalized, preferred_translation, and aliases",
                 },
+                "include_description": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include full entity description text on each term row (default False to keep overview compact; use inspect_term_entity for full entity details)",
+                },
                 "offset": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 50},
             },
@@ -1118,7 +1165,7 @@ TOOLS: list[dict[str, Any]] = [
                     "description": (
                         "Action payload: "
                         "save_term (batch: {'terms': [{'source', 'preferred_translation', 'category', 'description'?, 'aliases'?, 'disabled'?, 'group_primary'?}]} "
-                        "or single: {'source', 'preferred_translation', 'category', 'aliases'?, 'old_normalized'?, 'disabled'?} without 'description'); "
+                        "or single: {'source', 'preferred_translation', 'category', 'description'?, 'aliases'?, 'old_normalized'?, 'disabled'?}); "
                         "import_terms ({'terms': [...]} or {'path': '/abs/path.json|.csv'}); "
                         "complete_scan ({} for full project or {'only_file': 'F0001', 'only_part'?: '...'}); "
                         "update_knowledge ({'normalized': str, 'action'?: 'save_items'|'confirm_keep'|'set_fragment_enabled', 'items'?: [{'text': str, 'fragment_ids': [str]}], 'expected_revision'?: int}); "
@@ -1649,6 +1696,7 @@ class MCPWebBridge:
                             cf["part_count"] = len(parts)
                             if not include_parts:
                                 cf.pop("part_ids", None)
+                                cf.pop("parts", None)
                         compact_files.append(cf)
                     data["files"] = compact_files
                 sc = data.get("stage_completion")
@@ -1810,6 +1858,13 @@ class MCPWebBridge:
                         for side in ("before", "after")
                         if side in neighbors
                     }
+                if isinstance(ctx.get("matched_terms"), list):
+                    ctx["matched_terms"] = [
+                        _compact_matched_term(t, include_description=True)
+                        if isinstance(t, dict)
+                        else t
+                        for t in ctx["matched_terms"]
+                    ]
                 if not ctx.get("term_warnings"):
                     ctx.pop("term_warnings", None)
                 dar = ctx.get("document_adapter_requirements")
@@ -1982,11 +2037,31 @@ class MCPWebBridge:
             for opt_key in ("part_id", "line_start", "line_end"):
                 if args.get(opt_key) is not None:
                     body[opt_key] = args[opt_key]
-            return self._request(
+            res = self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/agent/runs/{rid}/checkout",
                 json_body=body,
             )
+            if isinstance(res, dict):
+                res = dict(res)
+                raw_inc = args.get("include_term_descriptions")
+                inc_desc = (
+                    bool(raw_inc)
+                    if raw_inc is not None
+                    else (res.get("stage") == "translation")
+                )
+                if isinstance(res.get("terms"), list):
+                    res["terms"] = [
+                        _compact_matched_term(t, include_description=inc_desc)
+                        if isinstance(t, dict)
+                        else t
+                        for t in res["terms"]
+                    ]
+                if not res.get("warnings"):
+                    res.pop("warnings", None)
+                if res.get("document_adapter_requirement") is None:
+                    res.pop("document_adapter_requirement", None)
+            return res
 
         if name == "submit_stage_batch":
             proj = quote(str(args["project"]), safe="")
@@ -2141,8 +2216,13 @@ class MCPWebBridge:
                         )
                     )
                 ]
+            inc_desc = bool(args.get("include_description", False))
             compact_terms = [
-                _compact_term_row(t, keep_candidates=(flt == "changes"))
+                _compact_term_row(
+                    t,
+                    keep_candidates=(flt == "changes"),
+                    include_description=inc_desc,
+                )
                 if isinstance(t, dict)
                 else t
                 for t in items[offset : offset + limit]
@@ -2249,6 +2329,9 @@ class MCPWebBridge:
             if action == "import_terms" or (
                 action == "save_term" and isinstance(payload.get("terms"), list)
             ):
+                import_params = (
+                    {"overwrite": "true"} if action == "save_term" else None
+                )
                 if isinstance(payload.get("terms"), list):
                     doc = {
                         "schema_version": 2,
@@ -2259,6 +2342,7 @@ class MCPWebBridge:
                     return self._request(
                         "POST",
                         f"/api/v1/projects/{proj}/terms/import",
+                        params=import_params,
                         files={"file": ("terms.json", raw_bytes, "application/json")},
                     )
                 if isinstance(payload.get("path"), str) and payload["path"].strip():
@@ -2275,6 +2359,7 @@ class MCPWebBridge:
                     return self._request(
                         "POST",
                         f"/api/v1/projects/{proj}/terms/import",
+                        params=import_params,
                         files={"file": (filename, raw_bytes, content_type)},
                     )
                 raise UsageError(
@@ -2308,7 +2393,44 @@ class MCPWebBridge:
             if action not in routes:
                 raise UsageError(f"不支持的术语编辑动作：{action}")
             method, path = routes[action]
-            res = self._request(method, path, json_body=payload)
+            if action == "save_term":
+                save_body = dict(payload)
+                desc_text = save_body.pop("description", None)
+                try:
+                    res = self._request(method, path, json_body=save_body)
+                except UsageError as exc:
+                    msg = str(exc)
+                    if (
+                        save_body.get("old_normalized") is None
+                        and "normalized source 已存在：" in msg
+                    ):
+                        existing_norm = msg.split(
+                            "normalized source 已存在：", 1
+                        )[1].strip()
+                        res = self._request(
+                            method,
+                            path,
+                            json_body={
+                                **save_body,
+                                "old_normalized": existing_norm,
+                            },
+                        )
+                    else:
+                        raise
+                if isinstance(desc_text, str) and desc_text.strip():
+                    target_norm = str(save_body.get("source") or "").strip()
+                    res = self._request(
+                        "PUT",
+                        f"/api/v1/projects/{proj}/terms/knowledge",
+                        json_body={
+                            "normalized": target_norm,
+                            "items": [
+                                {"text": desc_text.strip(), "fragment_ids": []}
+                            ],
+                        },
+                    )
+            else:
+                res = self._request(method, path, json_body=payload)
             if isinstance(res, dict) and isinstance(res.get("terms"), list):
                 terms_list = res["terms"]
                 selected_terms = terms_list
@@ -2661,7 +2783,11 @@ def handle_jsonrpc_message(
                     "content": [
                         {
                             "type": "text",
-                            "text": json.dumps(payload, ensure_ascii=False),
+                            "text": json.dumps(
+                                payload,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
                         }
                     ],
                     "isError": False,
@@ -2676,7 +2802,9 @@ def handle_jsonrpc_message(
                         {
                             "type": "text",
                             "text": json.dumps(
-                                {"error": str(exc)}, ensure_ascii=False
+                                {"error": str(exc)},
+                                ensure_ascii=False,
+                                separators=(",", ":"),
                             ),
                         }
                     ],

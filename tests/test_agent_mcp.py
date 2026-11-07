@@ -238,6 +238,9 @@ def test_pattern_b_agent_stage_run_lifecycle_and_web_visibility(tmp_path: Path) 
         {"project": "sample", "run_id": run_id, "max_segments": 2},
     )
     assert len(checkout1["batch"]) == 2
+    assert checkout1["checked_out_count"] == 2
+    assert "entity_knowledge" not in checkout1["terms"][0]
+    assert "aliases" not in checkout1["terms"][0]
     seg1_id = checkout1["batch"][0]["segment_id"]
     seg2_id = checkout1["batch"][1]["segment_id"]
 
@@ -521,11 +524,15 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     assert file_ids == ["F0001", "F0002", "F0003"]
     assert ov["files"][0]["part_count"] == 1
     assert "part_ids" not in ov["files"][0]
+    assert "parts" not in ov["files"][0]
     assert "knowledge_entities" not in ov["stage_completion"]["terminology"]
     ov_with_parts = bridge.call_tool(
         "get_project_overview", {"project": "mcp-created", "include_parts": True}
     )
     assert len(ov_with_parts["files"][0]["part_ids"]) == 1
+    assert ov_with_parts["files"][0]["parts"] == [
+        {"part_id": "document", "segment_count": 2}
+    ]
 
     # 3. Reorder files
     bridge.call_tool(
@@ -635,6 +642,27 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
                 "terms": [
                     {
                         "source": "第一行",
+                        "preferred_translation": "初行",
+                        "category": "general",
+                        "description": "初始首行术语",
+                        "aliases": ["一行"],
+                        "disabled": False,
+                    }
+                ]
+            },
+        },
+    )
+    assert imported["imported"] == 1
+    # Batch save_term overwrites existing term's aliases and description
+    overwritten = bridge.call_tool(
+        "edit_terms",
+        {
+            "project": "mcp-created",
+            "action": "save_term",
+            "payload": {
+                "terms": [
+                    {
+                        "source": "第一行",
                         "preferred_translation": "首行",
                         "category": "general",
                         "description": "项目测试首行术语",
@@ -645,7 +673,25 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
             },
         },
     )
-    assert imported["imported"] == 1
+    assert overwritten["changed"] is True
+    # Single-term save_term updates existing term without requiring old_normalized and supports description
+    single_saved = bridge.call_tool(
+        "edit_terms",
+        {
+            "project": "mcp-created",
+            "action": "save_term",
+            "payload": {
+                "source": "第一行",
+                "preferred_translation": "首行",
+                "category": "general",
+                "description": "单条直接更新说明",
+                "aliases": [],
+                "disabled": False,
+            },
+        },
+    )
+    assert single_saved["terms"][0]["aliases"] == []
+    assert single_saved["terms"][0]["description"] == "单条直接更新说明"
     updated_know = bridge.call_tool(
         "edit_terms",
         {
@@ -664,7 +710,13 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     )
     assert term_ov["total"] == 1
     assert "description_items" not in term_ov["terms"][0]
+    assert "description" not in term_ov["terms"][0]
     assert "conflicts" not in term_ov["terms"][0]
+    term_ov_desc = bridge.call_tool(
+        "get_terminology_overview",
+        {"project": "mcp-created", "q": "首行", "include_description": True},
+    )
+    assert term_ov_desc["terms"][0]["description"] == "更新后的首行说明"
     assert bridge.call_tool(
         "get_terminology_overview",
         {"project": "mcp-created", "q": "不存在的词"},
@@ -809,6 +861,20 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
     assert pr_run["selected_count"] == 3
     assert "accept_remaining=True" in pr_run["prompt"]
     assert '{"type":"end"}' not in pr_run["prompt"]
+    pr_co = bridge.call_tool(
+        "checkout_stage_batch",
+        {"project": "rep-mcp", "run_id": pr_run["run_id"], "max_segments": 2},
+    )
+    assert pr_co["checked_out_count"] == 2
+    pr_ov = bridge.call_tool("get_project_overview", {"project": "rep-mcp"})
+    assert pr_ov["stage_completion"]["proofreading"]["checked_out"] == 2
+    assert (
+        pr_ov["stage_completion"]["proofreading"]["active_run_id"]
+        == pr_run["run_id"]
+    )
+    pr_diag = bridge.call_tool("get_task_and_diagnostics", {"project": "rep-mcp"})
+    assert pr_diag["active_tasks"][0]["checked_out_segments"] == 2
+    assert pr_diag["active_tasks"][0]["checked_out_parts"] == {"document": 2}
     bridge.call_tool(
         "submit_stage_batch",
         {
@@ -824,6 +890,11 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
             ],
         },
     )
+    with pytest.raises(Exception, match="accept_remaining=True"):
+        bridge.call_tool(
+            "apply_stage_suggestions",
+            {"project": "rep-mcp", "stage": "proofreading", "confirm": True},
+        )
     pr_done = bridge.call_tool(
         "finish_agent_stage_run",
         {

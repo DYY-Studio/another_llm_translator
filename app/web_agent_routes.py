@@ -817,7 +817,15 @@ def register_agent_routes(
                 "warnings": warnings,
             }
 
-        return await run_blocking(_checkout)
+        result = await run_blocking(_checkout)
+        checked_out = app.state.tasks.record_agent_checkout(
+            root,
+            safe_id,
+            segment_ids=[item["segment_id"] for item in result.get("batch", [])],
+            part_id=result.get("part_id"),
+        )
+        result["checked_out_count"] = checked_out
+        return result
 
     @app.post("/api/v1/projects/{name}/agent/runs/{run_id}/submit")
     async def submit_agent_batch(
@@ -1056,6 +1064,7 @@ def register_agent_routes(
             safe_id,
             completed_segments=result["completed_count"],
             failed_segments=len(result["rejected_items"]),
+            committed_ids=result["committed_ids"],
         )
         return result
 

@@ -3541,25 +3541,38 @@ def _append_stage_status_filter(
         params.append(status)
 
 
-def segment_part_ids(project: Path) -> dict[str, list[str]]:
+def segment_part_counts(project: Path) -> dict[str, list[dict[str, Any]]]:
     connection = _with_db(project)
     try:
         rows = connection.execute(
             """
             SELECT segments.file_id, segments.part_id,
-                   MIN(segments.line_index) AS first_line_index
+                   MIN(segments.line_index) AS first_line_index,
+                   COUNT(*) AS segment_count
             FROM files CROSS JOIN segments ON segments.file_id = files.file_id
             WHERE segments.is_empty = 0
             GROUP BY segments.file_id, segments.part_id
             ORDER BY files.file_order, first_line_index
             """
         ).fetchall()
-        result: dict[str, list[str]] = {}
+        result: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
-            result.setdefault(str(row[0]), []).append(str(row[1]))
+            result.setdefault(str(row[0]), []).append(
+                {
+                    "part_id": str(row[1]),
+                    "segment_count": int(row[3]),
+                }
+            )
         return result
     finally:
         connection.close()
+
+
+def segment_part_ids(project: Path) -> dict[str, list[str]]:
+    return {
+        file_id: [entry["part_id"] for entry in parts]
+        for file_id, parts in segment_part_counts(project).items()
+    }
 
 
 def segment_count(
