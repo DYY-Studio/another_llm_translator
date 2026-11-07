@@ -390,6 +390,14 @@ def test_terminology_and_repetition_mcp_collaboration(
     assert group["uncertain"] == ["3"]
     assert group["occurrence_count"] == 3
     assert group["translation_counts"] == {"我会来接你": 1, "我会去接你": 2}
+    assert "occurrences" not in group
+
+    inspected_zero = bridge.call_tool(
+        "inspect_repetition_group",
+        {"project": "repetition", "group_id": group_id, "window": 0},
+    )
+    assert inspected_zero["occurrences"][0]["before"] == []
+    assert inspected_zero["occurrences"][0]["after"] == []
 
     inspected = bridge.call_tool(
         "inspect_repetition_group",
@@ -747,12 +755,18 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
 
     rep_overview = bridge.call_tool(
         "get_repetition_overview",
-        {"project": "rep-mcp", "create_draft": True},
+        {
+            "project": "rep-mcp",
+            "create_draft": True,
+            "include_occurrences": True,
+            "sort_by": "occurrence_count",
+        },
     )
     assert rep_overview["draft"] is not None
     assert "evidence" not in rep_overview["draft"]
     assert "sources" not in rep_overview["draft"]
     assert rep_overview["draft"]["total_groups"] == 1
+    assert rep_overview["draft"]["sort_by"] == "occurrence_count"
     rep_group = rep_overview["draft"]["groups"][0]
     assert rep_group["source"] == "待て！"
     assert "signature" not in rep_group["occurrences"][0]

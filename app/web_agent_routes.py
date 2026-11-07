@@ -1198,8 +1198,8 @@ def register_agent_routes(
         if not group_id and not source_text:
             raise UsageError("必须提供 group_id 或 source")
         window = payload.get("window", 5)
-        if not isinstance(window, int) or isinstance(window, bool) or not 1 <= window <= 30:
-            raise UsageError("window 必须是 1 到 30 之间的整数")
+        if not isinstance(window, int) or isinstance(window, bool) or not 0 <= window <= 30:
+            raise UsageError("window 必须是 0 到 30 之间的整数")
         offset = payload.get("offset", 0)
         limit = payload.get("limit", 20)
         if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
@@ -1245,14 +1245,17 @@ def register_agent_routes(
             occurrences = []
             for occ_id, sid in paged_pairs:
                 seg = by_id[sid]
-                before, after = query_segment_neighbors(
-                    root,
-                    file_id=str(seg["file_id"]),
-                    part_id=str(seg["part_id"]),
-                    line_index=int(seg["line_index"]),
-                    before_limit=window,
-                    after_limit=window,
-                )
+                if window == 0:
+                    before, after = [], []
+                else:
+                    before, after = query_segment_neighbors(
+                        root,
+                        file_id=str(seg["file_id"]),
+                        part_id=str(seg["part_id"]),
+                        line_index=int(seg["line_index"]),
+                        before_limit=window,
+                        after_limit=window,
+                    )
                 ctx_ids = [str(item["segment_id"]) for item in (*before, *after)]
                 ctx_states = latest_stage_states(root, "translation", ctx_ids) if ctx_ids else {}
                 occurrences.append(
@@ -1384,6 +1387,12 @@ def register_agent_routes(
         replace_draft = payload.get("replace_draft", False)
         if not isinstance(replace_draft, bool):
             raise UsageError("replace_draft 必须是布尔值")
+        include_occurrences = payload.get("include_occurrences", False)
+        if not isinstance(include_occurrences, bool):
+            raise UsageError("include_occurrences 必须是布尔值")
+        sort_by = payload.get("sort_by", "occurrence_count")
+        if sort_by not in {"group_index", "occurrence_count"}:
+            raise UsageError("sort_by 必须是 group_index 或 occurrence_count")
         offset = payload.get("offset", 0)
         limit = payload.get("limit", 50)
         if (
@@ -1580,8 +1589,12 @@ def register_agent_routes(
                         retained.append(items)
                 candidates = retained
 
+            indexed_candidates = list(enumerate(candidates, 1))
+            if sort_by == "occurrence_count":
+                indexed_candidates.sort(key=lambda pair: (-len(pair[1]), pair[0]))
+            paged_candidates = indexed_candidates[offset : offset + limit]
             groups = []
-            for idx, items in enumerate(candidates, 1):
+            for idx, items in paged_candidates:
                 variants = list(
                     dict.fromkeys(bases[str(s["segment_id"])]["text"] for s in items)
                 )
@@ -1595,7 +1608,9 @@ def register_agent_routes(
                     "occurrence_count": len(items),
                     "translations": variants,
                     "translation_counts": translation_counts,
-                    "occurrences": [
+                }
+                if include_occurrences:
+                    group_entry["occurrences"] = [
                         {
                             "occurrence_id": str(occ_idx),
                             "segment_id": str(s["segment_id"]),
@@ -1605,19 +1620,19 @@ def register_agent_routes(
                             "translation": bases[str(s["segment_id"])]["text"],
                         }
                         for occ_idx, s in enumerate(items[:20], 1)
-                    ],
-                }
-                if len(items) > 20:
-                    group_entry["occurrences_truncated"] = True
+                    ]
+                    if len(items) > 20:
+                        group_entry["occurrences_truncated"] = True
                 groups.append(group_entry)
             return {
                 "total_segments_in_scope": len(selected),
                 "translated_segments_in_scope": len(bases),
                 "excluded_punctuation_groups": excluded_punctuation_groups,
-                "total_groups": len(groups),
+                "total_groups": len(indexed_candidates),
+                "sort_by": sort_by,
                 "offset": offset,
                 "limit": limit,
-                "groups": groups[offset : offset + limit],
+                "groups": groups,
             }
 
         return await run_blocking(_scan)

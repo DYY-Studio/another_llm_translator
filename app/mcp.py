@@ -213,6 +213,26 @@ def _manual_review_summary(mr: Any) -> dict[str, Any] | None:
     }
 
 
+def _page_decision_items(
+    raw_items: Any, q_str: str, offset: int, limit: int
+) -> tuple[int, list[Any]]:
+    items = list(raw_items) if isinstance(raw_items, list) else []
+    if q_str:
+        items = [
+            item
+            for item in items
+            if isinstance(item, dict)
+            and any(
+                q_str in str(item.get(k) or "").casefold()
+                for k in ("normalized", "source", "reason")
+            )
+        ]
+    return len(items), [
+        _compact_decision_item(item) if isinstance(item, dict) else item
+        for item in items[offset : offset + limit]
+    ]
+
+
 MCP_INSTRUCTIONS = (
     "Another LLM Translator (minimal-llm-translator) MCP Server.\n"
     "Call `reference` (e.g. `reference(topic='workflows')`, `'pattern_b'`, `'terminology'`, `'repetition'`, `'config'`) "
@@ -1157,6 +1177,17 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "Create a formal pending repetition_consistency draft locally without calling external LLM",
                 },
                 "replace_draft": {"type": "boolean", "default": False},
+                "include_occurrences": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Inline up to 20 occurrences per group when True (default False to keep overview compact; use inspect_repetition_group for paginated occurrences)",
+                },
+                "sort_by": {
+                    "type": "string",
+                    "enum": ["occurrence_count", "group_index"],
+                    "default": "occurrence_count",
+                    "description": "Sort groups by descending occurrence frequency ('occurrence_count', default) or document appearance order ('group_index')",
+                },
                 "offset": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 50},
             },
@@ -1166,14 +1197,24 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "inspect_repetition_group",
-        "description": "Inspect occurrences of a repeated source group with configurable surrounding context window and pagination.",
+        "description": "Inspect occurrences of a repeated source group with configurable surrounding context window (0..30) and pagination.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "project": {"type": "string"},
-                "group_id": {"type": "string"},
-                "source": {"type": "string"},
-                "window": {"type": "integer", "default": 5},
+                "group_id": {
+                    "type": "string",
+                    "description": "Draft group id when a formal pending repetition draft exists (for live_scan without a draft, pass source instead)",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Exact repeated source segment text (works for both live_scan and formal draft)",
+                },
+                "window": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Number of neighboring segments before and after each occurrence (0 to 30; 0 omits neighbor context)",
+                },
                 "offset": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 20},
             },
@@ -1958,21 +1999,9 @@ class MCPWebBridge:
             if flt == "draft":
                 draft = decision.get("draft")
                 if isinstance(draft, dict) and isinstance(draft.get("proposals"), list):
-                    proposals = draft["proposals"]
-                    if q_str:
-                        proposals = [
-                            p
-                            for p in proposals
-                            if isinstance(p, dict)
-                            and any(
-                                q_str in str(p.get(k) or "").casefold()
-                                for k in ("normalized", "source", "reason")
-                            )
-                        ]
-                    compact_proposals = [
-                        _compact_decision_item(p) if isinstance(p, dict) else p
-                        for p in proposals[offset : offset + limit]
-                    ]
+                    total_proposals, compact_proposals = _page_decision_items(
+                        draft["proposals"], q_str, offset, limit
+                    )
                     needs_review_list = (
                         draft.get("needs_review")
                         if isinstance(draft.get("needs_review"), list)
@@ -1998,7 +2027,7 @@ class MCPWebBridge:
                                 }
                             },
                             "needs_review_count": len(needs_review_list),
-                            "total_proposals": len(proposals),
+                            "total_proposals": total_proposals,
                             "offset": offset,
                             "limit": limit,
                             "proposals": compact_proposals,
@@ -2014,31 +2043,18 @@ class MCPWebBridge:
                 return decision
             if flt == "needs_review":
                 draft = decision.get("draft")
-                nr_items = (
-                    list(draft.get("needs_review", []))
-                    if isinstance(draft, dict)
-                    and isinstance(draft.get("needs_review"), list)
-                    else []
+                total_nr, paged_nr = _page_decision_items(
+                    draft.get("needs_review") if isinstance(draft, dict) else [],
+                    q_str,
+                    offset,
+                    limit,
                 )
-                if q_str:
-                    nr_items = [
-                        item
-                        for item in nr_items
-                        if isinstance(item, dict)
-                        and any(
-                            q_str in str(item.get(k) or "").casefold()
-                            for k in ("normalized", "source", "reason")
-                        )
-                    ]
                 return {
                     "run_id": draft.get("run_id") if isinstance(draft, dict) else None,
-                    "total": len(nr_items),
+                    "total": total_nr,
                     "offset": offset,
                     "limit": limit,
-                    "items": [
-                        _compact_decision_item(item) if isinstance(item, dict) else item
-                        for item in nr_items[offset : offset + limit]
-                    ],
+                    "items": paged_nr,
                     "manual_review": _manual_review_summary(
                         decision.get("manual_review")
                     ),
@@ -2049,31 +2065,16 @@ class MCPWebBridge:
                     if isinstance(decision.get("manual_review"), dict)
                     else {}
                 )
-                mr_items = (
-                    list(mr.get("items", []))
-                    if isinstance(mr.get("items"), list)
-                    else []
+                total_mr, paged_mr = _page_decision_items(
+                    mr.get("items"), q_str, offset, limit
                 )
-                if q_str:
-                    mr_items = [
-                        item
-                        for item in mr_items
-                        if isinstance(item, dict)
-                        and any(
-                            q_str in str(item.get(k) or "").casefold()
-                            for k in ("normalized", "source", "reason")
-                        )
-                    ]
                 return {
-                    "total": len(mr_items),
+                    "total": total_mr,
                     "resolved": mr.get("resolved", 0),
                     "remaining": mr.get("remaining", 0),
                     "offset": offset,
                     "limit": limit,
-                    "items": [
-                        _compact_decision_item(item) if isinstance(item, dict) else item
-                        for item in mr_items[offset : offset + limit]
-                    ],
+                    "items": paged_mr,
                 }
             terms_data = self._request("GET", f"/api/v1/projects/{proj}/terms")
             items = list(terms_data.get("terms", []))
@@ -2358,6 +2359,10 @@ class MCPWebBridge:
             offset = int(args.get("offset", 0))
             limit = int(args.get("limit", 50))
             exclude_punct = bool(args.get("exclude_punctuation_only", True))
+            include_occurrences = bool(args.get("include_occurrences", False))
+            sort_by = str(args.get("sort_by", "occurrence_count"))
+            if sort_by not in {"group_index", "occurrence_count"}:
+                raise UsageError("sort_by 必须是 group_index 或 occurrence_count")
             if args.get("create_draft"):
                 self._request(
                     "POST",
@@ -2367,6 +2372,8 @@ class MCPWebBridge:
                         "exclude_punctuation_only": exclude_punct,
                         "create_draft": True,
                         "replace_draft": bool(args.get("replace_draft", False)),
+                        "include_occurrences": include_occurrences,
+                        "sort_by": sort_by,
                         "offset": offset,
                         "limit": limit,
                     },
@@ -2375,11 +2382,25 @@ class MCPWebBridge:
             draft = state.get("draft")
             if draft and isinstance(draft.get("groups"), list):
                 flt = args.get("filter", "all")
-                groups = draft["groups"]
+                groups = list(draft["groups"])
                 if flt == "uncertain_only":
                     groups = [g for g in groups if g.get("uncertain")]
                 elif flt == "over_budget_only":
                     groups = [g for g in groups if g.get("over_budget")]
+                if sort_by == "occurrence_count":
+                    groups = [
+                        g
+                        for _, g in sorted(
+                            enumerate(groups),
+                            key=lambda pair: (
+                                -len(pair[1].get("occurrences", []))
+                                if isinstance(pair[1], dict)
+                                and isinstance(pair[1].get("occurrences"), list)
+                                else 0,
+                                pair[0],
+                            ),
+                        )
+                    ]
                 compact_groups = []
                 for g in groups[offset : offset + limit]:
                     cg = {k: v for k, v in g.items() if k != "files"}
@@ -2389,7 +2410,7 @@ class MCPWebBridge:
                         else []
                     )
                     if isinstance(cg.get("occurrences"), list):
-                        all_occs = cg["occurrences"]
+                        all_occs = cg.pop("occurrences")
                         cg["occurrence_count"] = len(all_occs)
                         translation_counts: dict[str, int] = {}
                         for occ in all_occs:
@@ -2409,39 +2430,41 @@ class MCPWebBridge:
                                 )
                         if translation_counts:
                             cg["translation_counts"] = translation_counts
-                        compact_occs = []
-                        for occ in all_occs[:20]:
-                            if not isinstance(occ, dict):
-                                continue
-                            c_occ = {
-                                k: v
-                                for k, v in occ.items()
-                                if k
-                                in {
-                                    "id",
-                                    "segment_id",
-                                    "file_id",
-                                    "part_id",
-                                    "line_index",
-                                    "variant",
-                                    "text",
+                        if include_occurrences:
+                            compact_occs = []
+                            for occ in all_occs[:20]:
+                                if not isinstance(occ, dict):
+                                    continue
+                                c_occ = {
+                                    k: v
+                                    for k, v in occ.items()
+                                    if k
+                                    in {
+                                        "id",
+                                        "segment_id",
+                                        "file_id",
+                                        "part_id",
+                                        "line_index",
+                                        "variant",
+                                        "text",
+                                    }
                                 }
-                            }
-                            v_idx = occ.get("variant")
-                            if (
-                                "text" not in c_occ
-                                and isinstance(v_idx, int)
-                                and 0 <= v_idx < len(translations)
-                            ):
-                                c_occ["translation"] = translations[v_idx]
-                            compact_occs.append(c_occ)
-                        cg["occurrences"] = compact_occs
-                        if len(all_occs) > 20:
-                            cg["occurrences_truncated"] = True
+                                v_idx = occ.get("variant")
+                                if (
+                                    "text" not in c_occ
+                                    and isinstance(v_idx, int)
+                                    and 0 <= v_idx < len(translations)
+                                ):
+                                    c_occ["translation"] = translations[v_idx]
+                                compact_occs.append(c_occ)
+                            cg["occurrences"] = compact_occs
+                            if len(all_occs) > 20:
+                                cg["occurrences_truncated"] = True
                     compact_groups.append(cg)
                 draft = {
                     **{k: v for k, v in draft.items() if k not in {"evidence", "sources"}},
                     "total_groups": len(groups),
+                    "sort_by": sort_by,
                     "offset": offset,
                     "limit": limit,
                     "groups": compact_groups,
@@ -2460,6 +2483,8 @@ class MCPWebBridge:
                         "only_part": args.get("only_part"),
                         "exclude_punctuation_only": exclude_punct,
                         "create_draft": False,
+                        "include_occurrences": include_occurrences,
+                        "sort_by": sort_by,
                         "offset": offset,
                         "limit": limit,
                     },
