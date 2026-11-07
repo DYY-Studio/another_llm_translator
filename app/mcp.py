@@ -126,12 +126,16 @@ def _compact_segment_row(seg: dict[str, Any]) -> dict[str, Any]:
 
 
 def _compact_term_row(
-    term: dict[str, Any], *, keep_candidates: bool = False
+    term: dict[str, Any],
+    *,
+    keep_candidates: bool = False,
+    include_description: bool = True,
 ) -> dict[str, Any]:
     row = {
         k: v
         for k, v in term.items()
         if k not in {"description_items", "pending_change"}
+        and not (k == "description" and not include_description)
         and not (k == "conflicts" and not term.get("has_conflicts"))
     }
     pc = term.get("pending_change")
@@ -151,6 +155,139 @@ def _compact_term_row(
                 "candidate_count": len(pc.get("candidates", [])),
             }
     return row
+
+
+def _compact_matched_term(
+    term: dict[str, Any], *, include_description: bool = True
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "source": term.get("source"),
+        "preferred_translation": term.get("preferred_translation"),
+    }
+    if term.get("category"):
+        row["category"] = term["category"]
+    if term.get("aliases"):
+        row["aliases"] = term["aliases"]
+    if term.get("primary_source"):
+        row["primary_source"] = term["primary_source"]
+    if term.get("group_claims"):
+        row["group_claims"] = term["group_claims"]
+    if include_description:
+        desc = term.get("description")
+        if not desc and isinstance(term.get("entity_knowledge"), dict):
+            items = term["entity_knowledge"].get("items")
+            if isinstance(items, list):
+                desc = "；".join(
+                    str(it.get("text", "")).strip()
+                    for it in items
+                    if isinstance(it, dict) and str(it.get("text", "")).strip()
+                )
+        if desc:
+            row["description"] = desc
+    return row
+
+
+def _compact_decision_item(p: dict[str, Any]) -> dict[str, Any]:
+    cp = {
+        k: v
+        for k, v in p.items()
+        if k
+        not in {
+            "before",
+            "after",
+            "conflicts",
+            "knowledge_before",
+            "knowledge_after",
+            "evidence",
+            "knowledge_evidence",
+        }
+    }
+    for side in ("before", "after"):
+        if isinstance(p.get(side), list):
+            cp[side] = [
+                {
+                    k: v
+                    for k, v in st.items()
+                    if k
+                    in {
+                        "normalized",
+                        "source",
+                        "preferred_translation",
+                        "category",
+                        "aliases",
+                        "group_primary",
+                        "disabled",
+                    }
+                    and (
+                        v not in (None, [], False)
+                        or k
+                        in {
+                            "normalized",
+                            "source",
+                            "preferred_translation",
+                            "category",
+                        }
+                    )
+                }
+                for st in p[side]
+                if isinstance(st, dict)
+            ]
+    if p.get("conflicts"):
+        cp["conflict_count"] = len(p["conflicts"])
+    return cp
+
+
+def _manual_review_summary(mr: Any) -> dict[str, Any] | None:
+    if not isinstance(mr, dict):
+        return None
+    return {
+        "total": mr.get("total", len(mr.get("items") or [])),
+        "resolved": mr.get("resolved", 0),
+        "remaining": mr.get("remaining", 0),
+    }
+
+
+def _page_decision_items(
+    raw_items: Any, q_str: str, offset: int, limit: int
+) -> tuple[int, list[Any]]:
+    items = list(raw_items) if isinstance(raw_items, list) else []
+    if q_str:
+        items = [
+            item
+            for item in items
+            if isinstance(item, dict)
+            and any(
+                q_str in str(item.get(k) or "").casefold()
+                for k in ("normalized", "source", "reason")
+            )
+        ]
+    return len(items), [
+        _compact_decision_item(item) if isinstance(item, dict) else item
+        for item in items[offset : offset + limit]
+    ]
+
+
+def _page_params(
+    args: dict[str, Any],
+    offset_key: str = "offset",
+    limit_key: str = "limit",
+    default_limit: int = 50,
+    max_limit: int = 500,
+) -> tuple[int, int]:
+    raw_offset = args.get(offset_key)
+    raw_limit = args.get(limit_key)
+    offset = 0 if raw_offset is None else raw_offset
+    limit = default_limit if raw_limit is None else raw_limit
+    if (
+        not isinstance(offset, int)
+        or isinstance(offset, bool)
+        or offset < 0
+        or not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or not 1 <= limit <= max_limit
+    ):
+        raise UsageError(f"{offset_key}/{limit_key} 分页参数无效")
+    return offset, limit
 
 
 MCP_INSTRUCTIONS = (
@@ -254,7 +391,7 @@ REFERENCE_TOPICS: dict[str, dict[str, Any]] = {
         "summary": "Detailed contracts for Agent-driven stage runs (`start_agent_stage_run`, `checkout_stage_batch`, `submit_stage_batch`, `finish_agent_stage_run`).",
         "slice_and_cursor_control": {
             "description": "Both `checkout_stage_batch` and `submit_stage_batch` support scoping by `part_id`, `line_start` (inclusive), and `line_end` (exclusive), or via `run_id` shorthand `'<run_id>@<part_id>:<line_start>-<line_end>'`.",
-            "proofreading_cursor_tip": "In `proofreading`/`polishing`, unchanged segments are NOT submitted per batch, so they remain pending until `finish_agent_stage_run(accept_remaining=True)`. Pass `line_start = last_batch_segment['line_index'] + 1` to `checkout_stage_batch` (or `submit_stage_batch`) to advance to the next window.",
+            "proofreading_cursor_tip": "In `proofreading`/`polishing`, unchanged segments are NOT submitted per batch, so they remain pending until `finish_agent_stage_run(accept_remaining=True)`. Pass `line_start = last_batch_segment['line_index'] + 1` to `checkout_stage_batch` (or `submit_stage_batch`) to advance to the next window. Live cursor scan progress (`checked_out` / `checked_out_segments` / `checked_out_parts`) is automatically tracked on the active task in `get_project_overview` and `get_task_and_diagnostics`.",
         },
         "submit_stage_batch_items": {
             "translation": {
@@ -279,7 +416,7 @@ REFERENCE_TOPICS: dict[str, dict[str, Any]] = {
         "summary": "Payload schemas for `edit_terms`, `submit_term_decision_draft`, and `finalize_term_decision_draft`.",
         "edit_terms_actions": {
             "save_term_batch": {
-                "description": "Recommended for adding/updating one or more terms with optional one-shot string `description`.",
+                "description": "Recommended for adding or overwriting one or more terms (including `aliases`, `preferred_translation`, `category`, and optional one-shot string `description`).",
                 "payload": {
                     "terms": [
                         {
@@ -295,12 +432,12 @@ REFERENCE_TOPICS: dict[str, dict[str, Any]] = {
                 },
             },
             "save_term_single": {
-                "description": "Save a single term override. Note: single-term `save_term` does NOT accept string `description` (use batch `{'terms': [...]}` or `update_knowledge` for descriptions).",
+                "description": "Create or overwrite a single term (`old_normalized` is optional when updating the same source; optional string `description` is also supported).",
                 "payload": {
                     "source": "アリス",
-                    "old_normalized": "アリス",
                     "preferred_translation": "爱丽丝",
                     "category": "女性人名",
+                    "description": "本作女主角",
                     "aliases": ["アリ"],
                     "disabled": False,
                 },
@@ -355,12 +492,16 @@ REFERENCE_TOPICS: dict[str, dict[str, Any]] = {
             "clear_terms": {"payload": {"confirm": True}},
             "publish_partial": {"payload": {"confirm": True}},
         },
+        "overview_and_inspection": {
+            "get_terminology_overview": "Supports `filter` ('all', 'conflicts', 'changes', 'stale_knowledge', 'draft', 'needs_review', 'manual_review'), keyword `q`, `include_description` (default False), and `offset`/`limit`.",
+            "inspect_term_entity": "Supports independent pagination for evidence fragments (`fragments_offset`, `fragments_limit`, `include_fragments`) and segment hits (`hits_offset`, `hits_limit`, `include_hits`).",
+        },
     },
     "repetition": {
         "summary": "Workflow and payload schemas for repetition consistency review.",
         "workflow": [
-            "1. Call `get_repetition_overview(project='...', create_draft=True)` to scan repeated source segments with differing translations and create a local draft (`run_id`).",
-            "2. Inspect any group's surrounding context with `inspect_repetition_group(project='...', group_id='1', window=5)`.",
+            "1. Call `get_repetition_overview(project='...', create_draft=True, sort_by='occurrence_count')` to scan repeated source segments with differing translations (sorted by frequency by default; `include_occurrences=False` keeps overview compact) and optionally create a local draft (`run_id`).",
+            "2. Inspect a group's occurrences and surrounding context with `inspect_repetition_group(project='...', group_id='1', source='...', window=5, offset=0, limit=20)` (`window=0` omits neighbor lines).",
             "3. Submit subgroup unification proposals via `update_repetition_draft(project='...', run_id=..., group_proposals=[...])` (each subgroup with non-empty `apply` defaults to accepted when finalizing; pass `choices` only to override acceptance or target).",
             "4. Apply with `finalize_repetition_draft(project='...', run_id=..., action='apply', confirm=True)`.",
         ],
@@ -596,7 +737,14 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Get project overview including files, per-stage progress counts, unfinished runs, and pending drafts.",
         "inputSchema": {
             "type": "object",
-            "properties": {"project": {"type": "string", "description": "Project name or ID"}},
+            "properties": {
+                "project": {"type": "string", "description": "Project name or ID"},
+                "include_parts": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include full chapter part_ids list and per-part segment_count (`parts: [{'part_id', 'segment_count'}]`) for each file (default False, returning part_count only)",
+                },
+            },
             "required": ["project"],
             "additionalProperties": False,
         },
@@ -610,6 +758,8 @@ TOOLS: list[dict[str, Any]] = [
                 "project": {"type": "string"},
                 "task_id": {"type": "string"},
                 "stage": {"type": "string"},
+                "runs_offset": {"type": "integer", "default": 0},
+                "runs_limit": {"type": "integer", "default": 5},
                 "include_events": {"type": "boolean", "default": False},
             },
             "required": ["project"],
@@ -850,8 +1000,16 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "integer",
                     "description": "Exclusive 0-based line_index upper bound",
                 },
-                "max_segments": {"type": "integer", "default": 15},
+                "max_segments": {
+                    "type": "integer",
+                    "default": 15,
+                    "description": "Batch size (1..100, default 15; recommend <=25 for translation and <=20 for proofreading/polishing to keep responses compact)",
+                },
                 "context_before": {"type": "integer", "default": 3},
+                "include_term_descriptions": {
+                    "type": "boolean",
+                    "description": "Include entity descriptions on matched terms (defaults to True for translation and False for proofreading/polishing)",
+                },
             },
             "required": ["project", "run_id"],
             "additionalProperties": False,
@@ -916,7 +1074,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "get_terminology_overview",
-        "description": "Get terminology status, conflicts, pending changes, stale entity knowledge, decision draft proposals, and manual review queue.",
+        "description": "Get terminology status, conflicts, pending changes, stale entity knowledge, decision draft proposals, draft needs_review items, or manual review queue.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -929,12 +1087,19 @@ TOOLS: list[dict[str, Any]] = [
                         "changes",
                         "stale_knowledge",
                         "draft",
+                        "needs_review",
+                        "manual_review",
                     ],
                     "default": "all",
                 },
                 "q": {
                     "type": "string",
                     "description": "Optional case-insensitive substring search across source, normalized, preferred_translation, and aliases",
+                },
+                "include_description": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include full entity description text on each term row (default False to keep overview compact; use inspect_term_entity for full entity details)",
                 },
                 "offset": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 50},
@@ -945,13 +1110,17 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "inspect_term_entity",
-        "description": "Inspect a term/entity including its glossary entry, group members, applied description items, source evidence fragments, and segment hits.",
+        "description": "Inspect a term/entity including its glossary entry, group members, applied description items, paginated source evidence fragments, and paginated segment hits.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "project": {"type": "string"},
                 "normalized": {"type": "string"},
+                "include_fragments": {"type": "boolean", "default": True},
+                "fragments_offset": {"type": "integer", "default": 0},
+                "fragments_limit": {"type": "integer", "default": 50},
                 "include_hits": {"type": "boolean", "default": True},
+                "hits_offset": {"type": "integer", "default": 0},
                 "hits_limit": {"type": "integer", "default": 20},
                 "run_id": {"type": "string"},
                 "proposal_id": {"type": "string"},
@@ -996,7 +1165,7 @@ TOOLS: list[dict[str, Any]] = [
                     "description": (
                         "Action payload: "
                         "save_term (batch: {'terms': [{'source', 'preferred_translation', 'category', 'description'?, 'aliases'?, 'disabled'?, 'group_primary'?}]} "
-                        "or single: {'source', 'preferred_translation', 'category', 'aliases'?, 'old_normalized'?, 'disabled'?} without 'description'); "
+                        "or single: {'source', 'preferred_translation', 'category', 'description'?, 'aliases'?, 'old_normalized'?, 'disabled'?}); "
                         "import_terms ({'terms': [...]} or {'path': '/abs/path.json|.csv'}); "
                         "complete_scan ({} for full project or {'only_file': 'F0001', 'only_part'?: '...'}); "
                         "update_knowledge ({'normalized': str, 'action'?: 'save_items'|'confirm_keep'|'set_fragment_enabled', 'items'?: [{'text': str, 'fragment_ids': [str]}], 'expected_revision'?: int}); "
@@ -1082,6 +1251,17 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "Create a formal pending repetition_consistency draft locally without calling external LLM",
                 },
                 "replace_draft": {"type": "boolean", "default": False},
+                "include_occurrences": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Inline up to 20 occurrences per group when True (default False to keep overview compact; use inspect_repetition_group for paginated occurrences)",
+                },
+                "sort_by": {
+                    "type": "string",
+                    "enum": ["occurrence_count", "group_index"],
+                    "default": "occurrence_count",
+                    "description": "Sort groups by descending occurrence frequency ('occurrence_count', default) or document appearance order ('group_index')",
+                },
                 "offset": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 50},
             },
@@ -1091,14 +1271,26 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "inspect_repetition_group",
-        "description": "Inspect all occurrences of a repeated source group with configurable surrounding context window.",
+        "description": "Inspect occurrences of a repeated source group with configurable surrounding context window (0..30) and pagination.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "project": {"type": "string"},
-                "group_id": {"type": "string"},
-                "source": {"type": "string"},
-                "window": {"type": "integer", "default": 5},
+                "group_id": {
+                    "type": "string",
+                    "description": "Draft group id when a formal pending repetition draft exists (for live_scan without a draft, pass source instead)",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Exact repeated source segment text (works for both live_scan and formal draft)",
+                },
+                "window": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Number of neighboring segments before and after each occurrence (0 to 30; 0 omits neighbor context)",
+                },
+                "offset": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 20},
             },
             "required": ["project"],
             "additionalProperties": False,
@@ -1276,8 +1468,7 @@ class MCPWebBridge:
                         for k in ("name", "project_id", "selector", "path")
                     )
                 ]
-            offset = max(0, int(args.get("offset", 0)))
-            limit = max(1, int(args.get("limit", 50)))
+            offset, limit = _page_params(args, default_limit=50, max_limit=500)
             compact_projects = []
             for p in items[offset : offset + limit]:
                 if not isinstance(p, dict):
@@ -1486,15 +1677,39 @@ class MCPWebBridge:
 
         if name == "get_project_overview":
             proj = quote(str(args["project"]), safe="")
+            include_parts = bool(args.get("include_parts", False))
             data = self._request("GET", f"/api/v1/projects/{proj}", params={"limit": 1})
             if isinstance(data, dict):
                 data.pop("segments", None)
                 data.pop("offset", None)
                 data.pop("limit", None)
+                if isinstance(data.get("files"), list):
+                    compact_files = []
+                    for f in data["files"]:
+                        if not isinstance(f, dict):
+                            compact_files.append(f)
+                            continue
+                        cf = dict(f)
+                        parts = cf.get("part_ids")
+                        if isinstance(parts, list):
+                            cf["part_count"] = len(parts)
+                            if not include_parts:
+                                cf.pop("part_ids", None)
+                                cf.pop("parts", None)
+                        compact_files.append(cf)
+                    data["files"] = compact_files
+                sc = data.get("stage_completion")
+                if isinstance(sc, dict) and isinstance(sc.get("terminology"), dict):
+                    term_sc = dict(sc["terminology"])
+                    term_sc.pop("knowledge_entities", None)
+                    data["stage_completion"] = {**sc, "terminology": term_sc}
             return data
 
         if name == "get_task_and_diagnostics":
             project_name = str(args["project"])
+            runs_offset, runs_limit = _page_params(
+                args, "runs_offset", "runs_limit", default_limit=5, max_limit=200
+            )
             active = self._request("GET", "/api/v1/tasks/active").get("tasks", [])
             project_tasks = [
                 _compact_task(t)
@@ -1511,7 +1726,12 @@ class MCPWebBridge:
             runs = self._request(
                 "GET",
                 "/api/v1/runs",
-                params={"project": project_name, "limit": 5, **({"stage": args["stage"]} if args.get("stage") else {})},
+                params={
+                    "project": project_name,
+                    "offset": runs_offset,
+                    "limit": runs_limit,
+                    **({"stage": args["stage"]} if args.get("stage") else {}),
+                },
             )
             _strip_run_keys = {
                 "document_adapter_prompt_requirements",
@@ -1519,20 +1739,30 @@ class MCPWebBridge:
                 "document_adapter_options",
                 "translation_validators",
                 "stage_fingerprint",
+                "manual_review_handled_normalized",
+                "manual_review_resolved_normalized",
             }
-            recent_runs = [
-                {
+            recent_runs = []
+            for r in runs.get("items", []):
+                if not isinstance(r, dict):
+                    continue
+                cr = {
                     k: v
                     for k, v in r.items()
                     if k not in _strip_run_keys
                     and not (k in {"failure_counts", "warnings"} and not v)
                 }
-                for r in runs.get("items", [])
-                if isinstance(r, dict)
-            ]
+                warnings = cr.get("warnings")
+                if isinstance(warnings, list) and len(warnings) > 5:
+                    cr["warning_count"] = len(warnings)
+                    cr["warnings"] = warnings[:5]
+                recent_runs.append(cr)
             result: dict[str, Any] = {
                 "active_tasks": project_tasks,
                 "task_detail": task_detail,
+                "total_runs": runs.get("total", len(recent_runs)),
+                "runs_offset": runs_offset,
+                "runs_limit": runs_limit,
                 "recent_runs": recent_runs,
             }
             if args.get("include_events"):
@@ -1583,14 +1813,15 @@ class MCPWebBridge:
         if name == "query_segments":
             proj = quote(str(args["project"]), safe="")
             stage = str(args.get("stage", "translation"))
+            offset, limit = _page_params(args, default_limit=50, max_limit=500)
             body = {
                 "stage": stage,
                 "status": args.get("status", ""),
                 "q": args.get("q", ""),
                 "file_id": args.get("file_id", ""),
                 "part_id": args.get("part_id", ""),
-                "offset": int(args.get("offset", 0)),
-                "limit": int(args.get("limit", 50)),
+                "offset": offset,
+                "limit": limit,
             }
             data = self._request(
                 "POST", f"/api/v1/projects/{proj}/segments/query", json_body=body
@@ -1627,6 +1858,13 @@ class MCPWebBridge:
                         for side in ("before", "after")
                         if side in neighbors
                     }
+                if isinstance(ctx.get("matched_terms"), list):
+                    ctx["matched_terms"] = [
+                        _compact_matched_term(t, include_description=True)
+                        if isinstance(t, dict)
+                        else t
+                        for t in ctx["matched_terms"]
+                    ]
                 if not ctx.get("term_warnings"):
                     ctx.pop("term_warnings", None)
                 dar = ctx.get("document_adapter_requirements")
@@ -1650,7 +1888,7 @@ class MCPWebBridge:
                         "final_review": bool(args.get("final_review", False)),
                     },
                 )
-            return self._request(
+            res = self._request(
                 "GET",
                 f"/api/v1/projects/{proj}/task-options/{quote(stage, safe='')}",
                 params={
@@ -1660,6 +1898,24 @@ class MCPWebBridge:
                     "all_terms": bool(args.get("all_terms", False)),
                 },
             )
+            if isinstance(res, dict) and isinstance(res.get("knowledge_replacement_impacts"), list):
+                impacts = res.pop("knowledge_replacement_impacts")
+                owners = sorted(
+                    {
+                        str(item.get("owner"))
+                        for item in impacts
+                        if isinstance(item, dict) and item.get("owner")
+                    }
+                )
+                res = {
+                    **res,
+                    "knowledge_replacement_summary": {
+                        "affected_fragments": len(impacts),
+                        "affected_entities": len(owners),
+                        "sample_entities": owners[:20],
+                    },
+                }
+            return res
 
         if name == "start_host_stage_run":
             proj = quote(str(args["project"]), safe="")
@@ -1781,11 +2037,31 @@ class MCPWebBridge:
             for opt_key in ("part_id", "line_start", "line_end"):
                 if args.get(opt_key) is not None:
                     body[opt_key] = args[opt_key]
-            return self._request(
+            res = self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/agent/runs/{rid}/checkout",
                 json_body=body,
             )
+            if isinstance(res, dict):
+                res = dict(res)
+                raw_inc = args.get("include_term_descriptions")
+                inc_desc = (
+                    bool(raw_inc)
+                    if raw_inc is not None
+                    else (res.get("stage") == "translation")
+                )
+                if isinstance(res.get("terms"), list):
+                    res["terms"] = [
+                        _compact_matched_term(t, include_description=inc_desc)
+                        if isinstance(t, dict)
+                        else t
+                        for t in res["terms"]
+                    ]
+                if not res.get("warnings"):
+                    res.pop("warnings", None)
+                if res.get("document_adapter_requirement") is None:
+                    res.pop("document_adapter_requirement", None)
+            return res
 
         if name == "submit_stage_batch":
             proj = quote(str(args["project"]), safe="")
@@ -1819,67 +2095,35 @@ class MCPWebBridge:
         if name == "get_terminology_overview":
             proj = quote(str(args["project"]), safe="")
             flt = args.get("filter", "all")
-            offset = int(args.get("offset", 0))
-            limit = int(args.get("limit", 50))
+            if flt not in {
+                "all",
+                "conflicts",
+                "changes",
+                "stale_knowledge",
+                "draft",
+                "needs_review",
+                "manual_review",
+            }:
+                raise UsageError(f"不支持的术语筛选类型：{flt}")
+            offset, limit = _page_params(args, default_limit=50, max_limit=500)
+            q_str = str(args.get("q") or "").strip().casefold()
             decision = self._request("GET", f"/api/v1/projects/{proj}/terms/decision")
             if flt == "draft":
                 draft = decision.get("draft")
                 if isinstance(draft, dict) and isinstance(draft.get("proposals"), list):
-                    proposals = draft["proposals"]
-                    compact_proposals = []
-                    for p in proposals[offset : offset + limit]:
-                        if not isinstance(p, dict):
-                            compact_proposals.append(p)
-                            continue
-                        cp = {
-                            k: v
-                            for k, v in p.items()
-                            if k
-                            not in {
-                                "before",
-                                "after",
-                                "conflicts",
-                                "knowledge_before",
-                                "knowledge_after",
-                                "evidence",
-                                "knowledge_evidence",
-                            }
-                        }
-                        for side in ("before", "after"):
-                            if isinstance(p.get(side), list):
-                                cp[side] = [
-                                    {
-                                        k: v
-                                        for k, v in st.items()
-                                        if k
-                                        in {
-                                            "normalized",
-                                            "source",
-                                            "preferred_translation",
-                                            "category",
-                                            "aliases",
-                                            "group_primary",
-                                            "disabled",
-                                        }
-                                        and (
-                                            v not in (None, [], False)
-                                            or k
-                                            in {
-                                                "normalized",
-                                                "source",
-                                                "preferred_translation",
-                                                "category",
-                                            }
-                                        )
-                                    }
-                                    for st in p[side]
-                                    if isinstance(st, dict)
-                                ]
-                        if p.get("conflicts"):
-                            cp["conflict_count"] = len(p["conflicts"])
-                        compact_proposals.append(cp)
+                    total_proposals, compact_proposals = _page_decision_items(
+                        draft["proposals"], q_str, offset, limit
+                    )
+                    needs_review_list = (
+                        draft.get("needs_review")
+                        if isinstance(draft.get("needs_review"), list)
+                        else []
+                    )
                     decision = {
                         **decision,
+                        "manual_review": _manual_review_summary(
+                            decision.get("manual_review")
+                        ),
                         "draft": {
                             **{
                                 k: v
@@ -1887,19 +2131,63 @@ class MCPWebBridge:
                                 if k
                                 not in {
                                     "proposals",
+                                    "needs_review",
                                     "decision_targets",
                                     "reviewed_terms",
                                     "model_fingerprint",
                                     "prompt_fingerprint",
                                 }
                             },
-                            "total_proposals": len(proposals),
+                            "needs_review_count": len(needs_review_list),
+                            "total_proposals": total_proposals,
                             "offset": offset,
                             "limit": limit,
                             "proposals": compact_proposals,
                         },
                     }
+                else:
+                    decision = {
+                        **decision,
+                        "manual_review": _manual_review_summary(
+                            decision.get("manual_review")
+                        ),
+                    }
                 return decision
+            if flt == "needs_review":
+                draft = decision.get("draft")
+                total_nr, paged_nr = _page_decision_items(
+                    draft.get("needs_review") if isinstance(draft, dict) else [],
+                    q_str,
+                    offset,
+                    limit,
+                )
+                return {
+                    "run_id": draft.get("run_id") if isinstance(draft, dict) else None,
+                    "total": total_nr,
+                    "offset": offset,
+                    "limit": limit,
+                    "items": paged_nr,
+                    "manual_review": _manual_review_summary(
+                        decision.get("manual_review")
+                    ),
+                }
+            if flt == "manual_review":
+                mr = (
+                    decision.get("manual_review")
+                    if isinstance(decision.get("manual_review"), dict)
+                    else {}
+                )
+                total_mr, paged_mr = _page_decision_items(
+                    mr.get("items"), q_str, offset, limit
+                )
+                return {
+                    "total": total_mr,
+                    "resolved": mr.get("resolved", 0),
+                    "remaining": mr.get("remaining", 0),
+                    "offset": offset,
+                    "limit": limit,
+                    "items": paged_mr,
+                }
             terms_data = self._request("GET", f"/api/v1/projects/{proj}/terms")
             items = list(terms_data.get("terms", []))
             if flt == "conflicts":
@@ -1912,7 +2200,6 @@ class MCPWebBridge:
                     for t in items
                     if t.get("knowledge_status") in {"stale", "pending"}
                 ]
-            q_str = str(args.get("q") or "").strip().casefold()
             if q_str:
                 items = [
                     t
@@ -1929,21 +2216,41 @@ class MCPWebBridge:
                         )
                     )
                 ]
+            inc_desc = bool(args.get("include_description", False))
             compact_terms = [
-                _compact_term_row(t, keep_candidates=(flt == "changes"))
+                _compact_term_row(
+                    t,
+                    keep_candidates=(flt == "changes"),
+                    include_description=inc_desc,
+                )
                 if isinstance(t, dict)
                 else t
                 for t in items[offset : offset + limit]
             ]
+            scan_data = terms_data.get("scan")
+            if isinstance(scan_data, dict):
+                scan_data = dict(scan_data)
+                failed_segs = scan_data.get("failed_segments")
+                if isinstance(failed_segs, list):
+                    if offset > 0:
+                        scan_data.pop("failed_segments", None)
+                        scan_data.pop("failed_segments_truncated", None)
+                    elif len(failed_segs) > 20:
+                        scan_data["failed_segments"] = failed_segs[:20]
+                        scan_data["failed_segments_truncated"] = True
             return {
                 "total": len(items),
+                "offset": offset,
+                "limit": limit,
                 "terms": compact_terms,
                 "terms_revision": terms_data.get("terms_revision"),
                 "conflict_count": terms_data.get("conflict_count", 0),
-                "scan": terms_data.get("scan"),
+                "scan": scan_data,
                 "decision_state": {
                     "has_pending_draft": decision.get("draft") is not None,
-                    "manual_review": decision.get("manual_review"),
+                    "manual_review": _manual_review_summary(
+                        decision.get("manual_review")
+                    ),
                     "can_rollback": decision.get("rollback") is not None,
                 },
             }
@@ -1973,19 +2280,46 @@ class MCPWebBridge:
                 ),
                 None,
             )
+            resolved_norm = (
+                str(matched_term.get("normalized") or normalized)
+                if isinstance(matched_term, dict)
+                else str(normalized)
+            )
             knowledge = self._request(
                 "GET",
                 f"/api/v1/projects/{proj}/terms/knowledge",
-                params={"normalized": normalized},
+                params={"normalized": resolved_norm},
+            )
+            if isinstance(knowledge, dict) and isinstance(
+                knowledge.get("fragments"), list
+            ):
+                all_frags = knowledge["fragments"]
+                f_offset, f_limit = _page_params(
+                    args,
+                    "fragments_offset",
+                    "fragments_limit",
+                    default_limit=50,
+                    max_limit=500,
+                )
+                knowledge = {
+                    **{k: v for k, v in knowledge.items() if k != "fragments"},
+                    "total_fragments": len(all_frags),
+                }
+                if args.get("include_fragments", True):
+                    knowledge["fragments_offset"] = f_offset
+                    knowledge["fragments_limit"] = f_limit
+                    knowledge["fragments"] = all_frags[f_offset : f_offset + f_limit]
+            h_offset, h_limit = _page_params(
+                args, "hits_offset", "hits_limit", default_limit=20, max_limit=200
             )
             hits = (
                 self._request(
                     "POST",
                     f"/api/v1/projects/{proj}/terms/hits",
                     json_body={
-                        "normalized": normalized,
-                        "offset": 0,
-                        "limit": int(args.get("hits_limit", 20)),
+                        "normalized": resolved_norm,
+                        "offset": h_offset,
+                        "limit": h_limit,
                     },
                 )
                 if args.get("include_hits", True)
@@ -2000,6 +2334,9 @@ class MCPWebBridge:
             if action == "import_terms" or (
                 action == "save_term" and isinstance(payload.get("terms"), list)
             ):
+                import_params = (
+                    {"overwrite": "true"} if action == "save_term" else None
+                )
                 if isinstance(payload.get("terms"), list):
                     doc = {
                         "schema_version": 2,
@@ -2010,6 +2347,7 @@ class MCPWebBridge:
                     return self._request(
                         "POST",
                         f"/api/v1/projects/{proj}/terms/import",
+                        params=import_params,
                         files={"file": ("terms.json", raw_bytes, "application/json")},
                     )
                 if isinstance(payload.get("path"), str) and payload["path"].strip():
@@ -2026,6 +2364,7 @@ class MCPWebBridge:
                     return self._request(
                         "POST",
                         f"/api/v1/projects/{proj}/terms/import",
+                        params=import_params,
                         files={"file": (filename, raw_bytes, content_type)},
                     )
                 raise UsageError(
@@ -2059,7 +2398,60 @@ class MCPWebBridge:
             if action not in routes:
                 raise UsageError(f"不支持的术语编辑动作：{action}")
             method, path = routes[action]
-            res = self._request(method, path, json_body=payload)
+            if action == "save_term":
+                save_body = dict(payload)
+                desc_text = save_body.pop("description", None)
+                try:
+                    res = self._request(method, path, json_body=save_body)
+                except UsageError as exc:
+                    msg = str(exc)
+                    if (
+                        save_body.get("old_normalized") is None
+                        and "normalized source 已存在：" in msg
+                    ):
+                        existing_norm = msg.split(
+                            "normalized source 已存在：", 1
+                        )[1].strip()
+                        res = self._request(
+                            method,
+                            path,
+                            json_body={
+                                **save_body,
+                                "old_normalized": existing_norm,
+                            },
+                        )
+                    else:
+                        raise
+                if isinstance(desc_text, str) and desc_text.strip():
+                    raw_src = str(save_body.get("source") or "").strip()
+                    saved_terms = (
+                        res.get("terms", []) if isinstance(res, dict) else []
+                    )
+                    target_norm = next(
+                        (
+                            str(t["normalized"])
+                            for t in saved_terms
+                            if isinstance(t, dict)
+                            and (
+                                t.get("source") == raw_src
+                                or t.get("normalized") == raw_src
+                            )
+                            and t.get("normalized")
+                        ),
+                        raw_src,
+                    )
+                    res = self._request(
+                        "PUT",
+                        f"/api/v1/projects/{proj}/terms/knowledge",
+                        json_body={
+                            "normalized": target_norm,
+                            "items": [
+                                {"text": desc_text.strip(), "fragment_ids": []}
+                            ],
+                        },
+                    )
+            else:
+                res = self._request(method, path, json_body=payload)
             if isinstance(res, dict) and isinstance(res.get("terms"), list):
                 terms_list = res["terms"]
                 selected_terms = terms_list
@@ -2092,6 +2484,10 @@ class MCPWebBridge:
                         for t in selected_terms
                     ],
                 }
+            if isinstance(res, dict) and isinstance(res.get("stage_completion"), dict):
+                sc_term = dict(res["stage_completion"])
+                sc_term.pop("knowledge_entities", None)
+                res = {**res, "stage_completion": sc_term}
             return res
 
         if name == "submit_term_decision_draft":
@@ -2112,16 +2508,17 @@ class MCPWebBridge:
                     }
                 result["rejections"] = rej
             if "manual_reviews" in args and args["manual_reviews"]:
-                resolved_results = []
+                last_mr = None
                 for entry in args["manual_reviews"]:
-                    resolved_results.append(
-                        self._request(
-                            "PUT",
-                            f"/api/v1/projects/{proj}/terms/decision/manual-review",
-                            json_body=entry,
-                        )
+                    last_mr = self._request(
+                        "PUT",
+                        f"/api/v1/projects/{proj}/terms/decision/manual-review",
+                        json_body=entry,
                     )
-                result["manual_reviews"] = resolved_results
+                result["manual_reviews"] = {
+                    **(_manual_review_summary(last_mr) or {}),
+                    "updated_count": len(args["manual_reviews"]),
+                }
             if not result:
                 raise UsageError("必须提供 rejected_proposal_ids 或 manual_reviews")
             return result
@@ -2147,9 +2544,15 @@ class MCPWebBridge:
 
         if name == "get_repetition_overview":
             proj = quote(str(args["project"]), safe="")
-            offset = int(args.get("offset", 0))
-            limit = int(args.get("limit", 50))
+            offset, limit = _page_params(args, default_limit=50, max_limit=200)
+            flt = args.get("filter", "all")
+            if flt not in {"all", "uncertain_only", "over_budget_only"}:
+                raise UsageError(f"不支持的重复组筛选类型：{flt}")
             exclude_punct = bool(args.get("exclude_punctuation_only", True))
+            include_occurrences = bool(args.get("include_occurrences", False))
+            sort_by = str(args.get("sort_by", "occurrence_count"))
+            if sort_by not in {"group_index", "occurrence_count"}:
+                raise UsageError("sort_by 必须是 group_index 或 occurrence_count")
             if args.get("create_draft"):
                 self._request(
                     "POST",
@@ -2159,6 +2562,8 @@ class MCPWebBridge:
                         "exclude_punctuation_only": exclude_punct,
                         "create_draft": True,
                         "replace_draft": bool(args.get("replace_draft", False)),
+                        "include_occurrences": include_occurrences,
+                        "sort_by": sort_by,
                         "offset": offset,
                         "limit": limit,
                     },
@@ -2166,12 +2571,25 @@ class MCPWebBridge:
             state = self._request("GET", f"/api/v1/projects/{proj}/repetition")
             draft = state.get("draft")
             if draft and isinstance(draft.get("groups"), list):
-                flt = args.get("filter", "all")
-                groups = draft["groups"]
+                groups = list(draft["groups"])
                 if flt == "uncertain_only":
                     groups = [g for g in groups if g.get("uncertain")]
                 elif flt == "over_budget_only":
                     groups = [g for g in groups if g.get("over_budget")]
+                if sort_by == "occurrence_count":
+                    groups = [
+                        g
+                        for _, g in sorted(
+                            enumerate(groups),
+                            key=lambda pair: (
+                                -len(pair[1].get("occurrences", []))
+                                if isinstance(pair[1], dict)
+                                and isinstance(pair[1].get("occurrences"), list)
+                                else 0,
+                                pair[0],
+                            ),
+                        )
+                    ]
                 compact_groups = []
                 for g in groups[offset : offset + limit]:
                     cg = {k: v for k, v in g.items() if k != "files"}
@@ -2181,37 +2599,63 @@ class MCPWebBridge:
                         else []
                     )
                     if isinstance(cg.get("occurrences"), list):
-                        compact_occs = []
-                        for occ in cg["occurrences"]:
+                        all_occs = cg.pop("occurrences")
+                        cg["occurrence_count"] = len(all_occs)
+                        translation_counts: dict[str, int] = {}
+                        for occ in all_occs:
                             if not isinstance(occ, dict):
                                 continue
-                            c_occ = {
-                                k: v
-                                for k, v in occ.items()
-                                if k
-                                in {
-                                    "id",
-                                    "segment_id",
-                                    "file_id",
-                                    "part_id",
-                                    "line_index",
-                                    "variant",
-                                    "text",
-                                }
-                            }
                             v_idx = occ.get("variant")
+                            t_val = occ.get("text")
                             if (
-                                "text" not in c_occ
+                                t_val is None
                                 and isinstance(v_idx, int)
                                 and 0 <= v_idx < len(translations)
                             ):
-                                c_occ["translation"] = translations[v_idx]
-                            compact_occs.append(c_occ)
-                        cg["occurrences"] = compact_occs
+                                t_val = translations[v_idx]
+                            if isinstance(t_val, str):
+                                translation_counts[t_val] = (
+                                    translation_counts.get(t_val, 0) + 1
+                                )
+                        if translation_counts:
+                            cg["translation_counts"] = translation_counts
+                        if include_occurrences:
+                            compact_occs = []
+                            for occ in all_occs[:20]:
+                                if not isinstance(occ, dict):
+                                    continue
+                                c_occ = {
+                                    k: v
+                                    for k, v in occ.items()
+                                    if k
+                                    in {
+                                        "id",
+                                        "segment_id",
+                                        "file_id",
+                                        "part_id",
+                                        "line_index",
+                                        "variant",
+                                        "text",
+                                    }
+                                }
+                                v_idx = occ.get("variant")
+                                if (
+                                    "text" not in c_occ
+                                    and isinstance(v_idx, int)
+                                    and 0 <= v_idx < len(translations)
+                                ):
+                                    c_occ["translation"] = translations[v_idx]
+                                compact_occs.append(c_occ)
+                            cg["occurrences"] = compact_occs
+                            if len(all_occs) > 20:
+                                cg["occurrences_truncated"] = True
                     compact_groups.append(cg)
                 draft = {
                     **{k: v for k, v in draft.items() if k not in {"evidence", "sources"}},
                     "total_groups": len(groups),
+                    "sort_by": sort_by,
+                    "offset": offset,
+                    "limit": limit,
                     "groups": compact_groups,
                 }
             result_state: dict[str, Any] = {**state, "draft": draft}
@@ -2228,6 +2672,8 @@ class MCPWebBridge:
                         "only_part": args.get("only_part"),
                         "exclude_punctuation_only": exclude_punct,
                         "create_draft": False,
+                        "include_occurrences": include_occurrences,
+                        "sort_by": sort_by,
                         "offset": offset,
                         "limit": limit,
                     },
@@ -2236,13 +2682,18 @@ class MCPWebBridge:
 
         if name == "inspect_repetition_group":
             proj = quote(str(args["project"]), safe="")
+            offset, limit = _page_params(args, default_limit=20, max_limit=100)
+            raw_window = args.get("window")
+            window = 5 if raw_window is None else raw_window
             res = self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/agent/repetition/inspect",
                 json_body={
                     "group_id": args.get("group_id"),
                     "source": args.get("source"),
-                    "window": int(args.get("window", 5)),
+                    "window": window,
+                    "offset": offset,
+                    "limit": limit,
                 },
             )
             if isinstance(res, dict) and isinstance(res.get("draft_group"), dict):
@@ -2353,7 +2804,11 @@ def handle_jsonrpc_message(
                     "content": [
                         {
                             "type": "text",
-                            "text": json.dumps(payload, ensure_ascii=False),
+                            "text": json.dumps(
+                                payload,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
                         }
                     ],
                     "isError": False,
@@ -2368,7 +2823,9 @@ def handle_jsonrpc_message(
                         {
                             "type": "text",
                             "text": json.dumps(
-                                {"error": str(exc)}, ensure_ascii=False
+                                {"error": str(exc)},
+                                ensure_ascii=False,
+                                separators=(",", ":"),
                             ),
                         }
                     ],

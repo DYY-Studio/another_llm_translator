@@ -134,6 +134,7 @@ def import_terms(
     input_path: Path,
     *,
     dry_run: bool,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     config = load_project_config(project)
     spec = term_normalization(config)
@@ -165,6 +166,19 @@ def import_terms(
     merged: dict[str, dict[str, Any]] = {}
     _seed_published_terms(merged, library, spec)
     for normalized, item in merged_import.items():
+        if overwrite:
+            existing = merged.get(normalized)
+            replaced = deepcopy(item)
+            if (
+                existing is not None
+                and not replaced["group_primary_set"]
+                and existing["group_primary_set"]
+            ):
+                replaced["group_primary"] = existing["group_primary"]
+                replaced["group_primary_set"] = True
+                replaced["group_primary_locked"] = existing["group_primary_locked"]
+            merged[normalized] = replaced
+            continue
         target = merged.setdefault(normalized, _term_bucket())
         for key in (
             "sources",
@@ -192,9 +206,19 @@ def import_terms(
         str(item["normalized"]): dict(item) for item in original_overrides
     }
     for item in imported:
-        if not item["disabled"]:
-            continue
         normalized = normalize_term(item["source"], spec)
+        if not item["disabled"]:
+            if overwrite and normalized in overrides:
+                current_override = dict(overrides[normalized])
+                current_override["source"] = item["source"]
+                current_override["disabled"] = False
+                current_override["preferred_translation"] = item["preferred_translation"]
+                current_override["category"] = item["category"]
+                current_override["aliases"] = list(item["aliases"])
+                if item["_group_primary_set"]:
+                    current_override["group_primary"] = item["group_primary"]
+                overrides[normalized] = current_override
+            continue
         current = overrides.get(normalized, {"normalized": normalized})
         overrides[normalized] = {
             **current,
@@ -229,18 +253,60 @@ def import_terms(
     known = evidence(project, library_record)
     no_source = {(f["owner"], f["text"]) for f in known.values() if f["state"] == "active" and f["source_range"] is None}
     current = {t["normalized"]:t for t in (library or {}).get("terms", [])}
+    overwritten_descriptions: dict[str, str] = {}
     for item in imported:
         owner = normalize_term(item["source"], spec)
         text = item["description"]
-        if text and not item["disabled"] and (owner, text) not in no_source and text != current.get(owner, {}).get("description"):
-            add_unsourced(knowledge, owner, text, "import")
-            no_source.add((owner, text))
+        if text and not item["disabled"]:
+            if (owner, text) not in no_source and text != current.get(owner, {}).get("description"):
+                add_unsourced(knowledge, owner, text, "import")
+                no_source.add((owner, text))
+            if overwrite:
+                overwritten_descriptions[owner] = text
     previous_entities = entity_members(library) if library else {}
     known = evidence(project, library_record)
     for root, members in entity_members(library_record).items():
-        if root not in previous_entities:
-            save_items(project, library_record, root, [{"text":f["text"], "fragment_ids":[key]}
-                       for key,f in known.items() if f["owner"] in members and f["state"] == "active"], all_evidence=known)
+        has_overwritten = any(m in overwritten_descriptions for m in members)
+        if has_overwritten:
+            items_to_save: list[dict[str, Any]] = []
+            for m in members:
+                if m in overwritten_descriptions:
+                    target_text = overwritten_descriptions[m]
+                    fids = [
+                        key
+                        for key, f in known.items()
+                        if f["owner"] == m
+                        and f["state"] == "active"
+                        and f["text"] == target_text
+                    ]
+                    items_to_save.append(
+                        {"text": target_text, "fragment_ids": fids}
+                    )
+                else:
+                    for key, f in known.items():
+                        if f["owner"] == m and f["state"] == "active":
+                            items_to_save.append(
+                                {"text": f["text"], "fragment_ids": [key]}
+                            )
+            save_items(
+                project,
+                library_record,
+                root,
+                items_to_save,
+                all_evidence=known,
+            )
+        elif root not in previous_entities:
+            save_items(
+                project,
+                library_record,
+                root,
+                [
+                    {"text": f["text"], "fragment_ids": [key]}
+                    for key, f in known.items()
+                    if f["owner"] in members and f["state"] == "active"
+                ],
+                all_evidence=known,
+            )
     project_descriptions(project, library_record, all_evidence=known)
     changed = (terms != list((library or {}).get("terms", [])) or overrides_list != original_overrides
                or knowledge != (library or {}).get("knowledge"))

@@ -261,6 +261,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
     def import_term_file(
         name: str,
         file: UploadFile = File(...),
+        overwrite: bool = False,
     ) -> dict[str, Any]:
         suffix = Path(file.filename or "").suffix.casefold()
         if suffix not in {".json", ".csv"}:
@@ -276,7 +277,9 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             temporary = Path(handle.name)
         try:
             with project_write_lock(root):
-                return import_terms(root, temporary, dry_run=False)
+                return import_terms(
+                    root, temporary, dry_run=False, overwrite=overwrite
+                )
         finally:
             temporary.unlink(missing_ok=True)
 

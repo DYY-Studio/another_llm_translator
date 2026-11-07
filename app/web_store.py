@@ -42,7 +42,7 @@ from .sqlite_storage import (
     segment_count,
     segment_page_counts,
     segment_ids,
-    segment_part_ids,
+    segment_part_counts,
     stage_completion_counts,
     terminology_completed_count,
     utc_now,
@@ -530,7 +530,7 @@ class WebStore:
             search=search,
             stage=stage,
         )
-        part_ids_by_file = segment_part_ids(self.project)
+        parts_by_file = segment_part_counts(self.project)
         try:
             sqlite_bytes = database_path(self.project).stat().st_size
         except OSError as exc:
@@ -550,7 +550,11 @@ class WebStore:
                 "has_run_options": bool(
                     get_document_adapter(str(item["document_adapter_id"])).run_options
                 ),
-                "part_ids": part_ids_by_file.get(str(item["file_id"]), []),
+                "part_ids": [
+                    entry["part_id"]
+                    for entry in parts_by_file.get(str(item["file_id"]), [])
+                ],
+                "parts": parts_by_file.get(str(item["file_id"]), []),
                 "size_bytes": _stored_source_size(
                     self.project, item.get("stored_name")
                 ),

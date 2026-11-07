@@ -702,6 +702,8 @@ class WebTask:
     _apply_repetition_consistency: bool = field(default=False, repr=False)
     _apply_terminology_decision: bool = field(default=False, repr=False)
     _start_decision: _StartDecision | None = field(default=None, repr=False)
+    _checked_out_segment_ids: set[str] = field(default_factory=set, repr=False)
+    _checked_out_by_part: dict[str, set[str]] = field(default_factory=dict, repr=False)
 
     def view(self) -> dict[str, Any]:
         return {
@@ -748,6 +750,23 @@ class WebTask:
             "usage": self.usage,
             **({"executor": self.executor} if self.executor is not None else {}),
             **({"run_id": self.run_id} if self.run_id is not None else {}),
+            **(
+                {
+                    "checked_out_segments": len(self._checked_out_segment_ids),
+                    **(
+                        {
+                            "checked_out_parts": {
+                                part: len(sids)
+                                for part, sids in self._checked_out_by_part.items()
+                            }
+                        }
+                        if self._checked_out_by_part
+                        else {}
+                    ),
+                }
+                if self.executor == "agent_mcp"
+                else {}
+            ),
         }
 
 
@@ -1999,6 +2018,7 @@ class WebTaskManager:
         run_id: str,
         total_segments: int,
         completed_segments: int = 0,
+        checked_out_ids: Iterable[str] = (),
     ) -> dict[str, Any]:
         async with self.guard:
             if self._shutting_down:
@@ -2019,11 +2039,45 @@ class WebTaskManager:
                 started_at=now,
                 total_segments=total_segments,
                 completed_segments=completed_segments,
+                _checked_out_segment_ids={str(sid) for sid in checked_out_ids if sid},
             )
             self.tasks[task_id] = state
             self.active_by_project[project] = task_id
             self.running_task_ids.add(task_id)
             return state.view()
+
+    def active_agent_task(self, project: Path) -> dict[str, Any] | None:
+        task_id = self.active_by_project.get(project)
+        if task_id is None:
+            return None
+        state = self.tasks.get(task_id)
+        if (
+            state is None
+            or state.executor != "agent_mcp"
+            or state.status not in {"queued", "running", "cancelling"}
+        ):
+            return None
+        return state.view()
+
+    def record_agent_checkout(
+        self,
+        project: Path,
+        run_id: str,
+        *,
+        segment_ids: Iterable[str],
+        part_id: str | None = None,
+    ) -> int:
+        task_id = self.active_by_project.get(project)
+        if task_id is None:
+            return 0
+        state = self.tasks.get(task_id)
+        if state is None or state.executor != "agent_mcp" or state.run_id != run_id:
+            return 0
+        sids = [str(sid) for sid in segment_ids if sid]
+        state._checked_out_segment_ids.update(sids)
+        if part_id and sids:
+            state._checked_out_by_part.setdefault(str(part_id), set()).update(sids)
+        return len(state._checked_out_segment_ids)
 
     def update_agent_task(
         self,
@@ -2032,6 +2086,7 @@ class WebTaskManager:
         *,
         completed_segments: int,
         failed_segments: int = 0,
+        committed_ids: Iterable[str] = (),
     ) -> None:
         task_id = self.active_by_project.get(project)
         if task_id is None:
@@ -2041,6 +2096,9 @@ class WebTaskManager:
             return
         state.completed_segments = completed_segments
         state.failed_segments = failed_segments
+        state._checked_out_segment_ids.update(
+            str(sid) for sid in committed_ids if sid
+        )
 
     async def finish_agent_task(
         self,

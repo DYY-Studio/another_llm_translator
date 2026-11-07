@@ -625,6 +625,7 @@ def register_agent_routes(
                             "warnings": warnings,
                         },
                     )
+                pending_id_set = {str(item["segment_id"]) for item in selection.work}
                 return {
                     "run_id": run_id,
                     "project_id": str(metadata["project_id"]),
@@ -633,6 +634,9 @@ def register_agent_routes(
                     "reused_count": len(selection.reusable),
                     "pending_count": len(selection.work),
                     "completed_count": len(selected) - len(selection.work),
+                    "_completed_ids": [
+                        sid for sid in selected_ids if sid not in pending_id_set
+                    ],
                     "prompt": prompt,
                     "document_adapter_requirements": config.get(
                         "_document_adapter_prompt_requirements", {}
@@ -641,6 +645,7 @@ def register_agent_routes(
                 }
 
         prepared = await run_blocking(_prepare)
+        completed_ids = prepared.pop("_completed_ids", [])
         try:
             task_view = await app.state.tasks.register_agent_task(
                 root,
@@ -649,6 +654,7 @@ def register_agent_routes(
                 prepared["run_id"],
                 prepared["selected_count"],
                 prepared["completed_count"],
+                checked_out_ids=completed_ids,
             )
         except BaseException:
             def _rollback_run() -> None:
@@ -817,7 +823,15 @@ def register_agent_routes(
                 "warnings": warnings,
             }
 
-        return await run_blocking(_checkout)
+        result = await run_blocking(_checkout)
+        checked_out = app.state.tasks.record_agent_checkout(
+            root,
+            safe_id,
+            segment_ids=[item["segment_id"] for item in result.get("batch", [])],
+            part_id=result.get("part_id"),
+        )
+        result["checked_out_count"] = max(result["completed_count"], checked_out)
+        return result
 
     @app.post("/api/v1/projects/{name}/agent/runs/{run_id}/submit")
     async def submit_agent_batch(
@@ -1056,6 +1070,7 @@ def register_agent_routes(
             safe_id,
             completed_segments=result["completed_count"],
             failed_segments=len(result["rejected_items"]),
+            committed_ids=result["committed_ids"],
         )
         return result
 
@@ -1198,8 +1213,14 @@ def register_agent_routes(
         if not group_id and not source_text:
             raise UsageError("必须提供 group_id 或 source")
         window = payload.get("window", 5)
-        if not isinstance(window, int) or isinstance(window, bool) or not 1 <= window <= 30:
-            raise UsageError("window 必须是 1 到 30 之间的整数")
+        if not isinstance(window, int) or isinstance(window, bool) or not 0 <= window <= 30:
+            raise UsageError("window 必须是 0 到 30 之间的整数")
+        offset = payload.get("offset", 0)
+        limit = payload.get("limit", 20)
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise UsageError("offset 必须是非负整数")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise UsageError("limit 必须是 1 到 100 之间的整数")
 
         def _inspect() -> dict[str, Any]:
             nonlocal source_text
@@ -1214,69 +1235,89 @@ def register_agent_routes(
                         break
             segments = load_segments(root)
             by_id = {str(s["segment_id"]): s for s in segments}
-            non_empty = [s for s in segments if not s["is_empty"]]
             if target_group is None:
                 if not isinstance(source_text, str) or not source_text:
                     raise UsageError(f"未在当前重复译文草案中找到组：{group_id}")
-                matched_segments = [s for s in non_empty if s["source"] == source_text]
+                matched_segments = [
+                    s for s in segments if not s["is_empty"] and s["source"] == source_text
+                ]
                 if len(matched_segments) < 2:
                     raise UsageError("指定 source 未找到重复出现的非空 Segment")
-                occ_ids = [str(s["segment_id"]) for s in matched_segments]
+                occ_pairs = [
+                    (str(idx), str(s["segment_id"]))
+                    for idx, s in enumerate(matched_segments, 1)
+                ]
             else:
                 source_text_val = str(target_group["source"])
-                occ_ids = [str(o["segment_id"]) for o in target_group["occurrences"]]
+                occ_pairs = [
+                    (str(o.get("id") or idx), str(o["segment_id"]))
+                    for idx, o in enumerate(target_group["occurrences"], 1)
+                ]
                 source_text = source_text_val
 
-            states = latest_stage_states(root, "translation", occ_ids)
-            occurrences = []
-            for idx, sid in enumerate(occ_ids, 1):
+            paged_pairs = occ_pairs[offset : offset + limit]
+            page_windows = []
+            needed_ids = [sid for _, sid in paged_pairs]
+            for occ_id, sid in paged_pairs:
                 seg = by_id[sid]
-                before, after = query_segment_neighbors(
-                    root,
-                    file_id=str(seg["file_id"]),
-                    part_id=str(seg["part_id"]),
-                    line_index=int(seg["line_index"]),
-                    before_limit=window,
-                    after_limit=window,
-                )
-                ctx_ids = [str(item["segment_id"]) for item in (*before, *after)]
-                ctx_states = latest_stage_states(root, "translation", ctx_ids) if ctx_ids else {}
-                occurrences.append(
-                    {
-                        "occurrence_id": str(idx),
-                        "segment_id": sid,
-                        "file_id": seg["file_id"],
-                        "part_id": seg["part_id"],
-                        "line_index": seg["line_index"],
-                        "translation": (states.get(sid, {}).get("completed") or {}).get("text"),
-                        "before": [
-                            {
-                                "segment_id": str(item["segment_id"]),
-                                "source": str(item["source"]),
-                                "translation": (
-                                    ctx_states.get(str(item["segment_id"]), {}).get("completed")
-                                    or {}
-                                ).get("text"),
-                            }
-                            for item in before
-                        ],
-                        "after": [
-                            {
-                                "segment_id": str(item["segment_id"]),
-                                "source": str(item["source"]),
-                                "translation": (
-                                    ctx_states.get(str(item["segment_id"]), {}).get("completed")
-                                    or {}
-                                ).get("text"),
-                            }
-                            for item in after
-                        ],
-                    }
-                )
+                if window == 0:
+                    before, after = [], []
+                else:
+                    before, after = query_segment_neighbors(
+                        root,
+                        file_id=str(seg["file_id"]),
+                        part_id=str(seg["part_id"]),
+                        line_index=int(seg["line_index"]),
+                        before_limit=window,
+                        after_limit=window,
+                    )
+                needed_ids.extend(str(item["segment_id"]) for item in (*before, *after))
+                page_windows.append((occ_id, sid, seg, before, after))
+            states = (
+                latest_stage_states(root, "translation", list(dict.fromkeys(needed_ids)))
+                if needed_ids
+                else {}
+            )
+            occurrences = [
+                {
+                    "occurrence_id": occ_id,
+                    "segment_id": sid,
+                    "file_id": seg["file_id"],
+                    "part_id": seg["part_id"],
+                    "line_index": seg["line_index"],
+                    "translation": (states.get(sid, {}).get("completed") or {}).get("text"),
+                    "before": [
+                        {
+                            "segment_id": str(item["segment_id"]),
+                            "source": str(item["source"]),
+                            "translation": (
+                                states.get(str(item["segment_id"]), {}).get("completed")
+                                or {}
+                            ).get("text"),
+                        }
+                        for item in before
+                    ],
+                    "after": [
+                        {
+                            "segment_id": str(item["segment_id"]),
+                            "source": str(item["source"]),
+                            "translation": (
+                                states.get(str(item["segment_id"]), {}).get("completed")
+                                or {}
+                            ).get("text"),
+                        }
+                        for item in after
+                    ],
+                }
+                for occ_id, sid, seg, before, after in page_windows
+            ]
             return {
                 "group_id": target_group["id"] if target_group else None,
                 "source": source_text,
                 "draft_group": target_group,
+                "total_occurrences": len(occ_pairs),
+                "offset": offset,
+                "limit": limit,
                 "occurrences": occurrences,
             }
 
@@ -1367,6 +1408,12 @@ def register_agent_routes(
         replace_draft = payload.get("replace_draft", False)
         if not isinstance(replace_draft, bool):
             raise UsageError("replace_draft 必须是布尔值")
+        include_occurrences = payload.get("include_occurrences", False)
+        if not isinstance(include_occurrences, bool):
+            raise UsageError("include_occurrences 必须是布尔值")
+        sort_by = payload.get("sort_by", "occurrence_count")
+        if sort_by not in {"group_index", "occurrence_count"}:
+            raise UsageError("sort_by 必须是 group_index 或 occurrence_count")
         offset = payload.get("offset", 0)
         limit = payload.get("limit", 50)
         if (
@@ -1563,35 +1610,50 @@ def register_agent_routes(
                         retained.append(items)
                 candidates = retained
 
+            indexed_candidates = list(enumerate(candidates, 1))
+            if sort_by == "occurrence_count":
+                indexed_candidates.sort(key=lambda pair: (-len(pair[1]), pair[0]))
+            paged_candidates = indexed_candidates[offset : offset + limit]
             groups = []
-            for idx, items in enumerate(candidates, 1):
+            for idx, items in paged_candidates:
                 variants = list(
                     dict.fromkeys(bases[str(s["segment_id"])]["text"] for s in items)
                 )
-                groups.append(
-                    {
-                        "group_index": idx,
-                        "source": str(items[0]["source"]),
-                        "translations": variants,
-                        "occurrences": [
-                            {
-                                "occurrence_id": str(occ_idx),
-                                "segment_id": str(s["segment_id"]),
-                                "file_id": s["file_id"],
-                                "part_id": s["part_id"],
-                                "line_index": s["line_index"],
-                                "translation": bases[str(s["segment_id"])]["text"],
-                            }
-                            for occ_idx, s in enumerate(items, 1)
-                        ],
-                    }
-                )
+                translation_counts: dict[str, int] = {}
+                for s in items:
+                    t_text = str(bases[str(s["segment_id"])]["text"])
+                    translation_counts[t_text] = translation_counts.get(t_text, 0) + 1
+                group_entry: dict[str, Any] = {
+                    "group_index": idx,
+                    "source": str(items[0]["source"]),
+                    "occurrence_count": len(items),
+                    "translations": variants,
+                    "translation_counts": translation_counts,
+                }
+                if include_occurrences:
+                    group_entry["occurrences"] = [
+                        {
+                            "occurrence_id": str(occ_idx),
+                            "segment_id": str(s["segment_id"]),
+                            "file_id": s["file_id"],
+                            "part_id": s["part_id"],
+                            "line_index": s["line_index"],
+                            "translation": bases[str(s["segment_id"])]["text"],
+                        }
+                        for occ_idx, s in enumerate(items[:20], 1)
+                    ]
+                    if len(items) > 20:
+                        group_entry["occurrences_truncated"] = True
+                groups.append(group_entry)
             return {
                 "total_segments_in_scope": len(selected),
                 "translated_segments_in_scope": len(bases),
                 "excluded_punctuation_groups": excluded_punctuation_groups,
-                "total_groups": len(groups),
-                "groups": groups[offset : offset + limit],
+                "total_groups": len(indexed_candidates),
+                "sort_by": sort_by,
+                "offset": offset,
+                "limit": limit,
+                "groups": groups,
             }
 
         return await run_blocking(_scan)

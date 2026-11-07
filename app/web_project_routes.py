@@ -490,13 +490,24 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             raise UsageError("Segment 窗口参数无效")
         root = project(name)
         try:
-            return await asyncio.to_thread(lambda: WebStore(root).overview(
+            result = await asyncio.to_thread(lambda: WebStore(root).overview(
                 offset=offset,
                 limit=limit,
                 stage=params.get("stage", "translation"),
             ))
         except ValueError as exc:
             raise UsageError(str(exc)) from exc
+        active_agent = app.state.tasks.active_agent_task(root)
+        if active_agent is not None:
+            sc = result.get("stage_completion")
+            stage_name = str(active_agent.get("stage", ""))
+            if isinstance(sc, dict) and isinstance(sc.get(stage_name), dict):
+                sc[stage_name] = {
+                    **sc[stage_name],
+                    "checked_out": active_agent.get("checked_out_segments", 0),
+                    "active_run_id": active_agent.get("run_id"),
+                }
+        return result
 
     @app.post("/api/v1/projects/{name}/storage/compact")
     def compact_project_route(name: str) -> dict[str, int]:
