@@ -153,6 +153,66 @@ def _compact_term_row(
     return row
 
 
+def _compact_decision_item(p: dict[str, Any]) -> dict[str, Any]:
+    cp = {
+        k: v
+        for k, v in p.items()
+        if k
+        not in {
+            "before",
+            "after",
+            "conflicts",
+            "knowledge_before",
+            "knowledge_after",
+            "evidence",
+            "knowledge_evidence",
+        }
+    }
+    for side in ("before", "after"):
+        if isinstance(p.get(side), list):
+            cp[side] = [
+                {
+                    k: v
+                    for k, v in st.items()
+                    if k
+                    in {
+                        "normalized",
+                        "source",
+                        "preferred_translation",
+                        "category",
+                        "aliases",
+                        "group_primary",
+                        "disabled",
+                    }
+                    and (
+                        v not in (None, [], False)
+                        or k
+                        in {
+                            "normalized",
+                            "source",
+                            "preferred_translation",
+                            "category",
+                        }
+                    )
+                }
+                for st in p[side]
+                if isinstance(st, dict)
+            ]
+    if p.get("conflicts"):
+        cp["conflict_count"] = len(p["conflicts"])
+    return cp
+
+
+def _manual_review_summary(mr: Any) -> dict[str, Any] | None:
+    if not isinstance(mr, dict):
+        return None
+    return {
+        "total": mr.get("total", len(mr.get("items") or [])),
+        "resolved": mr.get("resolved", 0),
+        "remaining": mr.get("remaining", 0),
+    }
+
+
 MCP_INSTRUCTIONS = (
     "Another LLM Translator (minimal-llm-translator) MCP Server.\n"
     "Call `reference` (e.g. `reference(topic='workflows')`, `'pattern_b'`, `'terminology'`, `'repetition'`, `'config'`) "
@@ -925,7 +985,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "get_terminology_overview",
-        "description": "Get terminology status, conflicts, pending changes, stale entity knowledge, decision draft proposals, and manual review queue.",
+        "description": "Get terminology status, conflicts, pending changes, stale entity knowledge, decision draft proposals, draft needs_review items, or manual review queue.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -938,6 +998,8 @@ TOOLS: list[dict[str, Any]] = [
                         "changes",
                         "stale_knowledge",
                         "draft",
+                        "needs_review",
+                        "manual_review",
                     ],
                     "default": "all",
                 },
@@ -954,13 +1016,17 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "inspect_term_entity",
-        "description": "Inspect a term/entity including its glossary entry, group members, applied description items, source evidence fragments, and segment hits.",
+        "description": "Inspect a term/entity including its glossary entry, group members, applied description items, paginated source evidence fragments, and paginated segment hits.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "project": {"type": "string"},
                 "normalized": {"type": "string"},
+                "include_fragments": {"type": "boolean", "default": True},
+                "fragments_offset": {"type": "integer", "default": 0},
+                "fragments_limit": {"type": "integer", "default": 50},
                 "include_hits": {"type": "boolean", "default": True},
+                "hits_offset": {"type": "integer", "default": 0},
                 "hits_limit": {"type": "integer", "default": 20},
                 "run_id": {"type": "string"},
                 "proposal_id": {"type": "string"},
@@ -1887,65 +1953,36 @@ class MCPWebBridge:
             flt = args.get("filter", "all")
             offset = int(args.get("offset", 0))
             limit = int(args.get("limit", 50))
+            q_str = str(args.get("q") or "").strip().casefold()
             decision = self._request("GET", f"/api/v1/projects/{proj}/terms/decision")
             if flt == "draft":
                 draft = decision.get("draft")
                 if isinstance(draft, dict) and isinstance(draft.get("proposals"), list):
                     proposals = draft["proposals"]
-                    compact_proposals = []
-                    for p in proposals[offset : offset + limit]:
-                        if not isinstance(p, dict):
-                            compact_proposals.append(p)
-                            continue
-                        cp = {
-                            k: v
-                            for k, v in p.items()
-                            if k
-                            not in {
-                                "before",
-                                "after",
-                                "conflicts",
-                                "knowledge_before",
-                                "knowledge_after",
-                                "evidence",
-                                "knowledge_evidence",
-                            }
-                        }
-                        for side in ("before", "after"):
-                            if isinstance(p.get(side), list):
-                                cp[side] = [
-                                    {
-                                        k: v
-                                        for k, v in st.items()
-                                        if k
-                                        in {
-                                            "normalized",
-                                            "source",
-                                            "preferred_translation",
-                                            "category",
-                                            "aliases",
-                                            "group_primary",
-                                            "disabled",
-                                        }
-                                        and (
-                                            v not in (None, [], False)
-                                            or k
-                                            in {
-                                                "normalized",
-                                                "source",
-                                                "preferred_translation",
-                                                "category",
-                                            }
-                                        )
-                                    }
-                                    for st in p[side]
-                                    if isinstance(st, dict)
-                                ]
-                        if p.get("conflicts"):
-                            cp["conflict_count"] = len(p["conflicts"])
-                        compact_proposals.append(cp)
+                    if q_str:
+                        proposals = [
+                            p
+                            for p in proposals
+                            if isinstance(p, dict)
+                            and any(
+                                q_str in str(p.get(k) or "").casefold()
+                                for k in ("normalized", "source", "reason")
+                            )
+                        ]
+                    compact_proposals = [
+                        _compact_decision_item(p) if isinstance(p, dict) else p
+                        for p in proposals[offset : offset + limit]
+                    ]
+                    needs_review_list = (
+                        draft.get("needs_review")
+                        if isinstance(draft.get("needs_review"), list)
+                        else []
+                    )
                     decision = {
                         **decision,
+                        "manual_review": _manual_review_summary(
+                            decision.get("manual_review")
+                        ),
                         "draft": {
                             **{
                                 k: v
@@ -1953,19 +1990,91 @@ class MCPWebBridge:
                                 if k
                                 not in {
                                     "proposals",
+                                    "needs_review",
                                     "decision_targets",
                                     "reviewed_terms",
                                     "model_fingerprint",
                                     "prompt_fingerprint",
                                 }
                             },
+                            "needs_review_count": len(needs_review_list),
                             "total_proposals": len(proposals),
                             "offset": offset,
                             "limit": limit,
                             "proposals": compact_proposals,
                         },
                     }
+                else:
+                    decision = {
+                        **decision,
+                        "manual_review": _manual_review_summary(
+                            decision.get("manual_review")
+                        ),
+                    }
                 return decision
+            if flt == "needs_review":
+                draft = decision.get("draft")
+                nr_items = (
+                    list(draft.get("needs_review", []))
+                    if isinstance(draft, dict)
+                    and isinstance(draft.get("needs_review"), list)
+                    else []
+                )
+                if q_str:
+                    nr_items = [
+                        item
+                        for item in nr_items
+                        if isinstance(item, dict)
+                        and any(
+                            q_str in str(item.get(k) or "").casefold()
+                            for k in ("normalized", "source", "reason")
+                        )
+                    ]
+                return {
+                    "run_id": draft.get("run_id") if isinstance(draft, dict) else None,
+                    "total": len(nr_items),
+                    "offset": offset,
+                    "limit": limit,
+                    "items": [
+                        _compact_decision_item(item) if isinstance(item, dict) else item
+                        for item in nr_items[offset : offset + limit]
+                    ],
+                    "manual_review": _manual_review_summary(
+                        decision.get("manual_review")
+                    ),
+                }
+            if flt == "manual_review":
+                mr = (
+                    decision.get("manual_review")
+                    if isinstance(decision.get("manual_review"), dict)
+                    else {}
+                )
+                mr_items = (
+                    list(mr.get("items", []))
+                    if isinstance(mr.get("items"), list)
+                    else []
+                )
+                if q_str:
+                    mr_items = [
+                        item
+                        for item in mr_items
+                        if isinstance(item, dict)
+                        and any(
+                            q_str in str(item.get(k) or "").casefold()
+                            for k in ("normalized", "source", "reason")
+                        )
+                    ]
+                return {
+                    "total": len(mr_items),
+                    "resolved": mr.get("resolved", 0),
+                    "remaining": mr.get("remaining", 0),
+                    "offset": offset,
+                    "limit": limit,
+                    "items": [
+                        _compact_decision_item(item) if isinstance(item, dict) else item
+                        for item in mr_items[offset : offset + limit]
+                    ],
+                }
             terms_data = self._request("GET", f"/api/v1/projects/{proj}/terms")
             items = list(terms_data.get("terms", []))
             if flt == "conflicts":
@@ -1978,7 +2087,6 @@ class MCPWebBridge:
                     for t in items
                     if t.get("knowledge_status") in {"stale", "pending"}
                 ]
-            q_str = str(args.get("q") or "").strip().casefold()
             if q_str:
                 items = [
                     t
@@ -2001,15 +2109,30 @@ class MCPWebBridge:
                 else t
                 for t in items[offset : offset + limit]
             ]
+            scan_data = terms_data.get("scan")
+            if isinstance(scan_data, dict):
+                scan_data = dict(scan_data)
+                failed_segs = scan_data.get("failed_segments")
+                if isinstance(failed_segs, list):
+                    if offset > 0:
+                        scan_data.pop("failed_segments", None)
+                        scan_data.pop("failed_segments_truncated", None)
+                    elif len(failed_segs) > 20:
+                        scan_data["failed_segments"] = failed_segs[:20]
+                        scan_data["failed_segments_truncated"] = True
             return {
                 "total": len(items),
+                "offset": offset,
+                "limit": limit,
                 "terms": compact_terms,
                 "terms_revision": terms_data.get("terms_revision"),
                 "conflict_count": terms_data.get("conflict_count", 0),
-                "scan": terms_data.get("scan"),
+                "scan": scan_data,
                 "decision_state": {
                     "has_pending_draft": decision.get("draft") is not None,
-                    "manual_review": decision.get("manual_review"),
+                    "manual_review": _manual_review_summary(
+                        decision.get("manual_review")
+                    ),
                     "can_rollback": decision.get("rollback") is not None,
                 },
             }
@@ -2044,13 +2167,27 @@ class MCPWebBridge:
                 f"/api/v1/projects/{proj}/terms/knowledge",
                 params={"normalized": normalized},
             )
+            if isinstance(knowledge, dict) and isinstance(
+                knowledge.get("fragments"), list
+            ):
+                all_frags = knowledge["fragments"]
+                f_offset = int(args.get("fragments_offset", 0))
+                f_limit = int(args.get("fragments_limit", 50))
+                knowledge = {
+                    **{k: v for k, v in knowledge.items() if k != "fragments"},
+                    "total_fragments": len(all_frags),
+                }
+                if args.get("include_fragments", True):
+                    knowledge["fragments_offset"] = f_offset
+                    knowledge["fragments_limit"] = f_limit
+                    knowledge["fragments"] = all_frags[f_offset : f_offset + f_limit]
             hits = (
                 self._request(
                     "POST",
                     f"/api/v1/projects/{proj}/terms/hits",
                     json_body={
                         "normalized": normalized,
-                        "offset": 0,
+                        "offset": int(args.get("hits_offset", 0)),
                         "limit": int(args.get("hits_limit", 20)),
                     },
                 )
@@ -2182,16 +2319,17 @@ class MCPWebBridge:
                     }
                 result["rejections"] = rej
             if "manual_reviews" in args and args["manual_reviews"]:
-                resolved_results = []
+                last_mr = None
                 for entry in args["manual_reviews"]:
-                    resolved_results.append(
-                        self._request(
-                            "PUT",
-                            f"/api/v1/projects/{proj}/terms/decision/manual-review",
-                            json_body=entry,
-                        )
+                    last_mr = self._request(
+                        "PUT",
+                        f"/api/v1/projects/{proj}/terms/decision/manual-review",
+                        json_body=entry,
                     )
-                result["manual_reviews"] = resolved_results
+                result["manual_reviews"] = {
+                    **(_manual_review_summary(last_mr) or {}),
+                    "updated_count": len(args["manual_reviews"]),
+                }
             if not result:
                 raise UsageError("必须提供 rejected_proposal_ids 或 manual_reviews")
             return result
