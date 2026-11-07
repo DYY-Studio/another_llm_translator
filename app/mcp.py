@@ -1100,7 +1100,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "inspect_repetition_group",
-        "description": "Inspect all occurrences of a repeated source group with configurable surrounding context window.",
+        "description": "Inspect occurrences of a repeated source group with configurable surrounding context window and pagination.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1108,6 +1108,8 @@ TOOLS: list[dict[str, Any]] = [
                 "group_id": {"type": "string"},
                 "source": {"type": "string"},
                 "window": {"type": "integer", "default": 5},
+                "offset": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 20},
             },
             "required": ["project"],
             "additionalProperties": False,
@@ -2249,8 +2251,28 @@ class MCPWebBridge:
                         else []
                     )
                     if isinstance(cg.get("occurrences"), list):
+                        all_occs = cg["occurrences"]
+                        cg["occurrence_count"] = len(all_occs)
+                        translation_counts: dict[str, int] = {}
+                        for occ in all_occs:
+                            if not isinstance(occ, dict):
+                                continue
+                            v_idx = occ.get("variant")
+                            t_val = occ.get("text")
+                            if (
+                                t_val is None
+                                and isinstance(v_idx, int)
+                                and 0 <= v_idx < len(translations)
+                            ):
+                                t_val = translations[v_idx]
+                            if isinstance(t_val, str):
+                                translation_counts[t_val] = (
+                                    translation_counts.get(t_val, 0) + 1
+                                )
+                        if translation_counts:
+                            cg["translation_counts"] = translation_counts
                         compact_occs = []
-                        for occ in cg["occurrences"]:
+                        for occ in all_occs[:20]:
                             if not isinstance(occ, dict):
                                 continue
                             c_occ = {
@@ -2276,10 +2298,14 @@ class MCPWebBridge:
                                 c_occ["translation"] = translations[v_idx]
                             compact_occs.append(c_occ)
                         cg["occurrences"] = compact_occs
+                        if len(all_occs) > 20:
+                            cg["occurrences_truncated"] = True
                     compact_groups.append(cg)
                 draft = {
                     **{k: v for k, v in draft.items() if k not in {"evidence", "sources"}},
                     "total_groups": len(groups),
+                    "offset": offset,
+                    "limit": limit,
                     "groups": compact_groups,
                 }
             result_state: dict[str, Any] = {**state, "draft": draft}
@@ -2311,6 +2337,8 @@ class MCPWebBridge:
                     "group_id": args.get("group_id"),
                     "source": args.get("source"),
                     "window": int(args.get("window", 5)),
+                    "offset": int(args.get("offset", 0)),
+                    "limit": int(args.get("limit", 20)),
                 },
             )
             if isinstance(res, dict) and isinstance(res.get("draft_group"), dict):

@@ -1200,6 +1200,12 @@ def register_agent_routes(
         window = payload.get("window", 5)
         if not isinstance(window, int) or isinstance(window, bool) or not 1 <= window <= 30:
             raise UsageError("window 必须是 1 到 30 之间的整数")
+        offset = payload.get("offset", 0)
+        limit = payload.get("limit", 20)
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise UsageError("offset 必须是非负整数")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise UsageError("limit 必须是 1 到 100 之间的整数")
 
         def _inspect() -> dict[str, Any]:
             nonlocal source_text
@@ -1221,15 +1227,23 @@ def register_agent_routes(
                 matched_segments = [s for s in non_empty if s["source"] == source_text]
                 if len(matched_segments) < 2:
                     raise UsageError("指定 source 未找到重复出现的非空 Segment")
-                occ_ids = [str(s["segment_id"]) for s in matched_segments]
+                occ_pairs = [
+                    (str(idx), str(s["segment_id"]))
+                    for idx, s in enumerate(matched_segments, 1)
+                ]
             else:
                 source_text_val = str(target_group["source"])
-                occ_ids = [str(o["segment_id"]) for o in target_group["occurrences"]]
+                occ_pairs = [
+                    (str(o.get("id") or idx), str(o["segment_id"]))
+                    for idx, o in enumerate(target_group["occurrences"], 1)
+                ]
                 source_text = source_text_val
 
-            states = latest_stage_states(root, "translation", occ_ids)
+            paged_pairs = occ_pairs[offset : offset + limit]
+            paged_ids = [sid for _, sid in paged_pairs]
+            states = latest_stage_states(root, "translation", paged_ids) if paged_ids else {}
             occurrences = []
-            for idx, sid in enumerate(occ_ids, 1):
+            for occ_id, sid in paged_pairs:
                 seg = by_id[sid]
                 before, after = query_segment_neighbors(
                     root,
@@ -1243,7 +1257,7 @@ def register_agent_routes(
                 ctx_states = latest_stage_states(root, "translation", ctx_ids) if ctx_ids else {}
                 occurrences.append(
                     {
-                        "occurrence_id": str(idx),
+                        "occurrence_id": occ_id,
                         "segment_id": sid,
                         "file_id": seg["file_id"],
                         "part_id": seg["part_id"],
@@ -1277,6 +1291,9 @@ def register_agent_routes(
                 "group_id": target_group["id"] if target_group else None,
                 "source": source_text,
                 "draft_group": target_group,
+                "total_occurrences": len(occ_pairs),
+                "offset": offset,
+                "limit": limit,
                 "occurrences": occurrences,
             }
 
@@ -1568,29 +1585,38 @@ def register_agent_routes(
                 variants = list(
                     dict.fromkeys(bases[str(s["segment_id"])]["text"] for s in items)
                 )
-                groups.append(
-                    {
-                        "group_index": idx,
-                        "source": str(items[0]["source"]),
-                        "translations": variants,
-                        "occurrences": [
-                            {
-                                "occurrence_id": str(occ_idx),
-                                "segment_id": str(s["segment_id"]),
-                                "file_id": s["file_id"],
-                                "part_id": s["part_id"],
-                                "line_index": s["line_index"],
-                                "translation": bases[str(s["segment_id"])]["text"],
-                            }
-                            for occ_idx, s in enumerate(items, 1)
-                        ],
-                    }
-                )
+                translation_counts: dict[str, int] = {}
+                for s in items:
+                    t_text = str(bases[str(s["segment_id"])]["text"])
+                    translation_counts[t_text] = translation_counts.get(t_text, 0) + 1
+                group_entry: dict[str, Any] = {
+                    "group_index": idx,
+                    "source": str(items[0]["source"]),
+                    "occurrence_count": len(items),
+                    "translations": variants,
+                    "translation_counts": translation_counts,
+                    "occurrences": [
+                        {
+                            "occurrence_id": str(occ_idx),
+                            "segment_id": str(s["segment_id"]),
+                            "file_id": s["file_id"],
+                            "part_id": s["part_id"],
+                            "line_index": s["line_index"],
+                            "translation": bases[str(s["segment_id"])]["text"],
+                        }
+                        for occ_idx, s in enumerate(items[:20], 1)
+                    ],
+                }
+                if len(items) > 20:
+                    group_entry["occurrences_truncated"] = True
+                groups.append(group_entry)
             return {
                 "total_segments_in_scope": len(selected),
                 "translated_segments_in_scope": len(bases),
                 "excluded_punctuation_groups": excluded_punctuation_groups,
                 "total_groups": len(groups),
+                "offset": offset,
+                "limit": limit,
                 "groups": groups[offset : offset + limit],
             }
 
