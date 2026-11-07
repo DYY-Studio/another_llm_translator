@@ -596,7 +596,14 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Get project overview including files, per-stage progress counts, unfinished runs, and pending drafts.",
         "inputSchema": {
             "type": "object",
-            "properties": {"project": {"type": "string", "description": "Project name or ID"}},
+            "properties": {
+                "project": {"type": "string", "description": "Project name or ID"},
+                "include_parts": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include full chapter part_ids list for each file (default False, returning part_count only)",
+                },
+            },
             "required": ["project"],
             "additionalProperties": False,
         },
@@ -610,6 +617,8 @@ TOOLS: list[dict[str, Any]] = [
                 "project": {"type": "string"},
                 "task_id": {"type": "string"},
                 "stage": {"type": "string"},
+                "runs_offset": {"type": "integer", "default": 0},
+                "runs_limit": {"type": "integer", "default": 5},
                 "include_events": {"type": "boolean", "default": False},
             },
             "required": ["project"],
@@ -1486,15 +1495,37 @@ class MCPWebBridge:
 
         if name == "get_project_overview":
             proj = quote(str(args["project"]), safe="")
+            include_parts = bool(args.get("include_parts", False))
             data = self._request("GET", f"/api/v1/projects/{proj}", params={"limit": 1})
             if isinstance(data, dict):
                 data.pop("segments", None)
                 data.pop("offset", None)
                 data.pop("limit", None)
+                if isinstance(data.get("files"), list):
+                    compact_files = []
+                    for f in data["files"]:
+                        if not isinstance(f, dict):
+                            compact_files.append(f)
+                            continue
+                        cf = dict(f)
+                        parts = cf.get("part_ids")
+                        if isinstance(parts, list):
+                            cf["part_count"] = len(parts)
+                            if not include_parts:
+                                cf.pop("part_ids", None)
+                        compact_files.append(cf)
+                    data["files"] = compact_files
+                sc = data.get("stage_completion")
+                if isinstance(sc, dict) and isinstance(sc.get("terminology"), dict):
+                    term_sc = dict(sc["terminology"])
+                    term_sc.pop("knowledge_entities", None)
+                    data["stage_completion"] = {**sc, "terminology": term_sc}
             return data
 
         if name == "get_task_and_diagnostics":
             project_name = str(args["project"])
+            runs_offset = int(args.get("runs_offset", 0))
+            runs_limit = int(args.get("runs_limit", 5))
             active = self._request("GET", "/api/v1/tasks/active").get("tasks", [])
             project_tasks = [
                 _compact_task(t)
@@ -1511,7 +1542,12 @@ class MCPWebBridge:
             runs = self._request(
                 "GET",
                 "/api/v1/runs",
-                params={"project": project_name, "limit": 5, **({"stage": args["stage"]} if args.get("stage") else {})},
+                params={
+                    "project": project_name,
+                    "offset": runs_offset,
+                    "limit": runs_limit,
+                    **({"stage": args["stage"]} if args.get("stage") else {}),
+                },
             )
             _strip_run_keys = {
                 "document_adapter_prompt_requirements",
@@ -1519,20 +1555,30 @@ class MCPWebBridge:
                 "document_adapter_options",
                 "translation_validators",
                 "stage_fingerprint",
+                "manual_review_handled_normalized",
+                "manual_review_resolved_normalized",
             }
-            recent_runs = [
-                {
+            recent_runs = []
+            for r in runs.get("items", []):
+                if not isinstance(r, dict):
+                    continue
+                cr = {
                     k: v
                     for k, v in r.items()
                     if k not in _strip_run_keys
                     and not (k in {"failure_counts", "warnings"} and not v)
                 }
-                for r in runs.get("items", [])
-                if isinstance(r, dict)
-            ]
+                warnings = cr.get("warnings")
+                if isinstance(warnings, list) and len(warnings) > 5:
+                    cr["warning_count"] = len(warnings)
+                    cr["warnings"] = warnings[:5]
+                recent_runs.append(cr)
             result: dict[str, Any] = {
                 "active_tasks": project_tasks,
                 "task_detail": task_detail,
+                "total_runs": runs.get("total", len(recent_runs)),
+                "runs_offset": runs_offset,
+                "runs_limit": runs_limit,
                 "recent_runs": recent_runs,
             }
             if args.get("include_events"):
@@ -1650,7 +1696,7 @@ class MCPWebBridge:
                         "final_review": bool(args.get("final_review", False)),
                     },
                 )
-            return self._request(
+            res = self._request(
                 "GET",
                 f"/api/v1/projects/{proj}/task-options/{quote(stage, safe='')}",
                 params={
@@ -1660,6 +1706,24 @@ class MCPWebBridge:
                     "all_terms": bool(args.get("all_terms", False)),
                 },
             )
+            if isinstance(res, dict) and isinstance(res.get("knowledge_replacement_impacts"), list):
+                impacts = res.pop("knowledge_replacement_impacts")
+                owners = sorted(
+                    {
+                        str(item.get("owner"))
+                        for item in impacts
+                        if isinstance(item, dict) and item.get("owner")
+                    }
+                )
+                res = {
+                    **res,
+                    "knowledge_replacement_summary": {
+                        "affected_fragments": len(impacts),
+                        "affected_entities": len(owners),
+                        "sample_entities": owners[:20],
+                    },
+                }
+            return res
 
         if name == "start_host_stage_run":
             proj = quote(str(args["project"]), safe="")
@@ -2092,6 +2156,10 @@ class MCPWebBridge:
                         for t in selected_terms
                     ],
                 }
+            if isinstance(res, dict) and isinstance(res.get("stage_completion"), dict):
+                sc_term = dict(res["stage_completion"])
+                sc_term.pop("knowledge_entities", None)
+                res = {**res, "stage_completion": sc_term}
             return res
 
         if name == "submit_term_decision_draft":
