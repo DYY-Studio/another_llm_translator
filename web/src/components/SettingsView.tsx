@@ -361,8 +361,9 @@ function ConfigSettings({ project, scope, language, focusField, onFocusConsumed 
           <Field label={translate("settings.sourcedDescriptionInjection", language)} help={translate("settings.sourcedDescriptionInjectionHint", language)}>
             <select value={config.terminology.sourced_description_injection} onChange={(event) => update((draft) => { draft.terminology.sourced_description_injection = event.target.value as ProjectConfig["terminology"]["sourced_description_injection"]; })}>
               <option value="none">{translate("settings.descriptionNone", language)}</option>
+              <option value="stage">{translate("settings.descriptionStage", language)}</option>
               <option value="prefer_previous">{translate("settings.descriptionPreferPrevious", language)}</option>
-              <option value="all">{translate("settings.descriptionAll", language)}</option>
+              <option value="all">{translate("settings.descriptionAllSourced", language)}</option>
             </select>
           </Field>
           <Field label={translate("settings.unsourcedDescriptionInjection", language)} help={translate("settings.unsourcedDescriptionInjectionHint", language)}>

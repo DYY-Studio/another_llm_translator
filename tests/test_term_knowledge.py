@@ -929,6 +929,10 @@ def test_replacement_indexes_each_request_and_preserves_slice_boundaries(
     ("all", "all", 1, ["前文", "当前", "后文一", "后文并列", "后文二", "总结"]),
     ("prefer_previous", "when_no_sourced", 1, ["前文", "当前"]),
     ("prefer_previous", "all", 0, ["后文一", "后文并列", "总结"]),
+    ("stage", "when_no_sourced", 1, ["当前"]),
+    ("stage", "when_no_sourced", 3, ["后文一", "后文并列"]),
+    ("stage", "when_no_sourced", (0, 1), ["前文", "当前"]),
+    ("stage", "all", 0, ["后文一", "后文并列", "总结"]),
     ("none", "when_no_sourced", 1, ["总结"]),
     ("all", "none", 1, ["前文", "当前", "后文一", "后文并列", "后文二"]),
     ("none", "none", 1, []),
@@ -947,7 +951,8 @@ def test_entity_injection_policies(sourced, unsourced, position, expected):
             entry("后文二", 4), entry("总结", None)]}]}
     cache = _TermMatchCache(data, TermNormalization("NFKC", True), 10, segments=segments,
                            sourced_policy=sourced, unsourced_policy=unsourced)
-    terms = cache.for_items([segments[position]])
+    selected = [segments[i] for i in position] if isinstance(position, tuple) else [segments[position]]
+    terms = cache.for_items(selected)
     assert terms[0]["preferred_translation"] == "阿尔法"
     assert [i["text"] for i in terms[0].get("entity_knowledge", {}).get("items", [])] == expected
     if not expected:

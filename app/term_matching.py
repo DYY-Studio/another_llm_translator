@@ -503,6 +503,10 @@ class _TermMatchCache:
         elif self.sourced_policy == "prefer_previous":
             previous = [i for i in sourced if relations[i][0] is not None or relations[i][1]]
             sourced = previous or [i for i in sourced if "after 1" in items[i]["source_relation"]]
+        elif self.sourced_policy == "stage":
+            prior = max((prepared[i]["starts"][0] for i in sourced if prepared[i]["starts"][0] <= first), default=None)
+            active = [i for i in sourced if prepared[i]["starts"][0] == prior or relations[i][1]]
+            sourced = active or [i for i in sourced if "after 1" in items[i]["source_relation"]]
         selected = set(sourced)
         if self.unsourced_policy == "all" or (self.unsourced_policy == "when_no_sourced" and not sourced):
             selected.update(i for i, item in enumerate(items) if not item["source_relation"])

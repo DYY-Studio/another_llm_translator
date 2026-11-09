@@ -100,8 +100,8 @@ case_insensitive = true
 max_terms_per_segment = 100
 # alias 与另一主条目相同时：conflict 要求人工裁决；merge 尝试确定性组化。
 alias_primary_collision = "merge"
-# 有来源实体说明：none 不注入，prefer_previous 优先前文，all 全部。
-sourced_description_injection = "all"
+# 有来源实体说明：none 不注入，stage 按阶段，prefer_previous 优先前文，all 全部。
+sourced_description_injection = "stage"
 # 无来源实体说明：none 不注入，when_no_sourced 无有来源说明可注入时注入，all 全部。
 unsourced_description_injection = "all"
 

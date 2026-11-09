@@ -1145,7 +1145,7 @@ export interface ProjectConfig {
     case_insensitive: boolean;
     max_terms_per_segment: number;
     alias_primary_collision: "conflict" | "merge";
-    sourced_description_injection: "none" | "prefer_previous" | "all";
+    sourced_description_injection: "none" | "stage" | "prefer_previous" | "all";
     unsourced_description_injection: "none" | "when_no_sourced" | "all";
   };
   terminology_decision: {

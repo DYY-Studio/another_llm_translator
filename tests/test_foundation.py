@@ -591,7 +591,7 @@ def test_load_config_ignores_and_warns_legacy_translation_validator_flags(
 
 
 @pytest.mark.parametrize(("section", "key", "default", "valid"), [
-    ("terminology", "sourced_description_injection", "all", "prefer_previous"),
+    ("terminology", "sourced_description_injection", "stage", "prefer_previous"),
     ("terminology", "unsourced_description_injection", "all", "when_no_sourced"),
     ("terminology_decision", "description_generation", "sourced", "summary_only"),
 ])
