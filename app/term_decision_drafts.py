@@ -277,14 +277,16 @@ def _decision_needs_review(
 def manual_review_state(project: Path) -> dict[str, Any]:
     """Return the active manual-review queue for the latest decision epoch."""
     latest: dict[str, dict[str, Any]] = {}
+    handled: set[str] = set()
     for manifest in list_runs(project, stage=STAGE):
         status = manifest.get("decision_status")
         is_replacement = manifest.get("manual_review_replaces_previous") is True
         if status in {"applied", "rejected"}:
-            for item in _decision_needs_review(project, manifest):
+            for item in ([] if manifest.get("needs_review_count") == 0 else _decision_needs_review(project, manifest)):
                 normalized = str(item["normalized"])
-                if normalized not in latest:
+                if normalized not in latest and normalized not in handled:
                     latest[normalized] = item
+            handled.update(manifest.get("manual_review_handled_normalized", []))
         # The marker is retained when the Run is rolled back.  In that case
         # its own items are no longer active, but older queues must not revive.
         if is_replacement:
@@ -335,6 +337,36 @@ def set_manual_review_resolved(
     else:
         values.discard(normalized)
     manifest["manual_review_resolved_normalized"] = sorted(values)
+    draft = json.loads(_draft_path(project, run_id).read_text(encoding="utf-8"))
+    source_change = draft.get("source_library", {}).get("knowledge", {}).get("pending_changes", {}).get(normalized)
+    library = load_terms(project, resolve_knowledge=False)
+    if library is not None and source_change is not None:
+        pending = library["knowledge"]["pending_changes"]
+        previous = deepcopy(pending)
+        if resolved:
+            old_refs = {tuple(ref) for ref in source_change["candidate_refs"]}
+            for key in list(pending):
+                remaining = [ref for ref in pending[key]["candidate_refs"] if tuple(ref) not in old_refs]
+                if remaining:
+                    pending[key]["candidate_refs"] = remaining
+                else:
+                    del pending[key]
+        else:
+            entry = pending.setdefault(normalized, deepcopy(source_change))
+            for ref in source_change["candidate_refs"]:
+                if ref not in entry["candidate_refs"]:
+                    entry["candidate_refs"].append(ref)
+            from .term_knowledge import transfer_alias_evidence
+            transfer_alias_evidence(library, term_normalization(load_project_config(project)))
+            active = {term["normalized"] for term in library["terms"]}
+            for key in pending.keys() - active:
+                del pending[key]
+        if pending != previous:
+            library["terms_revision"] += 1
+            library["record_id"] = f'TERMS-{library["terms_revision"]}'
+            overrides = read_json(project, project / "terminology" / "overrides.json")
+            write_terminology_decision_state(project, terms=library, overrides=overrides, run_manifest=manifest)
+            return manual_review_state(project)
     write_json(project, project / "runs" / run_id / "manifest.json", manifest)
     return manual_review_state(project)
 
@@ -442,13 +474,19 @@ def apply_decision_draft(
     run_id = str(draft["run_id"])
     manifest_path = project / "runs" / run_id / "manifest.json"
     manifest = _pending_manifest(project, run_id)
-    if accepted == 0:
+    handled = set(draft.get("reviewed_terms", draft.get("decision_targets", []))) - {item["normalized"] for item in draft["needs_review"]}
+    pending = library["knowledge"]["pending_changes"]
+    acknowledgements = handled & pending.keys()
+    rejected_knowledge = {root for proposal in draft["proposals"] if proposal["proposal_id"] in rejected
+                          for root in proposal.get("knowledge_after", {})}
+    if accepted == 0 and not acknowledgements and not rejected_knowledge:
         manifest.update(
             decision_status="rejected",
             rejected_proposal_ids=sorted(rejected),
             applied_proposal_count=0,
             manual_review_resolved_normalized=[],
-            manual_review_replaces_previous=not draft.get("knowledge_only", False),
+            manual_review_replaces_previous=bool(draft.get("all_terms", True)) and not draft.get("knowledge_only", False),
+            manual_review_handled_normalized=sorted(handled),
             applied_at=utc_now(),
         )
         if "final_review_error" in manifest:
@@ -466,8 +504,9 @@ def apply_decision_draft(
         for item in overrides_document.get("overrides", [])
     }
     protected = set(overrides)
-    if protected.intersection(after_states):
-        raise UsageError("术语决策试图修改受保护的人工 override")
+    allowed = set(draft.get("decision_targets", []))
+    if protected.intersection(after_states) - allowed:
+        raise UsageError("术语决策试图修改处理范围外的已确认术语")
     current = {
         str(item["normalized"]): deepcopy(item) for item in library.get("terms", [])
     }
@@ -521,9 +560,15 @@ def apply_decision_draft(
         terms=terms,
         knowledge=deepcopy(library["knowledge"]),
     )
-    from .term_knowledge import entity_view, save_items, project_descriptions, transfer_alias_evidence, evidence
+    for key in acknowledgements:
+        del term_record["knowledge"]["pending_changes"][key]
+    from .term_knowledge import entity_view, save_items, project_descriptions, transfer_alias_evidence, evidence, confirm_keep
     if not draft.get("knowledge_only", False):
         transfer_alias_evidence(term_record, term_normalization(load_project_config(project)))
+    active = {term["normalized"] for term in terms}
+    pending_changes = term_record["knowledge"]["pending_changes"]
+    for key in pending_changes.keys() - active:
+        del pending_changes[key]
     known = evidence(project, term_record)
     for proposal in draft["proposals"]:
         if proposal["proposal_id"] in rejected:
@@ -534,6 +579,12 @@ def apply_decision_draft(
                 raise UsageError("实体说明证据已变化，请重新生成草案")
             save_items(project, term_record, root, aggregate["items"], all_evidence=known,
                        description_generation=aggregate.get("description_generation"))
+    for root in rejected_knowledge:
+        view = entity_view(project, term_record, root, all_evidence=known)
+        if view["status"] != "stale":
+            if root not in term_record["knowledge"]["entities"]:
+                save_items(project, term_record, root, [], all_evidence=known)
+            confirm_keep(project, term_record, root, all_evidence=known)
     project_descriptions(project, term_record, all_evidence=known)
     override_record = record_header(
         "terminology_overrides",
@@ -547,7 +598,8 @@ def apply_decision_draft(
         rejected_proposal_ids=sorted(rejected),
         applied_proposal_count=accepted,
         manual_review_resolved_normalized=[],
-        manual_review_replaces_previous=not draft.get("knowledge_only", False),
+        manual_review_replaces_previous=bool(draft.get("all_terms", True)) and not draft.get("knowledge_only", False),
+        manual_review_handled_normalized=sorted(handled),
         applied_terms_revision=revision,
         applied_at=utc_now(),
     )
@@ -594,7 +646,7 @@ def rollback_decision(project: Path, *, confirm: bool) -> dict[str, Any]:
         raise UsageError("术语库在应用后已有变化，不能撤销自动决策")
     source_library = deepcopy(draft["source_library"])
     from .term_knowledge import require_knowledge
-    require_knowledge(source_library)
+    require_knowledge(source_library).setdefault("pending_changes", {})
     source_overrides = deepcopy(draft["source_overrides"])
     revision = int(library["terms_revision"]) + 1
     source_library.update(

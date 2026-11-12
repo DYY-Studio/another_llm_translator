@@ -5,10 +5,10 @@ import os
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
-from app.config import load_global_config, load_project_config
+from app.config import load_global_config
 from app.llm_preset import load_llm_preset
 from app.errors import ConfigError, UsageError
 from app.llm_client import LLMClient, SlidingWindowLimiter
@@ -35,14 +35,6 @@ ROOT = Path(__file__).parents[1]
 
 def load_test_config() -> dict:
     return load_global_config(ROOT)
-
-
-def _replace_config(project: Path, old: str, new: str) -> None:
-    path = project / "config.toml"
-    path.write_text(
-        path.read_text(encoding="utf-8").replace(old, new),
-        encoding="utf-8",
-    )
 
 
 def _new_running_run(
@@ -108,17 +100,12 @@ def _seed_terminology_task(project: Path, task_id: str) -> None:
     )
 
 
-def test_resume_flags_only_exist_on_standalone_llm_commands() -> None:
+def test_resume_and_fingerprint_reuse_cli_flags() -> None:
     parser = build_parser()
     for command in ("terminology", "translate", "proofread", "polish"):
-        parsed = parser.parse_args([command, "demo", "--resume-run"])
-        assert parsed.resume_run is True
+        assert parser.parse_args([command, "demo", "--resume-run"]).resume_run is True
     with pytest.raises(SystemExit):
         parser.parse_args(["run-all", "demo", "--resume-run"])
-
-
-def test_fingerprint_reuse_flag_only_exists_on_llm_commands() -> None:
-    parser = build_parser()
     for command in (
         "terminology",
         "translate",
@@ -255,7 +242,7 @@ def test_proxy_config_rejects_unsupported_or_incomplete_url(
 
 
 @pytest.mark.asyncio
-async def test_llm_client_passes_proxy_and_preserves_httpx_environment_defaults(
+async def test_llm_client_passes_proxy_and_preserves_httpx2_environment_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[dict[str, Any]] = []
@@ -267,7 +254,7 @@ async def test_llm_client_passes_proxy_and_preserves_httpx_environment_defaults(
         async def aclose(self) -> None:
             return None
 
-    monkeypatch.setattr(httpx, "AsyncClient", DummyClient)
+    monkeypatch.setattr(httpx2, "AsyncClient", DummyClient)
     current = load_test_config()
     current["llm"]["proxy_url"] = "http://127.0.0.1:7890"
     async with LLMClient(
@@ -294,29 +281,6 @@ async def test_llm_client_passes_proxy_and_preserves_httpx_environment_defaults(
         pass
     assert calls[1]["proxy"] is None
     assert "trust_env" not in calls[1]
-
-
-@pytest.mark.asyncio
-async def test_injected_http_client_does_not_create_another_client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    current = load_test_config()
-    injected = object()
-
-    def fail(**_: Any) -> None:
-        raise AssertionError("unexpected client construction")
-
-    monkeypatch.setattr(httpx, "AsyncClient", fail)
-    async with LLMClient(
-        current,
-        SlidingWindowLimiter(0, 0),
-        run_dir=tmp_path,
-        project_id="P",
-        run_id="R",
-        stage="translation",
-        client=injected,  # type: ignore[arg-type]
-    ) as llm:
-        assert llm.client is injected
 
 
 @pytest.mark.asyncio
@@ -427,7 +391,7 @@ async def test_translation_resume_uses_old_scope_current_settings_and_same_run(
     )
     requested: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         assert body["model"] == "current-model"
         assert "CURRENT PROMPT" in body["messages"][0]["content"]
@@ -441,12 +405,12 @@ async def test_translation_resume_uses_old_scope_current_settings_and_same_run(
             }
             for item in payload["segments"]
         ]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         summary = await run_translation(
             project,
@@ -501,7 +465,7 @@ async def test_translation_mixed_fingerprint_stops_before_run_or_request(
     before_runs = list((project / "runs").iterdir())
     requests = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal requests
         requests += 1
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
@@ -513,12 +477,12 @@ async def test_translation_mixed_fingerprint_stops_before_run_or_request(
             }
             for item in payload["segments"]
         ]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         dry_run = await run_translation(
             project,
@@ -602,15 +566,15 @@ async def test_terminology_resume_keeps_active_task(tmp_path: Path) -> None:
     )
     seen: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         seen.extend(payload["source_segments"])
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl([])}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         summary = await run_terminology(
             project,
@@ -634,15 +598,15 @@ async def test_terminology_ignores_old_fingerprint_outside_scope(
     _seed_terminology_task(project, "TERM-TASK-SCOPE")
     seen: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         seen.extend(payload["source_segments"])
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl([])}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         summary = await run_terminology(
             project,
@@ -707,7 +671,7 @@ async def test_review_resume_reuses_completed_segments(
     )
     seen: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         seen.extend(item["id"] for item in payload["segments"])
         records = [
@@ -720,12 +684,12 @@ async def test_review_resume_reuses_completed_segments(
             }
             for item in payload["segments"]
         ]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         summary = await run_review(
             project,

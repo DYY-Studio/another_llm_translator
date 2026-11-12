@@ -7,14 +7,12 @@ import keyring
 import pytest
 
 from app.config import ConfigError, dump_config, load_config, load_project_config
-from app.documents import decode_plaintext
 from app.errors import StorageError, UsageError
 from app.main import run
 from app.project import (
     bundle_hash,
     discover_inputs,
     init_project,
-    natural_path_key,
     resolve_project_parent,
     sync_global_templates,
 )
@@ -265,54 +263,24 @@ def test_config_unresolved_retry_scope(tmp_path: Path, scope: str | None) -> Non
         assert load_config(path) == loaded
 
 
-def test_config_defaults_alias_collision_for_existing_projects(
+def test_config_fills_defaults_for_omitted_optional_fields(
     tmp_path: Path,
 ) -> None:
-    app_root = make_app_root(tmp_path)
-    config_path = app_root / "config" / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            'alias_primary_collision = "merge"\n',
-            "",
-        ).replace("cross_boundary_batching = []\n", ""),
-        encoding="utf-8",
-    )
-    assert load_config(config_path)["terminology"]["alias_primary_collision"] == (
-        "merge"
-    )
-    assert load_config(config_path)["chunking"]["cross_boundary_batching"] == []
-
-
-def test_config_defaults_translation_previous_summaries_for_existing_projects(
-    tmp_path: Path,
-) -> None:
-    app_root = make_app_root(tmp_path)
-    config_path = app_root / "config" / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            "previous_summaries = false\n",
-            "",
-        ),
-        encoding="utf-8",
-    )
-    assert load_config(config_path)["context"]["translation"][
-        "previous_summaries"
-    ] is False
-
-
-def test_config_defaults_missing_target_language_tag_to_empty(
-    tmp_path: Path,
-) -> None:
-    app_root = make_app_root(tmp_path)
-    config_path = app_root / "config" / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            'target_language_tag = "zh-Hans"\n',
-            "",
-        ),
-        encoding="utf-8",
-    )
-    assert load_config(config_path)["project"]["target_language_tag"] == "zh-Hans"
+    config_path = tmp_path / "config.toml"
+    text = CONFIG_TEMPLATE.read_text(encoding="utf-8")
+    for line in (
+        'alias_primary_collision = "merge"\n',
+        "cross_boundary_batching = []\n",
+        "previous_summaries = false\n",
+        'target_language_tag = "zh-Hans"\n',
+    ):
+        text = text.replace(line, "")
+    config_path.write_text(text, encoding="utf-8")
+    loaded = load_config(config_path)
+    assert loaded["terminology"]["alias_primary_collision"] == "merge"
+    assert loaded["chunking"]["cross_boundary_batching"] == []
+    assert loaded["context"]["translation"]["previous_summaries"] is False
+    assert loaded["project"]["target_language_tag"] == "zh-Hans"
 
 
 @pytest.mark.parametrize("value", ["zh_CN", "zh Hans", "zh-"])
@@ -389,40 +357,6 @@ def test_config_canonical_serialization_round_trips(tmp_path: Path) -> None:
     assert "previous_summaries = false" in text
     assert 'target_language = "简体中文 \\"测试\\""' in text
     assert "cross_boundary_batching = []" in text
-
-
-def test_decode_gbk_as_gb18030() -> None:
-    source = "你好，世界。这是一段用于编码探测的简体中文测试文本。"
-    decoded = decode_plaintext(
-        source.encode("gb18030"),
-        confidence_threshold=0.0,
-        fallback_encoding="utf-8",
-    )
-    assert decoded.text == source
-    assert decoded.encoding_detected
-    assert decoded.encoding_used.casefold() in {"gb18030", "gb2312"}
-
-
-def test_natural_path_key_orders_relative_paths_deterministically() -> None:
-    names = [
-        "chapter10.txt",
-        "Chapter2.txt",
-        "chapter02.txt",
-        "chapter1.txt",
-        "part10/chapter1.txt",
-        "part2/chapter10.txt",
-        "part2/chapter2.txt",
-    ]
-
-    assert sorted(names, key=natural_path_key) == [
-        "chapter1.txt",
-        "Chapter2.txt",
-        "chapter02.txt",
-        "chapter10.txt",
-        "part2/chapter2.txt",
-        "part2/chapter10.txt",
-        "part10/chapter1.txt",
-    ]
 
 
 def test_recursive_discovery_uses_natural_relative_path_order(
@@ -635,39 +569,29 @@ def test_persisted_record_rejects_unsupported_enum() -> None:
         _validate_record({"schema_version": 1, "status": "unknown"}, "test")
 
 
-def test_load_config_ignores_legacy_translation_validator_flags(
+def test_load_config_ignores_and_warns_legacy_translation_validator_flags(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "config.toml"
-    content = CONFIG_TEMPLATE.read_text(encoding="utf-8").replace(
-        "validators = []",
+    for replacement in (
         "japanese_kana = true\nkorean_hangul = false",
-    )
-    path.write_text(content, encoding="utf-8")
-
-    config = load_config(path)
-
-    assert config["validation"]["translation"]["validators"] == []
-    assert "japanese_kana" not in config["validation"]["translation"]
-
-
-def test_load_config_rejects_mixed_translation_validator_formats(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.toml"
-    content = CONFIG_TEMPLATE.read_text(encoding="utf-8").replace(
-        "validators = []",
-        'validators = []\njapanese_kana = true',
-    )
-    path.write_text(content, encoding="utf-8")
-
-    warnings = []
-    assert load_config(path, warnings=warnings)["validation"]["translation"]["validators"] == []
-    assert warnings and "japanese_kana" in warnings[0]
+        "validators = []\njapanese_kana = true",
+    ):
+        path.write_text(
+            CONFIG_TEMPLATE.read_text(encoding="utf-8").replace(
+                "validators = []", replacement
+            ),
+            encoding="utf-8",
+        )
+        warnings: list[str] = []
+        config = load_config(path, warnings=warnings)
+        assert config["validation"]["translation"]["validators"] == []
+        assert "japanese_kana" not in config["validation"]["translation"]
+        assert warnings and "japanese_kana" in warnings[0]
 
 
 @pytest.mark.parametrize(("section", "key", "default", "valid"), [
-    ("terminology", "sourced_description_injection", "all", "prefer_previous"),
+    ("terminology", "sourced_description_injection", "stage", "prefer_previous"),
     ("terminology", "unsourced_description_injection", "all", "when_no_sourced"),
     ("terminology_decision", "description_generation", "sourced", "summary_only"),
 ])

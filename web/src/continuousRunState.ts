@@ -111,6 +111,7 @@ export interface ContinuousPayloadOptions {
   applyRepetitionConsistency?: boolean;
   excludePunctuationOnly?: boolean;
   screeningEnabled?: boolean;
+  repetitionFinalReview?: boolean;
   finalReview: boolean;
   applyTerminologyDecision: boolean;
   force: boolean;
@@ -126,12 +127,14 @@ export function continuousPayload(
   options: ContinuousPayloadOptions,
 ) {
   const hasDecision = stages.includes("terminology_decision");
-  const terminalDecision = stages.at(-1) === "terminology_decision";
+  const repetitionEnabled = Boolean(options.includeRepetitionConsistency && (stages.includes("translation") || (stages.includes("terminology") && options.includeDraftTranslation)));
+  const terminalDecision = stages.at(-1) === "terminology_decision" && !repetitionEnabled;
   return {
     stage: "continuous" as const,
-    include_repetition_consistency: Boolean(options.includeRepetitionConsistency),
-    apply_repetition_consistency: Boolean(options.includeRepetitionConsistency && options.applyRepetitionConsistency),
+    include_repetition_consistency: repetitionEnabled,
+    apply_repetition_consistency: Boolean(repetitionEnabled && options.applyRepetitionConsistency),
     exclude_punctuation_only: options.excludePunctuationOnly ?? true,
+    repetition_final_review: Boolean(repetitionEnabled && options.repetitionFinalReview),
     screening_enabled: options.screeningEnabled ?? false,
     stages,
     final_review: hasDecision && (terminalDecision ? options.finalReview : true),

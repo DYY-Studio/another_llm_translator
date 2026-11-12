@@ -1,0 +1,3138 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+
+import httpx2
+
+from .errors import AppError, UsageError
+
+MCP_PROTOCOL_VERSION = "2024-11-05"
+SERVER_INFO = {"name": "another-llm-translator", "version": "0.3.0"}
+
+
+def default_base_url(port: int | None = None) -> str:
+    if port is None:
+        env_url = os.environ.get("ANOTHER_LLM_WEB_URL", "").strip()
+        if env_url:
+            return env_url.rstrip("/")
+    resolved_port = port or int(os.environ.get("ANOTHER_LLM_WEB_PORT", "8765"))
+    return f"http://127.0.0.1:{resolved_port}"
+
+
+def _resolve_server_inputs(paths: Any) -> tuple[list[str], list[str]]:
+    if (
+        not isinstance(paths, list)
+        or not paths
+        or not all(isinstance(p, str) and p.strip() for p in paths)
+    ):
+        raise UsageError("paths 必须是非空字符串数组")
+    resolved_paths: list[str] = []
+    kinds: list[str] = []
+    for raw in paths:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            raise UsageError(f"输入路径必须是本机绝对路径：{raw}")
+        resolved_paths.append(str(candidate))
+        kinds.append("folder" if candidate.is_dir() else "file")
+    return resolved_paths, kinds
+
+
+def _deep_merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+_FALSY_TASK_KEYS = {
+    "current_stage",
+    "steps",
+    "final_review",
+    "knowledge_only",
+    "all_terms",
+    "include_summaries",
+    "include_draft_translation",
+    "aggregate_full_summaries",
+    "draft_progress",
+    "summary_selection",
+    "summary_selection_progress",
+    "failure_counts",
+}
+
+
+def _compact_task(task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        k: v
+        for k, v in task.items()
+        if not (k in _FALSY_TASK_KEYS and not v)
+    }
+
+
+def _compact_result_view(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return result
+    return {
+        k: v
+        for k, v in result.items()
+        if v is not None and v != []
+    }
+
+
+def _compact_segment_row(seg: dict[str, Any]) -> dict[str, Any]:
+    row = dict(seg)
+    if row.get("model_source") is None or row.get("model_source") == row.get("source"):
+        row.pop("model_source", None)
+    if not row.get("stage_errors"):
+        row.pop("stage_errors", None)
+    trans = row.get("translation")
+    trans_record_id = trans.get("record_id") if isinstance(trans, dict) else None
+    if isinstance(trans, dict):
+        row["translation"] = _compact_result_view(trans)
+    reviews = row.get("reviews")
+    if isinstance(reviews, dict):
+        compact_reviews: dict[str, Any] = {}
+        for rev_stage, rev_val in reviews.items():
+            if not isinstance(rev_val, dict):
+                continue
+            if rev_val.get("suggestion") is None and rev_val.get("applied") is None:
+                continue
+            entry: dict[str, Any] = {}
+            base = rev_val.get("base")
+            if isinstance(base, dict) and base.get("record_id") != trans_record_id:
+                entry["base"] = _compact_result_view(base)
+            if rev_val.get("suggestion") is not None:
+                entry["suggestion"] = _compact_result_view(rev_val["suggestion"])
+            if rev_val.get("applied") is not None:
+                entry["applied"] = _compact_result_view(rev_val["applied"])
+            if rev_val.get("outdated"):
+                entry["outdated"] = True
+            if rev_val.get("applied_current"):
+                entry["applied_current"] = True
+            compact_reviews[rev_stage] = entry
+        if compact_reviews:
+            row["reviews"] = compact_reviews
+        else:
+            row.pop("reviews", None)
+    return row
+
+
+def _compact_term_row(
+    term: dict[str, Any],
+    *,
+    keep_candidates: bool = False,
+    include_description: bool = True,
+) -> dict[str, Any]:
+    row = {
+        k: v
+        for k, v in term.items()
+        if k not in {"description_items", "pending_change"}
+        and not (k == "description" and not include_description)
+        and not (k == "conflicts" and not term.get("has_conflicts"))
+    }
+    pc = term.get("pending_change")
+    if isinstance(pc, dict):
+        if keep_candidates:
+            row["pending_change"] = {
+                **pc,
+                "candidates": [
+                    {k: v for k, v in c.items() if k != "source_range"}
+                    for c in pc.get("candidates", [])
+                    if isinstance(c, dict)
+                ],
+            }
+        else:
+            row["pending_change"] = {
+                "kind": pc.get("kind"),
+                "candidate_count": len(pc.get("candidates", [])),
+            }
+    return row
+
+
+def _compact_matched_term(
+    term: dict[str, Any], *, include_description: bool = True
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "source": term.get("source"),
+        "preferred_translation": term.get("preferred_translation"),
+    }
+    if term.get("category"):
+        row["category"] = term["category"]
+    if term.get("aliases"):
+        row["aliases"] = term["aliases"]
+    if term.get("primary_source"):
+        row["primary_source"] = term["primary_source"]
+    if term.get("group_claims"):
+        row["group_claims"] = term["group_claims"]
+    if include_description:
+        desc = term.get("description")
+        if not desc and isinstance(term.get("entity_knowledge"), dict):
+            items = term["entity_knowledge"].get("items")
+            if isinstance(items, list):
+                desc = "；".join(
+                    str(it.get("text", "")).strip()
+                    for it in items
+                    if isinstance(it, dict) and str(it.get("text", "")).strip()
+                )
+        if desc:
+            row["description"] = desc
+    return row
+
+
+def _compact_decision_item(p: dict[str, Any]) -> dict[str, Any]:
+    cp = {
+        k: v
+        for k, v in p.items()
+        if k
+        not in {
+            "before",
+            "after",
+            "conflicts",
+            "knowledge_before",
+            "knowledge_after",
+            "evidence",
+            "knowledge_evidence",
+        }
+    }
+    for side in ("before", "after"):
+        if isinstance(p.get(side), list):
+            cp[side] = [
+                {
+                    k: v
+                    for k, v in st.items()
+                    if k
+                    in {
+                        "normalized",
+                        "source",
+                        "preferred_translation",
+                        "category",
+                        "aliases",
+                        "group_primary",
+                        "disabled",
+                    }
+                    and (
+                        v not in (None, [], False)
+                        or k
+                        in {
+                            "normalized",
+                            "source",
+                            "preferred_translation",
+                            "category",
+                        }
+                    )
+                }
+                for st in p[side]
+                if isinstance(st, dict)
+            ]
+    if p.get("conflicts"):
+        cp["conflict_count"] = len(p["conflicts"])
+    return cp
+
+
+def _manual_review_summary(mr: Any) -> dict[str, Any] | None:
+    if not isinstance(mr, dict):
+        return None
+    return {
+        "total": mr.get("total", len(mr.get("items") or [])),
+        "resolved": mr.get("resolved", 0),
+        "remaining": mr.get("remaining", 0),
+    }
+
+
+def _page_decision_items(
+    raw_items: Any, q_str: str, offset: int, limit: int
+) -> tuple[int, list[Any]]:
+    items = list(raw_items) if isinstance(raw_items, list) else []
+    if q_str:
+        items = [
+            item
+            for item in items
+            if isinstance(item, dict)
+            and any(
+                q_str in str(item.get(k) or "").casefold()
+                for k in ("normalized", "source", "reason")
+            )
+        ]
+    return len(items), [
+        _compact_decision_item(item) if isinstance(item, dict) else item
+        for item in items[offset : offset + limit]
+    ]
+
+
+def _page_params(
+    args: dict[str, Any],
+    offset_key: str = "offset",
+    limit_key: str = "limit",
+    default_limit: int = 50,
+    max_limit: int = 500,
+) -> tuple[int, int]:
+    raw_offset = args.get(offset_key)
+    raw_limit = args.get(limit_key)
+    offset = 0 if raw_offset is None else raw_offset
+    limit = default_limit if raw_limit is None else raw_limit
+    if (
+        not isinstance(offset, int)
+        or isinstance(offset, bool)
+        or offset < 0
+        or not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or not 1 <= limit <= max_limit
+    ):
+        raise UsageError(f"{offset_key}/{limit_key} 分页参数无效")
+    return offset, limit
+
+
+def _quote_project(args: dict[str, Any]) -> str:
+    raw = args.get("project")
+    if not isinstance(raw, str) or not raw.strip() or "/" in raw:
+        raise UsageError("project 必须是非空项目名称或 ID")
+    return quote(raw, safe="")
+
+
+def _opt_bool(args: dict[str, Any], key: str, default: bool) -> bool:
+    val = args.get(key)
+    if val is None:
+        return default
+    if not isinstance(val, bool):
+        raise UsageError(f"{key} 必须是布尔值")
+    return val
+
+
+def _opt_str(args: dict[str, Any], key: str, default: str) -> str:
+    val = args.get(key)
+    if val is None:
+        return default
+    if not isinstance(val, str):
+        raise UsageError(f"{key} 必须是字符串")
+    return val
+
+
+def _resolve_run_slice(args: dict[str, Any], body: dict[str, Any]) -> str:
+    raw_run_id = args.get("run_id")
+    if not isinstance(raw_run_id, str) or not raw_run_id:
+        raise UsageError("Run ID 无效")
+    part_spec = args.get("part_id")
+    line_start = args.get("line_start")
+    line_end = args.get("line_end")
+    if part_spec is not None and (not isinstance(part_spec, str) or not part_spec):
+        raise UsageError("part_id 必须是非空字符串")
+    if line_start is not None and (
+        not isinstance(line_start, int) or isinstance(line_start, bool) or line_start < 0
+    ):
+        raise UsageError("line_start 必须是非负整数")
+    if line_end is not None and (
+        not isinstance(line_end, int) or isinstance(line_end, bool) or line_end < 0
+    ):
+        raise UsageError("line_end 必须是非负整数")
+    if "@" in raw_run_id:
+        bare_run_id, spec = raw_run_id.split("@", 1)
+        if not bare_run_id or "/" in bare_run_id:
+            raise UsageError("Run ID 无效")
+        if not spec:
+            raise UsageError("part_id 必须是非空字符串")
+        parsed_range = False
+        if ":" in spec:
+            spec_part, rng = spec.rsplit(":", 1)
+            if "-" in rng:
+                s_str, e_str = rng.split("-", 1)
+                if (
+                    s_str.isascii()
+                    and s_str.isdigit()
+                    and e_str.isascii()
+                    and e_str.isdigit()
+                ):
+                    if not spec_part:
+                        raise UsageError("part_id 必须是非空字符串")
+                    part_spec = spec_part
+                    line_start = int(s_str)
+                    line_end = int(e_str)
+                    parsed_range = True
+        if not parsed_range and not part_spec:
+            part_spec = spec
+    else:
+        bare_run_id = raw_run_id
+        if "/" in bare_run_id:
+            raise UsageError("Run ID 无效")
+    if part_spec is not None:
+        body["part_id"] = part_spec
+    if line_start is not None:
+        body["line_start"] = line_start
+    if line_end is not None:
+        body["line_end"] = line_end
+    return quote(bare_run_id, safe="")
+
+
+MCP_INSTRUCTIONS = (
+    "Another LLM Translator (minimal-llm-translator) MCP Server.\n"
+    "Call `reference` (e.g. `reference(topic='workflows')`, `'pattern_b'`, `'terminology'`, `'repetition'`, `'config'`) "
+    "anytime you need workflow recipes or exact payload schemas.\n\n"
+    "Key Workflows:\n"
+    "1. Project Identification: Pass project `name` or `project_id` (`PRJ-...`) to `project` parameter in any tool.\n"
+    "2. Pattern B (Pure Agent Execution without external LLM):\n"
+    "   - Terminology: `edit_terms(action='save_term', payload={'terms': [{'source', 'preferred_translation', 'category', 'description', 'aliases'}]})` "
+    "-> `edit_terms(action='complete_scan', payload={})`.\n"
+    "   - Translation: `start_agent_stage_run(stage='translation')` -> loop `checkout_stage_batch` + "
+    "`submit_stage_batch(items=[{'segment_id': 'F0001-S000001', 'text': '...'}])` -> `finish_agent_stage_run(action='complete')`.\n"
+    "   - Proofreading / Polishing: `start_agent_stage_run(stage='proofreading'|'polishing')` -> loop `checkout_stage_batch(line_start=...)` + "
+    "`submit_stage_batch` (ONLY submit modified segments with `review_status='suggested'`, `suggested_text`, `reason`; advance window via `line_start` = last inspected `line_index + 1`) "
+    "-> `finish_agent_stage_run(action='complete', accept_remaining=True)` (bulk-confirms all remaining pending segments as `accepted`) "
+    "-> `apply_stage_suggestions(confirm=True)`.\n"
+    "   - Repetition Consistency: `get_repetition_overview(create_draft=True)` -> "
+    "`update_repetition_draft(run_id=..., group_proposals=[{'group_id': group_id, 'groups': [{'members': ['1','2'], 'target': '1', 'apply': ['2'], 'reason': '...'}], 'keep': [], 'uncertain': []}])` "
+    "-> `finalize_repetition_draft(run_id=..., action='apply', confirm=True)`.\n"
+    "3. Host LLM Mode: `preflight_stage_run` -> `start_host_stage_run` -> `get_task_and_diagnostics`."
+)
+
+REFERENCE_TOPICS: dict[str, dict[str, Any]] = {
+    "overview": {
+        "summary": "Core domain boundaries, execution modes, and available reference topics.",
+        "available_topics": [
+            "overview",
+            "workflows",
+            "pattern_b",
+            "terminology",
+            "repetition",
+            "config",
+        ],
+        "domain_concepts": {
+            "File": "Source document boundary (`F0001`, `F0002`, ...) for selection and export.",
+            "Segment": "Persistent translation/review unit (`F0001-S000001`, ...) with `part_id` and 0-based `line_index`.",
+            "Run": "Stage execution record (`run_id`). Pattern B runs use `executor='agent_mcp'`.",
+        },
+        "tool_groups": {
+            "project_and_files": [
+                "list_projects",
+                "create_project",
+                "open_project",
+                "add_project_files",
+                "manage_project_files",
+                "configure_project",
+                "get_project_overview",
+                "export_project",
+            ],
+            "segments_and_fixes": [
+                "query_segments",
+                "get_segment_context",
+                "submit_segment_fix",
+                "apply_stage_suggestions",
+            ],
+            "pattern_b_agent_runs": [
+                "start_agent_stage_run",
+                "checkout_stage_batch",
+                "submit_stage_batch",
+                "finish_agent_stage_run",
+            ],
+            "host_llm_runs": [
+                "preflight_stage_run",
+                "start_host_stage_run",
+                "get_task_and_diagnostics",
+                "cancel_stage_run",
+            ],
+            "terminology": [
+                "get_terminology_overview",
+                "inspect_term_entity",
+                "edit_terms",
+                "submit_term_decision_draft",
+                "finalize_term_decision_draft",
+            ],
+            "repetition": [
+                "get_repetition_overview",
+                "inspect_repetition_group",
+                "update_repetition_draft",
+                "finalize_repetition_draft",
+            ],
+        },
+    },
+    "workflows": {
+        "summary": "End-to-end workflows for Pattern B (Agent-driven) and Host LLM execution.",
+        "pattern_b_pure_agent": [
+            "1. Create/open project: `create_project(name='...', paths=['/abs/path/ch1.txt'])` or `open_project(path='/abs/path/proj')`.",
+            "2. Extract & save terms: read source segments via `query_segments`, then batch-import terms with descriptions via `edit_terms(action='save_term', payload={'terms': [...]})` and mark scan complete via `edit_terms(action='complete_scan', payload={})`.",
+            "3. Translate: `start_agent_stage_run(stage='translation')` -> repeat `checkout_stage_batch` + `submit_stage_batch(items=[{'segment_id': '...', 'text': '...'}])` until `remaining_pending_count == 0` -> `finish_agent_stage_run(action='complete')`.",
+            "4. Repetition check: `get_repetition_overview(create_draft=True)` -> if groups exist, inspect with `inspect_repetition_group`, submit subgroup unification via `update_repetition_draft`, and apply via `finalize_repetition_draft(action='apply', confirm=True)`.",
+            "5. Proofread / Polish: `start_agent_stage_run(stage='proofreading')` -> scan batches with `checkout_stage_batch(line_start=...)`, submit ONLY modified segments (`review_status='suggested'`) via `submit_stage_batch`, then call `finish_agent_stage_run(action='complete', accept_remaining=True)` and `apply_stage_suggestions(stage='proofreading', confirm=True)`.",
+            "6. Export: `export_project(stage='translated'|'proofread'|'polished', format='original'|'txt')`.",
+        ],
+        "host_llm_mode": [
+            "1. Check readiness: `preflight_stage_run(project='...', stage='...')`.",
+            "2. Launch background task: `start_host_stage_run(project='...', stage='...')`.",
+            "3. Monitor progress & diagnostics: `get_task_and_diagnostics(project='...', include_events=True)`.",
+        ],
+    },
+    "pattern_b": {
+        "summary": "Detailed contracts for Agent-driven stage runs (`start_agent_stage_run`, `checkout_stage_batch`, `submit_stage_batch`, `finish_agent_stage_run`).",
+        "slice_and_cursor_control": {
+            "description": "Both `checkout_stage_batch` and `submit_stage_batch` support scoping by `part_id`, `line_start` (inclusive), and `line_end` (exclusive), or via `run_id` shorthand `'<run_id>@<part_id>:<line_start>-<line_end>'`.",
+            "proofreading_cursor_tip": "In `proofreading`/`polishing`, unchanged segments are NOT submitted per batch, so they remain pending until `finish_agent_stage_run(accept_remaining=True)`. Pass `line_start = last_batch_segment['line_index'] + 1` to `checkout_stage_batch` (or `submit_stage_batch`) to advance to the next window. Live cursor scan progress (`checked_out` / `checked_out_segments` / `checked_out_parts`) is automatically tracked on the active task in `get_project_overview` and `get_task_and_diagnostics`.",
+        },
+        "submit_stage_batch_items": {
+            "translation": {
+                "segment_id": "F0001-S000001",
+                "text": "完整译文（也可使用字段名 translation）",
+            },
+            "proofreading_or_polishing_suggested": {
+                "segment_id": "F0001-S000001",
+                "review_status": "suggested",
+                "suggested_text": "修改后的完整译文",
+                "reason": "修改原因说明",
+            },
+            "proofreading_or_polishing_accepted_optional": {
+                "segment_id": "F0001-S000002",
+                "review_status": "accepted",
+                "note": "Normally omit accepted items during batch checkout and use finish_agent_stage_run(action='complete', accept_remaining=True) at the end.",
+            },
+        },
+        "validation_gate": "If `submit_stage_batch` or `submit_segment_fix` returns `status='rejected'`, inspect `rejected[].findings` and `repair_guidance`. Fix the text or pass `allow_warnings=True` if the warning is a false positive.",
+    },
+    "terminology": {
+        "summary": "Payload schemas for `edit_terms`, `submit_term_decision_draft`, and `finalize_term_decision_draft`.",
+        "edit_terms_actions": {
+            "save_term_batch": {
+                "description": "Recommended for adding or overwriting one or more terms (including `aliases`, `preferred_translation`, `category`, and optional one-shot string `description`).",
+                "payload": {
+                    "terms": [
+                        {
+                            "source": "アリス",
+                            "preferred_translation": "爱丽丝",
+                            "category": "女性人名",
+                            "description": "本作女主角",
+                            "aliases": ["アリ"],
+                            "disabled": False,
+                            "group_primary": None,
+                        }
+                    ]
+                },
+            },
+            "save_term_single": {
+                "description": "Create or overwrite a single term (`old_normalized` is optional when updating the same source; optional string `description` is also supported).",
+                "payload": {
+                    "source": "アリス",
+                    "preferred_translation": "爱丽丝",
+                    "category": "女性人名",
+                    "description": "本作女主角",
+                    "aliases": ["アリ"],
+                    "disabled": False,
+                },
+            },
+            "import_terms": {
+                "description": "Import terms from `{'terms': [...]}` list or local `.json`/`.csv` file `{'path': '/abs/path/terms.json'}`.",
+                "payload": {"path": "/abs/path/terms.json"},
+            },
+            "complete_scan": {
+                "description": "Mark terminology scan completed so Web UI shows terminology stage complete. Pass `{}` for full project or `{'only_file': 'F0001', 'only_part': 'part'}`.",
+                "payload": {},
+            },
+            "update_knowledge": {
+                "description": "Update entity knowledge (`expected_revision` is optional and auto-filled when omitted). Supports `action='save_items'` (`items`), `action='confirm_keep'`, or `action='set_fragment_enabled'` (`fragment_id`, `enabled`).",
+                "payload": {
+                    "normalized": "アリス",
+                    "action": "save_items",
+                    "items": [{"text": "本作女主角，金发少女", "fragment_ids": []}],
+                },
+            },
+            "remove_terms": {
+                "description": "Disable terms by normalized keys.",
+                "payload": {"normalized": ["アリス"]},
+            },
+            "set_primary": {
+                "payload": {"normalized": "アリス", "confirm": True},
+            },
+            "leave_group": {
+                "payload": {"normalized": "アリ", "confirm": True},
+            },
+            "group_related": {
+                "description": "Group two related terms under `primary_normalized` (must be one of their current group roots).",
+                "payload": {
+                    "normalized": "アリス",
+                    "related_normalized": "アリスちゃん",
+                    "primary_normalized": "アリス",
+                    "confirm": True,
+                },
+            },
+            "convert_to_alias": {
+                "payload": {
+                    "normalized": "アリス",
+                    "related_normalized": "アリ",
+                    "confirm": True,
+                },
+            },
+            "resolve_change": {
+                "payload": {
+                    "normalized": ["アリス"],
+                    "expected_revision": 2,
+                    "confirm": True,
+                },
+            },
+            "clear_terms": {"payload": {"confirm": True}},
+            "publish_partial": {"payload": {"confirm": True}},
+        },
+        "overview_and_inspection": {
+            "get_terminology_overview": "Supports `filter` ('all', 'conflicts', 'changes', 'stale_knowledge', 'draft', 'needs_review', 'manual_review'), keyword `q`, `include_description` (default False), and `offset`/`limit`.",
+            "inspect_term_entity": "Supports independent pagination for evidence fragments (`fragments_offset`, `fragments_limit`, `include_fragments`) and segment hits (`hits_offset`, `hits_limit`, `include_hits`).",
+        },
+    },
+    "repetition": {
+        "summary": "Workflow and payload schemas for repetition consistency review.",
+        "workflow": [
+            "1. Call `get_repetition_overview(project='...', create_draft=True, sort_by='occurrence_count')` to scan repeated source segments with differing translations (sorted by frequency by default; `include_occurrences=False` keeps overview compact) and optionally create a local draft (`run_id`).",
+            "2. Inspect a group's occurrences and surrounding context with `inspect_repetition_group(project='...', group_id='1', source='...', window=5, offset=0, limit=20)` (`window=0` omits neighbor lines).",
+            "3. Submit subgroup unification proposals via `update_repetition_draft(project='...', run_id=..., group_proposals=[...])` (each subgroup with non-empty `apply` defaults to accepted when finalizing; pass `choices` only to override acceptance or target).",
+            "4. Apply with `finalize_repetition_draft(project='...', run_id=..., action='apply', confirm=True)`.",
+        ],
+        "update_repetition_draft_schemas": {
+            "group_proposals": [
+                {
+                    "group_id": "1",
+                    "groups": [
+                        {
+                            "members": ["1", "2"],
+                            "target": "1",
+                            "apply": ["2"],
+                            "reason": "同一场景连续呼喊，统一为短 id '1' 的译文",
+                        }
+                    ],
+                    "keep": [],
+                    "uncertain": [],
+                }
+            ],
+            "choices": {
+                "1-1": {
+                    "accepted": True,
+                    "target": "1",
+                }
+            },
+            "notes": [
+                "Every occurrence short `id` in the repetition group (e.g. `'1'`, `'2'`) must appear in exactly one of `groups[].members`, `keep`, or `uncertain`.",
+                "`target` is the occurrence short `id` (e.g. `'1'`) whose existing translation is chosen, NOT the translation text itself.",
+                "`apply` lists occurrence short `id`s in `members` that should be updated.",
+            ],
+        },
+    },
+    "config": {
+        "summary": "Project configuration (`configure_project`) actions and structure.",
+        "actions": {
+            "get_config": "Returns `config`, `available_presets`, and `available_decision_presets`.",
+            "update_config": "Deep-merges `config` patch into `config.toml`. Example: `{'project': {'target_language': 'zh-CN'}, 'validation': {'translation': {'validators': ['japanese_kana']}}}`.",
+            "get_file_options": "Requires `file_id` (e.g. `'F0001'`). Returns Document Adapter run options for that file.",
+            "update_file_options": "Requires `file_id` and string key-value `options`.",
+            "delete_project": "Requires `confirm=True`.",
+        },
+    },
+}
+
+
+TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "reference",
+        "description": (
+            "Get on-demand usage documentation, end-to-end workflow recipes (Pattern B pure-Agent mode vs Host LLM mode), "
+            "and exact payload schemas/examples for terminology, repetition consistency, batch stage submission, or any specific tool."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": (
+                        "Reference topic or tool name: 'overview' (default), 'workflows', 'pattern_b', "
+                        "'terminology', 'repetition', 'config', or any MCP tool name (e.g. 'edit_terms', 'update_repetition_draft')."
+                    ),
+                    "default": "overview",
+                }
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_projects",
+        "description": "List registered projects (newest first, with optional keyword filter and pagination) and currently active background tasks.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "q": {
+                    "type": "string",
+                    "description": "Optional case-insensitive substring filter matching project name, project_id, selector, or path",
+                },
+                "offset": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 50},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "create_project",
+        "description": "Create a new project from local file/folder paths (or an empty project when empty=True) and register it in the Web workbench.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Project name"},
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Absolute local file or directory paths to import",
+                },
+                "empty": {"type": "boolean", "default": False},
+                "parent_dir": {
+                    "type": "string",
+                    "description": "Optional custom parent directory (absolute path)",
+                },
+                "adapter_options": {
+                    "type": "object",
+                    "description": "Optional Document Adapter import options {adapter_id: {option_id: value}}",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "open_project",
+        "description": "Open, verify, and register an existing project directory on disk in the Web workbench.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path to the existing project directory",
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "add_project_files",
+        "description": "Import and append local files or directories into an existing project.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project name or ID"},
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Absolute local file or directory paths to import",
+                },
+                "adapter_options": {
+                    "type": "object",
+                    "description": "Optional Document Adapter import options {adapter_id: {option_id: value}}",
+                },
+            },
+            "required": ["project", "paths"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "manage_project_files",
+        "description": "Manage project files: remove files (requires confirm=True), reorder files, or preview/confirm/cancel single-file replacement.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project name or ID"},
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "remove",
+                        "reorder",
+                        "replace_preview",
+                        "replace_confirm",
+                        "replace_cancel",
+                    ],
+                },
+                "file_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Target file IDs for remove or full ordered file IDs for reorder",
+                },
+                "file_id": {
+                    "type": "string",
+                    "description": "Target file ID for replace_preview, replace_confirm, or replace_cancel",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Absolute local file path for replace_preview",
+                },
+                "preview_id": {
+                    "type": "string",
+                    "description": "Replacement preview_id returned by replace_preview",
+                },
+                "adapter_options": {
+                    "type": "object",
+                    "description": "Optional Document Adapter options for replace_preview",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Explicit confirmation required for remove and replace_confirm",
+                },
+            },
+            "required": ["project", "action"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "configure_project",
+        "description": "Inspect or update project settings (config.toml, LLM/Decision presets), Document Adapter file run options, or delete a project (requires confirm=True).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project name or ID"},
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "get_config",
+                        "update_config",
+                        "get_file_options",
+                        "update_file_options",
+                        "delete_project",
+                    ],
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Partial or full config object to merge and save when action='update_config'",
+                },
+                "file_id": {
+                    "type": "string",
+                    "description": "File ID for get_file_options or update_file_options",
+                },
+                "options": {
+                    "type": "object",
+                    "description": "String key-value options for update_file_options",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Explicit confirmation required for delete_project",
+                },
+            },
+            "required": ["project", "action"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_project_overview",
+        "description": "Get project overview including files, per-stage progress counts, unfinished runs, and pending drafts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project name or ID"},
+                "include_parts": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include full chapter part_ids list and per-part segment_count (`parts: [{'part_id', 'segment_count'}]`) for each file (default False, returning part_count only)",
+                },
+            },
+            "required": ["project"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_task_and_diagnostics",
+        "description": "Get active task progress, recent stage runs, and optional diagnostic events for a project.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "task_id": {"type": "string"},
+                "stage": {"type": "string"},
+                "runs_offset": {"type": "integer", "default": 0},
+                "runs_limit": {"type": "integer", "default": 5},
+                "include_events": {"type": "boolean", "default": False},
+            },
+            "required": ["project"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "query_segments",
+        "description": "Query project segments by stage, status (e.g. failed, pending, completed, warning), keyword, file_id, or (file_id + part_id) chapter boundary.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "stage": {
+                    "type": "string",
+                    "enum": ["translation", "proofreading", "polishing"],
+                    "default": "translation",
+                },
+                "status": {"type": "string"},
+                "q": {"type": "string"},
+                "file_id": {
+                    "type": "string",
+                    "description": "Optional file_id filter (can be used alone or paired with part_id)",
+                },
+                "part_id": {
+                    "type": "string",
+                    "description": "Optional part_id filter (requires file_id)",
+                },
+                "offset": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 50},
+            },
+            "required": ["project"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_segment_context",
+        "description": "Fetch full details of a segment, matched terminology with entity knowledge, Document Adapter requirements, and surrounding bilingual context segments.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "segment_id": {"type": "string"},
+                "window": {"type": "integer", "default": 5},
+            },
+            "required": ["project", "segment_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "preflight_stage_run",
+        "description": "Inspect stage preflight options, unfinished run compatibility, and mixed fingerprint status before starting a host stage run.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "stage": {
+                    "type": "string",
+                    "enum": [
+                        "terminology",
+                        "terminology_decision",
+                        "translation",
+                        "proofreading",
+                        "polishing",
+                        "repetition_consistency",
+                        "content_summary",
+                    ],
+                },
+                "final_review": {"type": "boolean", "default": False},
+                "knowledge_only": {"type": "boolean", "default": False},
+                "all_terms": {"type": "boolean", "default": False},
+            },
+            "required": ["project", "stage"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "start_host_stage_run",
+        "description": "Start or resume a host LLMClient background stage task (terminology, terminology_decision, translation, proofreading, polishing, repetition_consistency).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "stage": {"type": "string"},
+                "language": {"type": "string"},
+                "from_file": {"type": "string"},
+                "only_file": {"type": "string"},
+                "only_segment": {"type": "string"},
+                "force": {"type": "boolean", "default": False},
+                "confirm_knowledge_replacement": {"type": "boolean", "default": False},
+                "reuse_mixed_fingerprints": {"type": "boolean", "default": False},
+                "run_action": {"type": "string", "enum": ["resume", "decline"]},
+                "replace_draft": {"type": "boolean", "default": False},
+                "include_summaries": {"type": "boolean", "default": False},
+                "include_draft_translation": {"type": "boolean", "default": False},
+                "aggregate_full_summaries": {"type": "boolean", "default": False},
+                "final_review": {"type": "boolean", "default": False},
+                "knowledge_only": {"type": "boolean", "default": False},
+                "all_terms": {"type": "boolean", "default": False},
+                "review_draft_run_id": {"type": "string"},
+                "acknowledge_manual_review": {"type": "boolean", "default": False},
+                "exclude_punctuation_only": {"type": "boolean", "default": True},
+                "screening_enabled": {"type": "boolean", "default": False},
+                "repetition_final_review": {"type": "boolean", "default": False},
+            },
+            "required": ["project", "stage"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "cancel_stage_run",
+        "description": "Cancel an active background task by task_id.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "submit_segment_fix",
+        "description": "Submit a strictly gated single-segment translation or review/polish fix (origin='agent_mcp'). Rejects unresolved validation findings unless allow_warnings=True.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "stage": {
+                    "type": "string",
+                    "enum": ["translation", "proofreading", "polishing"],
+                    "default": "translation",
+                },
+                "segment_id": {"type": "string"},
+                "text": {"type": "string"},
+                "review_status": {"type": "string", "enum": ["accepted", "suggested"]},
+                "suggested_text": {"type": "string"},
+                "reason": {"type": "string"},
+                "apply": {"type": "boolean", "default": False},
+                "allow_warnings": {"type": "boolean", "default": False},
+            },
+            "required": ["project", "segment_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "apply_stage_suggestions",
+        "description": "Apply proofreading or polishing suggestions across the selected scope (requires confirm=True).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "stage": {"type": "string", "enum": ["proofreading", "polishing"]},
+                "only_file": {"type": "string"},
+                "only_part": {"type": "string"},
+                "only_segment": {"type": "string"},
+                "segment_ids": {"type": "array", "items": {"type": "string"}},
+                "scope": {"type": "object"},
+                "allow_outdated_base": {"type": "boolean", "default": False},
+                "confirm": {"type": "boolean"},
+            },
+            "required": ["project", "stage", "confirm"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "export_project",
+        "description": "Export project files for a given stage in original or txt format.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "stage": {
+                    "type": "string",
+                    "enum": [
+                        "translated",
+                        "proofread",
+                        "polished",
+                    ],
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["original", "txt"],
+                    "default": "original",
+                },
+                "bilingual": {"type": "boolean", "default": False},
+                "allow_missing": {"type": "boolean", "default": False},
+                "file_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["project", "stage"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "start_agent_stage_run",
+        "description": "Pattern B: Create or resume an executor='agent_mcp' stage Run for Agent-driven batch generation and register live progress in Web UI.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "stage": {
+                    "type": "string",
+                    "enum": ["translation", "proofreading", "polishing"],
+                },
+                "scope": {
+                    "type": "object",
+                    "description": "Optional scope selector: {only_file, only_part (requires only_file), from_file, only_segment, segment_ids, force}",
+                },
+                "run_action": {"type": "string", "enum": ["resume", "decline"]},
+                "reuse_mixed_fingerprints": {"type": "boolean", "default": False},
+                "prompt_language": {"type": "string"},
+                "agent_model_hint": {"type": "string"},
+            },
+            "required": ["project", "stage"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "checkout_stage_batch",
+        "description": (
+            "Pattern B: Pull the next batch of pending segments from an active agent_mcp Run, optionally filtered by "
+            "part_id / line range (or via run_id@part_id:start-end), including matched terminology, entity knowledge, "
+            "and preceding bilingual context. In proofreading/polishing, pass line_start = last_inspected_line_index + 1 "
+            "to advance past unchanged segments."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "run_id": {
+                    "type": "string",
+                    "description": "Active run_id, or slice shorthand '<run_id>@<part_id>:<line_start>-<line_end>'",
+                },
+                "part_id": {"type": "string"},
+                "line_start": {
+                    "type": "integer",
+                    "description": "Inclusive 0-based line_index lower bound (use in proofreading/polishing to advance past unchanged segments)",
+                },
+                "line_end": {
+                    "type": "integer",
+                    "description": "Exclusive 0-based line_index upper bound",
+                },
+                "max_segments": {
+                    "type": "integer",
+                    "default": 15,
+                    "description": "Batch size (1..100, default 15; recommend <=25 for translation and <=20 for proofreading/polishing to keep responses compact)",
+                },
+                "context_before": {"type": "integer", "default": 3},
+                "include_term_descriptions": {
+                    "type": "boolean",
+                    "description": "Include entity descriptions on matched terms (defaults to True for translation and False for proofreading/polishing)",
+                },
+            },
+            "required": ["project", "run_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "submit_stage_batch",
+        "description": (
+            "Pattern B: Submit Agent-generated results for a batch of segments in an active agent_mcp Run. "
+            "For translation: items=[{'segment_id': 'F0001-S000001', 'text': '...'}]. "
+            "For proofreading/polishing: ONLY submit modified segments as items=[{'segment_id': '...', 'review_status': 'suggested', 'suggested_text': '...', 'reason': '...'}], "
+            "then call finish_agent_stage_run(action='complete', accept_remaining=True) at the end."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "run_id": {
+                    "type": "string",
+                    "description": "Active run_id, or slice shorthand '<run_id>@<part_id>:<line_start>-<line_end>'",
+                },
+                "part_id": {"type": "string"},
+                "line_start": {"type": "integer"},
+                "line_end": {"type": "integer"},
+                "items": {
+                    "type": "array",
+                    "description": (
+                        "Translation items: {'segment_id': str, 'text': str}. "
+                        "Proofreading/polishing items: {'segment_id': str, 'review_status': 'suggested'|'accepted', 'suggested_text'?: str, 'reason'?: str}."
+                    ),
+                    "items": {"type": "object"},
+                },
+                "allow_warnings": {"type": "boolean", "default": False},
+            },
+            "required": ["project", "run_id", "items"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "finish_agent_stage_run",
+        "description": (
+            "Pattern B: Complete or interrupt an active agent_mcp Run and release the active Web UI task. "
+            "For proofreading/polishing with action='complete', set accept_remaining=True to batch-confirm "
+            "all remaining pending segments in the Run as accepted (unchanged)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "run_id": {"type": "string"},
+                "action": {
+                    "type": "string",
+                    "enum": ["complete", "interrupt"],
+                    "default": "complete",
+                },
+                "accept_remaining": {"type": "boolean", "default": False},
+                "reason": {"type": "string"},
+            },
+            "required": ["project", "run_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_terminology_overview",
+        "description": "Get terminology status, conflicts, pending changes, stale entity knowledge, decision draft proposals, draft needs_review items, or manual review queue.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "filter": {
+                    "type": "string",
+                    "enum": [
+                        "all",
+                        "conflicts",
+                        "changes",
+                        "stale_knowledge",
+                        "draft",
+                        "needs_review",
+                        "manual_review",
+                    ],
+                    "default": "all",
+                },
+                "q": {
+                    "type": "string",
+                    "description": "Optional case-insensitive substring search across source, normalized, preferred_translation, and aliases",
+                },
+                "include_description": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include full entity description text on each term row (default False to keep overview compact; use inspect_term_entity for full entity details)",
+                },
+                "offset": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 50},
+            },
+            "required": ["project"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "inspect_term_entity",
+        "description": "Inspect a term/entity including its glossary entry, group members, applied description items, paginated source evidence fragments, and paginated segment hits.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "normalized": {"type": "string"},
+                "include_fragments": {"type": "boolean", "default": True},
+                "fragments_offset": {"type": "integer", "default": 0},
+                "fragments_limit": {"type": "integer", "default": 50},
+                "include_hits": {"type": "boolean", "default": True},
+                "hits_offset": {"type": "integer", "default": 0},
+                "hits_limit": {"type": "integer", "default": 20},
+                "run_id": {"type": "string"},
+                "proposal_id": {"type": "string"},
+            },
+            "required": ["project"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "edit_terms",
+        "description": (
+            "Perform a controlled edit on terminology: save_term (single term or batch {'terms': [...]}), "
+            "import_terms ({'terms': [...]} or {'path': '...'}), complete_scan (mark terminology scan completed for full project or scope), "
+            "set_primary, leave_group, group_related, convert_to_alias, "
+            "update_knowledge ({'normalized': str, 'action'?: 'save_items'|'confirm_keep'|'set_fragment_enabled', "
+            "'items'?: [{'text': str, 'fragment_ids': [str]}], 'fragment_id'?: str, 'enabled'?: bool, 'expected_revision'?: int}), "
+            "resolve_change, remove_terms, clear_terms, or publish_partial."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "save_term",
+                        "import_terms",
+                        "complete_scan",
+                        "set_primary",
+                        "leave_group",
+                        "group_related",
+                        "convert_to_alias",
+                        "update_knowledge",
+                        "resolve_change",
+                        "remove_terms",
+                        "clear_terms",
+                        "publish_partial",
+                    ],
+                },
+                "payload": {
+                    "type": "object",
+                    "description": (
+                        "Action payload: "
+                        "save_term (batch: {'terms': [{'source', 'preferred_translation', 'category', 'description'?, 'aliases'?, 'disabled'?, 'group_primary'?}]} "
+                        "or single: {'source', 'preferred_translation', 'category', 'description'?, 'aliases'?, 'old_normalized'?, 'disabled'?}); "
+                        "import_terms ({'terms': [...]} or {'path': '/abs/path.json|.csv'}); "
+                        "complete_scan ({} for full project or {'only_file'?: 'F0001', 'only_part'?: '...', 'only_segment'?: '...', 'segment_ids'?: [str], 'reset_task'?: bool}); "
+                        "update_knowledge ({'normalized': str, 'action'?: 'save_items'|'confirm_keep'|'set_fragment_enabled', 'items'?: [{'text': str, 'fragment_ids': [str]}], 'fragment_id'?: str, 'enabled'?: bool, 'expected_revision'?: int}); "
+                        "remove_terms ({'normalized': [str]}); "
+                        "set_primary / leave_group ({'normalized': str, 'confirm': True}); "
+                        "group_related ({'normalized': str, 'related_normalized': str, 'primary_normalized': str, 'confirm': True}); "
+                        "convert_to_alias ({'normalized': str, 'related_normalized': str, 'confirm': True}); "
+                        "resolve_change ({'normalized': [str], 'expected_revision': int, 'confirm': True}); "
+                        "clear_terms / publish_partial ({'confirm': True})."
+                    ),
+                },
+            },
+            "required": ["project", "action", "payload"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "submit_term_decision_draft",
+        "description": "Update rejected proposal IDs or mark manual review (needs_review) items resolved in the terminology decision state.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "rejected_proposal_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "manual_reviews": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "run_id": {"type": "string"},
+                            "normalized": {"type": "string"},
+                            "resolved": {"type": "boolean"},
+                        },
+                        "required": ["run_id", "normalized", "resolved"],
+                    },
+                },
+            },
+            "required": ["project"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "finalize_term_decision_draft",
+        "description": "Explicitly apply, discard, or rollback a terminology decision draft (requires confirm=True).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "action": {
+                    "type": "string",
+                    "enum": ["apply", "discard", "rollback"],
+                },
+                "confirm": {"type": "boolean"},
+            },
+            "required": ["project", "action", "confirm"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_repetition_overview",
+        "description": "Get repetition consistency draft state, live scan of repeated source segments with inconsistent translations, or create an agent_mcp repetition draft without calling host LLM.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "filter": {
+                    "type": "string",
+                    "enum": ["all", "uncertain_only", "over_budget_only"],
+                    "default": "all",
+                },
+                "only_file": {"type": "string"},
+                "only_part": {
+                    "type": "string",
+                    "description": "Optional chapter part_id for live scan (requires only_file)",
+                },
+                "exclude_punctuation_only": {"type": "boolean", "default": True},
+                "create_draft": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Create a formal pending repetition_consistency draft locally without calling external LLM",
+                },
+                "replace_draft": {"type": "boolean", "default": False},
+                "include_occurrences": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Inline up to 20 occurrences per group when True (default False to keep overview compact; use inspect_repetition_group for paginated occurrences)",
+                },
+                "sort_by": {
+                    "type": "string",
+                    "enum": ["occurrence_count", "group_index"],
+                    "default": "occurrence_count",
+                    "description": "Sort groups by descending occurrence frequency ('occurrence_count', default) or document appearance order ('group_index')",
+                },
+                "offset": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 50},
+            },
+            "required": ["project"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "inspect_repetition_group",
+        "description": "Inspect occurrences of a repeated source group with configurable surrounding context window (0..30) and pagination.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "group_id": {
+                    "type": "string",
+                    "description": "Draft group id when a formal pending repetition draft exists (for live_scan without a draft, pass source instead)",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Exact repeated source segment text (works for both live_scan and formal draft)",
+                },
+                "window": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Number of neighboring segments before and after each occurrence (0 to 30; 0 omits neighbor context)",
+                },
+                "offset": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 20},
+            },
+            "required": ["project"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "update_repetition_draft",
+        "description": (
+            "Update review choices or subgroup proposals for a pending repetition consistency draft. "
+            "Pass group_proposals=[{'group_id': group_id, 'groups': [{'members': ['1','2'], 'target': '1', 'apply': ['2'], 'reason': '...'}], 'keep': [], 'uncertain': []}] "
+            "or choices={'<subgroup_id>': {'accepted': True, 'target': '1'}}."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "run_id": {"type": "string"},
+                "choices": {
+                    "type": "object",
+                    "description": "Map of subgroup_id (e.g. '1-1' or '1-manual') to {'accepted': bool, 'target': '<occurrence_short_id>'}",
+                },
+                "group_proposals": {
+                    "type": "array",
+                    "description": (
+                        "List of group proposals: [{'group_id': str, 'groups': [{'members': [str], 'target': str, 'apply': [str], 'reason': str}], "
+                        "'keep': [str], 'uncertain'?: [str]}]. Every occurrence short id must appear in exactly one of groups[].members, keep, or uncertain."
+                    ),
+                    "items": {"type": "object"},
+                },
+            },
+            "required": ["project", "run_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "finalize_repetition_draft",
+        "description": "Explicitly apply, discard, or rollback a repetition consistency draft (requires confirm=True). When action='apply' and choices is omitted, uses the draft's currently saved choices.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "run_id": {"type": "string"},
+                "action": {
+                    "type": "string",
+                    "enum": ["apply", "discard", "rollback"],
+                },
+                "choices": {
+                    "type": "object",
+                    "description": "Optional override map of subgroup_id to {'accepted': bool, 'target': '<occurrence_short_id>'}",
+                },
+                "confirm": {"type": "boolean"},
+            },
+            "required": ["project", "run_id", "action", "confirm"],
+            "additionalProperties": False,
+        },
+    },
+]
+
+
+class MCPWebBridge:
+    def __init__(
+        self,
+        base_url: str | None = None,
+        *,
+        client: httpx2.Client | None = None,
+    ) -> None:
+        self.base_url = (base_url or default_base_url()).rstrip("/")
+        self._client = client
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+        form_data: dict[str, Any] | None = None,
+        files: Any = None,
+    ) -> Any:
+        try:
+            if self._client is not None:
+                response = self._client.request(
+                    method,
+                    path,
+                    params=params,
+                    json=json_body,
+                    data=form_data,
+                    files=files,
+                )
+            else:
+                with httpx2.Client(base_url=self.base_url, timeout=60.0) as client:
+                    response = client.request(
+                        method,
+                        path,
+                        params=params,
+                        json=json_body,
+                        data=form_data,
+                        files=files,
+                    )
+        except httpx2.RequestError as exc:
+            raise UsageError(
+                f"无法连接本地 Another LLM Translator 服务 ({self.base_url})；请先启动 Web 或桌面端服务后再调用 MCP 工具：{exc}"
+            ) from exc
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise UsageError(
+                f"本地 Web 服务返回了非 JSON 响应 (HTTP {response.status_code})"
+            ) from exc
+        if response.status_code >= 400:
+            if isinstance(data, dict) and "error" in data:
+                raise UsageError(str(data["error"]))
+            raise UsageError(f"HTTP {response.status_code}: {data}")
+        return data
+
+    def call_tool(self, name: str, arguments: dict[str, Any] | None) -> Any:
+        if arguments is not None and not isinstance(arguments, dict):
+            raise UsageError("arguments 必须是对象")
+        args = dict(arguments or {})
+        if name == "reference":
+            topic = _opt_str(args, "topic", "overview").strip() or "overview"
+            key = topic.casefold()
+            if key in REFERENCE_TOPICS:
+                return {"topic": key, **REFERENCE_TOPICS[key]}
+            for tool in TOOLS:
+                if str(tool.get("name", "")).casefold() == key:
+                    related_topic = None
+                    if "term" in key:
+                        related_topic = REFERENCE_TOPICS["terminology"]
+                    elif "repetition" in key:
+                        related_topic = REFERENCE_TOPICS["repetition"]
+                    elif key in {
+                        "start_agent_stage_run",
+                        "checkout_stage_batch",
+                        "submit_stage_batch",
+                        "finish_agent_stage_run",
+                        "submit_segment_fix",
+                        "apply_stage_suggestions",
+                    }:
+                        related_topic = REFERENCE_TOPICS["pattern_b"]
+                    elif key == "configure_project":
+                        related_topic = REFERENCE_TOPICS["config"]
+                    return {
+                        "topic": tool["name"],
+                        "tool": tool,
+                        **({"guide": related_topic} if related_topic else {}),
+                    }
+            return {
+                "topic": "overview",
+                "note": f"未知主题 '{topic}'，已返回 overview 及可用主题列表。",
+                **REFERENCE_TOPICS["overview"],
+            }
+
+        if name == "list_projects":
+            q_str = _opt_str(args, "q", "").strip().casefold()
+            offset, limit = _page_params(args, default_limit=50, max_limit=500)
+            projects_data = self._request("GET", "/api/v1/projects")
+            active = self._request("GET", "/api/v1/tasks/active")
+            tasks = [
+                _compact_task(t) if isinstance(t, dict) else t
+                for t in active.get("tasks", [])
+            ]
+            items = list(projects_data.get("projects", []))
+            items.sort(
+                key=lambda p: (
+                    str(p.get("created_at") or ""),
+                    str(p.get("name") or ""),
+                ),
+                reverse=True,
+            )
+            if q_str:
+                items = [
+                    p
+                    for p in items
+                    if isinstance(p, dict)
+                    and any(
+                        q_str in str(p.get(k) or "").casefold()
+                        for k in ("name", "project_id", "selector", "path")
+                    )
+                ]
+            compact_projects = []
+            for p in items[offset : offset + limit]:
+                if not isinstance(p, dict):
+                    compact_projects.append(p)
+                    continue
+                row: dict[str, Any] = {
+                    "name": p.get("name"),
+                    "project_id": p.get("project_id"),
+                    "created_at": p.get("created_at"),
+                    "file_count": p.get("file_count"),
+                    "segment_count": p.get("segment_count"),
+                }
+                if p.get("selector") and p.get("selector") != p.get("name"):
+                    row["selector"] = p["selector"]
+                if p.get("external"):
+                    row["external"] = True
+                    row["path"] = p.get("path")
+                if p.get("repair_needed"):
+                    row["repair_needed"] = True
+                compact_projects.append(row)
+            return {
+                "total": len(items),
+                "offset": offset,
+                "limit": limit,
+                "default_projects_path": projects_data.get("default_projects_path"),
+                "projects": compact_projects,
+                "active_tasks": tasks,
+            }
+
+        if name == "create_project":
+            raw_name = args.get("name")
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                raise UsageError("name 必须是非空字符串")
+            empty = _opt_bool(args, "empty", False)
+            parent_dir = _opt_str(args, "parent_dir", "")
+            raw_opts = args.get("adapter_options")
+            if raw_opts is not None and not isinstance(raw_opts, dict):
+                raise UsageError("adapter_options 必须是对象")
+            raw_paths = args.get("paths")
+            form: dict[str, Any] = {
+                "name": raw_name,
+                "empty": "true" if empty else "false",
+                "parent_dir": parent_dir,
+                "adapter_options": json.dumps(raw_opts or {}, ensure_ascii=False),
+            }
+            if raw_paths:
+                server_paths, server_kinds = _resolve_server_inputs(raw_paths)
+                form["server_paths"] = server_paths
+                form["server_input_kinds"] = server_kinds
+            elif raw_paths is not None and not isinstance(raw_paths, list):
+                raise UsageError("paths 必须是非空字符串数组")
+            elif not empty:
+                raise UsageError("必须提供 paths 导入文件，或显式设置 empty=True 创建空项目")
+            return self._request("POST", "/api/v1/projects", form_data=form)
+
+        if name == "open_project":
+            raw_path = args.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                raise UsageError("path 必须是非空字符串")
+            return self._request(
+                "POST",
+                "/api/v1/projects/open",
+                json_body={"path": str(Path(raw_path).expanduser())},
+            )
+
+        if name == "add_project_files":
+            proj = _quote_project(args)
+            raw_opts = args.get("adapter_options")
+            if raw_opts is not None and not isinstance(raw_opts, dict):
+                raise UsageError("adapter_options 必须是对象")
+            server_paths, server_kinds = _resolve_server_inputs(args.get("paths"))
+            form = {
+                "server_paths": server_paths,
+                "server_input_kinds": server_kinds,
+                "adapter_options": json.dumps(raw_opts or {}, ensure_ascii=False),
+            }
+            return self._request("POST", f"/api/v1/projects/{proj}/files", form_data=form)
+
+        if name == "manage_project_files":
+            proj = _quote_project(args)
+            action = args.get("action")
+            if not isinstance(action, str) or not action:
+                raise UsageError("action 必须是非空字符串")
+            if action == "remove":
+                if args.get("confirm") is not True:
+                    raise UsageError("移除项目文件必须显式指定 confirm=True")
+                return self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/files/remove",
+                    json_body={"file_ids": args.get("file_ids")},
+                )
+            if action == "reorder":
+                return self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/files/reorder",
+                    json_body={"file_ids": args.get("file_ids")},
+                )
+            file_id = args.get("file_id")
+            if not isinstance(file_id, str) or not file_id or "/" in file_id:
+                raise UsageError(f"{action} 必须提供有效 file_id")
+            fid = quote(file_id, safe="")
+            if action == "replace_preview":
+                raw_opts = args.get("adapter_options")
+                if raw_opts is not None and not isinstance(raw_opts, dict):
+                    raise UsageError("adapter_options 必须是对象")
+                server_paths, server_kinds = _resolve_server_inputs([args.get("path")])
+                if server_kinds[0] != "file":
+                    raise UsageError("单文件替换的 path 必须是文件路径")
+                form = {
+                    "server_path": server_paths[0],
+                    "adapter_options": json.dumps(raw_opts or {}, ensure_ascii=False),
+                }
+                return self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/files/{fid}/replacement-preview",
+                    form_data=form,
+                )
+            preview_id = args.get("preview_id")
+            if not isinstance(preview_id, str) or not preview_id or "/" in preview_id:
+                raise UsageError(f"{action} 必须提供有效 preview_id")
+            if action == "replace_confirm":
+                if args.get("confirm") is not True:
+                    raise UsageError("确认替换文件必须显式指定 confirm=True")
+                return self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/files/{fid}/replacement-confirm",
+                    json_body={"preview_id": preview_id},
+                )
+            if action == "replace_cancel":
+                pid = quote(preview_id, safe="")
+                return self._request(
+                    "DELETE",
+                    f"/api/v1/projects/{proj}/files/{fid}/replacement-preview/{pid}",
+                )
+            raise UsageError(f"不支持的文件管理动作：{action}")
+
+        if name == "configure_project":
+            proj = _quote_project(args)
+            action = args.get("action")
+            if not isinstance(action, str) or not action:
+                raise UsageError("action 必须是非空字符串")
+            if action == "get_config":
+                cfg = self._request("GET", f"/api/v1/projects/{proj}/config")
+                presets = self._request("GET", "/api/v1/global/presets")
+                decision_presets = self._request(
+                    "GET", "/api/v1/global/decision-presets"
+                )
+                def _compact_preset(item: dict[str, Any]) -> dict[str, Any]:
+                    out = {
+                        k: item[k]
+                        for k in ("preset_id", "adapter_id", "protocol", "model", "valid")
+                        if k in item
+                    }
+                    if item.get("missing_fields"):
+                        out["missing_fields"] = item["missing_fields"]
+                    if item.get("error"):
+                        out["error"] = item["error"]
+                    return out
+                return {
+                    **cfg,
+                    "available_presets": [
+                        _compact_preset(p)
+                        for p in presets.get("presets", [])
+                        if isinstance(p, dict)
+                    ],
+                    "available_decision_presets": [
+                        _compact_preset(p)
+                        for p in decision_presets.get("presets", [])
+                        if isinstance(p, dict)
+                    ],
+                }
+            if action == "update_config":
+                patch = args.get("config")
+                if not isinstance(patch, dict) or not patch:
+                    raise UsageError("update_config 必须提供非空 config 对象")
+                current = self._request(
+                    "GET", f"/api/v1/projects/{proj}/config"
+                ).get("config", {})
+                merged = _deep_merge_dict(
+                    dict(current) if isinstance(current, dict) else {}, patch
+                )
+                saved = self._request(
+                    "PUT",
+                    f"/api/v1/projects/{proj}/config",
+                    json_body={"config": merged},
+                )
+                latest = self._request("GET", f"/api/v1/projects/{proj}/config")
+                return {**latest, **saved}
+            if action == "get_file_options":
+                file_id = args.get("file_id")
+                if not isinstance(file_id, str) or not file_id or "/" in file_id:
+                    raise UsageError("get_file_options 必须提供有效 file_id")
+                fid = quote(file_id, safe="")
+                return self._request(
+                    "GET", f"/api/v1/projects/{proj}/files/{fid}/run-options"
+                )
+            if action == "update_file_options":
+                file_id = args.get("file_id")
+                options = args.get("options")
+                if not isinstance(file_id, str) or not file_id or "/" in file_id:
+                    raise UsageError("update_file_options 必须提供有效 file_id")
+                if not isinstance(options, dict):
+                    raise UsageError("update_file_options 必须提供 options 对象")
+                fid = quote(file_id, safe="")
+                return self._request(
+                    "PUT",
+                    f"/api/v1/projects/{proj}/files/{fid}/run-options",
+                    json_body={"options": options},
+                )
+            if action == "delete_project":
+                if args.get("confirm") is not True:
+                    raise UsageError("删除项目必须显式指定 confirm=True")
+                return self._request(
+                    "DELETE",
+                    f"/api/v1/projects/{proj}",
+                    json_body={"confirm": True},
+                )
+            raise UsageError(f"不支持的项目配置动作：{action}")
+
+        if name == "get_project_overview":
+            proj = _quote_project(args)
+            include_parts = _opt_bool(args, "include_parts", False)
+            data = self._request("GET", f"/api/v1/projects/{proj}", params={"limit": 1})
+            if isinstance(data, dict):
+                data.pop("segments", None)
+                data.pop("offset", None)
+                data.pop("limit", None)
+                if isinstance(data.get("files"), list):
+                    compact_files = []
+                    for f in data["files"]:
+                        if not isinstance(f, dict):
+                            compact_files.append(f)
+                            continue
+                        cf = dict(f)
+                        parts = cf.get("part_ids")
+                        if isinstance(parts, list):
+                            cf["part_count"] = len(parts)
+                            if not include_parts:
+                                cf.pop("part_ids", None)
+                                cf.pop("parts", None)
+                        compact_files.append(cf)
+                    data["files"] = compact_files
+                sc = data.get("stage_completion")
+                if isinstance(sc, dict) and isinstance(sc.get("terminology"), dict):
+                    term_sc = dict(sc["terminology"])
+                    term_sc.pop("knowledge_entities", None)
+                    data["stage_completion"] = {**sc, "terminology": term_sc}
+            return data
+
+        if name == "get_task_and_diagnostics":
+            _quote_project(args)
+            project_name = args["project"]
+            runs_offset, runs_limit = _page_params(
+                args, "runs_offset", "runs_limit", default_limit=5, max_limit=100
+            )
+            raw_tid = args.get("task_id")
+            if raw_tid is not None and (
+                not isinstance(raw_tid, str) or not raw_tid or "/" in raw_tid
+            ):
+                raise UsageError("task_id 必须是非空字符串")
+            stage_filter = args.get("stage")
+            if stage_filter is not None and (
+                not isinstance(stage_filter, str) or not stage_filter
+            ):
+                raise UsageError("stage 必须是非空字符串")
+            include_events = _opt_bool(args, "include_events", False)
+            active = self._request("GET", "/api/v1/tasks/active").get("tasks", [])
+            project_tasks = [
+                _compact_task(t)
+                for t in active
+                if isinstance(t, dict)
+                and (t.get("project") == project_name or t.get("project_id") == project_name)
+            ]
+            raw_detail = (
+                self._request("GET", f"/api/v1/tasks/{quote(raw_tid, safe='')}")
+                if raw_tid
+                else None
+            )
+            task_detail = _compact_task(raw_detail) if isinstance(raw_detail, dict) else raw_detail
+            runs = self._request(
+                "GET",
+                "/api/v1/runs",
+                params={
+                    "project": project_name,
+                    "offset": runs_offset,
+                    "limit": runs_limit,
+                    **({"stage": stage_filter} if stage_filter else {}),
+                },
+            )
+            _strip_run_keys = {
+                "document_adapter_prompt_requirements",
+                "document_adapters",
+                "document_adapter_options",
+                "translation_validators",
+                "stage_fingerprint",
+                "manual_review_handled_normalized",
+                "manual_review_resolved_normalized",
+            }
+            recent_runs = []
+            for r in runs.get("items", []):
+                if not isinstance(r, dict):
+                    continue
+                cr = {
+                    k: v
+                    for k, v in r.items()
+                    if k not in _strip_run_keys
+                    and not (k in {"failure_counts", "warnings"} and not v)
+                }
+                warnings = cr.get("warnings")
+                if isinstance(warnings, list) and len(warnings) > 5:
+                    cr["warning_count"] = len(warnings)
+                    cr["warnings"] = warnings[:5]
+                recent_runs.append(cr)
+            result: dict[str, Any] = {
+                "active_tasks": project_tasks,
+                "task_detail": task_detail,
+                "total_runs": runs.get("total", len(recent_runs)),
+                "runs_offset": runs_offset,
+                "runs_limit": runs_limit,
+                "recent_runs": recent_runs,
+            }
+            if include_events:
+                diag = self._request(
+                    "POST",
+                    "/api/v1/diagnostics",
+                    json_body={"project": project_name, "stage": stage_filter},
+                )
+                if isinstance(diag, dict):
+                    logs = diag.get("logs")
+                    if isinstance(logs, list) and len(logs) > 20:
+                        diag = {**diag, "total_logs": len(logs), "logs": logs[-20:]}
+                    reqs = diag.get("requests")
+                    if isinstance(reqs, dict) and isinstance(reqs.get("items"), list):
+                        req_items = reqs["items"]
+                        _req_keys = {
+                            "request_id",
+                            "stage",
+                            "request_kind",
+                            "segment_id",
+                            "status",
+                            "attempt_count",
+                            "last_http_status",
+                            "latency_ms",
+                            "usage",
+                            "stream_event_count",
+                            "stream_received_bytes",
+                            "error",
+                            "timestamp",
+                            "finished_at",
+                        }
+                        compact_reqs = [
+                            {k: v for k, v in item.items() if k in _req_keys}
+                            for item in req_items[-15:]
+                            if isinstance(item, dict)
+                        ]
+                        diag = {
+                            **diag,
+                            "requests": {
+                                **{k: v for k, v in reqs.items() if k != "items"},
+                                "total_items": len(req_items),
+                                "items": compact_reqs,
+                            },
+                        }
+                result["diagnostics"] = diag
+            return result
+
+        if name == "query_segments":
+            proj = _quote_project(args)
+            stage = _opt_str(args, "stage", "translation")
+            offset, limit = _page_params(args, default_limit=50, max_limit=500)
+            body = {
+                "stage": stage,
+                "status": _opt_str(args, "status", ""),
+                "q": _opt_str(args, "q", ""),
+                "file_id": _opt_str(args, "file_id", ""),
+                "part_id": _opt_str(args, "part_id", ""),
+                "offset": offset,
+                "limit": limit,
+            }
+            data = self._request(
+                "POST", f"/api/v1/projects/{proj}/segments/query", json_body=body
+            )
+            if isinstance(data, dict) and isinstance(data.get("segments"), list):
+                data = {
+                    **data,
+                    "segments": [
+                        _compact_segment_row(seg) if isinstance(seg, dict) else seg
+                        for seg in data["segments"]
+                    ],
+                }
+            return data
+
+        if name == "get_segment_context":
+            proj = _quote_project(args)
+            raw_window = args.get("window")
+            window = 5 if raw_window is None else raw_window
+            ctx = self._request(
+                "POST",
+                f"/api/v1/projects/{proj}/agent/segments/context",
+                json_body={
+                    "segment_id": args.get("segment_id"),
+                    "window": window,
+                },
+            )
+            if isinstance(ctx, dict):
+                ctx = _compact_segment_row(ctx)
+                neighbors = ctx.get("context")
+                if isinstance(neighbors, dict):
+                    ctx["context"] = {
+                        side: [
+                            _compact_segment_row(s) if isinstance(s, dict) else s
+                            for s in neighbors.get(side, [])
+                        ]
+                        for side in ("before", "after")
+                        if side in neighbors
+                    }
+                if isinstance(ctx.get("matched_terms"), list):
+                    ctx["matched_terms"] = [
+                        _compact_matched_term(t, include_description=True)
+                        if isinstance(t, dict)
+                        else t
+                        for t in ctx["matched_terms"]
+                    ]
+                if not ctx.get("term_warnings"):
+                    ctx.pop("term_warnings", None)
+                dar = ctx.get("document_adapter_requirements")
+                if isinstance(dar, dict):
+                    non_empty = [v for v in dar.values() if v]
+                    if not non_empty:
+                        ctx.pop("document_adapter_requirements", None)
+                    elif len({json.dumps(v, sort_keys=True, ensure_ascii=False) for v in non_empty}) == 1:
+                        ctx["document_adapter_requirements"] = non_empty[0]
+            return ctx
+
+        if name == "preflight_stage_run":
+            proj = _quote_project(args)
+            stage = args.get("stage")
+            if not isinstance(stage, str) or not stage or "/" in stage:
+                raise UsageError("stage 必须是非空字符串")
+            final_review = _opt_bool(args, "final_review", False)
+            knowledge_only = _opt_bool(args, "knowledge_only", False)
+            all_terms = _opt_bool(args, "all_terms", False)
+            if stage == "repetition_consistency":
+                return self._request(
+                    "GET",
+                    f"/api/v1/projects/{proj}/repetition/options",
+                    params={
+                        "estimate_usage": True,
+                        "final_review": final_review,
+                    },
+                )
+            res = self._request(
+                "GET",
+                f"/api/v1/projects/{proj}/task-options/{quote(stage, safe='')}",
+                params={
+                    "estimate_usage": True,
+                    "final_review": final_review,
+                    "knowledge_only": knowledge_only,
+                    "all_terms": all_terms,
+                },
+            )
+            if isinstance(res, dict) and isinstance(res.get("knowledge_replacement_impacts"), list):
+                impacts = res.pop("knowledge_replacement_impacts")
+                owners = sorted(
+                    {
+                        str(item.get("owner"))
+                        for item in impacts
+                        if isinstance(item, dict) and item.get("owner")
+                    }
+                )
+                res = {
+                    **res,
+                    "knowledge_replacement_summary": {
+                        "affected_fragments": len(impacts),
+                        "affected_entities": len(owners),
+                        "sample_entities": owners[:20],
+                    },
+                }
+            return res
+
+        if name == "start_host_stage_run":
+            proj = _quote_project(args)
+            stage = args.get("stage")
+            if not isinstance(stage, str) or not stage:
+                raise UsageError("stage 必须是非空字符串")
+            body = {
+                k: v
+                for k, v in args.items()
+                if k != "project" and v is not None
+            }
+            res = self._request("POST", f"/api/v1/projects/{proj}/tasks", json_body=body)
+            return _compact_task(res) if isinstance(res, dict) else res
+
+        if name == "cancel_stage_run":
+            raw_tid = args.get("task_id")
+            if not isinstance(raw_tid, str) or not raw_tid or "/" in raw_tid:
+                raise UsageError("task_id 必须是非空字符串")
+            tid = quote(raw_tid, safe="")
+            res = self._request("POST", f"/api/v1/tasks/{tid}/cancel")
+            return _compact_task(res) if isinstance(res, dict) else res
+
+        if name == "submit_segment_fix":
+            proj = _quote_project(args)
+            body = {k: v for k, v in args.items() if k != "project" and v is not None}
+            res = self._request(
+                "POST", f"/api/v1/projects/{proj}/agent/segments/fix", json_body=body
+            )
+            if isinstance(res, dict):
+                res = dict(res)
+                for key in ("result", "suggestion", "applied"):
+                    if isinstance(res.get(key), dict):
+                        res[key] = _compact_result_view(res[key])
+                if not res.get("findings"):
+                    res.pop("findings", None)
+            return res
+
+        if name == "apply_stage_suggestions":
+            proj = _quote_project(args)
+            stage = args.get("stage")
+            if not isinstance(stage, str) or stage not in {"proofreading", "polishing"}:
+                raise UsageError("stage 必须是 proofreading 或 polishing")
+            if args.get("confirm") is not True:
+                raise UsageError("应用阶段建议必须显式指定 confirm=True")
+            raw_scope = args.get("scope")
+            if raw_scope is not None and not isinstance(raw_scope, dict):
+                raise UsageError("scope 必须是对象")
+            scope_arg = raw_scope or {}
+            return self._request(
+                "POST",
+                f"/api/v1/projects/{proj}/apply",
+                json_body={
+                    "stage": stage,
+                    **{
+                        k: args[k] if args.get(k) is not None else scope_arg.get(k)
+                        for k in ("only_file", "only_part", "only_segment", "segment_ids")
+                    },
+                    "allow_outdated_base": _opt_bool(args, "allow_outdated_base", False),
+                    "all": True,
+                },
+            )
+
+        if name == "export_project":
+            proj = _quote_project(args)
+            stage = args.get("stage")
+            if not isinstance(stage, str) or not stage:
+                raise UsageError("stage 必须是非空字符串")
+            fmt = _opt_str(args, "format", "original")
+            bilingual = _opt_bool(args, "bilingual", False)
+            allow_missing = _opt_bool(args, "allow_missing", False)
+            data = self._request(
+                "POST",
+                f"/api/v1/projects/{proj}/export",
+                json_body={
+                    "stage": stage,
+                    "format": fmt,
+                    "bilingual": bilingual,
+                    "allow_missing": allow_missing,
+                    "file_ids": args.get("file_ids"),
+                },
+            )
+            if isinstance(data, dict) and isinstance(data.get("fallback_segments"), list):
+                fallback = data["fallback_segments"]
+                data = {
+                    **data,
+                    "fallback_segment_count": len(fallback),
+                }
+                if len(fallback) > 50:
+                    data["fallback_segments"] = fallback[:50]
+                    data["fallback_segments_truncated"] = True
+            return data
+
+        if name == "start_agent_stage_run":
+            proj = _quote_project(args)
+            prompt_lang = args.get("prompt_language")
+            if prompt_lang is not None and not isinstance(prompt_lang, str):
+                raise UsageError("prompt_language 必须是字符串")
+            body = {k: v for k, v in args.items() if k != "project" and v is not None}
+            res = self._request(
+                "POST", f"/api/v1/projects/{proj}/agent/runs/start", json_body=body
+            )
+            if isinstance(res, dict) and isinstance(res.get("prompt"), str):
+                prompt_text = res["prompt"]
+                for marker in (
+                    "segments[] 每项一条",
+                    "Return one type=segment",
+                    "每个 segments[] 恰好输出",
+                    "Output exactly one type=segment",
+                ):
+                    idx = prompt_text.rfind(marker)
+                    if idx != -1:
+                        prompt_text = prompt_text[:idx].rstrip()
+                        break
+                stage_name = str(res.get("stage") or args.get("stage") or "translation")
+                if stage_name == "translation":
+                    mcp_footer = (
+                        "Agent MCP 提交方式：通过 submit_stage_batch 提交 "
+                        'items=[{"segment_id": "F0001-S000001", "text": "完整译文"}]'
+                        "（必须使用 checkout_stage_batch 返回的完整 segment_id，不要输出 JSONL 或短 id）。"
+                        '全部批次提交完毕后调用 finish_agent_stage_run(action="complete")。'
+                    )
+                else:
+                    mcp_footer = (
+                        "Agent MCP 提交方式：通过 checkout_stage_batch 拉取待审批次"
+                        "（建议传入上批末尾的 line_start 推进窗口），仅需将有修改建议的条目通过 "
+                        'submit_stage_batch 提交：items=[{"segment_id": "F0001-S000001", '
+                        '"review_status": "suggested", "suggested_text": "完整修改后译文", '
+                        '"reason": "修改原因"}]；无需逐条提交无修改条目，全部审阅后调用 '
+                        'finish_agent_stage_run(action="complete", accept_remaining=True) '
+                        "即可批量确认其余条目为 accepted，最后调用 apply_stage_suggestions(confirm=True) 应用建议。"
+                    )
+                res = {**res, "prompt": f"{prompt_text}\n\n{mcp_footer}"}
+            return res
+
+        if name == "checkout_stage_batch":
+            proj = _quote_project(args)
+            raw_inc = args.get("include_term_descriptions")
+            if raw_inc is not None and not isinstance(raw_inc, bool):
+                raise UsageError("include_term_descriptions 必须是布尔值")
+            raw_max = args.get("max_segments")
+            raw_ctx = args.get("context_before")
+            body: dict[str, Any] = {
+                "max_segments": 15 if raw_max is None else raw_max,
+                "context_before": 3 if raw_ctx is None else raw_ctx,
+            }
+            rid = _resolve_run_slice(args, body)
+            res = self._request(
+                "POST",
+                f"/api/v1/projects/{proj}/agent/runs/{rid}/checkout",
+                json_body=body,
+            )
+            if isinstance(res, dict):
+                res = dict(res)
+                inc_desc = (
+                    raw_inc
+                    if raw_inc is not None
+                    else (res.get("stage") == "translation")
+                )
+                if isinstance(res.get("terms"), list):
+                    res["terms"] = [
+                        _compact_matched_term(t, include_description=inc_desc)
+                        if isinstance(t, dict)
+                        else t
+                        for t in res["terms"]
+                    ]
+                if not res.get("warnings"):
+                    res.pop("warnings", None)
+                if res.get("document_adapter_requirement") is None:
+                    res.pop("document_adapter_requirement", None)
+            return res
+
+        if name == "submit_stage_batch":
+            proj = _quote_project(args)
+            body = {
+                "items": args.get("items"),
+                "allow_warnings": _opt_bool(args, "allow_warnings", False),
+            }
+            rid = _resolve_run_slice(args, body)
+            return self._request(
+                "POST",
+                f"/api/v1/projects/{proj}/agent/runs/{rid}/submit",
+                json_body=body,
+            )
+
+        if name == "finish_agent_stage_run":
+            proj = _quote_project(args)
+            raw_rid = args.get("run_id")
+            if not isinstance(raw_rid, str) or not raw_rid or "/" in raw_rid:
+                raise UsageError("Run ID 无效")
+            rid = quote(raw_rid, safe="")
+            action = _opt_str(args, "action", "complete")
+            accept_remaining = _opt_bool(args, "accept_remaining", False)
+            return self._request(
+                "POST",
+                f"/api/v1/projects/{proj}/agent/runs/{rid}/finish",
+                json_body={
+                    "action": action,
+                    "accept_remaining": accept_remaining,
+                    "reason": args.get("reason"),
+                },
+            )
+
+        if name == "get_terminology_overview":
+            proj = _quote_project(args)
+            flt = _opt_str(args, "filter", "all")
+            if flt not in {
+                "all",
+                "conflicts",
+                "changes",
+                "stale_knowledge",
+                "draft",
+                "needs_review",
+                "manual_review",
+            }:
+                raise UsageError(f"不支持的术语筛选类型：{flt}")
+            offset, limit = _page_params(args, default_limit=50, max_limit=500)
+            q_str = _opt_str(args, "q", "").strip().casefold()
+            inc_desc = _opt_bool(args, "include_description", False)
+            decision = self._request("GET", f"/api/v1/projects/{proj}/terms/decision")
+            if flt == "draft":
+                draft = decision.get("draft")
+                if isinstance(draft, dict) and isinstance(draft.get("proposals"), list):
+                    total_proposals, compact_proposals = _page_decision_items(
+                        draft["proposals"], q_str, offset, limit
+                    )
+                    needs_review_list = (
+                        draft.get("needs_review")
+                        if isinstance(draft.get("needs_review"), list)
+                        else []
+                    )
+                    decision = {
+                        **decision,
+                        "manual_review": _manual_review_summary(
+                            decision.get("manual_review")
+                        ),
+                        "draft": {
+                            **{
+                                k: v
+                                for k, v in draft.items()
+                                if k
+                                not in {
+                                    "proposals",
+                                    "needs_review",
+                                    "decision_targets",
+                                    "reviewed_terms",
+                                    "model_fingerprint",
+                                    "prompt_fingerprint",
+                                }
+                            },
+                            "needs_review_count": len(needs_review_list),
+                            "total_proposals": total_proposals,
+                            "offset": offset,
+                            "limit": limit,
+                            "proposals": compact_proposals,
+                        },
+                    }
+                else:
+                    decision = {
+                        **decision,
+                        "manual_review": _manual_review_summary(
+                            decision.get("manual_review")
+                        ),
+                    }
+                return decision
+            if flt == "needs_review":
+                draft = decision.get("draft")
+                total_nr, paged_nr = _page_decision_items(
+                    draft.get("needs_review") if isinstance(draft, dict) else [],
+                    q_str,
+                    offset,
+                    limit,
+                )
+                return {
+                    "run_id": draft.get("run_id") if isinstance(draft, dict) else None,
+                    "total": total_nr,
+                    "offset": offset,
+                    "limit": limit,
+                    "items": paged_nr,
+                    "manual_review": _manual_review_summary(
+                        decision.get("manual_review")
+                    ),
+                }
+            if flt == "manual_review":
+                mr = (
+                    decision.get("manual_review")
+                    if isinstance(decision.get("manual_review"), dict)
+                    else {}
+                )
+                total_mr, paged_mr = _page_decision_items(
+                    mr.get("items"), q_str, offset, limit
+                )
+                return {
+                    "total": total_mr,
+                    "resolved": mr.get("resolved", 0),
+                    "remaining": mr.get("remaining", 0),
+                    "offset": offset,
+                    "limit": limit,
+                    "items": paged_mr,
+                }
+            terms_data = self._request("GET", f"/api/v1/projects/{proj}/terms")
+            items = list(terms_data.get("terms", []))
+            if flt == "conflicts":
+                items = [t for t in items if t.get("has_conflicts")]
+            elif flt == "changes":
+                items = [t for t in items if t.get("pending_change")]
+            elif flt == "stale_knowledge":
+                items = [
+                    t
+                    for t in items
+                    if t.get("knowledge_status") in {"stale", "pending"}
+                ]
+            if q_str:
+                items = [
+                    t
+                    for t in items
+                    if isinstance(t, dict)
+                    and (
+                        any(
+                            q_str in str(t.get(k) or "").casefold()
+                            for k in ("source", "normalized", "preferred_translation")
+                        )
+                        or any(
+                            q_str in str(a).casefold()
+                            for a in (t.get("aliases") or [])
+                        )
+                    )
+                ]
+            compact_terms = [
+                _compact_term_row(
+                    t,
+                    keep_candidates=(flt == "changes"),
+                    include_description=inc_desc,
+                )
+                if isinstance(t, dict)
+                else t
+                for t in items[offset : offset + limit]
+            ]
+            scan_data = terms_data.get("scan")
+            if isinstance(scan_data, dict):
+                scan_data = dict(scan_data)
+                failed_segs = scan_data.get("failed_segments")
+                if isinstance(failed_segs, list):
+                    if offset > 0:
+                        scan_data.pop("failed_segments", None)
+                        scan_data.pop("failed_segments_truncated", None)
+                    elif len(failed_segs) > 20:
+                        scan_data["failed_segments"] = failed_segs[:20]
+                        scan_data["failed_segments_truncated"] = True
+            return {
+                "total": len(items),
+                "offset": offset,
+                "limit": limit,
+                "terms": compact_terms,
+                "terms_revision": terms_data.get("terms_revision"),
+                "conflict_count": terms_data.get("conflict_count", 0),
+                "scan": scan_data,
+                "decision_state": {
+                    "has_pending_draft": decision.get("draft") is not None,
+                    "manual_review": _manual_review_summary(
+                        decision.get("manual_review")
+                    ),
+                    "can_rollback": decision.get("rollback") is not None,
+                },
+            }
+
+        if name == "inspect_term_entity":
+            proj = _quote_project(args)
+            run_id = args.get("run_id")
+            proposal_id = args.get("proposal_id")
+            if run_id is not None and (
+                not isinstance(run_id, str) or not run_id or "/" in run_id
+            ):
+                raise UsageError("Run ID 无效")
+            if proposal_id is not None and (
+                not isinstance(proposal_id, str) or not proposal_id or "/" in proposal_id
+            ):
+                raise UsageError("提案 ID 无效")
+            if bool(run_id) != bool(proposal_id):
+                raise UsageError("run_id 与 proposal_id 必须同时提供")
+            inc_fragments = _opt_bool(args, "include_fragments", True)
+            inc_hits = _opt_bool(args, "include_hits", True)
+            f_offset, f_limit = _page_params(
+                args,
+                "fragments_offset",
+                "fragments_limit",
+                default_limit=50,
+                max_limit=500,
+            )
+            h_offset, h_limit = _page_params(
+                args, "hits_offset", "hits_limit", default_limit=20, max_limit=200
+            )
+            if run_id and proposal_id:
+                rid = quote(run_id, safe="")
+                pid = quote(proposal_id, safe="")
+                return self._request(
+                    "GET",
+                    f"/api/v1/projects/{proj}/terms/decision/{rid}/proposals/{pid}",
+                )
+            normalized = args.get("normalized")
+            if not isinstance(normalized, str) or not normalized.strip():
+                raise UsageError("必须提供 normalized 或 (run_id + proposal_id)")
+            terms_data = self._request("GET", f"/api/v1/projects/{proj}/terms")
+            matched_term = next(
+                (
+                    _compact_term_row(t)
+                    for t in terms_data.get("terms", [])
+                    if isinstance(t, dict)
+                    and (
+                        t.get("normalized") == normalized
+                        or t.get("source") == normalized
+                    )
+                ),
+                None,
+            )
+            resolved_norm = (
+                str(matched_term.get("normalized") or normalized)
+                if isinstance(matched_term, dict)
+                else normalized
+            )
+            knowledge = self._request(
+                "GET",
+                f"/api/v1/projects/{proj}/terms/knowledge",
+                params={"normalized": resolved_norm},
+            )
+            if isinstance(knowledge, dict) and isinstance(
+                knowledge.get("fragments"), list
+            ):
+                all_frags = knowledge["fragments"]
+                knowledge = {
+                    **{k: v for k, v in knowledge.items() if k != "fragments"},
+                    "total_fragments": len(all_frags),
+                }
+                if inc_fragments:
+                    knowledge["fragments_offset"] = f_offset
+                    knowledge["fragments_limit"] = f_limit
+                    knowledge["fragments"] = all_frags[f_offset : f_offset + f_limit]
+            hits = (
+                self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/terms/hits",
+                    json_body={
+                        "normalized": resolved_norm,
+                        "offset": h_offset,
+                        "limit": h_limit,
+                    },
+                )
+                if inc_hits
+                else None
+            )
+            return {"term": matched_term, "knowledge": knowledge, "hits": hits}
+
+        if name == "edit_terms":
+            proj = _quote_project(args)
+            action = args.get("action")
+            if not isinstance(action, str) or not action:
+                raise UsageError("action 必须是非空字符串")
+            raw_payload = args.get("payload")
+            if not isinstance(raw_payload, dict):
+                raise UsageError("payload 必须是对象")
+            payload = dict(raw_payload)
+            if action == "import_terms" or (
+                action == "save_term" and isinstance(payload.get("terms"), list)
+            ):
+                import_params = (
+                    {"overwrite": "true"} if action == "save_term" else None
+                )
+                if isinstance(payload.get("terms"), list):
+                    doc = {
+                        "schema_version": 2,
+                        "record_type": "terminology_exchange",
+                        "terms": payload["terms"],
+                    }
+                    raw_bytes = json.dumps(doc, ensure_ascii=False).encode("utf-8")
+                    return self._request(
+                        "POST",
+                        f"/api/v1/projects/{proj}/terms/import",
+                        params=import_params,
+                        files={"file": ("terms.json", raw_bytes, "application/json")},
+                    )
+                if isinstance(payload.get("path"), str) and payload["path"].strip():
+                    file_path = Path(payload["path"]).expanduser().resolve()
+                    if not file_path.is_file():
+                        raise UsageError(f"术语导入文件不存在：{file_path}")
+                    raw_bytes = file_path.read_bytes()
+                    filename = file_path.name
+                    content_type = (
+                        "text/csv"
+                        if filename.lower().endswith(".csv")
+                        else "application/json"
+                    )
+                    return self._request(
+                        "POST",
+                        f"/api/v1/projects/{proj}/terms/import",
+                        params=import_params,
+                        files={"file": (filename, raw_bytes, content_type)},
+                    )
+                raise UsageError(
+                    "import_terms 必须在 payload 中提供 terms 列表或本地文件 path"
+                )
+            routes = {
+                "save_term": ("POST", f"/api/v1/projects/{proj}/terms"),
+                "complete_scan": (
+                    "POST",
+                    f"/api/v1/projects/{proj}/agent/terms/complete-scan",
+                ),
+                "set_primary": ("POST", f"/api/v1/projects/{proj}/terms/set-primary"),
+                "leave_group": ("POST", f"/api/v1/projects/{proj}/terms/leave-group"),
+                "group_related": ("POST", f"/api/v1/projects/{proj}/terms/group-related"),
+                "convert_to_alias": (
+                    "POST",
+                    f"/api/v1/projects/{proj}/terms/convert-to-alias",
+                ),
+                "update_knowledge": ("PUT", f"/api/v1/projects/{proj}/terms/knowledge"),
+                "resolve_change": (
+                    "POST",
+                    f"/api/v1/projects/{proj}/terms/changes/resolve",
+                ),
+                "remove_terms": ("POST", f"/api/v1/projects/{proj}/terms/remove"),
+                "clear_terms": ("POST", f"/api/v1/projects/{proj}/terms/clear"),
+                "publish_partial": (
+                    "POST",
+                    f"/api/v1/projects/{proj}/terms/publish-partial",
+                ),
+            }
+            if action not in routes:
+                raise UsageError(f"不支持的术语编辑动作：{action}")
+            method, path = routes[action]
+            if action == "save_term":
+                save_body = dict(payload)
+                has_desc = "description" in save_body
+                desc_text = save_body.pop("description", None)
+                if has_desc and desc_text is not None and not isinstance(desc_text, str):
+                    raise UsageError("description 必须是字符串或 null")
+                try:
+                    res = self._request(method, path, json_body=save_body)
+                except UsageError as exc:
+                    msg = str(exc)
+                    if (
+                        save_body.get("old_normalized") is None
+                        and "normalized source 已存在：" in msg
+                    ):
+                        existing_norm = msg.split(
+                            "normalized source 已存在：", 1
+                        )[1].strip()
+                        res = self._request(
+                            method,
+                            path,
+                            json_body={
+                                **save_body,
+                                "old_normalized": existing_norm,
+                            },
+                        )
+                    else:
+                        raise
+                if has_desc and not save_body.get("disabled"):
+                    raw_src = str(save_body.get("source") or "").strip()
+                    saved_terms = (
+                        res.get("terms", []) if isinstance(res, dict) else []
+                    )
+                    saved_term = next(
+                        (
+                            t
+                            for t in saved_terms
+                            if isinstance(t, dict)
+                            and (
+                                t.get("source") == raw_src
+                                or t.get("normalized") == raw_src
+                            )
+                        ),
+                        None,
+                    )
+                    raw_conflicts = (
+                        saved_term.get("conflicts")
+                        if saved_term and isinstance(saved_term.get("conflicts"), dict)
+                        else {}
+                    )
+                    single_doc = {
+                        "schema_version": 2,
+                        "record_type": "terminology_exchange",
+                        "terms": [
+                            {
+                                "source": (
+                                    str(saved_term["source"])
+                                    if saved_term and saved_term.get("source")
+                                    else raw_src
+                                ),
+                                "preferred_translation": (
+                                    saved_term.get("preferred_translation")
+                                    if saved_term
+                                    else save_body.get("preferred_translation")
+                                ),
+                                "category": (
+                                    saved_term.get("category")
+                                    if saved_term
+                                    else save_body.get("category")
+                                ),
+                                "description": (desc_text or "").strip(),
+                                "aliases": list(
+                                    (
+                                        saved_term.get("aliases")
+                                        if saved_term
+                                        else save_body.get("aliases")
+                                    )
+                                    or []
+                                ),
+                                "disabled": False,
+                                "conflicts": {
+                                    "categories": list(
+                                        raw_conflicts.get("categories", [])
+                                    ),
+                                    "preferred_translations": list(
+                                        raw_conflicts.get("preferred_translations", [])
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                    raw_bytes = json.dumps(single_doc, ensure_ascii=False).encode(
+                        "utf-8"
+                    )
+                    self._request(
+                        "POST",
+                        f"/api/v1/projects/{proj}/terms/import",
+                        params={"overwrite": "true"},
+                        files={
+                            "file": ("terms.json", raw_bytes, "application/json")
+                        },
+                    )
+                    res = self._request("GET", f"/api/v1/projects/{proj}/terms")
+            else:
+                res = self._request(method, path, json_body=payload)
+            if isinstance(res, dict) and isinstance(res.get("terms"), list):
+                terms_list = res["terms"]
+                selected_terms = terms_list
+                truncated = False
+                if len(terms_list) > 5:
+                    target_keys: set[str] = set()
+                    for k in (
+                        "normalized",
+                        "source",
+                        "old_normalized",
+                        "primary",
+                        "primary_normalized",
+                        "related_normalized",
+                    ):
+                        v = payload.get(k)
+                        if isinstance(v, str) and v:
+                            target_keys.add(v)
+                        elif isinstance(v, list):
+                            target_keys.update(str(x) for x in v if x)
+                    matched = [
+                        t
+                        for t in terms_list
+                        if isinstance(t, dict)
+                        and (
+                            t.get("normalized") in target_keys
+                            or t.get("source") in target_keys
+                            or t.get("group_primary") in target_keys
+                        )
+                    ]
+                    selected_terms = matched if matched else terms_list[:5]
+                    truncated = True
+                res = {
+                    **res,
+                    **({"total_terms": len(terms_list), "terms_truncated": True} if truncated else {}),
+                    "terms": [
+                        _compact_term_row(t) if isinstance(t, dict) else t
+                        for t in selected_terms
+                    ],
+                }
+            if isinstance(res, dict) and isinstance(res.get("stage_completion"), dict):
+                sc_term = dict(res["stage_completion"])
+                sc_term.pop("knowledge_entities", None)
+                res = {**res, "stage_completion": sc_term}
+            return res
+
+        if name == "submit_term_decision_draft":
+            proj = _quote_project(args)
+            result = {}
+            if "rejected_proposal_ids" in args and args["rejected_proposal_ids"] is not None:
+                rej = self._request(
+                    "PUT",
+                    f"/api/v1/projects/{proj}/terms/decision/rejections",
+                    json_body={"rejected_proposal_ids": args["rejected_proposal_ids"]},
+                )
+                if isinstance(rej, dict) and isinstance(rej.get("draft"), dict):
+                    draft_obj = rej["draft"]
+                    rej = {
+                        "run_id": draft_obj.get("run_id"),
+                        "rejected_proposal_ids": draft_obj.get("rejected_proposal_ids", []),
+                        "total_proposals": len(draft_obj.get("proposals", [])),
+                    }
+                result["rejections"] = rej
+            if args.get("manual_reviews") is not None:
+                mrs = args["manual_reviews"]
+                if (
+                    not isinstance(mrs, list)
+                    or not mrs
+                    or not all(isinstance(entry, dict) for entry in mrs)
+                ):
+                    raise UsageError("manual_reviews 必须是非空对象数组")
+                last_mr = None
+                for entry in mrs:
+                    last_mr = self._request(
+                        "PUT",
+                        f"/api/v1/projects/{proj}/terms/decision/manual-review",
+                        json_body=entry,
+                    )
+                result["manual_reviews"] = {
+                    **(_manual_review_summary(last_mr) or {}),
+                    "updated_count": len(mrs),
+                }
+            if not result:
+                raise UsageError("必须提供 rejected_proposal_ids 或 manual_reviews")
+            return result
+
+        if name == "finalize_term_decision_draft":
+            proj = _quote_project(args)
+            action = args.get("action")
+            if not isinstance(action, str) or action not in {"apply", "discard", "rollback"}:
+                raise UsageError(f"不支持的术语决策收尾动作：{action}")
+            if args.get("confirm") is not True:
+                raise UsageError("收尾术语决策草案必须显式指定 confirm=True")
+            res = self._request(
+                "POST",
+                f"/api/v1/projects/{proj}/terms/decision/{action}",
+                json_body={"confirm": True},
+            )
+            if isinstance(res, dict) and isinstance(res.get("terms"), dict):
+                terms_summary = res["terms"]
+                res = {
+                    **{k: v for k, v in res.items() if k != "terms"},
+                    "conflict_count": terms_summary.get("conflict_count", 0),
+                    "total_terms": len(terms_summary.get("terms", [])),
+                }
+            return res
+
+        if name == "get_repetition_overview":
+            proj = _quote_project(args)
+            offset, limit = _page_params(args, default_limit=50, max_limit=200)
+            flt = _opt_str(args, "filter", "all")
+            if flt not in {"all", "uncertain_only", "over_budget_only"}:
+                raise UsageError(f"不支持的重复组筛选类型：{flt}")
+            exclude_punct = _opt_bool(args, "exclude_punctuation_only", True)
+            include_occurrences = _opt_bool(args, "include_occurrences", False)
+            sort_by = _opt_str(args, "sort_by", "occurrence_count")
+            if sort_by not in {"group_index", "occurrence_count"}:
+                raise UsageError("sort_by 必须是 group_index 或 occurrence_count")
+            create_draft = _opt_bool(args, "create_draft", False)
+            replace_draft = _opt_bool(args, "replace_draft", False)
+            if create_draft:
+                self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/agent/repetition/scan",
+                    json_body={
+                        "only_file": args.get("only_file"),
+                        "only_part": args.get("only_part"),
+                        "exclude_punctuation_only": exclude_punct,
+                        "create_draft": True,
+                        "replace_draft": replace_draft,
+                        "include_occurrences": include_occurrences,
+                        "sort_by": sort_by,
+                        "offset": offset,
+                        "limit": limit,
+                    },
+                )
+            state = self._request("GET", f"/api/v1/projects/{proj}/repetition")
+            draft = state.get("draft")
+            if draft and isinstance(draft.get("groups"), list):
+                groups = list(draft["groups"])
+                if flt == "uncertain_only":
+                    groups = [g for g in groups if g.get("uncertain")]
+                elif flt == "over_budget_only":
+                    groups = [g for g in groups if g.get("over_budget")]
+                if sort_by == "occurrence_count":
+                    groups = [
+                        g
+                        for _, g in sorted(
+                            enumerate(groups),
+                            key=lambda pair: (
+                                -len(pair[1].get("occurrences", []))
+                                if isinstance(pair[1], dict)
+                                and isinstance(pair[1].get("occurrences"), list)
+                                else 0,
+                                pair[0],
+                            ),
+                        )
+                    ]
+                compact_groups = []
+                for g in groups[offset : offset + limit]:
+                    cg = {k: v for k, v in g.items() if k != "files"}
+                    translations = (
+                        g.get("translations")
+                        if isinstance(g.get("translations"), list)
+                        else []
+                    )
+                    if isinstance(cg.get("occurrences"), list):
+                        all_occs = cg.pop("occurrences")
+                        cg["occurrence_count"] = len(all_occs)
+                        translation_counts: dict[str, int] = {}
+                        for occ in all_occs:
+                            if not isinstance(occ, dict):
+                                continue
+                            v_idx = occ.get("variant")
+                            t_val = occ.get("text")
+                            if (
+                                t_val is None
+                                and isinstance(v_idx, int)
+                                and 0 <= v_idx < len(translations)
+                            ):
+                                t_val = translations[v_idx]
+                            if isinstance(t_val, str):
+                                translation_counts[t_val] = (
+                                    translation_counts.get(t_val, 0) + 1
+                                )
+                        if translation_counts:
+                            cg["translation_counts"] = translation_counts
+                        if include_occurrences:
+                            compact_occs = []
+                            for occ in all_occs[:20]:
+                                if not isinstance(occ, dict):
+                                    continue
+                                c_occ = {
+                                    k: v
+                                    for k, v in occ.items()
+                                    if k
+                                    in {
+                                        "id",
+                                        "segment_id",
+                                        "file_id",
+                                        "part_id",
+                                        "line_index",
+                                        "variant",
+                                        "text",
+                                    }
+                                }
+                                v_idx = occ.get("variant")
+                                if (
+                                    "text" not in c_occ
+                                    and isinstance(v_idx, int)
+                                    and 0 <= v_idx < len(translations)
+                                ):
+                                    c_occ["translation"] = translations[v_idx]
+                                compact_occs.append(c_occ)
+                            cg["occurrences"] = compact_occs
+                            if len(all_occs) > 20:
+                                cg["occurrences_truncated"] = True
+                    compact_groups.append(cg)
+                draft = {
+                    **{k: v for k, v in draft.items() if k not in {"evidence", "sources"}},
+                    "total_groups": len(groups),
+                    "sort_by": sort_by,
+                    "offset": offset,
+                    "limit": limit,
+                    "groups": compact_groups,
+                }
+            result_state: dict[str, Any] = {**state, "draft": draft}
+            if (
+                draft is None
+                or args.get("only_part") is not None
+                or (args.get("only_file") is not None and not create_draft)
+            ):
+                result_state["live_scan"] = self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/agent/repetition/scan",
+                    json_body={
+                        "only_file": args.get("only_file"),
+                        "only_part": args.get("only_part"),
+                        "exclude_punctuation_only": exclude_punct,
+                        "create_draft": False,
+                        "include_occurrences": include_occurrences,
+                        "sort_by": sort_by,
+                        "offset": offset,
+                        "limit": limit,
+                    },
+                )
+            return result_state
+
+        if name == "inspect_repetition_group":
+            proj = _quote_project(args)
+            offset, limit = _page_params(args, default_limit=20, max_limit=100)
+            raw_window = args.get("window")
+            window = 5 if raw_window is None else raw_window
+            res = self._request(
+                "POST",
+                f"/api/v1/projects/{proj}/agent/repetition/inspect",
+                json_body={
+                    "group_id": args.get("group_id"),
+                    "source": args.get("source"),
+                    "window": window,
+                    "offset": offset,
+                    "limit": limit,
+                },
+            )
+            if isinstance(res, dict) and isinstance(res.get("draft_group"), dict):
+                res = {
+                    **res,
+                    "draft_group": {
+                        k: v
+                        for k, v in res["draft_group"].items()
+                        if k not in {"files", "occurrences"}
+                    },
+                }
+            return res
+
+        if name == "update_repetition_draft":
+            proj = _quote_project(args)
+            run_id = args.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                raise UsageError("Run ID 无效")
+            result = {}
+            if args.get("group_proposals") is not None:
+                result["proposals"] = self._request(
+                    "POST",
+                    f"/api/v1/projects/{proj}/agent/repetition/proposals",
+                    json_body={
+                        "run_id": run_id,
+                        "group_proposals": args["group_proposals"],
+                    },
+                )
+            if args.get("choices") is not None:
+                result["choices"] = self._request(
+                    "PUT",
+                    f"/api/v1/projects/{proj}/repetition/choices",
+                    json_body={"run_id": run_id, "choices": args["choices"]},
+                )
+            if not result:
+                raise UsageError("必须提供 choices 或 group_proposals")
+            return result
+
+        if name == "finalize_repetition_draft":
+            proj = _quote_project(args)
+            action = args.get("action")
+            if not isinstance(action, str) or action not in {"apply", "discard", "rollback"}:
+                raise UsageError(f"不支持的重复译文草案动作：{action}")
+            run_id = args.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                raise UsageError("Run ID 无效")
+            if args.get("confirm") is not True:
+                raise UsageError("收尾重复译文草案必须显式指定 confirm=True")
+            body: dict[str, Any] = {
+                "run_id": run_id,
+                "confirm": True,
+            }
+            if action == "apply":
+                choices = args.get("choices")
+                if choices is None:
+                    current = self._request("GET", f"/api/v1/projects/{proj}/repetition")
+                    choices = (current.get("draft") or {}).get("choices", {})
+                body["choices"] = choices
+            return self._request(
+                "POST",
+                f"/api/v1/projects/{proj}/repetition/{action}",
+                json_body=body,
+            )
+
+        raise UsageError(f"未知 MCP 工具：{name}")
+
+
+def handle_jsonrpc_message(
+    message: dict[str, Any], bridge: MCPWebBridge
+) -> dict[str, Any] | None:
+    method = message.get("method")
+    msg_id = message.get("id")
+    raw_params = message.get("params")
+    params = raw_params if isinstance(raw_params, dict) else {}
+
+    if method == "notifications/initialized" or msg_id is None:
+        return None
+
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": SERVER_INFO,
+                "instructions": MCP_INSTRUCTIONS,
+            },
+        }
+
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": msg_id, "result": {}}
+
+    if method == "tools/list":
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": {"tools": TOOLS},
+        }
+
+    if method == "tools/call":
+        tool_name = params.get("name")
+        raw_arguments = params.get("arguments")
+        if not isinstance(tool_name, str) or not tool_name:
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -32602, "message": "Missing tool name"},
+            }
+        if raw_arguments is not None and not isinstance(raw_arguments, dict):
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -32602, "message": "Invalid tool arguments"},
+            }
+        arguments = raw_arguments or {}
+        try:
+            payload = bridge.call_tool(tool_name, arguments)
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                payload,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        }
+                    ],
+                    "isError": False,
+                },
+            }
+        except (AppError, KeyError, TypeError, ValueError) as exc:
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {"error": str(exc)},
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        }
+                    ],
+                    "isError": True,
+                },
+            }
+
+    return {
+        "jsonrpc": "2.0",
+        "id": msg_id,
+        "error": {"code": -32601, "message": f"Method not found: {method}"},
+    }
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m app.mcp",
+        description="启动桥接本地 Web 服务的 MCP (stdio) 服务端",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="本地 Web 服务端口（默认读取 ANOTHER_LLM_WEB_PORT 或 8765）",
+    )
+    parser.add_argument(
+        "--web-url",
+        "--url",
+        dest="url",
+        type=str,
+        default=None,
+        help="本地 Web 服务完整地址（优先于 --port，也可通过 ANOTHER_LLM_WEB_URL 指定）",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
+    base_url = args.url or default_base_url(args.port)
+    bridge = MCPWebBridge(base_url=base_url)
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            response = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": "Parse error"},
+            }
+            sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+            continue
+        if not isinstance(message, dict):
+            continue
+        response = handle_jsonrpc_message(message, bridge)
+        if response is not None:
+            sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()

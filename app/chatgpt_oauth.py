@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-import httpx
+import httpx2
 import jwt
 import keyring
 
@@ -194,11 +194,11 @@ class ChatGPTConnection:
             state["welcome_seen"] = True
             (await run_blocking(lambda: atomic_write_json(self.path, state)))
 
-    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+    async def request(self, method: str, url: str, **kwargs: Any) -> httpx2.Response:
         try:
-            async with httpx.AsyncClient(proxy=(await run_blocking(lambda: self.read()))["proxy_url"] or None, timeout=30, trust_env=False) as client:
+            async with httpx2.AsyncClient(proxy=(await run_blocking(lambda: self.read()))["proxy_url"] or None, timeout=30, trust_env=False) as client:
                 return await client.request(method, url, **kwargs)
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             # Exception strings can contain URLs or credential-bearing headers.
             error = ExternalError("ChatGPT 网络请求失败，请检查连接代理")
             error.params = {"retryable": True}
@@ -218,7 +218,7 @@ class ChatGPTConnection:
         return self._metadata
 
     @staticmethod
-    def response_json(response: httpx.Response) -> dict[str, Any]:
+    def response_json(response: httpx2.Response) -> dict[str, Any]:
         try:
             value = response.json()
         except ValueError as exc:

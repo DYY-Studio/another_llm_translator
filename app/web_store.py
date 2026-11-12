@@ -42,7 +42,9 @@ from .sqlite_storage import (
     segment_count,
     segment_page_counts,
     segment_ids,
-    segment_part_ids,
+    segment_part_counts,
+    stage_completion_counts,
+    terminology_completed_count,
     utc_now,
     write_json,
 )
@@ -179,9 +181,15 @@ class WebStore:
         return int(library["terms_revision"]) if library else None
 
     def _translation_validation_context(
-        self, segment: dict[str, Any], text: str
+        self,
+        segment: dict[str, Any],
+        text: str,
+        *,
+        library: dict[str, Any] | None = None,
+        load_library: bool = True,
     ) -> TranslationValidationContext:
-        library = load_terms(self.project)
+        if library is None and load_library:
+            library = load_terms(self.project, resolve_knowledge=False)
         terms = match_term_validation(
             str(segment["source"]),
             library,
@@ -522,7 +530,7 @@ class WebStore:
             search=search,
             stage=stage,
         )
-        part_ids_by_file = segment_part_ids(self.project)
+        parts_by_file = segment_part_counts(self.project)
         try:
             sqlite_bytes = database_path(self.project).stat().st_size
         except OSError as exc:
@@ -542,7 +550,11 @@ class WebStore:
                 "has_run_options": bool(
                     get_document_adapter(str(item["document_adapter_id"])).run_options
                 ),
-                "part_ids": part_ids_by_file.get(str(item["file_id"]), []),
+                "part_ids": [
+                    entry["part_id"]
+                    for entry in parts_by_file.get(str(item["file_id"]), [])
+                ],
+                "parts": parts_by_file.get(str(item["file_id"]), []),
                 "size_bytes": _stored_source_size(
                     self.project, item.get("stored_name")
                 ),
@@ -551,12 +563,40 @@ class WebStore:
         ]
         return {
             "name": self.metadata["name"],
+            "project_id": self.project_id,
             "path": str(self.project),
             "nonempty_segment_count": segment_count(self.project),
             **page,
             "storage": storage,
             "files": files,
+            "stage_completion": self.stage_completion(),
         }
+
+    def stage_completion(self) -> dict[str, Any]:
+        from .term_decision_drafts import manual_review_state
+        from .term_knowledge import project_descriptions
+        counts = stage_completion_counts(self.project)
+        total = counts["translation"]["total"]
+        library = load_terms(self.project, resolve_knowledge=False)
+        active_path = self.project / "terminology" / "active_task.json"
+        active = read_json(self.project, active_path) if record_exists(self.project, active_path) else {}
+        scanned = terminology_completed_count(self.project, str(active.get("active_task_id", "")))
+        conflicts = sum(any(term.get("conflicts", {}).values()) for term in (library or {}).get("terms", []))
+        views = project_descriptions(self.project, library) if library else {}
+        generation = self.config["terminology_decision"]["description_generation"] if views else None
+        pending_entities = [root for root, view in views.items() if view["status"] != "current" or view["description_generation"] != generation]
+        pending_knowledge = len(pending_entities)
+        pending = len(library["knowledge"]["pending_changes"]) if library else 0
+        draft_pending = any(run.get("decision_status") == "pending" for run in list_runs(self.project, stage="terminology_decision"))
+        manual = manual_review_state(self.project)["remaining"]
+        counts["terminology"] = {"total": total, "generated": scanned or int(bool(library and library["terms"])), "completed": scanned,
+            "conflicts": conflicts, "changes": pending, "knowledge": pending_knowledge, "knowledge_entities": pending_entities,
+            "draft": int(draft_pending), "manual": manual,
+            "unpublished": int(bool(active) and active.get("status") != "completed")}
+        for stage, value in counts.items():
+            blocked = stage == "terminology" and (library is None or any(value[key] for key in ("conflicts", "changes", "knowledge", "draft", "manual", "unpublished")))
+            value["state"] = "empty" if total == 0 else "none" if not value["generated"] else "complete" if value["completed"] == total and not blocked else "partial"
+        return counts
 
     def segment_index(
         self,
@@ -909,6 +949,10 @@ class WebStore:
                     ),
                 }
             )
+        from .term_changes import change_details, publication_invalidates_undo
+        details = change_details(self.project, library) if library else {}
+        for row in rows:
+            row["pending_change"] = details.get(row["normalized"])
         by_normalized = {item["normalized"]: item for item in rows}
 
         def group_root(item: dict[str, Any]) -> str:
@@ -940,32 +984,21 @@ class WebStore:
                 int(library["terms_revision"]) if library is not None else None
             ),
             "conflict_count": sum(bool(item["has_conflicts"]) for item in rows),
+            "publication_invalidates_undo": publication_invalidates_undo(self.project),
             "terms": rows,
             "scan": self.terminology_scan(),
         }
 
     def clear_terms(self) -> dict[str, Any]:
         with project_write_lock(self.project):
-            for run in list_runs(self.project, stage="terminology", status="running"):
-                run.update(
-                    status="interrupted",
-                    interrupted_reason="terminology_cleared",
-                    interrupted_at=utc_now(),
-                    completed_at=utc_now(),
-                )
-                write_json(
-                    self.project,
-                    self.project / "runs" / str(run["run_id"]) / "manifest.json",
-                    run,
-                )
             overrides = record_header(
                 "terminology_overrides",
                 self.project_id,
                 record_id="TERMINOLOGY-OVERRIDES",
                 overrides=[],
             )
-            clear_terminology_state(self.project, overrides)
-            return self.terms()
+            warnings = clear_terminology_state(self.project, overrides)
+            return {**self.terms(), "warnings": warnings}
 
     @staticmethod
     def _term_forms(term: dict[str, Any]) -> list[tuple[str, str]]:
@@ -1498,10 +1531,36 @@ class WebStore:
                 save_items(self.project, archived, knowledge_target, description_items)
             else:
                 save_items(self.project, term_record, knowledge_target, description_items)
+        active = {term["normalized"] for term in terms}
+        pending = term_record["knowledge"]["pending_changes"]
+        for key in pending.keys() - active:
+            del pending[key]
         applied_descriptions(term_record)
         from .sqlite_storage import write_terminology_publication
         write_terminology_publication(self.project, terms=term_record, overrides=override_record)
         return self.terms()
+
+    def resolve_term_changes(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from .term_changes import require_no_decision_draft
+        with project_write_lock(self.project):
+            require_no_decision_draft(self.project)
+            library = load_terms(self.project, resolve_knowledge=False)
+            if library is None or payload.get("expected_revision") != library["terms_revision"]:
+                raise UsageError("术语库版本已变化，请刷新后重试")
+            keys = payload.get("normalized")
+            if payload.get("confirm") is not True or not isinstance(keys, list) or not keys or not all(isinstance(key, str) for key in keys):
+                raise UsageError("请明确确认要保持当前值的术语")
+            pending = library["knowledge"]["pending_changes"]
+            if set(keys) - pending.keys():
+                raise UsageError("待处理变化已变化，请刷新后重试")
+            for key in set(keys):
+                del pending[key]
+            library["terms_revision"] += 1
+            library["record_id"] = f'TERMS-{library["terms_revision"]}'
+            from .sqlite_storage import write_terminology_publication
+            overrides = read_json(self.project, self.project / "terminology" / "overrides.json")
+            write_terminology_publication(self.project, terms=library, overrides=overrides)
+            return self.terms()
 
     def _terms_edit_prepare(
         self, payload: dict[str, Any]

@@ -14,7 +14,7 @@ from .summary_provenance import digest
 
 
 def empty_knowledge() -> dict[str, Any]:
-    return {"version": 2, "fragments": {}, "entities": {}, "published_candidates": []}
+    return {"version": 2, "fragments": {}, "entities": {}, "published_candidates": [], "pending_changes": {}}
 
 
 def persistent_library(library: dict[str, Any]) -> dict[str, Any]:
@@ -332,7 +332,7 @@ def _entity_view(
     return {"entity_key": root, "members": members, "status": status, "items": items,
             "fragments": fragments, "input_version": version,
             "source_order": active_order,
-            "description_generation": saved.get("description_generation", "sourced") if saved else "sourced"}
+            "description_generation": saved.get("accepted_generation", saved.get("description_generation", "sourced")) if saved else "sourced"}
 
 
 def validate_items(view: dict[str, Any], items: Any, *, allow_manual: bool = False) -> list[dict[str, Any]]:
@@ -390,6 +390,8 @@ def confirm_keep(project: Path, library: dict[str, Any], normalized: str, *,
     if saved is None:
         raise UsageError("尚无已应用说明，不能确认保持")
     saved["input_version"] = view["input_version"]
+    from .config import load_project_config
+    saved["accepted_generation"] = load_project_config(project)["terminology_decision"]["description_generation"]
 
 
 def applied_descriptions(library: dict[str, Any]) -> None:
@@ -673,6 +675,13 @@ def update_entity(project: Path, payload: dict[str, Any]) -> dict[str, Any]:
 def remap_owner(library: dict[str, Any], old: str, new: str) -> None:
     """Keep evidence identity when an explicit term rename/alias conversion moves it."""
     knowledge = require_knowledge(library)
+    pending = knowledge["pending_changes"]
+    if old in pending:
+        moved = pending.pop(old)
+        entry = pending.setdefault(new, moved)
+        for ref in moved["candidate_refs"]:
+            if ref not in entry["candidate_refs"]:
+                entry["candidate_refs"].append(ref)
     for fragment in knowledge["fragments"].values():
         if fragment["owner"] == old:
             fragment["owner"] = new
@@ -688,7 +697,9 @@ def transfer_alias_evidence(library: dict[str, Any], spec: Any) -> dict[str, str
         for alias in term.get("aliases", []):
             aliases.setdefault(normalize_term(alias, spec), set()).add(term["normalized"])
     moved = {}
-    for owner in {f["owner"] for f in require_knowledge(library)["fragments"].values()} - active:
+    knowledge = require_knowledge(library)
+    owners = {f["owner"] for f in knowledge["fragments"].values()} | knowledge["pending_changes"].keys()
+    for owner in owners - active:
         receivers = aliases.get(owner, set())
         if len(receivers) == 1:
             new = next(iter(receivers))

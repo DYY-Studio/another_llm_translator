@@ -55,11 +55,19 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
 
     @app.put("/api/v1/projects/{name}/terms/knowledge")
     def put_knowledge(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from .sqlite_storage import read_json, record_exists
         from .term_knowledge import update_entity
         root = project(name)
         if app.state.tasks.is_project_running(root):
             raise UsageError("项目存在运行中的任务，不能修改实体说明")
-        update_entity(root, payload)
+        norm_payload = dict(payload)
+        if "expected_revision" not in norm_payload or norm_payload["expected_revision"] is None:
+            path = root / "terminology" / "terms.json"
+            if record_exists(root, path):
+                norm_payload["expected_revision"] = read_json(root, path)["terms_revision"]
+        if "action" not in norm_payload and isinstance(norm_payload.get("items"), list):
+            norm_payload["action"] = "save_items"
+        update_entity(root, norm_payload)
         return WebStore(root).terms()
 
     @app.post("/api/v1/projects/{name}/terms/hits")
@@ -134,6 +142,13 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             raise UsageError("项目存在运行中的任务，结束或取消后才能清空术语阶段")
         return WebStore(root).clear_terms()
 
+    @app.post("/api/v1/projects/{name}/terms/changes/resolve")
+    def resolve_term_changes(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能处理术语变化")
+        return WebStore(root).resolve_term_changes(payload)
+
     @app.post("/api/v1/projects/{name}/terms/delete")
     def delete_terms(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return WebStore(project(name)).delete_terms(payload)
@@ -171,6 +186,8 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
         name: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         root = project(name)
+        if app.state.tasks.is_project_running(root):
+            raise UsageError("项目存在运行中的任务，不能处理术语待办")
         run_id = payload.get("run_id")
         normalized = payload.get("normalized")
         resolved = payload.get("resolved")
@@ -244,6 +261,7 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
     def import_term_file(
         name: str,
         file: UploadFile = File(...),
+        overwrite: bool = False,
     ) -> dict[str, Any]:
         suffix = Path(file.filename or "").suffix.casefold()
         if suffix not in {".json", ".csv"}:
@@ -259,7 +277,9 @@ def register_term_routes(*, app: FastAPI, projects_root: Path, app_root: Path, p
             temporary = Path(handle.name)
         try:
             with project_write_lock(root):
-                return import_terms(root, temporary, dry_run=False)
+                return import_terms(
+                    root, temporary, dry_run=False, overwrite=overwrite
+                )
         finally:
             temporary.unlink(missing_ok=True)
 

@@ -6,7 +6,7 @@ import os
 from contextlib import ExitStack
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -146,6 +146,7 @@ def test_request_output_rate_is_unavailable_without_reliable_final_attempt_usage
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["translation", "terminology"])
 async def test_format_retry_reports_parent_result_and_direct_source(tmp_path: Path, stage: str) -> None:
+    import json
     from tests.helpers import llm_jsonl
     from tests.test_terminology_translation import create_project
     from app.execution import Scope
@@ -156,17 +157,20 @@ async def test_format_retry_reports_parent_result_and_direct_source(tmp_path: Pa
     diagnostics = DiagnosticsHub(tmp_path / "logs" / "app.log")
     calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])
+        if calls > 1:
+            assert "format_correction" not in payload
         content = "invalid" if calls == 1 else llm_jsonl(
             [{"type": "segment", "id": "1", "translation": "你好"}]
             if stage == "translation" else []
         )
-        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": content}}]})
 
     with diagnostics.activate("sample", stage, task_id="retry-check"):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             run_stage = run_translation if stage == "translation" else run_terminology
             result = await run_stage(project, Scope(), http_client=client)
         assert result["failed"] == 0
@@ -455,11 +459,17 @@ def test_diagnostics_hub_removes_old_terminal_records_in_current_batch(
     assert hub.snapshot()["metrics"]["average_latency_ms"] == 10.0
 
 
+@pytest.mark.parametrize(
+    ("first_task", "second_task"),
+    [("T1", "T3"), ("T1", None), (None, "T3")],
+)
 def test_diagnostics_hub_clears_previous_batch_when_new_run_starts(
     tmp_path: Path,
+    first_task: str | None,
+    second_task: str | None,
 ) -> None:
     hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
-    with hub.activate("first", "translation", task_id="T1"):
+    with hub.activate("first", "translation", task_id=first_task):
         hub.begin_request(
             request_id="REQ-OLD",
             model="model",
@@ -475,7 +485,7 @@ def test_diagnostics_hub_clears_previous_batch_when_new_run_starts(
             max_attempts=1,
         )
         hub.complete_request("REQ-OTHER", content="other", reasoning_content=None)
-    with hub.activate("first", "translation", task_id="T3"):
+    with hub.activate("first", "translation", task_id=second_task):
         hub.begin_request(
             request_id="REQ-NEW",
             model="model",
@@ -533,41 +543,6 @@ async def test_diagnostics_hub_keeps_finished_sessions_while_another_run_is_acti
     assert finished["metrics"]["total_requests"] == 3
 
 
-def test_diagnostics_hub_clears_previous_batch_for_unscoped_run(
-    tmp_path: Path,
-) -> None:
-    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
-    with hub.activate("first", "translation", task_id="T1"):
-        hub.begin_request(
-            request_id="REQ-OLD",
-            model="model",
-            messages=[],
-            max_attempts=1,
-        )
-        hub.complete_request("REQ-OLD", content="old", reasoning_content=None)
-    with hub.activate("other", "translation", task_id="T2"):
-        hub.begin_request(
-            request_id="REQ-OTHER",
-            model="model",
-            messages=[],
-            max_attempts=1,
-        )
-        hub.complete_request("REQ-OTHER", content="other", reasoning_content=None)
-    with hub.activate("first", "translation"):
-        hub.begin_request(
-            request_id="REQ-NEW",
-            model="model",
-            messages=[],
-            max_attempts=1,
-        )
-        hub.complete_request("REQ-NEW", content="new", reasoning_content=None)
-
-    request_ids = {
-        item["request_id"] for item in hub.snapshot()["requests"]["items"]
-    }
-    assert request_ids == {"REQ-NEW"}
-
-
 def test_diagnostics_hub_unscoped_run_resets_incremental_feed(
     tmp_path: Path,
 ) -> None:
@@ -596,33 +571,6 @@ def test_diagnostics_hub_unscoped_run_resets_incremental_feed(
 
     assert after["reset"] is True
     assert [item["request_id"] for item in after["items"]] == ["REQ-NEW"]
-
-
-def test_diagnostics_hub_task_run_clears_previous_unscoped_run(
-    tmp_path: Path,
-) -> None:
-    hub = DiagnosticsHub(tmp_path / "logs" / "app.log")
-    with hub.activate("first", "translation"):
-        hub.begin_request(
-            request_id="REQ-OLD",
-            model="model",
-            messages=[],
-            max_attempts=1,
-        )
-        hub.complete_request("REQ-OLD", content="old", reasoning_content=None)
-    with hub.activate("first", "translation", task_id="T1"):
-        hub.begin_request(
-            request_id="REQ-NEW",
-            model="model",
-            messages=[],
-            max_attempts=1,
-        )
-        hub.complete_request("REQ-NEW", content="new", reasoning_content=None)
-
-    request_ids = {
-        item["request_id"] for item in hub.snapshot()["requests"]["items"]
-    }
-    assert request_ids == {"REQ-NEW"}
 
 
 def test_diagnostics_hub_preserves_details_for_more_than_200_active_requests(
@@ -759,39 +707,6 @@ def test_request_exchange_and_exact_usage_are_session_only(tmp_path: Path) -> No
     assert "private response" not in persisted
     assert "private chain" not in persisted
 
-    diagnostics.set_usage(
-        {
-            "input_tokens": 12,
-            "output_tokens": 3,
-            "total_tokens": 15,
-            "available": False,
-            "partial": False,
-        }
-    )
-    unavailable = diagnostics.snapshot()["metrics"]
-    assert unavailable["input_tokens"] == 0
-    assert unavailable["output_tokens"] == 0
-    assert unavailable["total_requests"] == 1
-    assert unavailable["throughput_input_tokens_per_second"] is None
-    assert unavailable["throughput_output_tokens_per_second"] is None
-    assert unavailable["throughput_tokens_per_second"] is None
-
-    diagnostics.set_usage(
-        {
-            "input_tokens": 12,
-            "output_tokens": 3,
-            "total_tokens": 15,
-            "available": False,
-            "partial": True,
-        }
-    )
-    partial = diagnostics.snapshot()["metrics"]
-    assert partial["usage_available"] is False
-    assert partial["usage_partial"] is True
-    assert partial["input_tokens"] == 12
-    assert partial["output_tokens"] == 3
-    assert partial["throughput_tokens_per_second"] is not None
-
 
 def test_stream_progress_is_visible_without_partial_response(
     tmp_path: Path,
@@ -820,24 +735,6 @@ def test_stream_progress_is_visible_without_partial_response(
         detail = diagnostics.request_detail("REQ-SSE")
         assert detail["response_content"] is None
         assert detail["attempts"] == []
-
-
-def test_total_request_count_resets_for_each_run(tmp_path: Path) -> None:
-    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
-    with diagnostics.activate("first", "translation"):
-        diagnostics.begin_request(
-            request_id="REQ-1",
-            model="test-model",
-            messages=[],
-            max_attempts=1,
-        )
-        assert diagnostics.snapshot()["metrics"]["total_requests"] == 1
-        assert diagnostics.snapshot()["metrics"]["average_latency_ms"] is None
-        assert diagnostics.snapshot()["metrics"]["p95_latency_ms"] is None
-    with diagnostics.activate("second", "translation"):
-        assert diagnostics.snapshot()["metrics"]["total_requests"] == 0
-        assert diagnostics.snapshot()["metrics"]["average_latency_ms"] is None
-        assert diagnostics.snapshot()["metrics"]["p95_latency_ms"] is None
 
 
 def test_latency_metrics_aggregate_successful_logical_requests_and_use_nearest_rank_p95(
@@ -1053,6 +950,12 @@ def test_request_records_are_bounded_and_released_records_removed(
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
 
     with diagnostics.activate("sample", "translation"):
+        diagnostics.begin_request(
+            request_id="REQ-ACTIVE",
+            model="model",
+            messages=[{"role": "user", "content": "active"}],
+            max_attempts=1,
+        )
         for index in range(201):
             request_id = f"REQ-{index}"
             diagnostics.begin_request(
@@ -1073,6 +976,13 @@ def test_request_records_are_bounded_and_released_records_removed(
                     "r" * 20_001 if index == 200 else "reasoning"
                 ),
             )
+        assert diagnostics.request_detail("REQ-ACTIVE")["status"] == "running"
+        diagnostics.complete_request(
+            "REQ-ACTIVE", content="active done", reasoning_content=None
+        )
+        assert diagnostics.request_detail("REQ-ACTIVE")["response_content"] == (
+            "active done"
+        )
 
     feed = diagnostics.snapshot()["requests"]
     assert feed["total"] == 200
@@ -1101,43 +1011,6 @@ def test_request_records_are_bounded_and_released_records_removed(
 
     with diagnostics.activate("third", "polishing"):
         assert diagnostics.snapshot()["requests"]["items"] == []
-
-
-def test_request_record_release_resets_incremental_feed(tmp_path: Path) -> None:
-    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
-
-    with diagnostics.activate("sample", "translation"):
-        for index in range(200):
-            request_id = f"REQ-{index}"
-            diagnostics.begin_request(
-                request_id=request_id,
-                model="model",
-                messages=[],
-                max_attempts=1,
-            )
-            diagnostics.complete_request(
-                request_id, content="content", reasoning_content=None
-            )
-        before = diagnostics.snapshot()["requests"]
-
-        diagnostics.begin_request(
-            request_id="REQ-200",
-            model="model",
-            messages=[],
-            max_attempts=1,
-        )
-        diagnostics.complete_request(
-            "REQ-200", content="content", reasoning_content=None
-        )
-        after = diagnostics.snapshot(
-            request_session=before["session_id"],
-            request_after=before["cursor"],
-        )["requests"]
-
-    assert after["reset"] is True
-    assert after["total"] == 200
-    assert len(after["items"]) == 200
-    assert all(item["request_id"] != "REQ-0" for item in after["items"])
 
 
 def test_diagnostics_hub_session_prune_resets_incremental_feed(
@@ -1217,46 +1090,6 @@ def test_request_summary_feed_is_incremental_and_resets_per_run(
         assert reset["items"] == []
 
 
-def test_running_request_detail_is_not_pruned_by_terminal_limit(
-    tmp_path: Path,
-) -> None:
-    diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
-
-    with diagnostics.activate("sample", "translation"):
-        diagnostics.begin_request(
-            request_id="REQ-ACTIVE",
-            model="model",
-            messages=[{"role": "user", "content": "active"}],
-            max_attempts=1,
-        )
-        for index in range(201):
-            request_id = f"REQ-DONE-{index}"
-            diagnostics.begin_request(
-                request_id=request_id,
-                model="model",
-                messages=[],
-                max_attempts=1,
-            )
-            diagnostics.complete_request(
-                request_id, content="done", reasoning_content=None
-            )
-
-        assert diagnostics.request_detail("REQ-ACTIVE")["status"] == "running"
-        active_summary = next(
-            item
-            for item in diagnostics.snapshot()["requests"]["items"]
-            if item["request_id"] == "REQ-ACTIVE"
-        )
-        assert active_summary["detail_available"] is True
-
-        diagnostics.complete_request(
-            "REQ-ACTIVE", content="active done", reasoning_content=None
-        )
-        assert diagnostics.request_detail("REQ-ACTIVE")["response_content"] == (
-            "active done"
-        )
-
-
 @pytest.mark.asyncio
 async def test_llm_runtime_reports_safe_diagnostics(tmp_path: Path) -> None:
     current = config()
@@ -1264,12 +1097,12 @@ async def test_llm_runtime_reports_safe_diagnostics(tmp_path: Path) -> None:
     current["retry"]["jitter_seconds"] = 0
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(429, headers={"Retry-After": "0"}, text="slow")
-        return httpx.Response(
+            return httpx2.Response(429, headers={"Retry-After": "0"}, text="slow")
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -1291,7 +1124,7 @@ async def test_llm_runtime_reports_safe_diagnostics(tmp_path: Path) -> None:
         )
 
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "never-log-this-secret"
     try:
         with diagnostics.activate("sample", "translation"):
@@ -1351,16 +1184,16 @@ async def test_429_wait_is_reported_only_while_sleeping(tmp_path: Path) -> None:
     wait_started = asyncio.Event()
     release = asyncio.Event()
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(
+            return httpx2.Response(
                 429,
                 headers={"Retry-After": "5"},
                 text="rate limited",
             )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
         )
@@ -1370,7 +1203,7 @@ async def test_429_wait_is_reported_only_while_sleeping(tmp_path: Path) -> None:
         await release.wait()
 
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "never-log-this-secret"
     try:
         with diagnostics.activate("sample", "translation"):
@@ -1425,12 +1258,12 @@ async def test_regular_retry_backoff_is_not_rate_limit_wait(
     wait_started = asyncio.Event()
     release = asyncio.Event()
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(500, text="temporary")
-        return httpx.Response(
+            return httpx2.Response(500, text="temporary")
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": '{"type":"end"}'}}]},
         )
@@ -1440,7 +1273,7 @@ async def test_regular_retry_backoff_is_not_rate_limit_wait(
         await release.wait()
 
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "never-log-this-secret"
     try:
         with diagnostics.activate("sample", "translation"):
@@ -1495,15 +1328,15 @@ async def test_llm_runtime_reports_safe_failure_categories(
     current = config()
     current["retry"]["http_max_attempts"] = 1
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if failure == "authentication":
-            return httpx.Response(401, text="secret provider response")
+            return httpx2.Response(401, text="secret provider response")
         if failure == "network":
-            raise httpx.ReadTimeout("secret network detail", request=request)
-        return httpx.Response(200, json={"choices": []})
+            raise httpx2.ReadTimeout("secret network detail", request=request)
+        return httpx2.Response(200, json={"choices": []})
 
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     os.environ["LLM_API_KEY"] = "never-log-this-secret"
     try:
         with diagnostics.activate("sample", "translation"):

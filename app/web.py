@@ -147,7 +147,7 @@ def create_app(
             for path in sorted(app.state.external_projects)
             if database_path(path).is_file()
         )
-        return list({path.resolve() for path in paths})
+        return list(dict.fromkeys(path.resolve() for path in paths))
 
     def storage_project_paths() -> list[Path]:
         return [*local_project_paths(), *sorted(app.state.external_projects)]
@@ -158,11 +158,19 @@ def create_app(
         try:
             return resolve_project(name, projects_root)
         except ProjectError:
+            all_paths = project_paths()
             matches = [
                 path
-                for path in project_paths()
+                for path in all_paths
                 if str(read_json(path, path / "project.json")["project_id"]) == name
             ]
+            if not matches:
+                matches = [
+                    path
+                    for path in all_paths
+                    if str(read_json(path, path / "project.json").get("name")) == name
+                    or path.name == name
+                ]
             if len(matches) != 1:
                 raise ProjectError(f"项目不存在或标识冲突：{name}")
             return matches[0]
@@ -414,6 +422,8 @@ def create_app(
     )
     from .web_segment_routes import register_segment_routes
     register_segment_routes(app=app, projects_root=projects_root, app_root=app_root, project=project)
+    from .web_agent_routes import register_agent_routes
+    register_agent_routes(app=app, project=project)
     from .web_repetition_routes import register_repetition_routes
     register_repetition_routes(app=app, project=project)
     from .web_export_routes import register_export_routes

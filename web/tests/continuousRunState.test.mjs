@@ -25,20 +25,21 @@ test("continuous stages remain a canonical interval and clearing truncates later
   ]);
 });
 
-test("continuous payload forces middle decision review and explicit apply", () => {
+test("continuous payload forces middle decision review and keeps terminal decision optional", () => {
+  const baseOptions = {
+    finalReview: false,
+    applyTerminologyDecision: true,
+    force: false,
+    reuseMixedFingerprints: false,
+    runActions: { translation: "resume" },
+    includeDraftTranslation: false,
+    includeSummaries: false,
+    aggregateFullSummaries: false,
+  };
   assert.deepEqual(
     continuousPayload(
       ["terminology", "terminology_decision", "translation"],
-      {
-        finalReview: false,
-        applyTerminologyDecision: true,
-        force: false,
-        reuseMixedFingerprints: false,
-        runActions: { translation: "resume" },
-        includeDraftTranslation: false,
-        includeSummaries: false,
-        aggregateFullSummaries: false,
-      },
+      baseOptions,
     ),
     {
       stage: "continuous",
@@ -46,6 +47,7 @@ test("continuous payload forces middle decision review and explicit apply", () =
       apply_repetition_consistency: false,
       exclude_punctuation_only: true,
       screening_enabled: false,
+      repetition_final_review: false,
       stages: ["terminology", "terminology_decision", "translation"],
       final_review: true,
       apply_terminology_decision: true,
@@ -57,37 +59,15 @@ test("continuous payload forces middle decision review and explicit apply", () =
       aggregate_full_summaries: false,
     },
   );
-});
-
-test("terminal decision keeps optional final review and automatic application", () => {
-  assert.deepEqual(
-    continuousPayload(["terminology", "terminology_decision"], {
-      finalReview: true,
-      applyTerminologyDecision: true,
-      force: true,
-      reuseMixedFingerprints: false,
-      runActions: {},
-      includeDraftTranslation: false,
-      includeSummaries: false,
-      aggregateFullSummaries: false,
-    }),
-    {
-      stage: "continuous",
-      include_repetition_consistency: false,
-      apply_repetition_consistency: false,
-      exclude_punctuation_only: true,
-      screening_enabled: false,
-      stages: ["terminology", "terminology_decision"],
-      final_review: true,
-      apply_terminology_decision: true,
-      force: true,
-      reuse_mixed_fingerprints: false,
-      run_actions: {},
-      include_draft_translation: false,
-      include_summaries: false,
-      aggregate_full_summaries: false,
-    },
-  );
+  const terminal = continuousPayload(["terminology", "terminology_decision"], {
+    ...baseOptions,
+    finalReview: false,
+    force: true,
+    runActions: {},
+  });
+  assert.equal(terminal.final_review, false);
+  assert.equal(terminal.apply_terminology_decision, true);
+  assert.equal(terminal.force, true);
 });
 
 test("run actions follow the current running Run and remove incompatible resume", () => {
@@ -159,12 +139,16 @@ test("repetition review is optional and applies only with explicit authorization
   };
   const enabled = continuousPayload(["translation", "proofreading"], {
     ...defaults, includeRepetitionConsistency: true, applyRepetitionConsistency: true,
-    excludePunctuationOnly: false, screeningEnabled: true,
+    excludePunctuationOnly: false, screeningEnabled: true, repetitionFinalReview: true,
   });
   assert.equal(enabled.include_repetition_consistency, true);
   assert.equal(enabled.apply_repetition_consistency, true);
   assert.equal(enabled.exclude_punctuation_only, false);
   assert.equal(enabled.screening_enabled, true);
+  assert.equal(enabled.repetition_final_review, true);
+  assert.equal(continuousPayload(["proofreading"], { ...defaults, includeRepetitionConsistency: true }).include_repetition_consistency, false);
+  assert.equal(continuousPayload(["terminology"], { ...defaults, includeDraftTranslation: true, includeRepetitionConsistency: true }).include_repetition_consistency, true);
+  assert.equal(continuousPayload(["terminology", "terminology_decision"], { ...defaults, includeDraftTranslation: true, includeRepetitionConsistency: true }).final_review, true);
   const terminal = continuousPayload(["translation"], { ...defaults, includeRepetitionConsistency: true, applyRepetitionConsistency: true });
   assert.equal(terminal.apply_repetition_consistency, true);
   const disabled = continuousPayload(["translation"], { ...defaults, applyRepetitionConsistency: true });

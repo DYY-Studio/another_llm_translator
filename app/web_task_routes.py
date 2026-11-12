@@ -203,6 +203,8 @@ def _safe_run_summary(
         "prompt_language",
         "review_stage",
         "primary_mode",
+        "executor",
+        "agent_model_hint",
     ):
         if isinstance(run.get(key), str):
             result[key] = run[key]
@@ -317,6 +319,8 @@ def _execution_snapshot(directory: Path, metadata: dict[str, Any]) -> dict[str, 
         "stage_fingerprint",
         "prompt_language",
         "primary_mode",
+        "executor",
+        "agent_model_hint",
     ):
         value = metadata.get(key)
         if isinstance(value, str):
@@ -800,12 +804,14 @@ def register_task_routes(
             replace_draft=payload.replace_draft,
             exclude_punctuation_only=payload.exclude_punctuation_only,
             screening_enabled=payload.screening_enabled,
+            repetition_final_review=payload.repetition_final_review,
             acknowledge_manual_review=payload.acknowledge_manual_review,
             include_summaries=payload.include_summaries,
             include_draft_translation=payload.include_draft_translation,
             aggregate_full_summaries=payload.aggregate_full_summaries,
             final_review=payload.final_review,
-            knowledge_only=payload.knowledge_only,
+            knowledge_only=payload.knowledge_only, all_terms=payload.all_terms,
+            review_draft_run_id=payload.review_draft_run_id,
             summary_selection=summary_selection,
             continuous_stages=payload.stages,
             continuous_run_actions=payload.run_actions,
@@ -826,12 +832,15 @@ def register_task_routes(
         language: str | None = None,
         final_review: bool = False,
         knowledge_only: bool = False,
+        all_terms: bool = False,
+        review_draft_run_id: str | None = None,
         stages: list[str] = Query(default=[]),  # noqa: B008
         apply_terminology_decision: bool = False,
         include_repetition_consistency: bool = False,
         apply_repetition_consistency: bool = False,
         exclude_punctuation_only: bool = True,
         screening_enabled: bool = False,
+        repetition_final_review: bool = False,
     ) -> dict[str, Any]:
         from .config import LLM_MODEL_STAGES
         from .web_chatgpt_routes import require_project_plan_session
@@ -854,13 +863,15 @@ def register_task_routes(
                 validate_language(language) if language is not None else None
             ),
             final_review=final_review,
-            knowledge_only=knowledge_only,
+            knowledge_only=knowledge_only, all_terms=all_terms,
+            review_draft_run_id=review_draft_run_id,
             continuous_stages=stages,
             apply_terminology_decision=apply_terminology_decision,
             include_repetition_consistency=include_repetition_consistency,
             apply_repetition_consistency=apply_repetition_consistency,
             exclude_punctuation_only=exclude_punctuation_only,
             screening_enabled=screening_enabled,
+            repetition_final_review=repetition_final_review,
         )
 
     @app.get("/api/v1/tasks/active")

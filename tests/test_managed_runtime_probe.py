@@ -49,68 +49,42 @@ def _write_lock(path: Path, values: dict[str, object]) -> None:
     path.write_text(json.dumps(values), encoding="utf-8")
 
 
-def test_probe_rejects_lock_missing_required_source_fields(tmp_path: Path) -> None:
-    lock = tmp_path / "runtime.lock.json"
-    _write_lock(lock, {"source": "python-build-standalone"})
-    archive = tmp_path / "runtime.tar.gz"
-    archive.write_bytes(b"not used after lock validation")
-
-    result = _run(lock, archive)
-
-    assert result.returncode != 0
-    assert "tag" in result.stderr
-
-
-def test_probe_rejects_asset_filename_inconsistent_with_locked_version(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("case", "diagnostic"),
+    [
+        ("missing_fields", "tag"),
+        ("bad_asset_filename", "asset_filename"),
+        ("missing_archive", "missing.tar.gz"),
+        ("non_tar_gzip", ".tar.gz"),
+        ("digest_mismatch", "sha256"),
+    ],
+)
+def test_probe_rejects_invalid_lock_or_archive(
+    tmp_path: Path, case: str, diagnostic: str
 ) -> None:
     lock = tmp_path / "runtime.lock.json"
-    values = _lock("0" * 64)
-    values["asset_filename"] = (
-        "cpython-3.13.14+20260901-aarch64-apple-darwin-install_only_stripped.tar.gz"
-    )
-    _write_lock(lock, values)
-    archive = tmp_path / "runtime.tar.gz"
-    archive.write_bytes(b"not used after lock validation")
+    archive = tmp_path / ("runtime.zip" if case == "non_tar_gzip" else "runtime.tar.gz")
+    if case != "missing_archive":
+        archive.write_bytes(b"archive bytes")
+    if case == "missing_fields":
+        _write_lock(lock, {"source": "python-build-standalone"})
+    elif case == "bad_asset_filename":
+        values = _lock("0" * 64)
+        values["asset_filename"] = (
+            "cpython-3.13.14+20260901-aarch64-apple-darwin-install_only_stripped.tar.gz"
+        )
+        _write_lock(lock, values)
+    elif case == "non_tar_gzip":
+        _write_lock(lock, _lock(hashlib.sha256(archive.read_bytes()).hexdigest()))
+    else:
+        _write_lock(lock, _lock("0" * 64))
+    if case == "missing_archive":
+        archive = tmp_path / "missing.tar.gz"
 
     result = _run(lock, archive)
 
     assert result.returncode != 0
-    assert "asset_filename" in result.stderr
-
-
-def test_probe_reports_missing_archive_path(tmp_path: Path) -> None:
-    lock = tmp_path / "runtime.lock.json"
-    _write_lock(lock, _lock("0" * 64))
-
-    result = _run(lock, tmp_path / "missing.tar.gz")
-
-    assert result.returncode != 0
-    assert "missing.tar.gz" in result.stderr
-
-
-def test_probe_rejects_non_tar_gzip_archive(tmp_path: Path) -> None:
-    archive = tmp_path / "runtime.zip"
-    archive.write_bytes(b"not a tarball")
-    lock = tmp_path / "runtime.lock.json"
-    _write_lock(lock, _lock(hashlib.sha256(archive.read_bytes()).hexdigest()))
-
-    result = _run(lock, archive)
-
-    assert result.returncode != 0
-    assert ".tar.gz" in result.stderr
-
-
-def test_probe_rejects_archive_digest_mismatch(tmp_path: Path) -> None:
-    archive = tmp_path / "runtime.tar.gz"
-    archive.write_bytes(b"archive bytes")
-    lock = tmp_path / "runtime.lock.json"
-    _write_lock(lock, _lock("0" * 64))
-
-    result = _run(lock, archive)
-
-    assert result.returncode != 0
-    assert "sha256" in result.stderr.lower()
+    assert diagnostic in result.stderr.lower() or diagnostic in result.stderr
 
 
 def _runtime_script(
@@ -214,62 +188,29 @@ def _run_fixture(
     )
 
 
-def test_probe_rejects_archive_without_bundled_python(tmp_path: Path) -> None:
-    result = _run_fixture(tmp_path, _archive(tmp_path, include_python=False))
-
-    assert result.returncode != 0
-    assert "bin/python3" in result.stderr
-
-
 @pytest.mark.parametrize(
-    ("version", "target", "diagnostic"),
+    ("archive_kwargs", "run_kwargs", "diagnostic"),
     [
-        ("3.13.14", "aarch64-apple-darwin", "version"),
-        ("3.13.15", "x86_64-apple-darwin", "target"),
+        ({"include_python": False}, {}, "bin/python3"),
+        ({"version": "3.13.14"}, {}, "version"),
+        ({"target": "x86_64-apple-darwin"}, {}, "target"),
+        ({"gil_disabled": None}, {}, "py_gil_disabled"),
+        ({"fail_after_move": True}, {}, "relocat"),
+        ({}, {"arch": "x86_64"}, "arm64"),
+        ({}, {"minos": "14.0"}, "14.0"),
+        ({"include_license": False}, {}, "license"),
     ],
 )
-def test_probe_rejects_bundled_python_version_or_target_mismatch(
-    tmp_path: Path, version: str, target: str, diagnostic: str
+def test_probe_rejects_invalid_bundled_runtime(
+    tmp_path: Path,
+    archive_kwargs: dict[str, object],
+    run_kwargs: dict[str, str],
+    diagnostic: str,
 ) -> None:
-    result = _run_fixture(tmp_path, _archive(tmp_path, version=version, target=target))
+    result = _run_fixture(tmp_path, _archive(tmp_path, **archive_kwargs), **run_kwargs)
 
     assert result.returncode != 0
-    assert diagnostic in result.stderr.lower()
-
-
-def test_probe_rejects_missing_gil_mode_metadata(tmp_path: Path) -> None:
-    result = _run_fixture(tmp_path, _archive(tmp_path, gil_disabled=None))
-
-    assert result.returncode != 0
-    assert "py_gil_disabled" in result.stderr.lower()
-
-
-def test_probe_rejects_runtime_that_fails_after_relocation(tmp_path: Path) -> None:
-    result = _run_fixture(tmp_path, _archive(tmp_path, fail_after_move=True))
-
-    assert result.returncode != 0
-    assert "relocat" in result.stderr.lower()
-
-
-def test_probe_rejects_non_arm64_macho(tmp_path: Path) -> None:
-    result = _run_fixture(tmp_path, _archive(tmp_path), arch="x86_64")
-
-    assert result.returncode != 0
-    assert "arm64" in result.stderr
-
-
-def test_probe_rejects_macho_deployment_target_above_13(tmp_path: Path) -> None:
-    result = _run_fixture(tmp_path, _archive(tmp_path), minos="14.0")
-
-    assert result.returncode != 0
-    assert "14.0" in result.stderr
-
-
-def test_probe_rejects_missing_license_material(tmp_path: Path) -> None:
-    result = _run_fixture(tmp_path, _archive(tmp_path, include_license=False))
-
-    assert result.returncode != 0
-    assert "license" in result.stderr.lower()
+    assert diagnostic in result.stderr.lower() or diagnostic in result.stderr
 
 
 def test_probe_reports_evidence_for_a_minimal_runtime_moved_from_its_archive_path(

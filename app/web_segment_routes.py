@@ -10,6 +10,7 @@ from .errors import (
 )
 from .execution import Scope
 from .locking import project_write_lock
+from .sqlite_storage import segment_ids as query_segment_ids
 from .stage_review import run_apply
 from .web_payloads import SegmentFilterPayload, SegmentQueryPayload
 from .web_store import WebStore
@@ -27,7 +28,7 @@ def register_segment_routes(*, app: FastAPI, projects_root: Path, app_root: Path
     async def overview_query(
         name: str, payload: SegmentQueryPayload
     ) -> dict[str, Any]:
-        if bool(payload.file_id) != bool(payload.part_id):
+        if payload.part_id and not payload.file_id:
             raise UsageError("file_id 与 part_id 必须同时提供")
         root = project(name)
         return (await run_blocking(lambda: WebStore(root).segment_query(
@@ -91,16 +92,30 @@ def register_segment_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             raise UsageError("allow_outdated_base 必须是布尔值")
         if not isinstance(confirmed_all, bool):
             raise UsageError("all 必须是布尔值")
-        scope = Scope(
-            from_file=payload.get("from_file"),
-            only_file=payload.get("only_file"),
-            only_segment=payload.get("only_segment"),
-            segment_ids=(
-                tuple(dict.fromkeys(segment_ids))
-                if isinstance(segment_ids, list)
-                else None
-            ),
-        )
+        only_file = payload.get("only_file")
+        only_part = payload.get("only_part")
+        if only_part is not None:
+            if not isinstance(only_part, str) or not only_part:
+                raise UsageError("only_part 必须是非空字符串")
+            if not isinstance(only_file, str) or not only_file:
+                raise UsageError("only_part 必须与 only_file 同时提供")
+            if segment_ids is not None or payload.get("from_file") or payload.get("only_segment"):
+                raise UsageError("only_part 不能与 from_file、only_segment 或 segment_ids 同时使用")
+            resolved_ids = query_segment_ids(root, file_id=only_file, part_id=only_part)
+            if not resolved_ids:
+                raise UsageError(f"指定章节范围为空或不存在：{only_file} / {only_part}")
+            scope = Scope(segment_ids=tuple(resolved_ids))
+        else:
+            scope = Scope(
+                from_file=payload.get("from_file"),
+                only_file=only_file,
+                only_segment=payload.get("only_segment"),
+                segment_ids=(
+                    tuple(dict.fromkeys(segment_ids))
+                    if isinstance(segment_ids, list)
+                    else None
+                ),
+            )
         with project_write_lock(root):
             return run_apply(
                 root,

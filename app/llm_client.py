@@ -13,7 +13,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
-import httpx
+import httpx2
 from .request_budget import RequestBudget, resolve_request_budget, request_input_limit
 from .credentials import resolve_api_keys
 from .chatgpt_oauth import ChatGPTConnection, plan_error
@@ -105,7 +105,7 @@ class _StreamProtocolError(ExternalError):
         self.usage_values = dict(usage_values or {})
 
 async def _iter_sse_data(
-    response: httpx.Response,
+    response: httpx2.Response,
 ) -> AsyncIterator[tuple[str, int]]:
     """Yield complete SSE data blocks while preserving exact byte counts."""
     pending = bytearray()
@@ -270,7 +270,7 @@ class LLMClient:
         project_id: str,
         run_id: str,
         stage: str,
-        client: httpx.AsyncClient | None = None,
+        client: httpx2.AsyncClient | None = None,
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
         on_usage: Callable[[dict[str, Any] | None], None] | None = None,
         preparation_started_at: float | None = None,
@@ -484,7 +484,7 @@ class LLMClient:
         diagnostics: Any | None,
     ) -> tuple[
         int,
-        httpx.Response,
+        httpx2.Response,
         LLMResponse,
         dict[str, int],
         list[str],
@@ -502,7 +502,7 @@ class LLMClient:
             if not 200 <= status < 300:
                 try:
                     await response.aread()
-                except httpx.DecodingError as exc:
+                except httpx2.DecodingError as exc:
                     raise _StreamProtocolError(
                         "LLM 响应内容解码失败",
                         status=status,
@@ -513,9 +513,9 @@ class LLMClient:
                         usage_values={},
                     ) from exc
                 except (
-                    httpx.TimeoutException,
-                    httpx.NetworkError,
-                    httpx.RemoteProtocolError,
+                    httpx2.TimeoutException,
+                    httpx2.NetworkError,
+                    httpx2.RemoteProtocolError,
                 ) as exc:
                     raise _StreamRetryable(
                         str(exc) or "LLM 流式错误响应连接中断",
@@ -626,7 +626,7 @@ class LLMClient:
                         break
             except _StreamRetryable:
                 raise
-            except httpx.DecodingError as exc:
+            except httpx2.DecodingError as exc:
                 raise _StreamProtocolError(
                     "LLM 响应内容解码失败",
                     status=status,
@@ -637,9 +637,9 @@ class LLMClient:
                     usage_values=usage_values,
                 ) from exc
             except (
-                httpx.TimeoutException,
-                httpx.NetworkError,
-                httpx.RemoteProtocolError,
+                httpx2.TimeoutException,
+                httpx2.NetworkError,
+                httpx2.RemoteProtocolError,
             ) as exc:
                 raise _StreamRetryable(
                     str(exc) or "LLM 流式连接中断",
@@ -722,17 +722,17 @@ class LLMClient:
     async def __aenter__(self) -> "LLMClient":
         if self.client is None:
             timeout = float(self.config["execution"]["request_timeout_seconds"])
-            client_timeout: float | httpx.Timeout = timeout
+            client_timeout: float | httpx2.Timeout = timeout
             if (
                 self.config["llm"].get("stream", False)
                 and not self.config["llm"]["stream_read_timeout_enabled"]
             ):
-                client_timeout = httpx.Timeout(timeout, read=None)
-            limits = httpx.Limits(
+                client_timeout = httpx2.Timeout(timeout, read=None)
+            limits = httpx2.Limits(
                 max_connections=self.config["execution"]["max_parallel"],
                 max_keepalive_connections=self.config["execution"]["max_parallel"],
             )
-            self.client = httpx.AsyncClient(
+            self.client = httpx2.AsyncClient(
                 timeout=client_timeout,
                 limits=limits,
                 proxy=self.config["llm"]["proxy_url"] or None,
@@ -1123,7 +1123,7 @@ class LLMClient:
             stream_result: (
                 tuple[
                     int,
-                    httpx.Response,
+                    httpx2.Response,
                     LLMResponse,
                     dict[str, int],
                     list[str],
@@ -1152,7 +1152,7 @@ class LLMClient:
                     and debug["inject_timeout_every"]
                     and self.send_count % debug["inject_timeout_every"] == 0
                 ):
-                    raise httpx.ReadTimeout("injected timeout")
+                    raise httpx2.ReadTimeout("injected timeout")
                 if stream_enabled:
                     stream_result = await self._stream_attempt(
                         url=url,
@@ -1178,13 +1178,13 @@ class LLMClient:
                         and debug["inject_429_every"]
                         and self.send_count % debug["inject_429_every"] == 0
                     ):
-                        response = httpx.Response(429, text="injected 429")
+                        response = httpx2.Response(429, text="injected 429")
                     elif (
                         debug["enabled"]
                         and debug["inject_500_every"]
                         and self.send_count % debug["inject_500_every"] == 0
                     ):
-                        response = httpx.Response(500, text="injected 500")
+                        response = httpx2.Response(500, text="injected 500")
                     else:
                         response = await self.client.post(
                             url,
@@ -1379,7 +1379,7 @@ class LLMClient:
                 if diagnostics is not None:
                     diagnostics.fail_request(request_id, "response_parse_error")
                 raise
-            except httpx.DecodingError as exc:
+            except httpx2.DecodingError as exc:
                 attempt_error = True
                 attempt_outcome = "response_parse_error"
                 await debug_attempt(
@@ -1403,9 +1403,9 @@ class LLMClient:
                     diagnostics.fail_request(request_id, "response_parse_error")
                 raise
             except (
-                httpx.TimeoutException,
-                httpx.NetworkError,
-                httpx.RemoteProtocolError,
+                httpx2.TimeoutException,
+                httpx2.NetworkError,
+                httpx2.RemoteProtocolError,
             ) as exc:
                 attempt_error = True
                 attempt_outcome = "network_error"
@@ -1768,7 +1768,7 @@ class LLMClient:
 
     def _retry_after_delay(
         self,
-        response: httpx.Response,
+        response: httpx2.Response,
         attempt: int,
     ) -> float:
         retry_after = response.headers.get("Retry-After")
@@ -1791,7 +1791,7 @@ class LLMClient:
     ) -> float:
         if error.retry_after is None:
             return self._backoff_delay(attempt)
-        response = httpx.Response(
+        response = httpx2.Response(
             429,
             headers={"Retry-After": error.retry_after},
         )

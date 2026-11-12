@@ -1,7 +1,7 @@
 from pathlib import Path
 import json
 
-import httpx
+import httpx2
 import pytest
 
 from app.config import load_config, load_global_config
@@ -46,7 +46,7 @@ async def test_empty_original_retry_preserves_request_and_usage(
     config["retry"]["empty_truncated_max_attempts"] = 1
     bodies = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         bodies.append(json.loads(request.content))
         content = "" if len(bodies) == 1 else "answer"
         if stream:
@@ -69,7 +69,7 @@ async def test_empty_original_retry_preserves_request_and_usage(
                 },
                 "[DONE]",
             )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -90,7 +90,7 @@ async def test_empty_original_retry_preserves_request_and_usage(
         )
 
     diagnostics = Diagnostics(tmp_path / "logs" / "app.log")
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         async with LLMClient(
             config,
             SlidingWindowLimiter(0, 0),
@@ -122,10 +122,10 @@ async def test_empty_split_limit_is_inherited_and_never_formats(tmp_path: Path) 
     project = await create_project(tmp_path, "a\nb\nc\nd\ne\nf\ng\nh")
     payloads = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         payloads.append(payload)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -137,7 +137,7 @@ async def test_empty_split_limit_is_inherited_and_never_formats(tmp_path: Path) 
             },
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         result = await run_translation(project, Scope(), http_client=client)
     assert [len(payload["segments"]) for payload in payloads] == [8, 4, 2, 2, 4, 2, 2]
     assert result["failed"] == 8
@@ -145,9 +145,21 @@ async def test_empty_split_limit_is_inherited_and_never_formats(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason,count", [("stop", 1), ("length", 2), ("stop", 0)])
+@pytest.mark.parametrize(
+    ("reason", "count", "expected_error"),
+    [
+        ("stop", 1, "预算已耗尽"),
+        ("length", 2, "预算已耗尽"),
+        ("stop", 0, "预算已耗尽"),
+        ("content_filter", 2, "拒绝生成正文"),
+    ],
+)
 async def test_empty_retry_exhaustion_and_disable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str, count: int
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    count: int,
+    expected_error: str,
 ) -> None:
     monkeypatch.setenv("LLM_API_KEY", "test")
     config = load_global_config(ROOT)
@@ -157,15 +169,16 @@ async def test_empty_retry_exhaustion_and_disable(
     config["retry"][f"empty_{kind}_max_attempts"] = count
     calls = 0
 
-    def handler(_request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(
+        content = None if reason == "content_filter" else " "
+        return httpx2.Response(
             200,
-            json={"choices": [{"message": {"content": " "}, "finish_reason": reason}]},
+            json={"choices": [{"message": {"content": content}, "finish_reason": reason}]},
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         async with LLMClient(
             config,
             SlidingWindowLimiter(0, 0),
@@ -175,13 +188,13 @@ async def test_empty_retry_exhaustion_and_disable(
             stage="translation",
             client=client,
         ) as llm:
-            with pytest.raises(ExternalError, match="预算已耗尽"):
+            with pytest.raises(ExternalError, match=expected_error):
                 await llm.chat(
                     messages=[{"role": "user", "content": "source"}],
                     temperature=0,
                     estimated_input_tokens=10,
                 )
-    assert calls == count + 1
+    assert calls == (1 if reason == "content_filter" else count + 1)
 
 
 @pytest.mark.asyncio
@@ -193,16 +206,16 @@ async def test_unknown_empty_draft_does_not_reenter_format_correction(
     project = await create_project(tmp_path, "a\nb")
     payloads = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payloads.append(
             json.loads(json.loads(request.content)["messages"][1]["content"])
         )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]},
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         result = await run_terminology(
             project, Scope(), http_client=client, include_draft_translation=True
         )
@@ -226,7 +239,7 @@ async def test_responses_stream_incomplete_retains_explicit_length_reason(
         ROOT / "llm_adapters/openai-responses.json"
     )
 
-    def handler(_request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx2.Request) -> httpx2.Response:
         return stream_response(
             {
                 "type": "response.incomplete",
@@ -241,7 +254,7 @@ async def test_responses_stream_incomplete_retains_explicit_length_reason(
             }
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         async with LLMClient(
             config,
             SlidingWindowLimiter(0, 0),
@@ -283,10 +296,10 @@ async def test_singleton_empty_split_fails_with_correct_reason(
     project = await create_project(tmp_path, "a")
     calls = 0
 
-    def handler(_request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [{"message": {"content": None}, "finish_reason": "length"}]
@@ -296,8 +309,8 @@ async def test_singleton_empty_split_fails_with_correct_reason(
     if stage == "proofreading":
         from tests.test_terminology_translation import llm_jsonl
 
-        def translate(_request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
+        def translate(_request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
                 200,
                 json={
                     "choices": [
@@ -318,11 +331,11 @@ async def test_singleton_empty_split_fails_with_correct_reason(
                 },
             )
 
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(translate)
+        async with httpx2.AsyncClient(
+            transport=httpx2.MockTransport(translate)
         ) as client:
             await run_translation(project, Scope(), http_client=client)
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         if stage == "terminology":
             from app.stage_terminology import run_terminology
 
@@ -343,43 +356,3 @@ async def test_singleton_empty_split_fails_with_correct_reason(
     if stage != "proofreading":
         assert record["error_class"] == "empty_response"
     assert "长度限制截断" in record["error_message"]
-
-
-@pytest.mark.asyncio
-async def test_explicit_blocked_reason_is_not_empty_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("LLM_API_KEY", "test")
-    config = load_global_config(ROOT)
-    config["chunking"]["context_reserve_tokens"] = 512
-    calls = 0
-
-    def handler(_request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {"message": {"content": None}, "finish_reason": "content_filter"}
-                ]
-            },
-        )
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        async with LLMClient(
-            config,
-            SlidingWindowLimiter(0, 0),
-            run_dir=tmp_path / "run",
-            project_id="PRJ",
-            run_id="RUN",
-            stage="translation",
-            client=client,
-        ) as llm:
-            with pytest.raises(ExternalError, match="拒绝生成正文"):
-                await llm.chat(
-                    messages=[{"role": "user", "content": "source"}],
-                    temperature=0,
-                    estimated_input_tokens=10,
-                )
-    assert calls == 1

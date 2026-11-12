@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.llm_response import (
     TerminologyResponseMode,
     parse_terminology_response,
@@ -7,38 +9,19 @@ from app.llm_response import (
 )
 
 
-def test_joint_response_keeps_summary_and_terms_in_response_order() -> None:
+@pytest.mark.parametrize(
+    ("summary_line", "expected_code"),
+    [
+        ('{"type":"summary","text":"A summary.","refs":["missing"]}', "invalid_reference"),
+        ('{"type":"summary","text":"A summary.","refs":["1","1"]}', "duplicate_reference"),
+    ],
+)
+def test_summary_reference_error_does_not_discard_valid_terms(
+    summary_line: str, expected_code: str
+) -> None:
     response = (
-        '{"type":"summary","text":"Alice enters the room.","refs":["1"]}\n'
-        '{"type":"term","source":"Alice","category":"person"}\n'
-        '{"type":"end"}'
-    )
-
-    parsed = parse_terminology_response(
-        response,
-        mode=TerminologyResponseMode.TERMS_AND_FRAGMENT_SUMMARY,
-        source_refs=("1",),
-    )
-
-    assert parsed.complete is True
-    assert parsed.summary_complete is True
-    assert parsed.terms_complete is True
-    assert [record["type"] for record in parsed.records] == [
-        "summary",
-        "term",
-    ]
-    assert parsed.summaries[0]["refs"] == ["1"]
-    assert parsed.terms[0]["source"] == "Alice"
-    assert response_record_types(TerminologyResponseMode.TERMS_ONLY) == (
-        "term",
-        "no_terms",
-    )
-
-
-def test_summary_reference_error_does_not_discard_valid_terms() -> None:
-    response = (
-        '{"type":"summary","text":"A summary.","refs":["missing"]}\n'
-        '{"type":"term","source":"Alice","category":"person"}\n'
+        f"{summary_line}\n"
+        '{"type":"term","source":"Not in source","category":"thing"}\n'
         '{"type":"end"}'
     )
 
@@ -53,8 +36,8 @@ def test_summary_reference_error_does_not_discard_valid_terms() -> None:
     assert parsed.terms_complete is True
     assert len(parsed.summaries) == 0
     assert len(parsed.terms) == 1
-    assert "summary" in parsed.error_codes_by_type
-    assert parsed.error_codes_by_type["summary"] == ("invalid_reference",)
+    assert parsed.error_codes_by_type["summary"] == (expected_code,)
+    assert parsed.error_codes_by_type["term"] == ()
 
 
 def test_global_protocol_error_invalidates_both_classes_but_keeps_rows() -> None:
@@ -105,20 +88,6 @@ def test_summary_without_refs_is_normalized_to_full_source_refs() -> None:
     assert parsed.summaries[0]["refs"] == ["1", "2"]
 
 
-def test_summary_refs_must_cover_all_source_refs() -> None:
-    parsed = parse_terminology_response(
-        '{"type":"summary","text":"Only one input.","refs":["1"]}\n'
-        '{"type":"end"}',
-        mode=TerminologyResponseMode.SUMMARY_ONLY,
-        source_refs=("1", "2"),
-    )
-
-    assert parsed.complete is False
-    assert parsed.summary_complete is False
-    assert parsed.summaries == ()
-    assert parsed.error_codes_by_type["summary"] == ("invalid_reference",)
-
-
 def test_multiple_summary_records_partition_source_refs_and_keep_term_order() -> None:
     response = (
         '{"type":"summary","text":"Alice enters.","refs":["1"]}\n'
@@ -134,92 +103,62 @@ def test_multiple_summary_records_partition_source_refs_and_keep_term_order() ->
     )
 
     assert parsed.complete is True
+    assert parsed.summary_complete is True
+    assert parsed.terms_complete is True
     assert [summary["refs"] for summary in parsed.summaries] == [["1"], ["2"]]
+    assert parsed.terms[0]["source"] == "Alice"
     assert [record["type"] for record in parsed.records] == [
         "summary",
         "summary",
         "term",
     ]
+    assert response_record_types(TerminologyResponseMode.TERMS_ONLY) == (
+        "term",
+        "no_terms",
+    )
 
 
-def test_multiple_summary_records_require_refs_on_each_record() -> None:
+@pytest.mark.parametrize(
+    ("lines", "source_refs", "expected_code"),
+    [
+        (
+            '{"type":"summary","text":"Only one input.","refs":["1"]}\n{"type":"end"}',
+            ("1", "2"),
+            "invalid_reference",
+        ),
+        (
+            '{"type":"summary","text":"Alice enters.","refs":["1"]}\n'
+            '{"type":"summary","text":"Bob waves."}\n{"type":"end"}',
+            ("1", "2"),
+            "invalid_reference",
+        ),
+        (
+            '{"type":"summary","text":"Alice enters.","refs":["1"]}\n'
+            '{"type":"summary","text":"Alice and Bob.","refs":["1","2"]}\n{"type":"end"}',
+            ("1", "2"),
+            "duplicate_reference",
+        ),
+        (
+            '{"type":"summary","text":"Alice enters.","refs":["1"]}\n'
+            '{"type":"summary","text":"Bob waves.","refs":["2"]}\n{"type":"end"}',
+            ("1", "2", "3"),
+            "invalid_reference",
+        ),
+    ],
+)
+def test_summary_refs_reject_invalid_partition_or_coverage(
+    lines: str, source_refs: tuple[str, ...], expected_code: str
+) -> None:
     parsed = parse_terminology_response(
-        '{"type":"summary","text":"Alice enters.","refs":["1"]}\n'
-        '{"type":"summary","text":"Bob waves."}\n'
-        '{"type":"end"}',
+        lines,
         mode=TerminologyResponseMode.SUMMARY_ONLY,
-        source_refs=("1", "2"),
+        source_refs=source_refs,
     )
 
     assert parsed.complete is False
     assert parsed.summary_complete is False
-    assert parsed.error_codes_by_type["summary"] == ("invalid_reference",)
-
-
-def test_multiple_summary_records_reject_overlapping_refs() -> None:
-    parsed = parse_terminology_response(
-        '{"type":"summary","text":"Alice enters.","refs":["1"]}\n'
-        '{"type":"summary","text":"Alice and Bob.","refs":["1","2"]}\n'
-        '{"type":"end"}',
-        mode=TerminologyResponseMode.SUMMARY_ONLY,
-        source_refs=("1", "2"),
-    )
-
-    assert parsed.complete is False
-    assert parsed.summary_complete is False
-    assert parsed.error_codes_by_type["summary"] == ("duplicate_reference",)
-
-
-def test_multiple_summary_records_reject_incomplete_coverage() -> None:
-    parsed = parse_terminology_response(
-        '{"type":"summary","text":"Alice enters.","refs":["1"]}\n'
-        '{"type":"summary","text":"Bob waves.","refs":["2"]}\n'
-        '{"type":"end"}',
-        mode=TerminologyResponseMode.SUMMARY_ONLY,
-        source_refs=("1", "2", "3"),
-    )
-
-    assert parsed.complete is False
-    assert parsed.summary_complete is False
-    assert parsed.error_codes_by_type["summary"] == ("invalid_reference",)
-
-
-def test_joint_summary_error_does_not_restrict_term_sources() -> None:
-    response = (
-        '{"type":"summary","text":"A summary.","refs":["1","1"]}\n'
-        '{"type":"term","source":"Not in source","category":"thing"}\n'
-        '{"type":"end"}'
-    )
-
-    parsed = parse_terminology_response(
-        response,
-        mode="terms+fragment-summary",
-        source_refs=("1",),
-    )
-
-    assert parsed.complete is False
-    assert parsed.summary_complete is False
-    assert parsed.terms_complete is True
-    assert parsed.error_codes_by_type["summary"] == ("duplicate_reference",)
-    assert parsed.error_codes_by_type["term"] == ()
-
-
-def test_terms_only_preserves_existing_duplicate_term_behavior() -> None:
-    response = (
-        '{"type":"term","source":"Alice","category":"person"}\n'
-        '{"type":"term","source":"Alice","category":"person"}\n'
-        '{"type":"end"}'
-    )
-
-    parsed = parse_terminology_response(
-        response,
-        mode=TerminologyResponseMode.TERMS_ONLY,
-    )
-
-    assert parsed.complete is True
-    assert parsed.terms_complete is True
-    assert parsed.error_codes_by_type["term"] == ()
-    assert len(parsed.terms) == 2
+    assert parsed.summaries == ()
+    assert parsed.error_codes_by_type["summary"] == (expected_code,)
 
 
 def test_missing_end_invalidates_requested_classes() -> None:

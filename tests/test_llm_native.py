@@ -74,7 +74,7 @@ async def test_gemini_stream_collects_all_parts_and_usage_after_finish(tmp_path)
 @pytest.mark.parametrize("name", ["anthropic", "google-gemini"])
 def test_model_discovery_fetches_all_pages_and_filters_generation(tmp_path, monkeypatch, name):
     import json
-    import httpx
+    import httpx2
     from fastapi.testclient import TestClient
     from app.web import create_app
     from tests.test_web import make_project
@@ -87,12 +87,12 @@ def test_model_discovery_fetches_all_pages_and_filters_generation(tmp_path, monk
     def handler(request):
         calls.append(request)
         if name == "anthropic":
-            return httpx.Response(200, json={"data": [{"id": "second" if request.url.params.get("after_id") else "first"}], "has_more": not bool(request.url.params.get("after_id")), "last_id": "cursor"})
+            return httpx2.Response(200, json={"data": [{"id": "second" if request.url.params.get("after_id") else "first"}], "has_more": not bool(request.url.params.get("after_id")), "last_id": "cursor"})
         if request.url.params.get("pageToken"):
-            return httpx.Response(200, json={"models": [{"name": "models/second", "supportedGenerationMethods": ["generateContent"]}]})
-        return httpx.Response(200, json={"models": [{"name": "models/embedding", "supportedGenerationMethods": ["embedContent"]}, {"name": "models/first", "supportedGenerationMethods": ["generateContent"]}], "nextPageToken": "cursor"})
-    original = httpx.AsyncClient
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(**kwargs, transport=httpx.MockTransport(handler)))
+            return httpx2.Response(200, json={"models": [{"name": "models/second", "supportedGenerationMethods": ["generateContent"]}]})
+        return httpx2.Response(200, json={"models": [{"name": "models/embedding", "supportedGenerationMethods": ["embedContent"]}, {"name": "models/first", "supportedGenerationMethods": ["generateContent"]}], "nextPageToken": "cursor"})
+    original = httpx2.AsyncClient
+    monkeypatch.setattr(httpx2, "AsyncClient", lambda **kwargs: original(**kwargs, transport=httpx2.MockTransport(handler)))
     response = client.post("/api/v1/global/presets/default/models", json=preset)
     assert response.status_code == 200
     assert [model["id"] for model in response.json()["models"]] == ["first", "second"]
@@ -102,7 +102,7 @@ def test_model_discovery_fetches_all_pages_and_filters_generation(tmp_path, monk
 @pytest.mark.parametrize("failure", ["http", "cursor"])
 def test_discovery_does_not_return_a_partial_list(tmp_path, monkeypatch, failure):
     import json
-    import httpx
+    import httpx2
     from fastapi.testclient import TestClient
     from app.web import create_app
     from tests.test_web import make_project
@@ -113,10 +113,10 @@ def test_discovery_does_not_return_a_partial_list(tmp_path, monkeypatch, failure
     monkeypatch.setenv("LLM_API_KEY", "test")
     def handler(request):
         if failure == "http" and request.url.params.get("after_id"):
-            return httpx.Response(503)
-        return httpx.Response(200, json={"data": [{"id": "first"}], "has_more": True, "last_id": "cursor"})
-    original = httpx.AsyncClient
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(**kwargs, transport=httpx.MockTransport(handler)))
+            return httpx2.Response(503)
+        return httpx2.Response(200, json={"data": [{"id": "first"}], "has_more": True, "last_id": "cursor"})
+    original = httpx2.AsyncClient
+    monkeypatch.setattr(httpx2, "AsyncClient", lambda **kwargs: original(**kwargs, transport=httpx2.MockTransport(handler)))
     response = client.post("/api/v1/global/presets/default/models", json=preset)
     assert response.status_code == 400
     assert "models" not in response.json()
@@ -175,7 +175,7 @@ async def test_anthropic_stream_keeps_final_thinking_usage(tmp_path):
 @pytest.mark.parametrize('enabled,declares_schema,reject_schema', [(True, True, False), (True, False, False), (False, True, False), (True, True, True)])
 async def test_generic_client_only_sends_schema_when_preset_and_task_enable_it(tmp_path, monkeypatch, enabled, declares_schema, reject_schema):
     import json
-    import httpx
+    import httpx2
     from app.diagnostics import DiagnosticsHub
     from app.config import load_global_config
     from app.llm_client import LLMClient, SlidingWindowLimiter
@@ -193,11 +193,11 @@ async def test_generic_client_only_sends_schema_when_preset_and_task_enable_it(t
         else:
             assert 'response_format' not in body
         if reject_schema:
-            return httpx.Response(400, json={'error':{'message':'JSON Schema unsupported'}})
-        return httpx.Response(200, json={'choices':[{'message':{'content':'{"result":"ok"}'}, 'finish_reason':'stop'}]})
+            return httpx2.Response(400, json={'error':{'message':'JSON Schema unsupported'}})
+        return httpx2.Response(200, json={'choices':[{'message':{'content':'{"result":"ok"}'}, 'finish_reason':'stop'}]})
     diagnostics = DiagnosticsHub(tmp_path / 'app.log')
     with diagnostics.activate('P', 'translation', task_id='TASK'):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
             async with LLMClient(config, SlidingWindowLimiter(0, 0), run_dir=tmp_path,
                                  project_id='P', run_id='R', stage='translation', client=http) as client:
                 if reject_schema:

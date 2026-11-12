@@ -5,7 +5,6 @@ import {
   ApiError,
   api,
   apiErrorFromResponse,
-  errorPayloadFrom,
   parseErrorPayload,
 } from "../src/api.ts";
 import {
@@ -50,19 +49,6 @@ test("normalizes malformed error bodies without throwing", () => {
     code: "http_error",
     params: { status: 502 },
     error: "",
-  });
-});
-
-test("recovers the backend envelope carried by a native rejection string", () => {
-  const payload = errorPayloadFrom(JSON.parse(JSON.stringify({
-    error: "EPUB export fallback",
-    code: "export_error",
-    params: { reason: "missing_target_language_tag" },
-  })));
-  assert.deepEqual(payload, {
-    error: "EPUB export fallback",
-    code: "export_error",
-    params: { reason: "missing_target_language_tag" },
   });
 });
 

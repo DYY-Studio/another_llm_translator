@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
-import httpx
+import httpx2
 
 from .decision import DecisionClient
 from .diagnostics import current_diagnostics
@@ -580,7 +580,7 @@ async def _execute_stage_run(
     exception_completed: Callable[[], int],
     exception_failed: Callable[[], int],
     failure_counts: Counter[str],
-    http_client: httpx.AsyncClient | None = None,
+    http_client: httpx2.AsyncClient | None = None,
     runtime_parts_kwargs: dict[str, Any] | None = None,
     runtime_request_observer: Callable[[list[dict[str, Any]]], None] | None = None,
     runtime_split_observer: Callable[
@@ -1133,8 +1133,8 @@ def prompt_middle_digests(project: Path, stage: str) -> dict[str, str]:
     return digests
 
 
-def _prompt(project: Path, stage: str, language: str | None = None) -> str:
-    factory = _prompt_factory(project, stage, language)
+def _prompt(project: Path, stage: str, language: str | None = None, *, phase: str | None = None) -> str:
+    factory = _prompt_factory(project, stage, language, phase=phase)
     return factory(())
 
 
@@ -1166,6 +1166,7 @@ def _prompt_factory(
     language: str | None = None,
     response_mode: TerminologyResponseMode | str | None = None,
     require_term_declaration: bool = False,
+    phase: str | None = None,
 ) -> Callable[[Iterable[str]], str]:
     try:
         parsed_mode = (
@@ -1213,6 +1214,7 @@ def _prompt_factory(
             fragment_summary_middle=fragment_summary_middle,
             translation_middle=translation_middle,
             require_term_declaration=require_term_declaration,
+            phase=phase,
         )
 
     return build

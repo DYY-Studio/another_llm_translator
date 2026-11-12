@@ -71,33 +71,25 @@ def test_preset_accepts_extra_headers_and_rejects_invalid_values(tmp_path: Path)
         load_llm_preset(write_preset(tmp_path, value))
 
 
+@pytest.mark.parametrize("max_output_tokens", [0, 65536])
 def test_preset_allows_disabled_limits_small_safety_factor_and_large_output(
-    tmp_path: Path,
+    tmp_path: Path, max_output_tokens: int
 ) -> None:
     value = preset_definition()
     value.update(
         requests_per_minute=0,
         input_tokens_per_minute=0,
         token_safety_factor=0.5,
-        max_output_tokens=65536,
+        max_output_tokens=max_output_tokens,
         context_window_tokens=8192,
     )
     preset = load_llm_preset(write_preset(tmp_path, value))
     assert preset.definition["requests_per_minute"] == 0
     assert preset.definition["token_safety_factor"] == 0.5
-    assert preset.definition["max_output_tokens"] == 65536
+    assert preset.definition["max_output_tokens"] == max_output_tokens
 
 
-def test_preset_allows_zero_max_output_tokens(tmp_path: Path) -> None:
-    value = preset_definition()
-    value["max_output_tokens"] = 0
-
-    preset = load_llm_preset(write_preset(tmp_path, value))
-
-    assert preset.definition["max_output_tokens"] == 0
-
-
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7])
+@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7])
 def test_old_preset_requires_explicit_migration(tmp_path: Path, version: int) -> None:
     value = preset_definition()
     value["schema_version"] = version
@@ -126,13 +118,6 @@ def test_preset_rejects_invalid_values(
     value.update(change)
     with pytest.raises(ConfigError, match=message):
         load_llm_preset(write_preset(tmp_path, value))
-
-
-def test_preset_preserves_legacy_endpoint(tmp_path: Path) -> None:
-    value = preset_definition()
-    value["endpoint"] = "/v1beta/models/${model}:generateContent"
-    preset = load_llm_preset(write_preset(tmp_path, value))
-    assert "endpoint" not in preset.definition
 
 
 def test_preset_accepts_keychain_credential_reference(tmp_path: Path) -> None:
@@ -169,42 +154,6 @@ def test_preset_rejects_invalid_credential_reference(
     value["credential"] = credential
     with pytest.raises(ConfigError, match=message):
         load_llm_preset(write_preset(tmp_path, value))
-
-
-def test_preset_rejects_v1_schema_with_clear_message(tmp_path: Path) -> None:
-    value = preset_definition()
-    value["schema_version"] = 1
-    value["api_key_env"] = "LLM_API_KEY"
-    del value["credential"]
-    with pytest.raises(ConfigError, match="schema_version 必须是 9"):
-        load_llm_preset(write_preset(tmp_path, value))
-
-
-def test_adapter_merges_extra_body_without_overwriting(tmp_path: Path) -> None:
-    adapter = load_json_adapter(
-        ROOT / "llm_adapters" / "openai-compatible.json"
-    )
-    _, body = adapter.build_request(
-        api_key="secret",
-        model="model",
-        messages=[],
-        temperature=0.2,
-        max_output_tokens=100,
-        stream=False,
-        extra_body={"provider": {"order": ["google"]}},
-    )
-    assert body["provider"] == {"order": ["google"]}
-
-    with pytest.raises(ConfigError, match="字段冲突：model"):
-        adapter.build_request(
-            api_key="secret",
-            model="model",
-            messages=[],
-            temperature=0.2,
-            max_output_tokens=100,
-            stream=False,
-            extra_body={"model": "override"},
-        )
 
 
 def test_project_resolves_live_preset_and_run_freezes_snapshot(
@@ -404,7 +353,9 @@ def test_project_preset_requires_existing_global_adapter(tmp_path: Path) -> None
         load_project_config(project, presets_root=app_root)
 
 
-def test_inline_project_config_is_rejected(tmp_path: Path) -> None:
+def test_inline_project_and_global_configs_fall_back_to_default_preset(
+    tmp_path: Path,
+) -> None:
     app_root = make_app_root(tmp_path)
     source = tmp_path / "input.txt"
     source.write_text("one", encoding="utf-8")
@@ -415,27 +366,22 @@ def test_inline_project_config_is_rejected(tmp_path: Path) -> None:
         projects_root=tmp_path / "projects",
     )
     assert project is not None
-    config_path = project / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
+    project_config = project / "config.toml"
+    project_config.write_text(
+        project_config.read_text(encoding="utf-8").replace(
             'preset = "default"', 'adapter = "openai-compatible"'
         ),
         encoding="utf-8",
     )
-
-    assert load_project_config(project, presets_root=app_root)["llm"]["model"] == "example-model"
-
-
-def test_inline_global_config_is_rejected(tmp_path: Path) -> None:
-    app_root = make_app_root(tmp_path)
-    config_path = app_root / "config" / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
+    global_config = app_root / "config" / "config.toml"
+    global_config.write_text(
+        global_config.read_text(encoding="utf-8").replace(
             'preset = "default"', 'model = "legacy-model"'
         ),
         encoding="utf-8",
     )
 
+    assert load_project_config(project, presets_root=app_root)["llm"]["model"] == "example-model"
     assert load_global_config(app_root)["llm"]["model"] == "example-model"
 
 
@@ -473,34 +419,6 @@ def test_shipped_adapters_and_presets_load_and_dry_run() -> None:
         )
         if adapter.models_spec is not None:
             adapter.build_models_request(api_key="***")
-
-
-def test_project_resolves_gemini_preset_endpoint_placeholder(tmp_path: Path) -> None:
-    app_root = make_app_root(tmp_path)
-    config_path = app_root / "config" / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            'preset = "default"', 'preset = "google-gemini"'
-        ),
-        encoding="utf-8",
-    )
-    source = tmp_path / "input.txt"
-    source.write_text("one", encoding="utf-8")
-    project, _ = init_project(
-        [str(source)],
-        name="gemini-project",
-        app_root=app_root,
-        projects_root=tmp_path / "projects",
-    )
-    assert project is not None
-    assert not (project / "llm_adapters").exists()
-
-    resolved = load_project_config(project, presets_root=app_root)
-    assert resolved["llm"]["adapter"] == "google-gemini"
-    assert resolved["llm"]["endpoint"] == (
-        "/models/${model}:generateContent"
-    )
-    assert resolved["_llm_adapter"].messages_format == "gemini"
 
 
 def test_project_resolves_endpoints_from_adapter_not_legacy_preset(

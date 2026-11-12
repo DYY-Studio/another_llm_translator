@@ -12,7 +12,7 @@ function stageLabelKey(stage: TaskOptions["stage"]): string {
 export interface RepetitionRunOptions {
   excluded_punctuation_groups: number; candidate_groups: number; selected: number; over_budget_groups: number;
   running_run: RunningRun | null; run_action: "resume" | "decline" | null; only_file: string | null; completed: number;
-  screening_enabled: boolean; exclude_punctuation_only: boolean; preset: {id: string; model: string};
+  screening_enabled: boolean; final_review: boolean; exclude_punctuation_only: boolean; preset: {id: string; model: string};
   estimated_requests: number | null; estimated_input_tokens: number | null; estimate_error?: import("../types").ErrorPayload | null; decision_model: string | null; model: string;
 }
 
@@ -80,13 +80,15 @@ export function RunDialog(props: StageRunDialogProps | {
   excludePunctuationOnly: boolean; onExcludePunctuationOnly: (enabled: boolean) => void; replaceDraft: boolean; busy: boolean; error: string;
   onRunAction: (action: "resume" | "decline") => void;
   screeningEnabled: boolean; onScreeningEnabled: (enabled: boolean) => void;
+  finalReview: boolean; onFinalReview: (enabled: boolean) => void;
   language: Language; onClose: () => void; onStart: () => void;
 }) {
   if (!("repetitionOptions" in props)) return <StageRunDialog {...props} />;
-  const { repetitionOptions: options, language, replaceDraft, busy, error, onClose, onStart, excludePunctuationOnly, onExcludePunctuationOnly, screeningEnabled, onScreeningEnabled, onRunAction } = props;
+  const { repetitionOptions: options, language, replaceDraft, busy, error, onClose, onStart, excludePunctuationOnly, onExcludePunctuationOnly, screeningEnabled, onScreeningEnabled, finalReview, onFinalReview, onRunAction } = props;
   const t = (key: string, params: Record<string, string | number> = {}) => translate(`repetition.${key}`, language, params);
   const resuming = options?.run_action === "resume";
   const generationOptions = <>
+    <label className="config-toggle"><span><input type="checkbox" checked={finalReview} disabled={busy || resuming} onChange={e => onFinalReview(e.target.checked)} />{t("finalReview")}</span><small>{t("finalReviewHint")}</small></label>
     <label className="config-toggle"><span><input type="checkbox" checked={screeningEnabled} disabled={busy || resuming} onChange={e => onScreeningEnabled(e.target.checked)} />{t("screeningEnabled")}</span></label>
     <label className="config-toggle"><span><input type="checkbox" checked={excludePunctuationOnly} disabled={busy || resuming} onChange={e => onExcludePunctuationOnly(e.target.checked)} />{t("excludePunctuationOnly")}</span><small>{t("punctuationFilterHint")}</small></label>
   </>;
@@ -103,13 +105,14 @@ export function RunDialog(props: StageRunDialogProps | {
     {resuming && options.running_run && <p className="muted">{t("resumeSteps", {completed: options.running_run.completed_steps ?? 0, total: options.running_run.total_steps ?? 0})}</p>}
     <div className="run-decision-info"><span>{options.decision_model ? t("models", { decision: options.decision_model, model: options.model }) : t("comparisonModel", {model: options.model})}</span>
       <span>{options.estimated_requests != null && options.estimated_input_tokens != null ? t("estimate", { groups: options.candidate_groups, count: options.selected, requests: options.estimated_requests, tokens: options.estimated_input_tokens }) : t("candidateScope", { groups: options.candidate_groups, count: options.selected })}</span>
+      {finalReview && options.estimated_requests != null && (!resuming || options.completed < options.selected) && <span>{t("finalReviewEstimateHint")}</span>}
       {options.estimate_error && <span className="warning-banner">{translate("runDialog.estimateFailed", language, { error: errorMessage(options.estimate_error, language) })}</span>}
       <span>{t("punctuationExcluded", { count: options.excluded_punctuation_groups })}</span>
       {!!options.over_budget_groups && <span>{t("overBudget", { count: options.over_budget_groups })}</span>}
     </div>
     </> : busy ? <p>{translate("common.loading", language)}</p> : null}
     {error && <p className="error-text" role="alert">{error}</p>}
-    {replaceDraft && <div className="warning-banner run-warning">{t("confirmReplace")}</div>}
+    {replaceDraft && <div className="warning-banner run-warning">{t(finalReview ? "confirmReplaceWithFinalReview" : "confirmReplace")}</div>}
     <div className="modal-actions">
       <button className="quiet-button" disabled={busy} onClick={onClose}>{translate("common.cancel", language)}</button>
       <button className="primary-button" disabled={busy || !options?.candidate_groups || (resuming && options.running_run?.resume_compatible === false)} onClick={onStart}>{translate("runDialog.run", language)}</button>
@@ -148,7 +151,7 @@ function StageRunDialog({
   }, [options.include_draft_translation, options.include_summaries, options.mismatched_fingerprint_completed]);
   const decisionMode = options.stage === "terminology_decision";
   const [finalReview, setFinalReview] = useState(
-    options.running_run?.final_review ?? options.final_review ?? false,
+    options.review_draft_run_id ? true : options.running_run?.final_review ?? options.final_review ?? false,
   );
   const hybridSummary = options.stage === "terminology" && Boolean(options.include_summaries);
   const summaryPromptBlocked = Boolean(options.summary_prompt_preflight && !options.summary_prompt_preflight.ok);
@@ -163,7 +166,7 @@ function StageRunDialog({
   const draftBlocked = draftEnabled && options.draft_prompt_preflight?.ok === false;
   const replacementNeeded = !resuming && resultPolicy === "force" && Boolean(options.knowledge_replacement_impacts?.length);
   const ready = (replacementNeeded && !knowledgeConfirmed) ? false : summaryConfigurationBlocked || draftBlocked || draftLoading ? false : decisionMode
-    ? options.selected > 0 && (!options.running_run || resuming || resultPolicy === "force")
+    ? (options.selected > 0 || (options.knowledge_pending ?? 0) > 0) && (!options.running_run || resuming || resultPolicy === "force")
     : resuming || resultPolicy !== null;
 
   async function changeDraft(enabled: boolean, summaries = false) {
@@ -193,20 +196,20 @@ function StageRunDialog({
   function submit() {
     if (!ready) return;
     onStart({
-      ...(decisionMode ? { knowledge_only: Boolean(options.knowledge_only) } : {}),
+      ...(decisionMode ? { knowledge_only: Boolean(options.knowledge_only), all_terms: resuming ? Boolean(options.running_run?.all_terms) : Boolean(options.all_terms) } : {}),
       force: !resuming && resultPolicy === "force",
       confirm_knowledge_replacement: replacementNeeded && knowledgeConfirmed,
       reuse_mixed_fingerprints: !resuming && resultPolicy === "reuse",
       run_action: options.running_run ? runAction : null,
-      final_review: decisionMode && !options.knowledge_only && finalReview,
+      final_review: decisionMode && !options.knowledge_only && (Boolean(options.review_draft_run_id) || finalReview),
       ...(options.stage === "terminology" ? { include_draft_translation: draftEnabled, include_summaries: hybridSummary } : {}),
     });
   }
 
   return (
     <RunDialogFrame
-      title={translate(options.knowledge_only ? "terms.knowledgeOnlyTitle" : decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(stageLabelKey(options.stage), language) })}
-      subtitle={decisionMode ? translate(options.knowledge_only ? "terms.knowledgeOnlyHint" : "terms.decisionHint", language) : translate("runDialog.subtitle", language)}
+      title={translate(options.review_draft_run_id ? "terms.decisionStartFinalReview" : options.knowledge_only ? options.all_terms ? "terms.knowledgeAll" : "terms.knowledgeOnlyTitle" : decisionMode ? "runDialog.decisionTitle" : "runDialog.title", language, { stage: translate(stageLabelKey(options.stage), language) })}
+      subtitle={decisionMode ? translate(options.review_draft_run_id ? "terms.decisionDraftFinalReviewHint" : options.knowledge_only ? "terms.knowledgeOnlyHint" : "terms.decisionHint", language) : translate("runDialog.subtitle", language)}
       onClose={onClose}>
         <div className="run-preset" aria-label={translate("runDialog.currentPreset", language)}>
           <span>{translate("runDialog.currentPreset", language)}</span>
@@ -232,11 +235,14 @@ function StageRunDialog({
             </div>
           </section>
         )}
+        {options.stage === "terminology" && options.publication_invalidates_undo && <p className="warning-banner">{translate("terms.publicationUndoLoss", language)}</p>}
         {decisionMode && <div className="run-decision-info">
-          <span>{translate(options.knowledge_only ? "terms.knowledgeOnlyScope" : "terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
+          <span>{translate(options.all_terms ? "terms.decisionAllTerms" : "terms.pendingChanges", language)}</span>
+          {!options.knowledge_only && (options.knowledge_pending ?? 0) > 0 && <span>{translate("terms.pendingKnowledgeCount", language, { count: options.knowledge_pending ?? 0 })}</span>}
+          <span>{translate(options.review_draft_run_id ? "terms.decisionDraftFinalReviewScope" : options.knowledge_only ? "terms.knowledgeOnlyScope" : "terms.decisionScope", language, { selected: options.selected, protected: options.protected ?? 0 })}</span>
           {options.estimated_requests != null && options.estimated_input_tokens != null && <span>{translate("terms.decisionEstimate", language, { requests: options.estimated_requests, tokens: options.estimated_input_tokens })}</span>}
           {options.estimate_error && <span className="warning-banner">{translate("runDialog.estimateFailed", language, { error: errorMessage(options.estimate_error, language) })}</span>}
-          {!options.knowledge_only && <label className="config-toggle">
+          {!options.knowledge_only && !options.review_draft_run_id && <label className="config-toggle">
             <span>
               <input
                 type="checkbox"

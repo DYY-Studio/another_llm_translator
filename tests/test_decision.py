@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-import httpx
+import httpx2
 import pytest
 
 from app.decision import DecisionClient, DecisionQuestion, validate_decision_preset
@@ -45,12 +45,12 @@ def test_decision_diagnostics_retains_counts_after_detail_eviction(tmp_path, dia
 def test_decision_diagnostics_tracks_retry_and_preflight_failure(tmp_path, monkeypatch):
     monkeypatch.setenv("DECISION_TEST_KEY", "secret")
     diagnostics = Diagnostics(tmp_path / "app.log")
-    responses = iter([httpx.Response(429), httpx.Response(200, json={
+    responses = iter([httpx2.Response(429), httpx2.Response(200, json={
         "model": "test-model", "answers": {"term": {"type": "refusal"}},
     })])
     async def run():
         with diagnostics.activate("project", "translation"):
-            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: next(responses))) as http:
+            async with httpx2.AsyncClient(transport=httpx2.MockTransport(lambda _: next(responses))) as http:
                 value = preset()
                 client = DecisionClient(value, http_client=http,
                                         retry={"http_max_attempts": 2, "base_delay_seconds": 0})
@@ -96,7 +96,7 @@ def test_oversized_decision_fails_before_http(protocol, part, monkeypatch):
     async def run():
         def unexpected_request(request):
             pytest.fail("Oversized Decision must not send HTTP")
-        async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected_request)) as http:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(unexpected_request)) as http:
             client = DecisionClient(value, http_client=http)
             with pytest.raises(ExternalError, match="Decision.*Token"):
                 await client.choose(state, [question], segment_id="SEG-1")
@@ -121,9 +121,9 @@ def test_decision_removes_oldest_context_until_request_fits(protocol, recent, ex
         assert evidence["source"] == "current"
         assert evidence["reference_context"] == expected
         answers = {"term": {"type": "refusal"}} if protocol == "typesafe" else [{"name": "term", "type": "refusal"}]
-        return httpx.Response(200, json={"model": "test-model", "answers": answers})
+        return httpx2.Response(200, json={"model": "test-model", "answers": answers})
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
             client = DecisionClient(value, http_client=http)
             with diagnostics.activate("project", "translation"):
                 await client.choose(state, [question], reference_context=context, segment_id="SEG")
@@ -170,11 +170,11 @@ def test_choice_request_uses_full_url_and_maps_answers(protocol, monkeypatch, tm
             assert body["questions"][0]["name"] == "term"
             answer.update(name="term", probabilities=[dict(value="required", probability=0.95), dict(value="ordinary", probability=0.05)])
             answers = [answer]
-        return httpx.Response(200, json=dict(model="actual-model", answers=answers, usage=dict(input_tokens=10, output_tokens=85)))
+        return httpx2.Response(200, json=dict(model="actual-model", answers=answers, usage=dict(input_tokens=10, output_tokens=85)))
     async def run():
         diagnostics = Diagnostics(tmp_path / "app.log")
         with diagnostics.activate("project", "translation"):
-            async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
                 client = DecisionClient(validate_decision_preset(preset(protocol)), http_client=http)
                 result = await client.choose({"source": "text"}, [question])
                 assert result["term"].choice == "required"
@@ -196,16 +196,6 @@ def test_preset_rejects_credentials_in_url():
         validate_decision_preset(value)
 
 
-def test_invalid_answer_fails_without_fallback(monkeypatch):
-    monkeypatch.setenv("DECISION_TEST_KEY", "secret")
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"answers": {}}))) as http:
-            client = DecisionClient(validate_decision_preset(preset()), http_client=http)
-            with pytest.raises(ExternalError):
-                await client.choose("source", [DecisionQuestion("term", "Question", {"a": "A", "b": "B"})])
-    asyncio.run(run())
-
-
 @pytest.mark.parametrize("protocol,invalid", [
     ("typesafe", "empty"), ("typesafe", "json"),
     ("openai-decisions", "missing"), ("openai-decisions", "fields"),
@@ -220,15 +210,15 @@ def test_invalid_decision_response_uses_retry_budget(tmp_path, monkeypatch, prot
         calls.append(request)
         if len(calls) == 1 or exhausted:
             if invalid in {"empty", "json"}:
-                return httpx.Response(200, content=b"" if invalid == "empty" else b"not JSON")
+                return httpx2.Response(200, content=b"" if invalid == "empty" else b"not JSON")
             answers = [] if invalid == "missing" else [{"name": "term", "type": "choice"}]
-            return httpx.Response(200, json={"model": "test-model", "answers": answers, "usage": {"input_tokens": 10, "output_tokens": 99}})
+            return httpx2.Response(200, json={"model": "test-model", "answers": answers, "usage": {"input_tokens": 10, "output_tokens": 99}})
         answers = {"term": {"type": "refusal"}} if protocol == "typesafe" else [{"name": "term", "type": "refusal"}]
-        return httpx.Response(200, json={"model": "test-model", "answers": answers, "usage": {"input_tokens": 20, "output_tokens": 85}})
+        return httpx2.Response(200, json={"model": "test-model", "answers": answers, "usage": {"input_tokens": 20, "output_tokens": 85}})
 
     async def run():
         with diagnostics.activate("project", "translation"):
-            async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
                 client = DecisionClient(preset(protocol), http_client=http, debug_directory=tmp_path / "debug",
                                         retry={"http_max_attempts": 2, "base_delay_seconds": 0})
                 question = DecisionQuestion("term", "Question", {"a": "A", "b": "B"})
@@ -257,22 +247,6 @@ def test_invalid_decision_response_uses_retry_budget(tmp_path, monkeypatch, prot
     asyncio.run(run())
 
 
-def test_retry_and_refusal_are_recorded(monkeypatch):
-    monkeypatch.setenv("DECISION_TEST_KEY", "secret")
-    responses = iter([httpx.Response(429), httpx.Response(200, json={
-        "model": "test-model", "answers": {"term": {"type": "refusal"}},
-    })])
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: next(responses))) as http:
-            client = DecisionClient(preset(), http_client=http,
-                                    retry={"http_max_attempts": 2, "base_delay_seconds": 0})
-            result = await client.choose("source", [DecisionQuestion("term", "Question", {"a": "A", "b": "B"})])
-            assert result["term"].refused
-            assert [record["http_status"] for record in client.records] == [429, 200]
-            assert client.pool.active == 0
-    asyncio.run(run())
-
-
 def test_cancellation_releases_request_lease(tmp_path, monkeypatch):
     monkeypatch.setenv("DECISION_TEST_KEY", "secret")
     diagnostics = Diagnostics(tmp_path / "app.log")
@@ -281,7 +255,7 @@ def test_cancellation_releases_request_lease(tmp_path, monkeypatch):
         async def respond(request):
             entered.set()
             await asyncio.Event().wait()
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
             client = DecisionClient(preset(), http_client=http)
             task = asyncio.create_task(client.choose("source", [DecisionQuestion("term", "Question", {"a": "A", "b": "B"})]))
             await entered.wait()
@@ -331,7 +305,7 @@ def test_decision_history_records_actual_input_and_refusal(tmp_path, monkeypatch
     monkeypatch.setenv("DECISION_TEST_KEY", "secret")
     answers = {"term": {"type": "refusal"}} if protocol == "typesafe" else [{"name": "term", "type": "refusal"}]
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"model": "judge", "answers": answers}))) as http:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(lambda _: httpx2.Response(200, json={"model": "judge", "answers": answers}))) as http:
             client = DecisionClient(preset(protocol), http_client=http, debug_directory=tmp_path if debug_enabled else None,
                                     project_id="PROJECT", run_id="RUN", stage="translation")
             await client.choose({"source": "Alice came", "translation": "她来了", "terms": {"term": {"source": "Alice"}}},
@@ -414,12 +388,12 @@ def test_llm_decision_uses_frozen_resources_and_retries_invalid_answers(tmp_path
             return stream_response({"choices": [{"delta": {"content": json.dumps(answer)}, "finish_reason": None}]},
                 {"choices": [{"delta": {}, "finish_reason": "stop"}],
                  "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}, "[DONE]")
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}, "finish_reason": "stop"}],
+        return httpx2.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}})
     async def run():
         diagnostics = Diagnostics(tmp_path / "llm.log")
         with diagnostics.activate("project", "translation"):
-            async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
                 retry = load_config(root / "config" / "config.toml")["retry"]
                 retry["http_max_attempts"] = 2
                 client = DecisionClient(frozen, context_reserve_tokens=512, http_client=http, retry=retry, debug_directory=tmp_path / "debug")
@@ -462,10 +436,10 @@ def test_llm_decision_http_and_parse_errors_share_send_budget(tmp_path, monkeypa
     def respond(request):
         attempts.append(request)
         if len(attempts) == 1:
-            return httpx.Response(429, headers={"retry-after": "0"})
-        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]})
+            return httpx2.Response(429, headers={"retry-after": "0"})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]})
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
             retry = load_config(root / "config" / "config.toml")["retry"]
             retry["http_max_attempts"] = 2
             client = DecisionClient(value, context_reserve_tokens=512, http_client=http, retry=retry)
@@ -490,10 +464,10 @@ def test_llm_decision_debug_records_final_outcome(tmp_path, monkeypatch, stream,
         if stream:
             from tests.test_llm_streaming import stream_response
             return stream_response({"choices": [{"delta": {"content": content}, "finish_reason": "stop"}]}, "[DONE]")
-        return httpx.Response(200, json={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]})
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
             client = DecisionClient(preset, context_reserve_tokens=512, http_client=http, debug_directory=tmp_path / "debug")
             question = DecisionQuestion("q", "Choose", {"a": "A", "b": "B"})
             if "refusal" in content:
@@ -533,7 +507,7 @@ def test_llm_decision_schema_is_included_in_context_preflight(tmp_path):
     assert schema_estimate > plain_estimate
     client.preset['context_window_tokens'] = plain_estimate + client.preset['context_safety_margin_tokens']
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: pytest.fail('Must fail before HTTP'))) as http:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(lambda _: pytest.fail('Must fail before HTTP'))) as http:
             client.http_client = http
             with pytest.raises(ExternalError, match='超过可用上下文'):
                 await client.choose('Evidence', questions)

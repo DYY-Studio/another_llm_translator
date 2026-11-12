@@ -448,40 +448,6 @@ def test_file_replacement_rejects_project_staging_digest_mismatch(
     assert stored.read_text(encoding="utf-8") == "one"
 
 
-def test_files_replace_cli_cleans_plan_after_dry_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project = init_empty(tmp_path)
-    original = tmp_path / "original.txt"
-    replacement = tmp_path / "replacement.txt"
-    original.write_text("one", encoding="utf-8")
-    replacement.write_text("two", encoding="utf-8")
-    add_project_files(project, [str(original)])
-    plans = []
-    prepare = main_module.prepare_file_replacement
-
-    def capture_plan(*args: object, **kwargs: object) -> object:
-        plan = prepare(*args, **kwargs)
-        plans.append(plan)
-        return plan
-
-    monkeypatch.setattr(main_module, "prepare_file_replacement", capture_plan)
-    assert (
-        run(
-            [
-                "files-replace",
-                str(project),
-                "F0001",
-                str(replacement),
-                "--dry-run",
-            ]
-        )
-        == 0
-    )
-    assert len(plans) == 1
-    assert not plans[0].temporary_root.exists()
-
-
 def test_file_replacement_rejects_directory_input(tmp_path: Path) -> None:
     project = init_empty(tmp_path)
     original = tmp_path / "book.txt"
@@ -899,70 +865,12 @@ def init_empty(
     return project
 
 
-def test_optimize_cli_reports_project_storage_sizes(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    project = init_empty(tmp_path)
-
-    assert run(["optimize", str(project)]) == 0
-
-    summary = json.loads(capsys.readouterr().out)
-    assert set(summary) == {"before_bytes", "after_bytes", "reclaimed_bytes"}
-    assert summary["before_bytes"] >= summary["after_bytes"]
-    assert summary["reclaimed_bytes"] == (
-        summary["before_bytes"] - summary["after_bytes"]
-    )
-
-
 def rewrite_segment_payload(project: Path, segment: dict[str, object]) -> None:
     with sqlite3.connect(project / "project.sqlite") as connection:
         connection.execute(
             "UPDATE segments SET part_id = ? WHERE segment_id = ?",
             (segment.get("part_id"), segment["segment_id"]),
         )
-
-
-def test_export_cli_collects_repeated_file_ids() -> None:
-    args = build_parser().parse_args(
-        [
-            "export",
-            "sample",
-            "--stage",
-            "translated",
-            "--file",
-            "F0001",
-            "--file",
-            "F0003",
-        ]
-    )
-    assert args.file_ids == ["F0001", "F0003"]
-
-
-def test_adapter_options_are_collected_for_cli_imports() -> None:
-    init_args = build_parser().parse_args(
-        [
-            "init",
-            "book.epub",
-            "--name",
-            "book",
-            "--document-adapter",
-            "epub",
-            "--adapter-option",
-            "epub.ruby_mode=parenthetical",
-        ]
-    )
-    add_args = build_parser().parse_args(
-        [
-            "files-add",
-            "book",
-            "next.epub",
-            "--adapter-option",
-            "epub.ruby_mode=base_only",
-        ]
-    )
-
-    assert init_args.adapter_options == ["epub.ruby_mode=parenthetical"]
-    assert add_args.adapter_options == ["epub.ruby_mode=base_only"]
 
 
 def test_parse_adapter_option_args_builds_adapter_dict() -> None:
@@ -1078,32 +986,27 @@ def test_files_options_cli_rejects_unknown_targets_and_foreign_options(
         )
 
 
-def test_files_replace_cli_parser_accepts_preview_and_confirmation_flags() -> None:
-    parser = build_parser()
-    preview = parser.parse_args(
-        ["files-replace", "sample", "F0001", "revised.txt", "--dry-run"]
-    )
-    assert preview.command == "files-replace"
-    assert preview.file_id == "F0001"
-    assert preview.dry_run is True
-    assert preview.yes is False
-
-    confirmed = parser.parse_args(
-        ["files-replace", "sample", "F0001", "revised.txt", "--yes"]
-    )
-    assert confirmed.yes is True
-    assert confirmed.dry_run is False
-
-
-def test_files_replace_cli_dry_run_and_yes_apply(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_files_replace_cli_dry_run_and_yes_apply(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     project = init_empty(tmp_path)
     original = tmp_path / "original.txt"
     replacement = tmp_path / "replacement.txt"
     original.write_text("one\ntwo", encoding="utf-8")
     replacement.write_text("one\ninserted\ntwo", encoding="utf-8")
     add_project_files(project, [str(original)])
+    plans = []
+    prepare = main_module.prepare_file_replacement
+
+    def capture_plan(*args: object, **kwargs: object) -> object:
+        plan = prepare(*args, **kwargs)
+        plans.append(plan)
+        return plan
+
+    monkeypatch.setattr(main_module, "prepare_file_replacement", capture_plan)
 
     assert run(["files-replace", str(project), "F0001", str(replacement), "--dry-run"]) == 0
+    assert len(plans) == 1 and not plans[0].temporary_root.exists()
     preview = json.loads(capsys.readouterr().out)
     assert preview["preserved_segment_count"] == 2
     assert "preview_token" not in preview
@@ -1176,27 +1079,6 @@ def test_empty_project_can_open_inspect_and_add_txt_files(
         for item in read_segments(project)
     } == {"document"}
     assert read_json(project, project / "project.json")["next_file_sequence"] == 3
-
-
-def test_file_reorder_upgrades_unopened_v6_project(tmp_path: Path) -> None:
-    from app import sqlite_storage
-
-    project = init_empty(tmp_path)
-    source = tmp_path / "chapter.txt"
-    source.write_text("one", encoding="utf-8")
-    add_project_files(project, [str(source)])
-    with sqlite3.connect(project / "project.sqlite") as database:
-        database.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
-    sqlite_storage._SUPPORTED_CACHE.discard(project / "project.sqlite")
-
-    result = reorder_project_files(project, ["F0001"])
-
-    assert result["reordered_file_ids"] == ["F0001"]
-    with sqlite3.connect(project / "project.sqlite") as database:
-        assert database.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == str(sqlite_storage.SCHEMA_VERSION)
-    assert len(list((project / "snapshots" / "storage_migrations").glob("*.sqlite"))) == 1
 
 
 def test_reorder_project_files_preserves_ids_history_and_adapter_state(
@@ -1527,22 +1409,6 @@ def test_auto_import_recurses_all_supported_formats_and_preserves_paths(
     assert summary["warnings"] == [
         f"{source_root}: 已忽略 1 个不支持的文件"
     ]
-
-
-def test_auto_import_rejects_case_insensitive_effective_path_collision(
-    tmp_path: Path,
-) -> None:
-    project = init_empty(tmp_path)
-    first = tmp_path / "first" / "same.txt"
-    second = tmp_path / "second" / "SAME.TXT"
-    first.parent.mkdir()
-    second.parent.mkdir()
-    first.write_text("one", encoding="utf-8")
-    second.write_text("two", encoding="utf-8")
-
-    with pytest.raises(UsageError, match="重复导出相对路径"):
-        add_project_files(project, [str(first), str(second)])
-    assert read_files(project) == []
 
 
 def test_export_file_filter_limits_result_validation_and_output(

@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
-import httpx
+import httpx2
 from .errors import (
     ContextLengthError,
     EmptyResponseSplitError,
@@ -57,7 +57,7 @@ from .stage_runtime import (StageRunState, _SegmentParseResult, _assemble_warnin
 
 def translation_validation_resources(
     config: dict[str, Any], *, project_id: str,
-    http_client: httpx.AsyncClient | None = None, run_dir: Path | None = None,
+    http_client: httpx2.AsyncClient | None = None, run_dir: Path | None = None,
     run_id: str = "", stage: str = "translation",
 ) -> tuple[dict[str, DecisionClient], DecisionClient | None, tuple[TranslationValidator, ...]]:
     decision_clients = {
@@ -339,7 +339,7 @@ async def run_translation(
     project: Path,
     scope: Scope,
     *,
-    http_client: httpx.AsyncClient | None = None,
+    http_client: httpx2.AsyncClient | None = None,
     limiter: SlidingWindowLimiter | KeyPool | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
@@ -555,14 +555,15 @@ async def run_translation(
 
         if draft_scan is not None:
             payload["response_mode"] = draft_scan.mode(items).value
-            if items[0].get("_draft_terms") or items[0].get("_draft_summary"):
+            if not items[0].get("_draft_translation") and (
+                items[0].get("_draft_terms") or items[0].get("_draft_summary")
+            ):
                 payload["source_segments"] = (
                     [
                         {"id": str(index), "text": segment_model_source(item)}
                         for index, item in enumerate(items, 1)
                     ]
-                    if items[0].get("_draft_translation")
-                    or items[0].get("_draft_summary")
+                    if items[0].get("_draft_summary")
                     else [segment_model_source(item) for item in items]
                 )
             if not items[0].get("_draft_translation"):

@@ -3,41 +3,7 @@ from dataclasses import replace
 import pytest
 
 from app.errors import ConfigError
-from app.plugins import _builtin_plugins, _validate_plugins, load_plugins
-
-
-def test_plugins_declare_optional_decision_prompts():
-    plugins = load_plugins()
-    declarations = [prompt for plugin in plugins for prompt in plugin.decision_prompts]
-    assert {prompt.validator_id for prompt in declarations} == {"preferred_term_usage", "segment_alignment"}
-    for prompt in declarations:
-        assert not hasattr(prompt, "defaults")
-        assert set(prompt.default["criteria"]) == set(prompt.choice_ids)
-
-
-def test_prompt_declaration_must_belong_to_its_plugin():
-    plugin = _builtin_plugins()[1]
-    foreign = replace(plugin.decision_prompts[0], validator_id="foreign")
-    with pytest.raises(ConfigError, match="Decision"):
-        _validate_plugins([replace(plugin, decision_prompts=(foreign,))])
-
-
-def test_prompt_resolution_precedence_and_invalid_override(tmp_path, monkeypatch):
-    from app.decision_prompt import resolve_prompt, prompt_path
-    from app.sqlite_storage import atomic_write_json
-    monkeypatch.setenv("ANOTHER_LLM_USER_ROOT", str(tmp_path / "user"))
-    prompt = next(p for plugin in load_plugins() for p in plugin.decision_prompts if p.validator_id == "preferred_term_usage")
-    project = tmp_path / "project"
-    global_content = {**prompt.default, "instructions": "Global rule"}
-    project_content = {**global_content, "instructions": "Project nickname rule"}
-    assert resolve_prompt(prompt)[1] == "default"
-    atomic_write_json(prompt_path(tmp_path / "user", prompt.validator_id), global_content)
-    assert resolve_prompt(prompt, project)[0] == global_content
-    atomic_write_json(prompt_path(project, prompt.validator_id), project_content)
-    assert resolve_prompt(prompt, project) == (project_content, "project")
-    atomic_write_json(prompt_path(project, prompt.validator_id), {**project_content, "criteria": {}})
-    with pytest.raises(ConfigError, match="选项"):
-        resolve_prompt(prompt, project)
+from app.plugins import _validate_plugins
 
 
 def test_prompt_routes_project_override_restore_and_library(tmp_path):
@@ -137,7 +103,7 @@ def test_run_prompt_snapshot_and_fingerprint(tmp_path):
 @pytest.mark.parametrize("validator_id", ["preferred_term_usage", "segment_alignment"])
 async def test_custom_prompt_reaches_both_apis_and_keeps_outcome(protocol, validator_id, monkeypatch):
     import json
-    import httpx
+    import httpx2
     from app.decision import DecisionClient
     from app.decision_prompt import get_declaration
     from app.translation_validation import SegmentAlignmentValidator, TranslationTermMatch, TranslationValidationContext
@@ -159,8 +125,8 @@ async def test_custom_prompt_reaches_both_apis_and_keeps_outcome(protocol, valid
         else:
             assert all(question["choices"] == [{"value": key, "description": value} for key, value in content["criteria"].items()] for question in questions)
             answers = [{"name": question["name"], "type": "choice", "choice": choice, "confidence": .9, "probabilities": [{"value": key, "probability": int(key == choice)} for key in declaration.choice_ids]} for question in questions]
-        return httpx.Response(200, json={"model": "test-model", "answers": answers})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        return httpx2.Response(200, json={"model": "test-model", "answers": answers})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
         client = DecisionClient(preset(protocol), http_client=http)
         context = TranslationValidationContext("Alice arrived", "她到了", terms=(TranslationTermMatch("Alice", "Alice", "source", "爱丽丝"),), segment_id="S1", decision=client, decision_prompts={validator_id: content})
         if validator_id == "preferred_term_usage":

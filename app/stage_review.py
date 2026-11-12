@@ -6,7 +6,7 @@ from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-import httpx
+import httpx2
 from .errors import (
     ContextLengthError,
     EmptyResponseSplitError,
@@ -24,6 +24,7 @@ from .execution import (
     classify_stage_states,
     create_run,
     finalize_run,
+    find_running_runs,
     load_stage_history,
     segment_model_source,
     segment_model_text,
@@ -118,7 +119,7 @@ async def run_review(
     stage: str,
     scope: Scope,
     *,
-    http_client: httpx.AsyncClient | None = None,
+    http_client: httpx2.AsyncClient | None = None,
     limiter: SlidingWindowLimiter | KeyPool | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
@@ -683,6 +684,16 @@ def run_apply(
         or str(item["segment_id"]) not in bases
     ]
     if missing:
+        running = find_running_runs(project, review_stage)
+        agent_runs = [r for r in running if r.get("executor") == "agent_mcp"]
+        if agent_runs:
+            run_id_hint = str(agent_runs[0].get("run_id", ""))
+            raise IncompleteError(
+                f"apply 缺少建议或基准，整个范围未应用：{', '.join(missing[:10])}；"
+                f"检测到未完成的 Agent Run ({run_id_hint})，请先调用 "
+                f"finish_agent_stage_run(run_id='{run_id_hint}', action='complete', accept_remaining=True) "
+                "批量确认其余未修改段落后再执行 apply"
+            )
         raise IncompleteError(
             f"apply 缺少建议或基准，整个范围未应用：{', '.join(missing[:10])}"
         )

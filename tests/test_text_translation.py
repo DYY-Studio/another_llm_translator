@@ -4,7 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app.config import dump_config, load_config
@@ -42,14 +42,14 @@ def test_temporary_segment_uses_project_terms_without_persisting(tmp_path: Path,
             write_json(project, project / "terminology/terms.json", library)
         requests = []
 
-        def respond(request: httpx.Request) -> httpx.Response:
+        def respond(request: httpx2.Request) -> httpx2.Response:
             body = json.loads(json.loads(request.content)["messages"][1]["content"])
             requests.append(body)
-            return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+            return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
                 dict(type="segment", id=body["segments"][0]["id"], translation="爱丽丝\n你好")
             ])}}], "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}})
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             result = await translate_text(project, "  Alice\nHello", http_client=client)
         assert result["text"] == "  爱丽丝\n你好"
         assert result["usage"]["total_tokens"] == 15
@@ -78,14 +78,14 @@ def test_temporary_translation_repairs_and_reports_validation(tmp_path: Path, wa
         (project / "config.toml").write_text(dump_config(config), encoding="utf-8")
         bodies = []
 
-        def respond(request: httpx.Request) -> httpx.Response:
+        def respond(request: httpx2.Request) -> httpx2.Response:
             body = json.loads(json.loads(request.content)["messages"][1]["content"])
             bodies.append(body)
-            return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+            return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
                 dict(type="segment", id=body["segments"][0]["id"], translation="こんにちは")
             ])}}]})
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             if warning:
                 result = await translate_text(project, "こんにちは", http_client=client)
                 assert result["validation_findings"]
@@ -115,19 +115,19 @@ def test_temporary_translation_recovers_and_reassembles_one_segment(tmp_path: Pa
         project = await create_project(tmp_path, "existing")
         bodies = []
 
-        def respond(request: httpx.Request) -> httpx.Response:
+        def respond(request: httpx2.Request) -> httpx2.Response:
             body = json.loads(json.loads(request.content)["messages"][1]["content"])
             bodies.append(body)
             if len(bodies) == 1:
                 if rejection == "format":
-                    return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([])}}]})
-                return httpx.Response(400, json={"error": {"message": "context length exceeded", "code": "context_length_exceeded"}})
+                    return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([])}}]})
+                return httpx2.Response(400, json={"error": {"message": "context length exceeded", "code": "context_length_exceeded"}})
             item = body["segments"][0]
-            return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+            return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
                 dict(type="segment", id=item["id"], translation=item["source"].upper())
             ])}}]})
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
             result = await translate_text(project, "hello world", http_client=client)
         assert result["text"] == "HELLO WORLD"
         assert len(bodies) == (3 if rejection == "context" else 2)
@@ -136,29 +136,7 @@ def test_temporary_translation_recovers_and_reassembles_one_segment(tmp_path: Pa
     asyncio.run(scenario())
 
 
-def test_text_translation_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from fastapi.testclient import TestClient
-    from app.web import create_app
-    from tests.test_web import make_project
-
-    projects_root, project = make_project(tmp_path)
-    seen = []
-
-    async def translate(root: Path, source: str, **kwargs: object) -> dict:
-        seen.append((root, source, kwargs))
-        return dict(text="你好", usage=None, warnings=[], validation_findings=[])
-
-    monkeypatch.setattr("app.text_translation.translate_text", translate)
-    with TestClient(create_app(projects_root=projects_root, app_root=tmp_path / "app-root")) as client:
-        response = client.post("/api/v1/projects/sample/text-translation", json={"source": "hello"})
-        assert response.status_code == 200
-        assert response.json()["text"] == "你好"
-        assert seen[0][0:2] == (project, "hello")
-        assert seen[0][2]["limiter"] is not None
-        assert client.post("/api/v1/projects/sample/text-translation", json={"source": 3}).status_code == 400
-
-
-def test_text_translation_options_use_translation_preset(tmp_path: Path) -> None:
+def test_text_translation_endpoint_and_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from fastapi.testclient import TestClient
     from app.web import create_app
     from tests.test_web import make_project
@@ -171,8 +149,22 @@ def test_text_translation_options_use_translation_preset(tmp_path: Path) -> None
     config = load_config(project / "config.toml")
     config["llm"]["preset_translation"] = "text-preview"
     (project / "config.toml").write_text(dump_config(config))
+
+    seen = []
+
+    async def translate(root: Path, source: str, **kwargs: object) -> dict:
+        seen.append((root, source, kwargs))
+        return dict(text="你好", usage=None, warnings=[], validation_findings=[])
+
+    monkeypatch.setattr("app.text_translation.translate_text", translate)
     with TestClient(create_app(projects_root=projects_root, app_root=tmp_path / "app-root")) as client:
-        response = client.get("/api/v1/projects/sample/text-translation")
+        options = client.get("/api/v1/projects/sample/text-translation")
+        assert options.status_code == 200
+        assert options.json() == {"preset": {"id": "text-preview", "model": "translation-model"}}
+        response = client.post("/api/v1/projects/sample/text-translation", json={"source": "hello"})
         assert response.status_code == 200
-        assert response.json() == {"preset": {"id": "text-preview", "model": "translation-model"}}
+        assert response.json()["text"] == "你好"
+        assert seen[0][0:2] == (project, "hello")
+        assert seen[0][2]["limiter"] is not None
+        assert client.post("/api/v1/projects/sample/text-translation", json={"source": 3}).status_code == 400
     assert list_run_index(project) == ([], 0)

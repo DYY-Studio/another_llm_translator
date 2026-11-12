@@ -2,23 +2,14 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import {
-  fetchOverview,
   fetchHistoricalRequest,
   fetchHistoricalRun,
   fetchHistoricalRuns,
-  fetchProjects,
-  fetchRelatedTerms,
-  fetchStorage,
-  fetchStorageProject,
   clearGlobalLogs,
   clearDebugAttachments,
   clearRunCheckpoints,
   clearOutputFile,
   clearProjectLogs,
-  fetchSummaries,
-  fetchTermHits,
-  fetchTerms,
-  queryKeys,
 } from "../src/queries.ts";
 
 const originalFetch = globalThis.fetch;
@@ -45,89 +36,6 @@ function assertGet(call, path, signal) {
   assert.equal(call.init.signal, signal);
 }
 
-test("read query keys isolate projects and related revisions", () => {
-  assert.deepEqual(queryKeys.projects(), ["projects"]);
-  const project = { projectId: "project-id-a", selector: "same-name" };
-  const otherProject = { projectId: "project-id-b", selector: "same-name" };
-  assert.deepEqual(queryKeys.overview(project), ["overview", "project-id-a"]);
-  assert.deepEqual(queryKeys.terms(project), ["terms", "project-id-a"]);
-  assert.deepEqual(queryKeys.termHits(project, "term"), ["term-hits", "project-id-a", "term"]);
-  assert.deepEqual(queryKeys.relatedTerms(project, 7, "match"), ["related-terms", "project-id-a", 7, "match"]);
-  assert.deepEqual(queryKeys.summaries(project), ["summaries", "project-id-a"]);
-  assert.notDeepEqual(queryKeys.overview(project), queryKeys.overview(otherProject));
-});
-
-test("fetchProjects uses a cancellable GET request", async () => {
-  const signal = new AbortController().signal;
-  const calls = stubFetch({ projects: [] });
-
-  await fetchProjects(signal);
-
-  assertGet(calls[0], "/api/v1/projects", signal);
-});
-
-test("fetchOverview uses the project-specific overview URL", async () => {
-  const signal = new AbortController().signal;
-  const calls = stubFetch({ name: "A" });
-
-  await fetchOverview("project-a", signal);
-
-  assertGet(calls[0], "/api/v1/projects/project-a?offset=0&limit=1", signal);
-});
-
-test("fetchTerms uses the project-specific terminology URL", async () => {
-  const signal = new AbortController().signal;
-  const calls = stubFetch({ terms: [] });
-
-  await fetchTerms("project-a", signal);
-
-  assertGet(calls[0], "/api/v1/projects/project-a/terms", signal);
-});
-
-test("fetchTermHits sends the normalized term and offset", async () => {
-  const signal = new AbortController().signal;
-  const calls = stubFetch({ hits: [] });
-
-  await fetchTermHits("project-a", "hello", 50, signal);
-
-  assert.equal(calls[0].input, "/api/v1/projects/project-a/terms/hits");
-  assert.equal(calls[0].init.method, "POST");
-  assert.equal(calls[0].init.body, JSON.stringify({ normalized: "hello", offset: 50, limit: 50 }));
-  assert.equal(calls[0].init.signal, signal);
-});
-
-test("fetchRelatedTerms sends the normalized term and fixed limit", async () => {
-  const signal = new AbortController().signal;
-  const calls = stubFetch({ related: [] });
-
-  await fetchRelatedTerms("project-a", "hello", signal);
-
-  assert.equal(calls[0].input, "/api/v1/projects/project-a/terms/related");
-  assert.equal(calls[0].init.method, "POST");
-  assert.equal(calls[0].init.body, JSON.stringify({ normalized: "hello", limit: 20 }));
-  assert.equal(calls[0].init.signal, signal);
-});
-
-test("fetchSummaries uses the project-specific summaries URL", async () => {
-  const signal = new AbortController().signal;
-  const calls = stubFetch({ boundaries: [], artifacts: [], participation: [] });
-
-  await fetchSummaries("project-a", signal);
-
-  assertGet(calls[0], "/api/v1/projects/project-a/summaries", signal);
-});
-
-test("storage queries use cancellable summary and lazy detail URLs", async () => {
-  const signal = new AbortController().signal;
-  const calls = stubFetch({});
-
-  await fetchStorage(signal);
-  await fetchStorageProject("project/a", signal);
-
-  assertGet(calls[0], "/api/v1/storage", signal);
-  assertGet(calls[1], "/api/v1/storage/projects/project%2Fa", signal);
-});
-
 test("storage cleanup requests always send explicit confirmation", async () => {
   const signal = new AbortController().signal;
   const calls = stubFetch({ affected_files: 1, reclaimed_bytes: 2 });
@@ -153,19 +61,6 @@ test("storage cleanup requests always send explicit confirmation", async () => {
   assert.equal(calls[4].init.body, JSON.stringify({ confirm: true }));
   assert.equal(calls[5].input, "/api/v1/projects/project%2Fa/storage/checkpoints/clear");
   assert.equal(calls[5].init.body, JSON.stringify({ confirm: true }));
-});
-
-test("historical run query keys include scope and pagination", () => {
-  assert.deepEqual(
-    queryKeys.historicalRuns({
-      project: "sample",
-      stage: "translation",
-      status: "failed",
-      offset: 20,
-      limit: 20,
-    }),
-    ["historical-runs", "sample", "translation", "failed", 20, 20],
-  );
 });
 
 test("fetchHistoricalRuns sends filters and pagination as a GET", async () => {

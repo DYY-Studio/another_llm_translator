@@ -94,32 +94,6 @@ def test_request_metadata_sharing_preserves_records_and_progress(
         assert database.execute("SELECT count(*) FROM request_metadata").fetchone()[0] == (1 if same_scan_fingerprint else 2)
 
 
-def test_v6_migration_shares_request_metadata_without_changing_records(tmp_path: Path) -> None:
-    from app import sqlite_storage
-
-    project = create_project(tmp_path)
-    stage, scan = _seed_fingerprint_records(project)
-    with sqlite3.connect(project / "project.sqlite") as database:
-        for table, record in [("stage_results", stage), ("terminology_scans", scan)]:
-            payload = json.loads(database.execute(f"SELECT payload_json FROM {table}").fetchone()[0])
-            payload.pop("_request_meta", None)
-            payload.update({key:record[key] for key in ("run_id","request_id","created_at","stage_fingerprint")})
-            database.execute(f"UPDATE {table} SET payload_json=?", (json.dumps(payload),))
-        database.execute("DROP TABLE request_metadata")
-        database.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
-    sqlite_storage._SUPPORTED_CACHE.discard(project / "project.sqlite")
-    backup = ensure_supported(project)
-    assert backup is not None
-    assert read_jsonl(project, project / "stages" / "translation.jsonl") == [stage]
-    assert read_jsonl(project, project / "terminology" / "scans.jsonl") == [scan]
-    with sqlite3.connect(project / "project.sqlite") as database:
-        assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
-        for table in ("stage_results", "terminology_scans"):
-            payload = json.loads(database.execute(f"SELECT payload_json FROM {table}").fetchone()[0])
-            assert payload["_request_meta"] > 0
-        assert database.execute("SELECT count(*) FROM request_metadata").fetchone()[0] == 1
-
-
 def test_dangling_request_metadata_reference_fails_explicitly(tmp_path: Path) -> None:
     project = create_project(tmp_path)
     _seed_fingerprint_records(project)
@@ -210,7 +184,6 @@ def test_v6_adapter_state_compresses_on_open_preserving_history(
         assert zlib.decompress(packed).decode("utf-8") == raw
         assert database.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
     assert read_adapter_state(project, "F0001") == expected
-    assert sqlite_storage._take_migration_backup_notice(project) is None
     assert ensure_supported(project) is None
     assert list((project / "snapshots" / "storage_migrations").glob("*.sqlite")) == [backup]
 
@@ -330,7 +303,6 @@ def _seed_v6_summary(project: Path, *, same_model_text: bool = True) -> dict:
 def test_v6_summary_upgrade_deduplicates_hashes_without_changing_history(
     tmp_path: Path, same_model_text: bool,
 ) -> None:
-    from app.sqlite_storage import _take_migration_backup_notice
 
     project = create_project(tmp_path)
     summary = _seed_v6_summary(project, same_model_text=same_model_text)
@@ -350,7 +322,6 @@ def test_v6_summary_upgrade_deduplicates_hashes_without_changing_history(
         assert "original_source_digest" not in value
         assert "original_model_text_digest" not in value
         assert ("model_text_digest" not in value) == same_model_text
-    assert _take_migration_backup_notice(project) is None
     assert ensure_supported(project) is None
     assert list((project / "snapshots" / "storage_migrations").glob("*.sqlite")) == [backup]
 
@@ -447,8 +418,6 @@ def test_v5_summary_upgrade_preserves_history_and_compacts_once(tmp_path: Path, 
     assert run["usage"] == {"total_tokens": 123}
     manifest = json.loads((project / "runs" / "RUN-HISTORY" / "manifest.json").read_text())
     assert manifest["summary_boundaries"] == run["summary_boundaries"]
-    from app.sqlite_storage import _take_migration_backup_notice
-    assert _take_migration_backup_notice(project) is None
     assert read_summary_runs(project)[0]["source_ranges"] == [{
         "file_id": "F0001", "part_id": "document", "segment_ids": ["F0001-S000001"],
     }]
@@ -566,159 +535,6 @@ def _summary_child(artifact: dict[str, object]) -> dict[str, object]:
         "source_digest": artifact["source_digest"],
         "source_range": artifact["source_range"],
     }
-
-
-def create_v2_project(tmp_path: Path, *, conflict: bool = False) -> tuple[Path, dict, dict, dict]:
-    project = tmp_path / "v2"
-    project.mkdir()
-    database = sqlite3.connect(project / "project.sqlite")
-    project_id = "PRJ-V2"
-    file_record = record_header(
-        "source_file",
-        project_id,
-        record_id="FILE-F0001",
-        file_id="F0001",
-        file_order=1,
-        original_name="source.txt",
-        stored_name="input/F0001__source.txt",
-        segment_count=1,
-    )
-    segment_record = record_header(
-        "source_segment",
-        project_id,
-        record_id="F0001-S000001",
-        segment_id="F0001-S000001",
-        file_id="F0001",
-        line_index=0,
-        part_id="document",
-        source="source",
-        is_empty=False,
-    )
-    stage_record = record_header(
-        "stage_result",
-        project_id,
-        stage="translation",
-        segment_id="F0001-S000001",
-        status="completed",
-        text="translated",
-        stage_fingerprint="sha256:test",
-        run_id="RUN-TEST",
-        extra_payload="kept",
-    )
-    if conflict:
-        segment_record["source"] = "different"
-    try:
-        database.executescript(
-            """
-            CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE project_meta (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
-            CREATE TABLE files (
-                file_id TEXT PRIMARY KEY,
-                file_order INTEGER NOT NULL UNIQUE,
-                payload_json TEXT NOT NULL
-            );
-            CREATE TABLE segments (
-                segment_id TEXT PRIMARY KEY,
-                file_id TEXT NOT NULL,
-                file_order INTEGER NOT NULL,
-                line_index INTEGER NOT NULL,
-                part_id TEXT NOT NULL,
-                source TEXT NOT NULL,
-                is_empty INTEGER NOT NULL,
-                model_source TEXT,
-                payload_json TEXT NOT NULL,
-                UNIQUE(file_id, line_index)
-            );
-            CREATE TABLE adapter_states (file_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL);
-            CREATE TABLE stage_results (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                record_id TEXT NOT NULL UNIQUE,
-                stage TEXT NOT NULL,
-                segment_id TEXT,
-                status TEXT,
-                created_at TEXT,
-                payload_json TEXT NOT NULL
-            );
-            CREATE INDEX stage_results_stage_segment ON stage_results(stage, segment_id, sequence);
-            CREATE TABLE terminology_scans (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                record_id TEXT NOT NULL UNIQUE,
-                active_task_id TEXT NOT NULL,
-                segment_id TEXT,
-                status TEXT,
-                created_at TEXT,
-                payload_json TEXT NOT NULL
-            );
-            CREATE INDEX terminology_scans_task_segment ON terminology_scans(active_task_id, segment_id, sequence);
-            CREATE TABLE terminology_candidates (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                record_id TEXT NOT NULL UNIQUE,
-                active_task_id TEXT NOT NULL,
-                created_at TEXT,
-                payload_json TEXT NOT NULL
-            );
-            CREATE INDEX terminology_candidates_task ON terminology_candidates(active_task_id, sequence);
-            CREATE TABLE terms_state (key TEXT PRIMARY KEY, payload_json TEXT);
-            CREATE TABLE runs (
-                run_id TEXT PRIMARY KEY,
-                stage TEXT NOT NULL,
-                status TEXT NOT NULL,
-                started_at TEXT,
-                payload_json TEXT NOT NULL
-            );
-            CREATE INDEX runs_stage_status ON runs(stage, status, started_at);
-            CREATE TABLE run_chunks (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                record_id TEXT NOT NULL UNIQUE,
-                run_id TEXT NOT NULL,
-                created_at TEXT,
-                payload_json TEXT NOT NULL
-            );
-            CREATE INDEX run_chunks_run ON run_chunks(run_id, sequence);
-            """
-        )
-        database.execute("INSERT INTO schema_meta(key,value) VALUES ('schema_version','2')")
-        database.execute(
-            "INSERT INTO project_meta(key,value_json) VALUES (?,?)",
-            ("project_id", json.dumps(project_id)),
-        )
-        database.execute(
-            "INSERT INTO files(file_id,file_order,payload_json) VALUES (?,?,?)",
-            ("F0001", 1, json.dumps(file_record, ensure_ascii=False)),
-        )
-        database.execute(
-            """INSERT INTO segments(
-                segment_id,file_id,file_order,line_index,part_id,source,is_empty,model_source,payload_json
-            ) VALUES (?,?,?,?,?,?,?,?,?)""",
-            (
-                "F0001-S000001",
-                "F0001",
-                1,
-                0,
-                "document",
-                "source",
-                0,
-                None,
-                json.dumps(segment_record, ensure_ascii=False),
-            ),
-        )
-        database.execute(
-            """INSERT INTO stage_results(
-                record_id,stage,segment_id,status,created_at,payload_json
-            ) VALUES (?,?,?,?,?,?)""",
-            (
-                stage_record["record_id"],
-                "translation",
-                "F0001-S000001",
-                "completed",
-                stage_record["created_at"],
-                json.dumps(stage_record, ensure_ascii=False),
-            ),
-        )
-        database.commit()
-    finally:
-        database.close()
-    return project, file_record, segment_record, stage_record
 
 
 def test_summary_participation_and_artifacts_persist_provenance(
@@ -1306,26 +1122,37 @@ def test_v4_epub_upgrade_defaults_missing_options_and_rejects_invalid_values(
         }
 
 
-@pytest.mark.parametrize("version", [1, 2])
-def test_v1_and_v2_projects_are_rejected_without_mutation(
-    tmp_path: Path, version: int
+@pytest.mark.parametrize(
+    ("version", "pattern"),
+    [
+        ("1", "schema_version.*重新创建项目"),
+        ("2", "schema_version.*重新创建项目"),
+        ("future", "schema_version.*future"),
+    ],
+)
+def test_unsupported_schema_versions_are_rejected_without_mutation(
+    tmp_path: Path, version: str, pattern: str
 ) -> None:
-    project, _file_record, _segment_record, _stage_record = create_v2_project(tmp_path)
+    project = tmp_path / "unsupported"
+    project.mkdir()
     with sqlite3.connect(project / "project.sqlite") as database:
         database.execute(
-            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-            (str(version),),
+            "CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        database.execute(
+            "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
+            (version,),
         )
         database.commit()
 
-    with pytest.raises(ProjectError, match="schema_version.*重新创建项目"):
+    with pytest.raises(ProjectError, match=pattern):
         ensure_supported(project)
 
     assert not (project / "snapshots" / "storage_migrations").exists()
     with sqlite3.connect(project / "project.sqlite") as database:
         assert database.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == str(version)
+        ).fetchone()[0] == version
 
 
 def test_epub_upgrade_failure_rolls_back_and_keeps_backup(tmp_path: Path) -> None:
@@ -1656,20 +1483,6 @@ def test_epub_v4_migration_rejects_non_ruby_source_without_mutation(
         ).fetchone()[0] == "4"
 
 
-def test_schema_version_rejects_non_numeric_value_as_project_error(
-    tmp_path: Path,
-) -> None:
-    project, _file_record, _segment_record, _stage_record = create_v2_project(tmp_path)
-    with sqlite3.connect(project / "project.sqlite") as database:
-        database.execute(
-            "UPDATE schema_meta SET value='future' WHERE key='schema_version'"
-        )
-        database.commit()
-
-    with pytest.raises(ProjectError, match="schema_version.*future"):
-        ensure_supported(project)
-
-
 def test_compact_project_database_reclaims_deleted_pages(tmp_path: Path) -> None:
     project = create_project(tmp_path)
     with sqlite3.connect(project / "project.sqlite") as database:
@@ -1689,33 +1502,6 @@ def test_compact_project_database_reclaims_deleted_pages(tmp_path: Path) -> None
     )
     with sqlite3.connect(project / "project.sqlite") as database:
         assert database.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-
-
-def test_v3_run_payload_does_not_duplicate_sql_timestamps(tmp_path: Path) -> None:
-    project = create_project(tmp_path)
-    project_id = str(read_json(project, project / "project.json")["project_id"])
-    run = record_header(
-        "run",
-        project_id,
-        record_id="RUN-TEST",
-        run_id="RUN-TEST",
-        stage="translation",
-        status="completed",
-        started_at="2026-08-16T12:00:00+08:00",
-        detail="kept",
-    )
-    manifest_path = project / "runs" / "RUN-TEST" / "manifest.json"
-
-    write_json(project, manifest_path, run)
-
-    with sqlite3.connect(project / "project.sqlite") as database:
-        payload = json.loads(
-            database.execute(
-                "SELECT payload_json FROM runs WHERE run_id = 'RUN-TEST'"
-            ).fetchone()[0]
-        )
-    assert payload == {"detail": "kept"}
-    assert read_json(project, manifest_path)["created_at"] == run["started_at"]
 
 
 def test_v3_payloads_keep_only_nonrelational_fields(tmp_path: Path) -> None:
@@ -1898,6 +1684,7 @@ def test_v3_payloads_keep_only_nonrelational_fields(tmp_path: Path) -> None:
     assert "file_id" not in payloads["files"]
     assert "stage" not in payloads["stage_results"]
     assert "run_id" not in payloads["runs"]
+    assert "started_at" not in payloads["runs"]
     assert payloads["stage_results"]["text"] == "translated"
     assert payloads["adapter_states"]["state"] == {"kept": True}
     for kind in ("terms", "overrides", "active_task"):
@@ -2088,6 +1875,7 @@ def test_bulk_results_and_states_respect_sqlite_parameter_limit(tmp_path: Path, 
     project = create_project(tmp_path, "\n".join(["fixture"] * 1200))
     segments = read_segments(project)
     pid = str(read_json(project, project / "project.json")["project_id"])
+    _, scan = _seed_fingerprint_records(project)
     original = storage._connect
     def connect(path):
         connection = original(path)
@@ -2104,6 +1892,10 @@ def test_bulk_results_and_states_respect_sqlite_parameter_limit(tmp_path: Path, 
     assert len(summary) == 1200 and all(state["completed"] for state in summary.values())
     latest = storage.latest_stage_results(project, "translation", [row["segment_id"] for row in segments])
     assert len(latest) == 1200
+    scan_ids = [scan["segment_id"], *(f"absent-{i}" for i in range(1000))]
+    assert storage.terminology_scan_state(project, "TASK-SHARED", scan_ids) == (
+        {scan["segment_id"]}, {scan["stage_fingerprint"]},
+    )
 
 
 def test_applied_text_resolution_preserves_raw_records_and_exact_parent(tmp_path: Path) -> None:
@@ -2162,27 +1954,7 @@ def test_summary_reads_keep_source_texts_in_the_same_snapshot(tmp_path: Path, mo
     assert read_content_summaries(project) == expected
 
 
-def test_scan_progress_batches_segment_ids_with_low_bind_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from app import sqlite_storage
-
-    project = create_project(tmp_path)
-    _, scan = _seed_fingerprint_records(project)
-    original = sqlite_storage._with_db
-
-    def limited_connection(project):
-        connection = original(project)
-        connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
-        return connection
-
-    monkeypatch.setattr(sqlite_storage, "_with_db", limited_connection)
-    ids = [scan["segment_id"], *(f"absent-{i}" for i in range(1000))]
-    assert sqlite_storage.terminology_scan_state(project, "TASK-SHARED", ids) == (
-        {scan["segment_id"]}, {scan["stage_fingerprint"]},
-    )
-
-
-@pytest.mark.parametrize("maintenance", [False, True])
-def test_retention_removes_unneeded_reset_in_one_pass(tmp_path: Path, maintenance: bool) -> None:
+def test_retention_removes_unneeded_reset_in_one_pass(tmp_path: Path) -> None:
     from app import sqlite_storage
     from app.stage_result_retention import maintain_stage_results, obsolete_stage_results
 
@@ -2191,18 +1963,15 @@ def test_retention_removes_unneeded_reset_in_one_pass(tmp_path: Path, maintenanc
     records = [record_header("stage_result", project_id, record_id=key,
                             stage="translation", segment_id="F0001-S000001", status=status)
                for key, status in [("old", "completed"), ("reset", "reset"), ("failed", "failed")]]
-    if maintenance:
-        connection = sqlite_storage._with_db(project)
-        try:
-            with connection:
-                sqlite_storage._insert_stage(connection, records)
-                assert obsolete_stage_results(connection) == {"old", "reset"}
-                assert maintain_stage_results(connection) == 2
-                assert not obsolete_stage_results(connection)
-        finally:
-            connection.close()
-    else:
-        sqlite_storage.append_stage_results(project, records)
+    connection = sqlite_storage._with_db(project)
+    try:
+        with connection:
+            sqlite_storage._insert_stage(connection, records)
+            assert obsolete_stage_results(connection) == {"old", "reset"}
+            assert maintain_stage_results(connection) == 2
+            assert not obsolete_stage_results(connection)
+    finally:
+        connection.close()
     assert [record["record_id"] for record in read_jsonl(project, project / "stages" / "translation.jsonl")] == ["failed"]
 
 

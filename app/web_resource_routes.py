@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import psutil
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -291,6 +291,11 @@ def register_resource_routes(
             }
             result["assembled_phases"] = assembled_phases
             result["assembled"] = assembled_phases["adjudication"]
+        elif stage == "repetition_consistency":
+            result["assembled_phases"] = {
+                "comparison": result["assembled"],
+                "final_review": full_prompt(stage, content, resolved, requirements_for(stage), phase="final_review"),
+            }
         if stage == "fragment_summary":
             result["assembled_modes"] = {"summary-only": result["assembled"]}
             result["assembled_mode_languages"] = {"summary-only": resolved}
@@ -661,6 +666,11 @@ def register_resource_routes(
             }
             result["assembled_phases"] = assembled_phases
             result["assembled"] = assembled_phases["adjudication"]
+        elif stage == "repetition_consistency":
+            result["assembled_phases"] = {
+                "comparison": result["assembled"],
+                "final_review": full_prompt(stage, content, language, phase="final_review"),
+            }
         if stage == "fragment_summary":
             result["assembled_modes"] = {"summary-only": result["assembled"]}
             result["assembled_mode_languages"] = {"summary-only": language}
@@ -988,7 +998,7 @@ def register_resource_routes(
         query: dict[str, str] = {}
         cursors: set[tuple[tuple[str, str], ...]] = set()
         try:
-            async with httpx.AsyncClient(timeout=timeout, proxy=proxy, **({"trust_env": False} if plan else {})) as client:
+            async with httpx2.AsyncClient(timeout=timeout, proxy=proxy, **({"trust_env": False} if plan else {})) as client:
                 while True:
                     response = await client.get(url, headers=headers, params=query)
                     if response.status_code >= 400:
@@ -1006,7 +1016,7 @@ def register_resource_routes(
                         raise UsageError("模型列表返回重复分页游标")
                     cursors.add(cursor)
                     query = next_query
-        except (httpx.HTTPError, OSError) as exc:
+        except (httpx2.HTTPError, OSError) as exc:
             raise UsageError(f"模型列表请求失败：{exc}") from exc
         except ExternalError as exc:
             raise UsageError(str(exc)) from exc

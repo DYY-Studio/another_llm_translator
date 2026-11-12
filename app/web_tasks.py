@@ -137,6 +137,23 @@ def _running_run(
         return None
     manifest = candidates[0]
     run_id = str(manifest["run_id"])
+    if manifest.get("executor") == "agent_mcp":
+        result = {
+            "run_id": run_id,
+            "executor": "agent_mcp",
+            "started_at": manifest.get("started_at"),
+            "scope": manifest.get("scope"),
+            "previous": {
+                "model": str(manifest.get("agent_model_hint") or "agent_mcp"),
+                "endpoint": "mcp://agent_harness",
+            },
+            "current": _endpoint_summary(current_config),
+            "resume_compatible": False,
+            "resume_incompatibility_reason": "未完成 Run 由 Agent MCP 创建，请在 Agent 中续作或创建新 Run",
+        }
+        if isinstance(manifest.get("last_interruption"), dict):
+            result["last_interruption"] = manifest["last_interruption"]
+        return result
     current_protocol = run_protocol_is_current(project, run_id)
     if current_protocol:
         previous = _endpoint_summary(load_run_config(project / "runs" / run_id))
@@ -162,6 +179,8 @@ def _running_run(
     if stage == TERMINOLOGY_DECISION_STAGE and "final_review" in manifest:
         result["final_review"] = manifest["final_review"]
         result["knowledge_only"] = bool(manifest.get("knowledge_only", False))
+        result["all_terms"] = bool(manifest.get("all_terms", False))
+        result["review_draft_run_id"] = manifest.get("review_draft_run_id")
         if result["knowledge_only"]:
             result["total_steps"] = int(manifest["selected_segment_count"])
         for field in ("final_review_target_count", "containment_target_count"):
@@ -181,26 +200,39 @@ def task_options(
     estimate_usage: bool = False,
     exclude_punctuation_only: bool = True,
     screening_enabled: bool = False,
+    repetition_final_review: bool = False,
     include_summaries: bool = False,
     include_draft_translation: bool = False,
     aggregate_full_summaries: bool = False,
     prompt_language: str | None = None,
     final_review: bool = False,
     knowledge_only: bool = False,
+    all_terms: bool = False,
+    review_draft_run_id: str | None = None,
     continuous_stages: Iterable[object] = (),
     apply_terminology_decision: bool = False,
     include_repetition_consistency: bool = False,
     apply_repetition_consistency: bool = False,
 ) -> dict[str, Any]:
+    if review_draft_run_id is not None and (stage != TERMINOLOGY_DECISION_STAGE or not final_review or knowledge_only):
+        raise UsageError("草案终审仅支持自动术语决策终审模式")
     if knowledge_only and (stage != TERMINOLOGY_DECISION_STAGE or final_review):
         raise UsageError("仅实体说明模式只允许自动术语决策，且不能同时启用术语终审")
+    if stage in {"terminology", "run-all"}:
+        from .term_changes import require_no_decision_draft
+        require_no_decision_draft(project)
+    if all_terms and stage != TERMINOLOGY_DECISION_STAGE:
+        raise UsageError("全部术语范围只支持术语自动决策")
     if include_draft_translation and stage not in {"terminology", CONTINUOUS_STAGE}:
         raise UsageError("粗翻开关仅支持术语扫描")
     if final_review and stage not in {
         TERMINOLOGY_DECISION_STAGE,
+        "repetition_consistency",
         CONTINUOUS_STAGE,
     }:
-        raise UsageError("final_review 只允许自动术语决策")
+        raise UsageError("final_review 只允许自动术语决策或重复译文审查")
+    if repetition_final_review and stage != CONTINUOUS_STAGE:
+        raise UsageError("repetition_final_review 只允许连续运行")
     if aggregate_full_summaries and stage != CONTINUOUS_STAGE:
         raise UsageError("完整聚合选项只允许连续运行")
     if stage == "continuous":
@@ -222,6 +254,7 @@ def task_options(
             apply_repetition_consistency=apply_repetition_consistency,
             exclude_punctuation_only=exclude_punctuation_only,
             screening_enabled=screening_enabled,
+            repetition_final_review=repetition_final_review,
             final_review=final_review,
         )
     if stage == TERMINOLOGY_DECISION_STAGE:
@@ -233,24 +266,19 @@ def task_options(
             str(item["normalized"])
             for item in overrides.get("overrides", [])
         }
-        has_eligible = any(
-            str(item["normalized"]) not in protected
-            and not bool(item.get("disabled", False))
-            for item in library.get("terms", [])
-        )
         config = load_project_config(project, stage=stage)
         plan = (
-            decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, prepare_requests=False, estimate_usage=False)
-            if has_eligible or knowledge_only
+            decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id, prepare_requests=False, estimate_usage=False)
+            if library.get("terms")
             else None
         )
         estimate_error = None
         if estimate_usage and plan is not None:
             try:
-                plan = decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only)
+                plan = decision_plan(project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id)
             except RequestSizeError as exc:
                 estimate_error = app_error_payload(exc)
-        selected = (plan["knowledge_pending"] if knowledge_only else len(plan["eligible"])) if plan else 0
+        selected = (plan["total_steps"] if review_draft_run_id else plan["knowledge_pending"] if knowledge_only else len(plan["eligible"])) if plan else 0
         running_run = _running_run(project, stage, config)
         if running_run is not None:
             running_final_review = running_run.get("final_review")
@@ -258,7 +286,7 @@ def task_options(
                 project,
                 str(running_run["run_id"]),
                 source_terms_revision=int(library["terms_revision"]),
-                knowledge_only=knowledge_only,
+                knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id,
                 final_review=(
                     bool(running_final_review)
                     if isinstance(running_final_review, bool)
@@ -268,7 +296,7 @@ def task_options(
             running_run["completed_steps"] = decision_checkpoint_progress(
                 project, str(running_run["run_id"])
             )
-            if not running_run.get("knowledge_only"):
+            if not running_run.get("knowledge_only") and not review_draft_run_id:
                 running_run["total_steps"] = selected * 2 + int(
                     running_run.get("final_review_target_count", 0)
                 ) + int(running_run.get("containment_target_count", 0))
@@ -278,11 +306,14 @@ def task_options(
             "stage": stage,
             "final_review": final_review,
             "knowledge_only": knowledge_only,
+            "all_terms": all_terms,
+            "review_draft_run_id": review_draft_run_id,
             "preset": {
                 "id": str(config["_llm_preset_id"]),
                 "model": str(config["llm"]["model"]),
             },
             "selected": selected,
+            "knowledge_pending": plan["knowledge_pending"] if plan else 0,
             "protected": len(plan["protected"]) if plan else len(protected),
             "completed": 0,
             "pending": selected,
@@ -393,6 +424,8 @@ def task_options(
     }
     if stage == "terminology":
         from .term_knowledge import replacement_impacts
+        from .term_changes import publication_invalidates_undo
+        result["publication_invalidates_undo"] = publication_invalidates_undo(project)
         result["knowledge_replacement_impacts"] = replacement_impacts(project, nonempty)
     result["include_summaries"] = include_summaries
     if stage == "terminology" and include_summaries:
@@ -526,6 +559,7 @@ def _running_runs_snapshot(
             if stage == TERMINOLOGY_DECISION_STAGE:
                 stable["final_review"] = manifest.get("final_review")
                 stable["knowledge_only"] = manifest.get("knowledge_only", False)
+                stable["all_terms"] = manifest.get("all_terms", False)
             snapshots.append(
                 (
                     stage,
@@ -550,6 +584,11 @@ def _decision_input_snapshot(plan: dict[str, Any]) -> str:
             "language": plan["language"],
             "final_review": bool(plan.get("final_review", False)),
             "knowledge_only": bool(plan.get("knowledge_only", False)),
+            "all_terms": bool(plan.get("all_terms", False)),
+            "review_draft": None if plan.get("source_draft") is None else {
+                "run_id": plan["source_draft"]["run_id"],
+                "rejected_proposal_ids": plan["source_draft"]["rejected_proposal_ids"],
+            },
         }
     )
 
@@ -615,6 +654,8 @@ class WebTask:
     project_id: str
     stage: str
     status: str = "queued"
+    executor: str | None = None
+    run_id: str | None = None
     created_at: str = field(default_factory=utc_now)
     started_at: str | None = None
     completed_at: str | None = None
@@ -642,9 +683,12 @@ class WebTask:
     _run_action: str | None = field(default=None, repr=False)
     _final_review: bool = field(default=False, repr=False)
     _knowledge_only: bool = field(default=False, repr=False)
+    _all_terms: bool = field(default=False, repr=False)
+    _review_draft_run_id: str | None = field(default=None, repr=False)
     _prompt_language: str | None = field(default=None, repr=False)
     _exclude_punctuation_only: bool = field(default=True, repr=False)
     _screening_enabled: bool = field(default=False, repr=False)
+    _repetition_final_review: bool = field(default=False, repr=False)
     _replace_draft: bool = field(default=False, repr=False)
     _acknowledge_manual_review: bool = field(default=False, repr=False)
     _include_summaries: bool = field(default=False, repr=False)
@@ -658,6 +702,8 @@ class WebTask:
     _apply_repetition_consistency: bool = field(default=False, repr=False)
     _apply_terminology_decision: bool = field(default=False, repr=False)
     _start_decision: _StartDecision | None = field(default=None, repr=False)
+    _checked_out_segment_ids: set[str] = field(default_factory=set, repr=False)
+    _checked_out_by_part: dict[str, set[str]] = field(default_factory=dict, repr=False)
 
     def view(self) -> dict[str, Any]:
         return {
@@ -669,6 +715,7 @@ class WebTask:
             "steps": [dict(step) for step in self.steps],
             "final_review": self._final_review,
             "knowledge_only": self._knowledge_only,
+            "all_terms": self._all_terms,
             "include_summaries": self._include_summaries,
             "include_draft_translation": self._include_draft_translation,
             "aggregate_full_summaries": self._aggregate_full_summaries,
@@ -701,6 +748,25 @@ class WebTask:
             ),
             "failure_counts": dict(self.failure_counts),
             "usage": self.usage,
+            **({"executor": self.executor} if self.executor is not None else {}),
+            **({"run_id": self.run_id} if self.run_id is not None else {}),
+            **(
+                {
+                    "checked_out_segments": len(self._checked_out_segment_ids),
+                    **(
+                        {
+                            "checked_out_parts": {
+                                part: len(sids)
+                                for part, sids in self._checked_out_by_part.items()
+                            }
+                        }
+                        if self._checked_out_by_part
+                        else {}
+                    ),
+                }
+                if self.executor == "agent_mcp"
+                else {}
+            ),
         }
 
 
@@ -925,12 +991,15 @@ class WebTaskManager:
         prompt_language: str | None,
         exclude_punctuation_only: bool = True,
         screening_enabled: bool = False,
+        repetition_final_review: bool = False,
         include_summaries: bool = False,
         include_draft_translation: bool = False,
         aggregate_full_summaries: bool = False,
         summary_selection: tuple[tuple[str, str], ...] = (),
         final_review: bool = False,
         knowledge_only: bool = False,
+        all_terms: bool = False,
+        review_draft_run_id: str | None = None,
         continuous_stages: Iterable[object] = (),
         continuous_run_actions: Mapping[str, str] | None = None,
         apply_terminology_decision: bool = False,
@@ -949,6 +1018,8 @@ class WebTaskManager:
             CONTINUOUS_STAGE,
         }:
             raise UsageError(f"未知后台阶段：{stage}")
+        if review_draft_run_id is not None and (stage != TERMINOLOGY_DECISION_STAGE or not final_review or knowledge_only):
+            raise UsageError("草案终审仅支持自动术语决策终审模式")
         if knowledge_only and (stage != TERMINOLOGY_DECISION_STAGE or final_review):
             raise UsageError("仅实体说明模式只允许自动术语决策，且不能同时启用术语终审")
         if include_draft_translation and stage not in {"terminology", CONTINUOUS_STAGE}:
@@ -970,6 +1041,8 @@ class WebTaskManager:
             raise UsageError(
                 "include_summaries 要求完整项目范围，不支持部分 Scope"
             )
+        if repetition_final_review and stage != CONTINUOUS_STAGE:
+            raise UsageError("repetition_final_review 只允许连续运行")
         if aggregate_full_summaries and stage != CONTINUOUS_STAGE:
             raise UsageError("完整聚合选项只允许连续运行")
         force = scope.force
@@ -981,9 +1054,10 @@ class WebTaskManager:
             raise UsageError("run-all 不支持 run_action")
         if final_review and stage not in {
             TERMINOLOGY_DECISION_STAGE,
+            "repetition_consistency",
             CONTINUOUS_STAGE,
         }:
-            raise UsageError("final_review 只允许自动术语决策")
+            raise UsageError("final_review 只允许自动术语决策或重复译文审查")
         if stage != CONTINUOUS_STAGE and (
             tuple(continuous_stages)
             or continuous_run_actions
@@ -1004,13 +1078,13 @@ class WebTaskManager:
             from .repetition_consistency import repetition_plan, repetition_resume
             if reuse_mixed_fingerprints:
                 raise UsageError("重复译文审查不支持跨 Run 复用结果")
-            plan = repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, preview_only=not find_running_runs(project, stage), estimate_usage=False)
+            plan = repetition_plan(project, scope, prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, final_review=final_review, preview_only=not find_running_runs(project, stage), estimate_usage=False)
             running = repetition_resume(project, plan, estimate_usage=False) if not plan.get("preview_only") else None
             if running and run_action is None:
                 raise UsageError("发现未完成 Run，必须选择续用或结束旧 Run 并新建")
             if run_action == "resume" and (not running or not running["resume_compatible"]):
                 raise UsageError(running["resume_incompatibility_reason"] if running else "没有可续作的重复译文 Run")
-            return _StartDecision(selected_count=plan["selected"], running_run_id=running["run_id"] if running else None,
+            return _StartDecision(final_review=final_review, selected_count=plan["selected"], running_run_id=running["run_id"] if running else None,
                 fingerprints=((stage, plan["fingerprint"]),), selection_snapshots=(), running_runs=_running_runs_snapshot(project, (stage,)),
                 plan=None if ensure_unique or plan.get("preview_only") else plan)
         selected_count = 0
@@ -1057,6 +1131,7 @@ class WebTaskManager:
                 apply_repetition_consistency=apply_repetition_consistency,
                 exclude_punctuation_only=exclude_punctuation_only,
                 screening_enabled=screening_enabled,
+                repetition_final_review=repetition_final_review,
                 final_review=final_review,
             )
             require_continuous_ready(inspection)
@@ -1114,7 +1189,7 @@ class WebTaskManager:
                 )
         elif stage == TERMINOLOGY_DECISION_STAGE:
             decision_plan_snapshot = decision_plan(
-                project, prompt_language, final_review=final_review, knowledge_only=knowledge_only
+                project, prompt_language, final_review=final_review, knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id
             , prepare_requests=False, estimate_usage=False)
             library = decision_plan_snapshot["library"]
             selected_count = int(
@@ -1126,6 +1201,7 @@ class WebTaskManager:
             if (
                 run_action != "resume"
                 and not knowledge_only
+                and review_draft_run_id is None
                 and not acknowledge_manual_review
                 and manual_review_state(project)["remaining"] > 0
             ):
@@ -1144,7 +1220,7 @@ class WebTaskManager:
                     project,
                     str(running[0]["run_id"]),
                     source_terms_revision=current_terms_revision,
-                    knowledge_only=knowledge_only,
+                    knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id,
                     final_review=final_review,
                 )
                 if not compatible:
@@ -1249,7 +1325,7 @@ class WebTaskManager:
                         decision_plan_snapshot["prompts"],
                         decision_plan_snapshot["library"],
                         final_review=final_review,
-                        knowledge_only=knowledge_only,
+                        knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id,
                     )
                     if stage == TERMINOLOGY_DECISION_STAGE
                     else _stage_fingerprint_snapshot(project, stage),
@@ -1367,7 +1443,8 @@ class WebTaskManager:
                     reuse_mixed_fingerprints=state._reuse_mixed_fingerprints,
                     run_action=state._run_action,
                     final_review=state._final_review,
-                    knowledge_only=state._knowledge_only,
+                    knowledge_only=state._knowledge_only, all_terms=state._all_terms,
+                    review_draft_run_id=state._review_draft_run_id,
                     continuous_stages=state._continuous_stages,
                     continuous_run_actions=state._continuous_run_actions,
                     apply_terminology_decision=state._apply_terminology_decision,
@@ -1377,6 +1454,7 @@ class WebTaskManager:
                     replace_draft=state._replace_draft,
                     exclude_punctuation_only=state._exclude_punctuation_only,
                     screening_enabled=state._screening_enabled,
+                    repetition_final_review=state._repetition_final_review,
                     acknowledge_manual_review=state._acknowledge_manual_review,
                     include_summaries=state._include_summaries,
                     include_draft_translation=state._include_draft_translation,
@@ -1415,6 +1493,7 @@ class WebTaskManager:
         prompt_language: str | None = None,
         exclude_punctuation_only: bool = True,
         screening_enabled: bool = False,
+        repetition_final_review: bool = False,
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
@@ -1423,6 +1502,8 @@ class WebTaskManager:
         summary_selection: Iterable[dict[str, str]] = (),
         final_review: bool = False,
         knowledge_only: bool = False,
+        all_terms: bool = False,
+        review_draft_run_id: str | None = None,
         continuous_stages: Iterable[object] = (),
         continuous_run_actions: Mapping[str, str] | None = None,
         apply_terminology_decision: bool = False,
@@ -1454,6 +1535,7 @@ class WebTaskManager:
             prompt_language=prompt_language,
             exclude_punctuation_only=exclude_punctuation_only,
             screening_enabled=screening_enabled,
+            repetition_final_review=repetition_final_review,
             include_summaries=include_summaries,
             include_draft_translation=include_draft_translation,
             aggregate_full_summaries=aggregate_full_summaries,
@@ -1462,7 +1544,7 @@ class WebTaskManager:
                 for item in summary_selection
             ),
             final_review=final_review,
-            knowledge_only=knowledge_only,
+            knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id,
             continuous_stages=continuous_stages,
             continuous_run_actions=continuous_run_actions,
             apply_terminology_decision=apply_terminology_decision,
@@ -1490,11 +1572,14 @@ class WebTaskManager:
             state._run_action = run_action
             state._final_review = decision.final_review
             state._knowledge_only = knowledge_only
+            state._all_terms = all_terms
+            state._review_draft_run_id = review_draft_run_id
             state.steps = [dict(step) for step in decision.continuous_steps]
             state._prompt_language = prompt_language
             state._replace_draft = replace_draft
             state._exclude_punctuation_only = exclude_punctuation_only
             state._screening_enabled = screening_enabled
+            state._repetition_final_review = repetition_final_review
             state._acknowledge_manual_review = acknowledge_manual_review
             state._include_summaries = include_summaries
             state._include_draft_translation = include_draft_translation
@@ -1524,6 +1609,7 @@ class WebTaskManager:
         prompt_language: str | None = None,
         exclude_punctuation_only: bool = True,
         screening_enabled: bool = False,
+        repetition_final_review: bool = False,
         replace_draft: bool = False,
         acknowledge_manual_review: bool = False,
         include_summaries: bool = False,
@@ -1532,6 +1618,8 @@ class WebTaskManager:
         summary_selection: tuple[tuple[str, str], ...] = (),
         final_review: bool = False,
         knowledge_only: bool = False,
+        all_terms: bool = False,
+        review_draft_run_id: str | None = None,
         continuous_stages: tuple[str, ...] = (),
         continuous_run_actions: Mapping[str, str] | None = None,
         apply_terminology_decision: bool = False,
@@ -1636,12 +1724,13 @@ class WebTaskManager:
                     prompt_language=prompt_language,
                     exclude_punctuation_only=exclude_punctuation_only,
                     screening_enabled=screening_enabled,
+                    repetition_final_review=repetition_final_review,
                     include_summaries=include_summaries,
                     include_draft_translation=include_draft_translation,
                     aggregate_full_summaries=aggregate_full_summaries,
                     summary_selection=summary_selection,
                     final_review=final_review,
-                    knowledge_only=knowledge_only,
+                    knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id,
                     continuous_stages=continuous_stages,
                     continuous_run_actions=continuous_run_actions,
                     apply_terminology_decision=apply_terminology_decision,
@@ -1667,7 +1756,7 @@ class WebTaskManager:
                     limiter_stages = (state.stage,)
                 if state.stage in {CONTINUOUS_STAGE, "run-all"}:
                     for stage in limiter_stages:
-                        config = (await run_blocking(lambda: load_project_config(state.project, stage="translation" if stage == "repetition_consistency" else stage)))
+                        config = (await run_blocking(lambda: load_project_config(state.project, stage=stage)))
                         key = (
                             str(config["_llm_preset_id"]),
                             str(config["_llm_preset_hash"]),
@@ -1679,7 +1768,7 @@ class WebTaskManager:
                         shared_limiters[key] = limiter
                         limiter_releases.append(release)
                 else:
-                    config = (await run_blocking(lambda: load_project_config(state.project, stage="translation" if state.stage == "repetition_consistency" else state.stage)))
+                    config = (await run_blocking(lambda: load_project_config(state.project, stage=state.stage)))
                     limiter, release = self._acquire_limiter(config)
                     shared_limiters[
                         (
@@ -1723,6 +1812,7 @@ class WebTaskManager:
                         apply_repetition_consistency=apply_repetition_consistency,
                         exclude_punctuation_only=exclude_punctuation_only,
                         screening_enabled=screening_enabled,
+                        repetition_final_review=repetition_final_review,
                         final_review=final_review,
                         prompt_language=prompt_language,
                         include_draft_translation=include_draft_translation,
@@ -1758,7 +1848,7 @@ class WebTaskManager:
                         limiter=next(iter(shared_limiters.values())),
                         plan=decision.plan,
                         final_review=final_review,
-                        knowledge_only=knowledge_only,
+                        knowledge_only=knowledge_only, all_terms=all_terms, review_draft_run_id=review_draft_run_id,
                     )
                 elif state.stage == "terminology":
                     summary = await run_terminology(
@@ -1777,7 +1867,7 @@ class WebTaskManager:
                 elif state.stage == "repetition_consistency":
                     from .repetition_consistency import run_repetition
                     summary = await run_repetition(state.project, scope, replace_draft=replace_draft, run_action=run_action,
-                        prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled,
+                        prompt_language=prompt_language, exclude_punctuation_only=exclude_punctuation_only, screening_enabled=screening_enabled, final_review=final_review,
                         on_progress=progress, on_usage=usage_changed,
                         limiter=next(iter(shared_limiters.values())), prepared_plan=decision.plan)
                 elif state.stage == "translation":
@@ -1912,6 +2002,126 @@ class WebTaskManager:
             for state in self.tasks.values()
         )
 
+    def has_conflicting_task(self, project: Path, run_id: str) -> bool:
+        return any(
+            state.project == project
+            and state.status in {"queued", "running", "cancelling"}
+            and not (state.executor == "agent_mcp" and state.run_id == run_id)
+            for state in self.tasks.values()
+        )
+
+    async def register_agent_task(
+        self,
+        project: Path,
+        project_id: str,
+        stage: str,
+        run_id: str,
+        total_segments: int,
+        completed_segments: int = 0,
+        checked_out_ids: Iterable[str] = (),
+    ) -> dict[str, Any]:
+        async with self.guard:
+            if self._shutting_down:
+                raise UsageError("任务管理器正在关闭")
+            if self.is_project_running(project):
+                raise UsageError("项目已有后台任务")
+            task_id = f"TASK-{uuid.uuid4().hex[:12].upper()}"
+            now = utc_now()
+            state = WebTask(
+                task_id=task_id,
+                project=project,
+                project_id=project_id,
+                stage=stage,
+                status="running",
+                executor="agent_mcp",
+                run_id=run_id,
+                created_at=now,
+                started_at=now,
+                total_segments=total_segments,
+                completed_segments=completed_segments,
+                _checked_out_segment_ids={str(sid) for sid in checked_out_ids if sid},
+            )
+            self.tasks[task_id] = state
+            self.active_by_project[project] = task_id
+            self.running_task_ids.add(task_id)
+            return state.view()
+
+    def active_agent_task(self, project: Path) -> dict[str, Any] | None:
+        task_id = self.active_by_project.get(project)
+        if task_id is None:
+            return None
+        state = self.tasks.get(task_id)
+        if (
+            state is None
+            or state.executor != "agent_mcp"
+            or state.status not in {"queued", "running", "cancelling"}
+        ):
+            return None
+        return state.view()
+
+    def record_agent_checkout(
+        self,
+        project: Path,
+        run_id: str,
+        *,
+        segment_ids: Iterable[str],
+        part_id: str | None = None,
+    ) -> int:
+        task_id = self.active_by_project.get(project)
+        if task_id is None:
+            return 0
+        state = self.tasks.get(task_id)
+        if state is None or state.executor != "agent_mcp" or state.run_id != run_id:
+            return 0
+        sids = [str(sid) for sid in segment_ids if sid]
+        state._checked_out_segment_ids.update(sids)
+        if part_id and sids:
+            state._checked_out_by_part.setdefault(str(part_id), set()).update(sids)
+        return len(state._checked_out_segment_ids)
+
+    def update_agent_task(
+        self,
+        project: Path,
+        run_id: str,
+        *,
+        completed_segments: int,
+        failed_segments: int = 0,
+        committed_ids: Iterable[str] = (),
+    ) -> None:
+        task_id = self.active_by_project.get(project)
+        if task_id is None:
+            return
+        state = self.tasks.get(task_id)
+        if state is None or state.executor != "agent_mcp" or state.run_id != run_id:
+            return
+        state.completed_segments = completed_segments
+        state.failed_segments = failed_segments
+        state._checked_out_segment_ids.update(
+            str(sid) for sid in committed_ids if sid
+        )
+
+    async def finish_agent_task(
+        self,
+        project: Path,
+        run_id: str,
+        *,
+        status: str,
+        summary: dict[str, Any] | None = None,
+    ) -> None:
+        async with self.guard:
+            task_id = self.active_by_project.get(project)
+            if task_id is None:
+                return
+            state = self.tasks.get(task_id)
+            if state is None or state.executor != "agent_mcp" or state.run_id != run_id:
+                return
+            state.status = status
+            state.summary = summary
+            state.completed_at = utc_now()
+            self.running_task_ids.discard(task_id)
+            self.active_by_project.pop(project, None)
+            self._dispatch_locked()
+
     async def cancel(self, task_id: str) -> dict[str, Any]:
         async with self.guard:
             try:
@@ -1926,6 +2136,28 @@ class WebTaskManager:
                 state.completed_at = utc_now()
                 if self.active_by_project.get(state.project) == task_id:
                     self.active_by_project.pop(state.project, None)
+                return state.view()
+            if state.status == "running" and state.executor == "agent_mcp":
+                if state.run_id:
+                    from .execution import _interrupt_run
+
+                    def _interrupt_agent_run() -> None:
+                        with project_write_lock(state.project):
+                            manifest_path = (
+                                state.project / "runs" / str(state.run_id) / "manifest.json"
+                            )
+                            if record_exists(state.project, manifest_path):
+                                manifest = read_json(state.project, manifest_path)
+                                if manifest.get("status") == "running":
+                                    _interrupt_run(state.project, manifest, reason="cancelled")
+
+                    await run_blocking(_interrupt_agent_run)
+                state.status = "cancelled"
+                state.completed_at = utc_now()
+                self.running_task_ids.discard(task_id)
+                if self.active_by_project.get(state.project) == task_id:
+                    self.active_by_project.pop(state.project, None)
+                self._dispatch_locked()
                 return state.view()
             if state.status != "running" or state.asyncio_task is None:
                 raise UsageError("后台任务当前不可取消")

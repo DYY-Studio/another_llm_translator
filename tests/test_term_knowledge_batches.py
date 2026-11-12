@@ -46,18 +46,6 @@ async def test_batch_keeps_success_before_retry_and_isolates_cross_entity_refs(t
     assert saved["beta"]["items"][0]["fragment_ids"] == ["beta-fragment"]
 
 
-def test_budget_packing_isolates_oversized_entity(tmp_path):
-    from app.term_knowledge import pack_knowledge_batches
-    config = load_project_config(make_project(tmp_path), stage="terminology_decision")
-    config["execution"].update(input_tokens_per_minute=0)
-    config["chunking"].update(target_content_tokens=1000, context_reserve_tokens=0)
-    config["llm"].update(context_window_tokens=2000)
-    batches, tokens, errors = pack_knowledge_batches([view("a"), view("large", "大" * 10000), view("b")], "整理", config)
-    assert [[v["entity_key"] for v in b] for b in batches] == [["a", "b"]]
-    assert tokens > 0
-    assert set(errors) == {"large"}
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("damage", ["missing", "duplicate", "unknown", "broken", "no_end"])
 async def test_batch_response_failure_scope(tmp_path, damage):
@@ -92,7 +80,7 @@ async def test_batch_response_failure_scope(tmp_path, damage):
 @pytest.mark.asyncio
 async def test_knowledge_run_uses_bounded_parallel_batches(tmp_path, monkeypatch):
     import asyncio
-    import httpx
+    import httpx2
     from app.sqlite_storage import read_json, write_json, record_header
     from app.term_knowledge import add_unsourced, empty_knowledge, entity_view, knowledge_payload
     from app.term_decision import run_terminology_decision, _prompt
@@ -138,13 +126,13 @@ async def test_knowledge_run_uses_bounded_parallel_batches(tmp_path, monkeypatch
         try:
             await asyncio.wait_for(first_pair.wait(), 3)
             await asyncio.sleep(0)
-            return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+            return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
                 {"type": "entity_knowledge", "entity": e["entity"], "reason": "整理", "items": []}
                 for e in payload["entities"]])}}]})
         finally:
             active -= 1
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         result = await run_terminology_decision(project, http_client=client)
     assert maximum == 2
     assert sorted(calls) == ["a", "b", "c", "d"]
@@ -155,7 +143,7 @@ async def test_knowledge_run_uses_bounded_parallel_batches(tmp_path, monkeypatch
 @pytest.mark.parametrize("knowledge_only", [False, True])
 async def test_cancelled_retry_preserves_checkpoint_and_resume_requests_only_unfinished(tmp_path, monkeypatch, knowledge_only):
     import asyncio
-    import httpx
+    import httpx2
     from app.sqlite_storage import read_json, write_json, record_header
     from app.term_knowledge import add_unsourced, empty_knowledge
     from app.term_decision import run_terminology_decision, decision_resume_compatibility, decision_plan, _decision_fingerprint
@@ -185,9 +173,9 @@ async def test_cancelled_retry_preserves_checkpoint_and_resume_requests_only_unf
         records = [{"type": "entity_knowledge", "entity": e["entity"], "reason": "整理",
                     "items": [{"text": "身份", "refs": [e["fragments"][0]["id"] if resumed or e["entity"] == "beta" else "unknown"]}]}
                    for e in entities]
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         with pytest.raises(asyncio.CancelledError):
             await run_terminology_decision(project, knowledge_only=knowledge_only, http_client=client)
         run_id = next((project / "runs").glob("*/terminology_decision_checkpoint.json")).parent.name
@@ -224,20 +212,6 @@ async def test_cancelled_retry_preserves_checkpoint_and_resume_requests_only_unf
     assert before != after
 
 
-def test_soft_overflow_and_feedback_budget_are_explicit(tmp_path):
-    from app.term_knowledge import pack_knowledge_batches, knowledge_payload
-    from app.execution import estimate_messages, render_messages
-    config = load_project_config(make_project(tmp_path), stage="terminology_decision")
-    config["execution"]["input_tokens_per_minute"] = 0
-    size = estimate_messages(render_messages("整理", knowledge_payload([view("alpha")], config["project"]["target_language"])[0]), config["execution"]["token_safety_factor"])
-    config["chunking"]["target_content_tokens"] = 1
-    assert len(pack_knowledge_batches([view("alpha")], "整理", config)[0]) == 1
-    config["llm"].update(context_window_tokens=size + 5)
-    config["chunking"]["context_reserve_tokens"] = 0
-    batches, _, errors = pack_knowledge_batches([view("alpha")], "整理", config, feedback="格式修正" * 100)
-    assert not batches and set(errors) == {"alpha"}
-
-
 @pytest.mark.asyncio
 async def test_request_failure_preserves_prior_success_and_fatal_errors_propagate(tmp_path):
     from app.term_knowledge import aggregate_batch
@@ -271,7 +245,7 @@ async def test_request_failure_preserves_prior_success_and_fatal_errors_propagat
 
 @pytest.mark.asyncio
 async def test_description_generation_modes_apply_without_growing_evidence(tmp_path, monkeypatch):
-    import httpx
+    import httpx2
     from app.config import dump_config, load_config
     from app.sqlite_storage import read_json, write_json, record_header
     from app.term_decision import run_terminology_decision
@@ -304,9 +278,9 @@ async def test_description_generation_modes_apply_without_growing_evidence(tmp_p
             record["items"] = [{"text": "详细身份说明", "refs": [entity["fragments"][0]["id"]]}]
         if mode != "sourced":
             record["summary"] = "船长"
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([record])}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([record])}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         for mode, expected in [("sourced", ["详细身份说明"]),
                                ("sourced_and_summary", ["详细身份说明", "船长"]),
                                ("summary_only", ["船长"])]:
@@ -348,7 +322,7 @@ def test_description_generation_rejects_invalid_model_output(mode, items, summar
 
 @pytest.mark.asyncio
 async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_lifecycle(tmp_path, monkeypatch):
-    import httpx
+    import httpx2
     from copy import deepcopy
     from app.sqlite_storage import read_json, write_json, record_header
     from app.term_knowledge import add_unsourced, empty_knowledge, save_items, entity_view
@@ -367,7 +341,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     write_json(project, project / "terminology/terms.json", record_header("terminology_library", meta["project_id"], **data))
     before = deepcopy(load_terms(project))
     assert entity_view(project, before, "alpha")["status"] == "current"
-    plan = decision_plan(project, knowledge_only=True)
+    plan = decision_plan(project, knowledge_only=True, all_terms=True)
     assert plan["eligible"] == []
     assert plan["knowledge_pending"] == 1
     assert set(plan["prompts"]) == {"knowledge"}
@@ -379,7 +353,7 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
         calls.append(payload["phase"])
         assert payload["phase"] == "knowledge"
         entity = payload["entities"][0]
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
             {"type": "entity_knowledge", "entity": "alpha", "reason": "重新整理说明",
              "items": [{"text": "更新说明", "refs": ["unknown" if invalid_output else entity["fragments"][0]["id"]]}]}])}}]})
 
@@ -388,21 +362,21 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     from app.web_tasks import WebTaskManager
     from app.execution import Scope
     api = TestClient(create_app(projects_root=project.parent))
-    options = api.get("/api/v1/projects/terms/task-options/terminology_decision?knowledge_only=true")
+    options = api.get("/api/v1/projects/terms/task-options/terminology_decision?knowledge_only=true&all_terms=true")
     assert options.status_code == 200
     assert options.json()["selected"] == 1
     assert options.json()["knowledge_only"] is True
-    assert api.get("/api/v1/projects/terms/task-options/translation?knowledge_only=true").status_code == 400
+    assert api.get("/api/v1/projects/terms/task-options/translation?knowledge_only=true&all_terms=true").status_code == 400
     assert api.get("/api/v1/projects/terms/task-options/terminology_decision?knowledge_only=true&final_review=true").status_code == 400
 
     async def execute(*args, **kwargs):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             return await run_terminology_decision(*args, http_client=client, **kwargs)
 
     monkeypatch.setattr("app.web_tasks.run_terminology_decision", execute)
     manager = WebTaskManager()
     started = await manager.start(project, "terminology_decision", scope=Scope(),
-                                  reuse_mixed_fingerprints=False, run_action=None, knowledge_only=True)
+                                  reuse_mixed_fingerprints=False, run_action=None, knowledge_only=True, all_terms=True)
     await manager.tasks[started["task_id"]].asyncio_task
     finished = manager.get(started["task_id"])
     assert finished["status"] == "completed", finished.get("error")
@@ -435,16 +409,16 @@ async def test_knowledge_only_regenerates_current_entities_and_reuses_draft_life
     assert calls == ["knowledge"]
     from app.errors import UsageError
     invalid_output = True
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         with pytest.raises(UsageError, match="实体说明聚合失败"):
-            await run_terminology_decision(project, knowledge_only=True, http_client=client)
+            await run_terminology_decision(project, knowledge_only=True, all_terms=True, http_client=client)
     assert current_decision_draft(project) is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("schema_version", [7, 8])
 async def test_sidecar_migration_preserves_real_draft_apply_and_rollback(tmp_path, monkeypatch, schema_version):
-    import httpx
+    import httpx2
     import sqlite3
     from copy import deepcopy
     from app.config import load_project_config
@@ -508,10 +482,10 @@ async def test_sidecar_migration_preserves_real_draft_apply_and_rollback(tmp_pat
             entity = payload["entities"][0]
             records = [{"type": "entity_knowledge", "entity": "alpha", "reason": "整理",
                         "items": [{"text": "合并说明", "refs": [f["id"] for f in entity["fragments"]]}]}]
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await run_terminology_decision(project, http_client=client)
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        result = await run_terminology_decision(project, all_terms=True, http_client=client)
     run_dir = project / "runs" / result["run_id"]
     draft_path = run_dir / "terminology_decision_draft.json"
     draft = json.loads(draft_path.read_text(encoding="utf-8"))
@@ -592,7 +566,7 @@ async def test_sidecar_migration_preserves_real_draft_apply_and_rollback(tmp_pat
     assert manifest["status"] == "interrupted"
     assert manifest["decision_status"] == "pending"
     with pytest.raises(UsageError, match="旧 Run 已结束"):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             await run_terminology_decision(
                 project, resume_run_id=result["run_id"], http_client=client,
             )
@@ -607,15 +581,15 @@ async def test_sidecar_migration_preserves_real_draft_apply_and_rollback(tmp_pat
     rollback_decision(project, confirm=True)
     rolled_back = load_terms(project)
     assert next(term for term in rolled_back["terms"] if term["normalized"] == "beta")["group_primary"] is None
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        next_run = await run_terminology_decision(project, replace_draft=True, http_client=client)
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        next_run = await run_terminology_decision(project, replace_draft=True, all_terms=True, http_client=client)
     assert next_run["run_id"] != result["run_id"]
     assert calls == 6
 
 
 @pytest.mark.asyncio
 async def test_knowledge_only_partial_failure_preserves_reviewable_success(tmp_path, monkeypatch):
-    import httpx
+    import httpx2
     from app.errors import UsageError
     from app.sqlite_storage import read_json, write_json, record_header
     from app.term_knowledge import add_unsourced, empty_knowledge
@@ -637,9 +611,9 @@ async def test_knowledge_only_partial_failure_preserves_reviewable_success(tmp_p
         records = [{"type": "entity_knowledge", "entity": e["entity"], "reason": "整理",
                     "items": [{"text": "更新说明", "refs": [e["fragments"][0]["id"] if e["entity"] == "alpha" else "unknown"]}]}
                    for e in payload["entities"]]
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         with pytest.raises(UsageError, match="实体说明聚合失败"):
             await run_terminology_decision(project, knowledge_only=True, http_client=client)
     draft = current_decision_draft(project)
@@ -669,3 +643,12 @@ def test_knowledge_budget_excludes_comparison_items_but_limits_complete_payload(
     batches, _, errors = pack_knowledge_batches(entities, "整理", config)
     assert not errors
     assert [[entity["entity_key"] for entity in batch] for batch in batches] == [["alpha"], ["beta"]]
+    batches, _, errors = pack_knowledge_batches(
+        [entities[0], view("large", "大" * 10000), entities[1]], "整理", config
+    )
+    assert [[entity["entity_key"] for entity in batch] for batch in batches] == [["alpha"], ["beta"]]
+    assert set(errors) == {"large"}
+    batches, _, errors = pack_knowledge_batches(
+        [entities[0]], "整理", config, feedback="格式修正" * 100
+    )
+    assert not batches and set(errors) == {"alpha"}

@@ -6,8 +6,6 @@ annotated-doc==0.0.5 --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead22
 annotated-types==0.8.0 --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
 # wheel=anyio-4.15.1-py3-none-any.whl tag=py3-none-any sha256=6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101
 anyio==4.15.1 --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101
-# wheel=certifi-2026.7.22-py3-none-any.whl tag=py3-none-any sha256=62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
-certifi==2026.7.22 --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
 # wheel=cffi-2.1.1-cp313-cp313-macosx_11_0_arm64.whl tag=cp313-cp313-macosx_11_0_arm64 sha256=19ee6127ee34de7d83ce3d371ebc5ed91addbdcc39f9ab15ce4eb35a4e534971
 cffi==2.1.1 --hash=sha256:19ee6127ee34de7d83ce3d371ebc5ed91addbdcc39f9ab15ce4eb35a4e534971
 # wheel=chardet-5.2.0-py3-none-any.whl tag=py3-none-any sha256=e1cf59446890a00105fe7b7912492ea04b6e6f06d4b742b2c788469e34c82970
@@ -20,10 +18,10 @@ cryptography==50.0.2 --hash=sha256:fa8f5efb344d6908a1ce62f4a24e2e5780f825d6f53f5
 fastapi==0.141.1 --hash=sha256:bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3
 # wheel=h11-0.16.0-py3-none-any.whl tag=py3-none-any sha256=63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
 h11==0.16.0 --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
-# wheel=httpcore-1.0.9-py3-none-any.whl tag=py3-none-any sha256=2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55
-httpcore==1.0.9 --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55
-# wheel=httpx-0.28.1-py3-none-any.whl tag=py3-none-any sha256=d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
-httpx==0.28.1 --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
+# wheel=httpcore2-2.16.0-py3-none-any.whl tag=py3-none-any sha256=5c4358319f2602d984ad93182c9fee5160f22e9da7babdda870a5e7c4e2dc34f
+httpcore2==2.16.0 --hash=sha256:5c4358319f2602d984ad93182c9fee5160f22e9da7babdda870a5e7c4e2dc34f
+# wheel=httpx2-2.16.0-py3-none-any.whl tag=py3-none-any sha256=fd2c5d7909e8d86fe92d53020c310ca0e4e431b838c207c5754b9bbf0308d49a
+httpx2==2.16.0 --hash=sha256:fd2c5d7909e8d86fe92d53020c310ca0e4e431b838c207c5754b9bbf0308d49a
 # wheel=idna-3.20-py3-none-any.whl tag=py3-none-any sha256=ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
 idna==3.20 --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
 # wheel=jaraco.classes-3.4.0-py3-none-any.whl tag=py3-none-any sha256=f662826b6bed8cace05e7ff873ce0f9283b5c924470fe664fff1c2f00f581790
@@ -52,6 +50,8 @@ python-multipart==0.0.32 --hash=sha256:ff6d3f776f16878c894e52e107296ffc890e913c6
 regex==2026.9.10 --hash=sha256:d8c668af8f7bdb1d18739c27d30cd9f4b371495a883f75a002fb7a39d740fecd
 # wheel=starlette-1.6.0-py3-none-any.whl tag=py3-none-any sha256=a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c
 starlette==1.6.0 --hash=sha256:a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c
+# wheel=truststore-0.10.5-py3-none-any.whl tag=py3-none-any sha256=9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c
+truststore==0.10.5 --hash=sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c
 # wheel=typing_extensions-4.16.0-py3-none-any.whl tag=py3-none-any sha256=481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
 typing-extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
 # wheel=typing_inspection-0.4.4-py3-none-any.whl tag=py3-none-any sha256=65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147

@@ -291,6 +291,10 @@ _FIELD_PREFIX = {
         "zh-CN": "segments[].source: 对应短 id 的本次待处理源文。",
         "en": "segments[].source: The pending source for the corresponding short id.",
     },
+    "segments[].id": {
+        "zh-CN": "segments[].id: 本次请求的短引用 id。",
+        "en": "segments[].id: The request-local short reference id.",
+    },
     "segments[].current_text": {
         "zh-CN": "segments[].current_text: 对应源文的当前译文。",
         "en": "segments[].current_text: The current translation of the corresponding source.",
@@ -329,12 +333,12 @@ _FIELD_PREFIX = {
         "en": "anchors: Read-only relationship references; never modify them or output decisions for them.",
     },
     "evidence": {
-        "zh-CN": "evidence: 源文命中证据。hit_count 是命中的源文片段数，不是字符出现次数；samples 是包含术语的源文样本。boundary_ref 是只读的请求内内容边界引用，相同值表示样本属于同一边界，不表示全局 ID、顺序或权重。",
-        "en": "evidence: Source-text occurrences. hit_count counts matching source passages, not substring occurrences; samples contains passages with the term. boundary_ref is a read-only request-local content-boundary reference: equal values indicate a shared boundary, not a global ID, order, or weight.",
+        "zh-CN": "evidence: 源文命中证据。hit_count 是命中的源文片段数，不是字符出现次数；samples 是包含术语的源文样本。普通阶段的 source_ref 引用请求级 evidence_sources 表中的摘录，可在 terms 和 anchors 间共享；boundary_ref 是只读的请求内内容边界引用，相同值表示样本属于同一边界，不表示全局 ID、顺序或权重。",
+        "en": "evidence: Source-text occurrences. hit_count counts matching source passages, not substring occurrences; samples contains passages with the term. In ordinary phases, source_ref points to an excerpt in the request-wide evidence_sources table and may be shared across terms and anchors. boundary_ref is a read-only request-local content-boundary reference: equal values indicate a shared boundary, not a global ID, order, or weight.",
     },
     "decision_context": {
-        "zh-CN": "context_segments: 终审请求共享的原文 Segment 表，以 segment_ref 索引，含 boundary_ref、source 和 is_empty。各术语 evidence.windows 的 segment_refs 按原文顺序引用此表，hit_segment_refs 标明该术语的命中片段；window_ref 仅在所属术语内有效。",
-        "en": "context_segments: Shared source Segment table for final review, keyed by segment_ref, containing boundary_ref, source, and is_empty. Each term's evidence.windows lists ordered segment_refs into this table and its own hit_segment_refs. window_ref is local to its term.",
+        "zh-CN": "context_segments: 终审请求共享的原文 Segment 表，以 segment_ref 索引，含 boundary_ref、source 和 is_empty。各术语 evidence.windows 的 segment_refs 按原文顺序引用此表，hit_segment_refs 标明该术语的命中片段；终审 samples 通过 segment_ref 引用命中 Segment，不重复携带 source；window_ref 仅在所属术语内有效。",
+        "en": "context_segments: Shared source Segment table for final review, keyed by segment_ref, containing boundary_ref, source, and is_empty. Each term's evidence.windows lists ordered segment_refs into this table and its own hit_segment_refs. Final-review samples use segment_ref to reference the hit Segment without repeating source; window_ref is local to its term.",
     },
     "conflicts": {
         "zh-CN": "conflicts: 去重后的历史候选和关系争用证据，不是投票结果或可选值白名单；可依据整部作品证据提出候选之外的新值。",
@@ -373,7 +377,7 @@ _FIELD_PREFIX = {
 _TASK_PREFIX = {
     "terminology": {
         "zh-CN": "提取术语候选。Description 只记录本次待扫描源文支持的信息，参考上下文只用于理解指代，不得把参考知识当成本次源文揭示的事实。",
-        "en": "Extract terminology candidates. Description must contain only information supported by the current source_segments. Reference context may resolve references but must not be copied as facts revealed by the current source.",
+        "en": "Extract terminology candidates. Description must contain only information supported by the current pending source. Reference context may resolve references but must not be copied as facts revealed by the current source.",
     },
     "fragment_summary": {
         "zh-CN": "概括本次源文内容。",
@@ -466,13 +470,13 @@ _RESULT_PROTOCOLS: dict[str, dict[str, str]] = {
         "zh-CN": (
             '输出一条或多条 type="summary" 记录。'
             "每条 summary 必须有非空 text。单条 summary 可以省略 refs；如果输出多条，"
-            "每条都必须包含 refs，refs 之间不能重复且合并后必须覆盖全部 source_segments 中的 id。"
+            "每条都必须包含 refs，refs 之间不能重复且合并后必须覆盖本次源文中的全部请求短 id。"
         ),
         "en": (
             'Output one or more type="summary" '
             "records. A summary contains type and non-empty text. A single summary may "
             "omit refs. If outputting multiple summaries, each must include refs; refs "
-            "must not overlap and must collectively cover all ids in source_segments."
+            "must not overlap and must collectively cover all request-local short ids in the current sources."
         ),
     },
 }
@@ -583,14 +587,30 @@ _FIELD_PREFIX.update({
         "zh-CN": "repetitions[].occurrences: 该重复组各次出现的短 id、文件、章节、位置、译文索引、上下文及术语引用。file 是项目文件顺序中从 1 开始的索引，files 将索引映射到文件名。part 是请求内 parts 表从 1 开始的索引，对应文件内的内容边界名称；每个 File/part 边界单独编号。position 是文件内从 0 开始的 Segment 序号，包含空片段，不是章节内序号或字符偏移。",
         "en": "repetitions[].occurrences: Short id, file, part, position, translation index, context, and terminology references for each occurrence. file is the one-based index in project file order; files maps indices to filenames. part is a one-based index into the request's parts table of content boundary names; each File/part boundary receives its own index. position is the zero-based Segment index within the file, counting empty segments, not an index within the part or a character offset.",
     },
+    "repetition.final_review": {
+        "zh-CN": "phase 为 final_review。repetitions[].groups、keep、uncertain 是首轮结果。groups 的既有成员、target 及既有成员的 apply 选择和 keep 均为只读锚点；uncertain 是本阶段唯一待裁决的出现。",
+        "en": "phase is final_review. repetitions[].groups, keep, and uncertain contain first-pass results. Existing group members, target, original members' apply choices, and keep are read-only anchors; uncertain contains the only occurrences to resolve.",
+    },
 })
 _TASK_PREFIX["repetition_consistency"] = {
     "zh-CN": "你负责重复译文一致性审查。",
     "en": "You perform repeated translation consistency review.",
 }
+_TASK_PREFIX["repetition_final_review"] = {
+    "zh-CN": "你负责重复译文终审。仅裁决首轮待审出现，结合扩大的原文上下文判断其与其他出现的关联。",
+    "en": "You perform final review of repeated translations. Resolve only first-pass uncertain occurrences, using expanded source context to assess their relationships to other occurrences.",
+}
 _RESULT_PROTOCOLS["repetition_consistency"] = {
-    "zh-CN": '只返回一个 JSON 对象，无 Markdown 或额外字段：{"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"依据"}],"keep":["3"],"uncertain":[]}]}。每个输入重复组恰好返回一个结果，id 原样使用 repetitions 的组 id。成员及 target 必须使用该重复组 occurrences 中的短 id。每个成员恰好属于一个子组、keep 或 uncertain；子组至少两个成员且不可重叠。target 必须是该子组成员，选用其现有译文，不生成新译文。apply 是本次建议应用的成员短 id 数组，必须是 members 的无重复子集，可以为空；成员关联与应用选择独立。reason 使用 target_language 简述依据。没有可统一子组时 groups 为空。',
-    "en": 'Return only one JSON object, without Markdown or extra fields: {"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"evidence"}],"keep":["3"],"uncertain":[]}]}. Return exactly one result per input repeated group, copying its repetitions id verbatim. Use only that group\'s occurrence short ids for members and target. Every occurrence must belong exactly once to a subgroup, keep, or uncertain; subgroups must have at least two members and cannot overlap. target must be a subgroup member selecting its existing translation; do not generate a new translation. apply lists occurrence short ids to update, a unique subset of members that may be empty. Group membership and application are separate. Write a brief reason in target_language. Use an empty groups array if no subgroup can be unified.',
+    "zh-CN": '只返回一个 JSON 对象，无 Markdown 或额外字段：{"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"依据"}],"keep":["3"],"uncertain":[]}]}。每个成员恰好属于一个子组、keep 或 uncertain。无法确认是否统一的出现归入 uncertain。',
+    "en": 'Return only one JSON object, without Markdown or extra fields: {"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"evidence"}],"keep":["3"],"uncertain":[]}]}. Every occurrence must belong exactly once to a subgroup, keep, or uncertain. Put occurrences whose unification cannot be confirmed in uncertain.',
+}
+_RESULT_PROTOCOLS["repetition_final_review"] = {
+    "zh-CN": '只返回一个 JSON 对象，无 Markdown 或额外字段：{"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"依据"}],"keep":["3"]}]}。每个成员恰好属于一个子组或 keep，不得输出 uncertain。首轮待审出现可加入已有子组、与其他待审出现另组或归入 keep；加入已有子组时保留全部原成员、target 及原成员的 apply 选择，仅决定新增成员是否加入 apply。首轮 keep 原样保留。证据不足的待审出现归入 keep，保留其现有译文。',
+    "en": 'Return only one JSON object, without Markdown or extra fields: {"repetitions":[{"id":"1","groups":[{"members":["1","2"],"target":"1","apply":["2"],"reason":"evidence"}],"keep":["3"]}]}. Every occurrence must belong exactly once to a subgroup or keep. Do not output uncertain. First-pass uncertain occurrences may join an existing group, form new groups with other uncertain occurrences, or enter keep. Preserve all original group members, target, and original apply choices; decide apply only for added members. Preserve first-pass keep. Put uncertain occurrences with insufficient evidence in keep, retaining their current translations.',
+}
+_RESULT_PROTOCOLS["repetition_groups"] = {
+    "zh-CN": "每个输入重复组恰好返回一个结果，id 原样使用 repetitions 的组 id。成员及 target 必须使用该重复组 occurrences 中的短 id。子组至少两个成员且不可重叠。target 必须是该子组成员，选用其现有译文，不生成新译文。apply 是本次建议应用的成员短 id 数组，必须是 members 的无重复子集，可以为空；成员关联与应用选择独立。reason 使用 target_language 简述依据。没有可统一子组时 groups 为空。",
+    "en": "Return exactly one result per input repeated group, copying its repetitions id verbatim. Use only that group's occurrence short ids for members and target. Subgroups must have at least two members and cannot overlap. target must be a subgroup member selecting its existing translation; do not generate a new translation. apply lists occurrence short ids to update, a unique subset of members that may be empty. Group membership and application are separate. Write a brief reason in target_language. Use an empty groups array if no subgroup can be unified.",
 }
 
 # Each declaration selects input fields, a task, and output contracts.
@@ -676,7 +696,7 @@ _PROMPT_DECLARATIONS = {
     },
     ("repetition_consistency", None): {
         "fields": ("target_language", "repetition.groups", "repetition.source", "repetition.translations", "repetition.context", "repetition.terms", "repetition.occurrences"),
-        "task": "repetition_consistency", "protocols": ("repetition_consistency",),
+        "task": "repetition_consistency", "protocols": ("repetition_consistency", "repetition_groups"),
     },
     ("terminology", None): {
         "fields": ("target_language", "source_segments", "reference_context"),
@@ -705,6 +725,10 @@ _PROMPT_DECLARATIONS = {
         "fields": ("target_language", "summaries"),
         "task": "content_summary", "protocols": ("content_summary",),
     },
+}
+_PROMPT_DECLARATIONS[("repetition_consistency", "final_review")] = {
+    "fields": (*_PROMPT_DECLARATIONS[("repetition_consistency", None)]["fields"], "repetition.final_review"),
+    "task": "repetition_final_review", "protocols": ("repetition_final_review", "repetition_groups"),
 }
 for _phase in ("adjudication", "consistency", "containment", "final_review", "knowledge"):
     _PROMPT_DECLARATIONS[("terminology_decision", _phase)] = {
@@ -784,10 +808,7 @@ def full_prompt(
         phase = "adjudication"
     if stage != "terminology_decision" and (stage, None) not in _PROMPT_DECLARATIONS:
         raise UsageError(f"阶段没有 LLM Prompt：{stage}")
-    if phase is not None and (
-        stage != "terminology_decision"
-        or (stage, phase) not in _PROMPT_DECLARATIONS
-    ):
+    if phase is not None and (stage, phase) not in _PROMPT_DECLARATIONS:
         raise UsageError(f"阶段不支持 Prompt phase：{stage}/{phase}")
     if response_mode is not None:
         if stage != "terminology" or phase is not None:
@@ -815,12 +836,20 @@ def full_prompt(
     else:
         effective_middle = middle.strip()
     declarations = [
-        _PROMPT_DECLARATIONS[(name, phase if name == "terminology_decision" else None)]
+        _PROMPT_DECLARATIONS[(name, phase if name == stage else None)]
         for name in active_stages
     ]
     field_ids = dict.fromkeys(
         field for declaration in declarations for field in declaration["fields"]
     )
+    if stage == "terminology" and "translation" in active_stages:
+        field_ids = dict.fromkeys(
+            {
+                "source_segments": "segments[].source",
+                "source_segments[].id": "segments[].id",
+            }.get(field, field)
+            for field in field_ids
+        )
     task_ids = dict.fromkeys(declaration["task"] for declaration in declarations if declaration["task"] is not None)
     feedback = "validation_feedback" if "validation_feedback" in field_ids else "validation_repair"
     prefix = "\n".join((
@@ -1477,8 +1506,11 @@ def create_run(
     run_id = f"RUN-{timestamp}-{STAGE_CODES[stage]}-{suffix}"
     run_dir = project / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+    manifest_details = dict(details or {})
+    is_agent_mcp = manifest_details.get("executor") == "agent_mcp"
     (run_dir / "config.toml").write_text(dump_config(canonical_config(config)), encoding="utf-8")
-    _write_llm_snapshots(run_dir, config)
+    if not is_agent_mcp:
+        _write_llm_snapshots(run_dir, config)
     atomic_write_json(
         run_dir / "document_adapter_prompt_requirements.json",
         config.get("_document_adapter_prompt_requirements", {}), compact=True,
@@ -1491,7 +1523,6 @@ def create_run(
         prompt_variant_requirements,
         primary_mode=primary_mode,
     )
-    manifest_details = dict(details or {})
     if prompt_variant_paths:
         manifest_details["prompt_variants"] = prompt_variant_paths
     manifest = record_header(
@@ -1515,7 +1546,7 @@ def create_run(
         started_at=utc_now(),
         completed_at=None,
     )
-    if stage in {
+    if not is_agent_mcp and stage in {
         "terminology",
         "terminology_decision",
         "content_summary",
@@ -1560,8 +1591,12 @@ def _interrupt_run(
 
 def run_protocol_is_current(project: Path, run_id: str) -> bool:
     directory = project / "runs" / run_id
-    preset = json.loads((directory / "llm_preset.json").read_text(encoding="utf-8"))
-    adapter = json.loads((directory / "llm_adapter.json").read_text(encoding="utf-8"))
+    preset_path = directory / "llm_preset.json"
+    adapter_path = directory / "llm_adapter.json"
+    if not preset_path.is_file() or not adapter_path.is_file():
+        return False
+    preset = json.loads(preset_path.read_text(encoding="utf-8"))
+    adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
     return preset.get("schema_version") == 9 and adapter.get("schema_version") == ADAPTER_SCHEMA_VERSION
 
 
@@ -1581,6 +1616,8 @@ def choose_running_run(
     latest = candidates[0]
     run_id = str(latest["run_id"])
     warning = f"发现未完成 Run：{run_id}"
+    if latest.get("executor") == "agent_mcp" and action != "decline":
+        raise UsageError(f"未完成 Run 由 Agent MCP 创建，不能由宿主模型直接续作；请使用 --decline-run 创建新 Run：{run_id}")
     if not run_protocol_is_current(project, run_id) and action != "decline":
         raise UsageError(f"旧 Run 使用旧 LLM 协议，不能续作；请使用 --decline-run 创建新 Run：{run_id}")
     if dry_run:
@@ -1683,7 +1720,8 @@ def continue_run(
     snapshot_dir = run_dir / relative
     snapshot_dir.mkdir(parents=True, exist_ok=False)
     (snapshot_dir / "config.toml").write_text(dump_config(canonical_config(config)), encoding="utf-8")
-    _write_llm_snapshots(snapshot_dir, config)
+    if manifest.get("executor") != "agent_mcp":
+        _write_llm_snapshots(snapshot_dir, config)
     atomic_write_json(
         snapshot_dir / "document_adapter_prompt_requirements.json",
         config.get("_document_adapter_prompt_requirements", {}), compact=True,

@@ -1,5 +1,6 @@
 import type {
   TermDecisionConflicts,
+  TermDecisionDraft,
   TermDecisionManualReviewItem,
   TermDecisionProposal,
   TermDecisionState,
@@ -117,8 +118,8 @@ export function filterDecisionProposals(
   });
 }
 
-export function filterManualReviewItems(
-  items: TermDecisionManualReviewItem[],
+export function filterManualReviewItems<T extends Pick<TermDecisionManualReviewItem, "source" | "normalized" | "reason" | "conflicts"> & { resolved?: boolean }>(
+  items: T[],
   query: string,
   status: "all" | "open" | "resolved",
 ) {
@@ -137,6 +138,25 @@ export function filterManualReviewItems(
       .toLocaleLowerCase()
       .includes(needle);
   });
+}
+
+export type DecisionDraftEntry =
+  | { kind: "proposal"; proposal: TermDecisionProposal }
+  | { kind: "needs_review"; item: TermDecisionDraft["needs_review"][number] };
+
+export function filterDecisionDraft(
+  draft: Pick<TermDecisionDraft, "proposals" | "needs_review">,
+  query: string,
+  kind: string,
+  status: DecisionProposalStatus,
+  rejected: ReadonlySet<string>,
+): DecisionDraftEntry[] {
+  const proposals: DecisionDraftEntry[] = filterDecisionProposals(draft.proposals, query, kind, status, rejected)
+    .map(proposal => ({ kind: "proposal", proposal }));
+  const pending: DecisionDraftEntry[] = (!kind || kind === "needs_review") && status === "all"
+    ? filterManualReviewItems(draft.needs_review, query, "open").map(item => ({ kind: "needs_review", item }))
+    : [];
+  return [...proposals, ...pending];
 }
 
 export function summarizeDecisionProposals(

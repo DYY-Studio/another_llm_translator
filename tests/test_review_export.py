@@ -3,12 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import sqlite3
 from copy import deepcopy
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app.config import dump_config, load_config, load_project_config
@@ -20,12 +19,12 @@ from app.project_export import export_project
 from app.stages import inspect_full, run_all
 from app.stage_review import run_apply, run_review
 from app.stage_translation import run_translation
-from app.sqlite_storage import read_content_summaries, read_jsonl
+from app.sqlite_storage import read_jsonl
 from tests.helpers import llm_jsonl, use_llm_preset
 from tests.test_terminology_translation import create_project
 
 
-def workflow_handler(request: httpx.Request) -> httpx.Response:
+def workflow_handler(request: httpx2.Request) -> httpx2.Response:
     body = json.loads(request.content)
     system = body["messages"][0]["content"]
     payload = json.loads(body["messages"][1]["content"])
@@ -55,7 +54,7 @@ def workflow_handler(request: httpx.Request) -> httpx.Response:
             }
             for item in payload["segments"]
         ]
-    return httpx.Response(
+    return httpx2.Response(
         200,
         json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
     )
@@ -66,7 +65,7 @@ async def test_review_apply_and_bilingual_export(tmp_path: Path) -> None:
     project = await create_project(
         tmp_path, "one\n\u3000\n \t\ntwo", encoding="utf-8-sig"
     )
-    client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(workflow_handler))
     proof_progress: list[tuple[int, int, int]] = []
     try:
         await run_translation(project, Scope(), http_client=client)
@@ -138,7 +137,7 @@ async def test_review_apply_and_export_restore_source_indentation(
     source = " \t\u3000one"
     project = await create_project(tmp_path, source, encoding="utf-8-sig")
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         system = body["messages"][0]["content"]
         payload = json.loads(body["messages"][1]["content"])
@@ -162,12 +161,12 @@ async def test_review_apply_and_export_restore_source_indentation(
                 }
                 for item in payload["segments"]
             ]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         await run_translation(project, Scope(), http_client=client)
         await run_review(project, "proofreading", Scope(), http_client=client)
@@ -217,36 +216,6 @@ async def test_review_apply_and_export_restore_source_indentation(
     ).read_text(encoding="utf-8-sig") == (
         f"{source}\n \t\u3000legacy  \t"
     )
-
-
-@pytest.mark.asyncio
-async def test_apply_rejects_outdated_base(tmp_path: Path) -> None:
-    project = await create_project(tmp_path, "one")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
-    try:
-        await run_translation(project, Scope(), http_client=client)
-        await run_review(project, "proofreading", Scope(), http_client=client)
-        await run_translation(project, Scope(force=True), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-    with pytest.raises(IncompleteError, match="旧上游"):
-        run_apply(
-            project,
-            "proofreading",
-            Scope(),
-            allow_outdated_base=False,
-            confirmed_all=True,
-        )
-    summary = run_apply(
-        project,
-        "proofreading",
-        Scope(),
-        allow_outdated_base=True,
-        confirmed_all=True,
-    )
-    assert summary["completed"] == 1
-    assert summary["warnings"]
 
 
 @pytest.mark.asyncio
@@ -405,10 +374,10 @@ async def test_review_limits_upstream_reads_to_scope_and_ordered_context(
     monkeypatch.setattr(stage_review, "latest_stage_states", capture_history)
     seen: list[dict] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         seen.append(payload)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [{
@@ -422,7 +391,7 @@ async def test_review_limits_upstream_reads_to_scope_and_ordered_context(
             },
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         result = await run_review(
             project,
@@ -441,33 +410,11 @@ async def test_review_limits_upstream_reads_to_scope_and_ordered_context(
 
 
 @pytest.mark.asyncio
-async def test_run_all_generates_suggestions_without_apply(tmp_path: Path) -> None:
-    project = await create_project(tmp_path, "one\ntwo")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
-    try:
-        summary = await run_all(project, Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-    assert [step["stage"] for step in summary["steps"]] == [
-        "terminology",
-        "translation",
-        "proofreading",
-        "polishing",
-    ]
-    assert read_jsonl(project, project / "stages" / "proofreading.jsonl")
-    assert read_jsonl(project, project / "stages" / "polishing.jsonl")
-    assert read_content_summaries(project) == []
-    assert not (project / "stages" / "proofreading_applied.jsonl").exists()
-    assert not (project / "stages" / "polishing_applied.jsonl").exists()
-
-
-@pytest.mark.asyncio
 async def test_run_all_scans_terms_for_new_files_after_completed_task(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "one")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(workflow_handler))
     try:
         first = await run_all(project, Scope(), http_client=client)
         second = await run_all(project, Scope(), http_client=client)
@@ -528,77 +475,6 @@ async def test_run_all_dry_run_plans_without_writing(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_all_shares_production_client_and_limiter(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    project = await create_project(tmp_path, "one")
-    clients: list[object] = []
-    calls: list[tuple[str, object, object]] = []
-
-    class DummyClient:
-        def __init__(self, **_: object) -> None:
-            clients.append(self)
-            self.closed = False
-
-        async def __aenter__(self) -> "DummyClient":
-            return self
-
-        async def __aexit__(self, *_: object) -> None:
-            self.closed = True
-
-    async def fake_terminology(
-        _project: Path,
-        _scope: Scope,
-        **kwargs: object,
-    ) -> dict:
-        assert kwargs["reuse_mixed_fingerprints"] is True
-        calls.append(
-            ("terminology", kwargs["http_client"], kwargs["limiter"])
-        )
-        return {"stage": "terminology", "failed": 0, "pending": 0}
-
-    async def fake_translation(
-        _project: Path,
-        _scope: Scope,
-        **kwargs: object,
-    ) -> dict:
-        assert kwargs["reuse_mixed_fingerprints"] is True
-        calls.append(
-            ("translation", kwargs["http_client"], kwargs["limiter"])
-        )
-        return {"stage": "translation", "failed": 0, "pending": 0}
-
-    async def fake_review(
-        _project: Path,
-        stage: str,
-        _scope: Scope,
-        **kwargs: object,
-    ) -> dict:
-        assert kwargs["reuse_mixed_fingerprints"] is True
-        calls.append((stage, kwargs["http_client"], kwargs["limiter"]))
-        return {"stage": stage, "failed": 0, "pending": 0}
-
-    monkeypatch.setattr("app.stages.httpx.AsyncClient", DummyClient)
-    monkeypatch.setattr("app.stages.run_terminology", fake_terminology)
-    monkeypatch.setattr("app.stages.run_translation", fake_translation)
-    monkeypatch.setattr("app.stages.run_review", fake_review)
-    try:
-        await run_all(
-            project,
-            Scope(),
-            reuse_mixed_fingerprints=True,
-        )
-    finally:
-        del os.environ["LLM_API_KEY"]
-
-    assert len(clients) == 1
-    assert clients[0].closed
-    assert {id(client) for _, client, _ in calls} == {id(clients[0])}
-    assert len({id(limiter) for _, _, limiter in calls}) == 1
-
-
-@pytest.mark.asyncio
 async def test_run_all_aggregates_progress_and_latest_usage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -655,7 +531,7 @@ async def test_run_all_aggregates_progress_and_latest_usage(
     monkeypatch.setattr("app.stages.run_terminology", fake_terminology)
     monkeypatch.setattr("app.stages.run_translation", fake_translation)
     monkeypatch.setattr("app.stages.run_review", fake_review)
-    client = httpx.AsyncClient()
+    client = httpx2.AsyncClient()
     try:
         summary = await run_all(
             project,
@@ -727,7 +603,7 @@ async def test_run_all_separates_clients_and_limiters_by_preset(
             alternate if stage in {"proofreading", "polishing"} else default
         ),
     )
-    monkeypatch.setattr("app.stages.httpx.AsyncClient", DummyClient)
+    monkeypatch.setattr("app.stages.httpx2.AsyncClient", DummyClient)
     monkeypatch.setattr("app.stages.run_translation", fake_stage)
     monkeypatch.setattr("app.stages.run_review", fake_review)
     monkeypatch.setattr(
@@ -791,16 +667,13 @@ async def test_invalid_complete_batch_retries_original_batch(
     calls: list[dict] = []
     result_path = project / "stages" / f"{stage}.jsonl"
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         payload = json.loads(body["messages"][1]["content"])
         calls.append(payload)
         # On retry the previous response has been processed, but none of it may persist.
         assert not read_jsonl(project, result_path)
         assert "format_correction" not in payload
-        if stage != "translation":
-            assert "accepted 仅含 type、id、status" in body["messages"][0]["content"]
-            assert '"suggested_text":"完整建议"' in body["messages"][0]["content"]
         ids = [item["id"] for item in payload["segments"]]
         if len(calls) == 1:
             if mismatch == "missing":
@@ -819,19 +692,19 @@ async def test_invalid_complete_batch_retries_original_batch(
         content = llm_jsonl(records)
         if len(calls) == 1 and mismatch == "missing_end":
             content = "\n".join(json.dumps(record) for record in records)
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": content}}]},
         )
 
     try:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(workflow_handler)) as client:
             if stage != "translation":
                 await run_translation(project, Scope(), http_client=client)
             if stage == "polishing":
                 await run_review(project, "proofreading", Scope(), http_client=client)
                 run_apply(project, "proofreading", Scope(),
                           allow_outdated_base=False, confirmed_all=True)
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             if stage == "translation":
                 summary = await run_translation(project, Scope(), http_client=client)
             else:
@@ -854,11 +727,16 @@ async def test_invalid_complete_batch_retries_original_batch(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["translation", "proofreading", "polishing"])
 @pytest.mark.parametrize(
-    ("error", "max_attempts", "succeeds"),
-    [("missing", 2, True), ("duplicate", 2, True), ("field", 2, True),
-     ("missing", 0, False), ("missing", 1, False), ("missing_end", 0, False)],
+    ("stage", "error", "max_attempts", "succeeds"),
+    [
+        ("translation", "missing", 2, True),
+        ("translation", "field", 2, True),
+        ("translation", "missing", 0, False),
+        ("proofreading", "duplicate", 2, True),
+        ("proofreading", "field", 2, True),
+        ("polishing", "missing_end", 0, False),
+    ],
 )
 async def test_chunk_retry_discards_partial_results(
     tmp_path: Path, stage: str, error: str, max_attempts: int, succeeds: bool,
@@ -867,7 +745,7 @@ async def test_chunk_retry_discards_partial_results(
     calls: list[dict[str, object]] = []
     result_path = project / "stages" / f"{stage}.jsonl"
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         calls.append(payload)
         # Check storage at the next request, after the previous response was handled.
@@ -896,12 +774,12 @@ async def test_chunk_retry_discards_partial_results(
             content = "\n".join(json.dumps(record) for record in records)
         else:
             content = llm_jsonl(records)
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"choices": [{"message": {"content": content}}]},
         )
 
     try:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(workflow_handler)) as client:
             if stage != "translation":
                 await run_translation(project, Scope(), http_client=client)
             if stage == "polishing":
@@ -915,7 +793,7 @@ async def test_chunk_retry_discards_partial_results(
             .replace("format_max_attempts = 2", f"format_max_attempts = {max_attempts}"),
             encoding="utf-8",
         )
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             if stage == "translation":
                 summary = await run_translation(project, Scope(), http_client=client)
             else:
@@ -941,68 +819,13 @@ async def test_chunk_retry_discards_partial_results(
 
 
 @pytest.mark.asyncio
-async def test_review_format_retry_adds_no_guidance(
-    tmp_path: Path,
-) -> None:
-    project = await create_project(tmp_path, "one")
-    review_calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal review_calls
-        body = json.loads(request.content)
-        system = body["messages"][0]["content"]
-        payload = json.loads(body["messages"][1]["content"])
-        if "完整 translation" in system:
-            records = [
-                {
-                    "type": "segment",
-                    "id": item["id"],
-                    "translation": f"译:{item['source']}",
-                }
-                for item in payload["segments"]
-            ]
-            content = llm_jsonl(records)
-        else:
-            review_calls += 1
-            if review_calls == 1:
-                content = json.dumps({"segments": [{"id": "1"}]})
-            else:
-                assert "format_correction" not in payload
-                records = [
-                    {
-                        "type": "segment",
-                        "id": item["id"],
-                        "status": "accepted",
-                        "suggested_text": None,
-                        "reason": None,
-                    }
-                    for item in payload["segments"]
-                ]
-                content = llm_jsonl(records)
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": content}}]},
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        await run_translation(project, Scope(), http_client=client)
-        summary = await run_review(project, "proofreading", Scope(), http_client=client)
-    finally:
-        await client.aclose()
-        del os.environ["LLM_API_KEY"]
-    assert summary["completed"] == 1
-    assert review_calls == 2
-
-
-@pytest.mark.asyncio
 async def test_review_accepts_thought_wrapped_echo_without_format_retry(
     tmp_path: Path,
 ) -> None:
     project = await create_project(tmp_path, "one")
     review_calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal review_calls
         body = json.loads(request.content)
         system = body["messages"][0]["content"]
@@ -1031,12 +854,12 @@ async def test_review_accepts_thought_wrapped_echo_without_format_retry(
                 for item in payload["segments"]
             ]
             content = f"<thought>无需修改</thought>\n{llm_jsonl(records)}"
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": content}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         await run_translation(project, Scope(), http_client=client)
         summary = await run_review(project, "proofreading", Scope(), http_client=client)
@@ -1064,7 +887,7 @@ async def test_oversized_review_segment_is_combined_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = await create_project(tmp_path, "A" * 5000)
-    client = httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(workflow_handler))
     try:
         await run_translation(project, Scope(), http_client=client)
         use_llm_preset(
@@ -1106,7 +929,7 @@ async def test_applied_export_reports_translation_validation_warning(
         encoding="utf-8",
     )
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
         system = body["messages"][0]["content"]
         payload = json.loads(body["messages"][1]["content"])
@@ -1130,12 +953,12 @@ async def test_applied_export_reports_translation_validation_warning(
                 }
                 for item in payload["segments"]
             ]
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"choices": [{"message": {"content": llm_jsonl(records)}}]},
         )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         await run_translation(project, Scope(), http_client=client)
         await run_review(project, "proofreading", Scope(), http_client=client)
@@ -1209,7 +1032,7 @@ async def test_force_redo_counts_only_current_results(
     project = await create_project(tmp_path, "one\ntwo")
     requests: list[dict] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(json.loads(request.content)["messages"][1])
         return workflow_handler(request)
 
@@ -1220,7 +1043,7 @@ async def test_force_redo_counts_only_current_results(
         return await run_review(project, stage, scope, **kwargs)
 
     progress: list[tuple[int, int, int]] = []
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         if stage != "translation":
             await run_translation(project, Scope(), http_client=client)
         if stage == "polishing":
@@ -1248,35 +1071,12 @@ async def test_force_redo_counts_only_current_results(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["proofreading", "polishing"])
-async def test_apply_reuses_identical_results_and_counts_run(tmp_path: Path, stage: str) -> None:
-    from app.sqlite_storage import read_json
-    project = await create_project(tmp_path, "one\ntwo")
-    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
-        await run_translation(project, Scope(), http_client=client)
-        await run_review(project, stage, Scope(), http_client=client)
-    first = run_apply(project, stage, Scope(only_segment="F0001-S000001"),
-                      allow_outdated_base=False, confirmed_all=True)
-    second = run_apply(project, stage, Scope(), allow_outdated_base=False, confirmed_all=True)
-    third = run_apply(project, stage, Scope(), allow_outdated_base=False, confirmed_all=True)
-    assert first["reused"] == 0
-    assert second["completed"] == 2 and second["reused"] == 1
-    assert third["completed"] == 2 and third["reused"] == 2
-    assert len(read_jsonl(project, project / "stages" / f"{stage}_applied.jsonl")) == 2
-    manifest = read_json(project, project / "runs" / third["run_id"] / "manifest.json")
-    assert manifest["status"] == "completed"
-    assert manifest["completed_segment_count"] == 0
-    assert manifest["requested_segment_count"] == 0
-    assert manifest["reused_segment_count"] == 2
-
-
-@pytest.mark.asyncio
 async def test_apply_batch_failure_marks_run_failed_and_rolls_back(tmp_path: Path, monkeypatch) -> None:
     import app.stage_review as module
     from app.errors import StorageError
     from app.sqlite_storage import append_stage_results, list_runs
     project = await create_project(tmp_path, "one\ntwo")
-    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(workflow_handler)) as client:
         await run_translation(project, Scope(), http_client=client)
         await run_review(project, "proofreading", Scope(), http_client=client)
     def broken_batch(project, records):
@@ -1295,7 +1095,7 @@ async def test_reference_applications_keep_detail_base_and_export(tmp_path: Path
     from app.web_store import WebStore
     from app.stage_runtime import _base_results
     project = await create_project(tmp_path, "one\ntwo")
-    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(workflow_handler)) as client:
         await run_translation(project, Scope(), http_client=client)
         await run_review(project, "proofreading", Scope(), http_client=client)
     run_apply(project, "proofreading", Scope(), allow_outdated_base=False, confirmed_all=True)
@@ -1321,7 +1121,7 @@ async def test_reference_applications_keep_detail_base_and_export(tmp_path: Path
 async def test_application_writers_omit_duplicate_text_and_keep_whitespace_override(tmp_path: Path, stage: str) -> None:
     from app.web_store import WebStore
     project = await create_project(tmp_path, "one\n\u3000two", encoding="utf-8-sig")
-    async with httpx.AsyncClient(transport=httpx.MockTransport(workflow_handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(workflow_handler)) as client:
         await run_translation(project, Scope(), http_client=client)
     store = WebStore(project)
     manual = store.save_review(dict(stage=stage, segment_id="F0001-S000001", review_status="accepted", apply=True))

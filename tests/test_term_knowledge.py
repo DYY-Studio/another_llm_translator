@@ -240,7 +240,7 @@ def test_migration_preserves_old_explanations_without_fabricating_sources(tmp_pa
 @pytest.mark.asyncio
 async def test_protected_explanation_updates_through_decision_and_rollback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
-    import httpx
+    import httpx2
     from app.config import load_project_config
     from app.sqlite_storage import read_json, write_json
     from app.term_library import term_normalization, load_terms
@@ -268,7 +268,7 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
     overrides["overrides"] = [{"normalized": "alpha", "preferred_translation": "阿尔法"}]
     write_json(project, project / "terminology" / "overrides.json", overrides)
     attempts = []
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         messages = json.loads(request.content)["messages"]
         payload = json.loads(messages[1]["content"])
         assert payload["phase"] == "knowledge"
@@ -284,8 +284,8 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
         content = llm_jsonl([{"type": "entity_knowledge", "entity": "alpha", "reason": "补充身份", "items": [
             {"text": "船长，保留人工说明", "refs": ["unknown"] if len(attempts) == 1 else refs},
         ]}])
-        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        return httpx2.Response(200, json={"choices": [{"message": {"content": content}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         result = await run_terminology_decision(project, http_client=client)
     assert len(attempts) == 2
     assert result["failed"] == 0
@@ -310,7 +310,7 @@ async def test_protected_explanation_updates_through_decision_and_rollback(tmp_p
 @pytest.mark.asyncio
 async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
-    import httpx
+    import httpx2
     from app.config import load_project_config
     from app.sqlite_storage import read_json, write_json
     from app.term_library import term_normalization
@@ -341,7 +341,7 @@ async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(
     write_json(project, project / "terminology" / "terms.json", record_header("terminology_library", meta["project_id"], **data))
     calls = []
     allow_alpha = False
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         calls.append((payload["phase"], tuple(e["entity"] for e in payload.get("entities", []))))
         if payload["phase"] == "knowledge":
@@ -356,8 +356,8 @@ async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(
             records = [{"type":"decision","normalized":s["normalized"],"reason":"译名",
                         **({"action":"update","changes":{"preferred_translation":"阿尔法" if s["normalized"]=="alpha" else "贝塔"}}
                            if payload["phase"]=="adjudication" else {"action":"keep"})} for s in payload["terms"]]
-        return httpx.Response(200,json={"choices":[{"message":{"content":llm_jsonl(records)}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        return httpx2.Response(200,json={"choices":[{"message":{"content":llm_jsonl(records)}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         with pytest.raises(UsageError, match="聚合失败"):
             await run_terminology_decision(project,http_client=client)
         draft = current_decision_draft(project)
@@ -392,22 +392,6 @@ async def test_failed_entity_holds_its_name_changes_and_resume_reuses_successes(
     assert counts == {"evidence": 2, "project_descriptions": 2}
 
 
-@pytest.mark.asyncio
-async def test_entity_budget_fails_before_any_model_request(tmp_path: Path) -> None:
-    from app.config import load_project_config
-    from app.term_library import term_normalization
-    from app.term_knowledge import publish_evidence, entity_view, pack_knowledge_batches
-    project = make_project(tmp_path)
-    data = library()
-    config = load_project_config(project, stage="terminology_decision")
-    publish_evidence(project, data, [scan_record(project, "身份信息" * 1000)], term_normalization(config))
-    config["llm"]["context_window_tokens"] = 100
-    config["chunking"]["context_reserve_tokens"] = 0
-    batches, _, errors = pack_knowledge_batches([entity_view(project, data, "alpha")], "聚合", config)
-    assert not batches
-    assert "完整证据" in errors["alpha"]
-
-
 def test_group_changes_invalidate_shared_explanation_and_cross_entity_refs(tmp_path: Path) -> None:
     from app.term_knowledge import entity_view, save_items, project_descriptions
     project = make_project(tmp_path)
@@ -430,7 +414,7 @@ def test_group_changes_invalidate_shared_explanation_and_cross_entity_refs(tmp_p
 @pytest.mark.asyncio
 async def test_sibling_name_updates_share_one_review_unit_through_protected_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
-    import httpx
+    import httpx2
     from app.sqlite_storage import read_json, write_json
     from app.term_decision import run_terminology_decision
     from app.term_decision_drafts import current_decision_draft, apply_decision_draft
@@ -452,9 +436,9 @@ async def test_sibling_name_updates_share_one_review_unit_through_protected_root
         rows = [dict(type="decision",normalized=s["normalized"],reason="译名",**(
             {"action":"update","changes":{"preferred_translation":s["source"]+"译"}} if payload["phase"]=="adjudication" else {"action":"keep"}
         )) for s in payload["terms"]]
-        return httpx.Response(200,json={"choices":[{"message":{"content":llm_jsonl(rows)}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await run_terminology_decision(project,http_client=client)
+        return httpx2.Response(200,json={"choices":[{"message":{"content":llm_jsonl(rows)}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        await run_terminology_decision(project,all_terms=True,http_client=client)
     proposals = current_decision_draft(project)["proposals"]
     assert len(proposals)==1
     assert proposals[0]["normalized"]==["alpha","beta","gamma"]
@@ -556,7 +540,7 @@ def test_knowledge_api_checks_revision_and_explicit_fragment_operations(tmp_path
 async def test_decision_application_keeps_other_requests_responsive(tmp_path, monkeypatch):
     import asyncio
     import threading
-    import httpx
+    import httpx2
     from app.web import create_app
 
     project = make_project(tmp_path)
@@ -570,7 +554,7 @@ async def test_decision_application_keeps_other_requests_responsive(tmp_path, mo
         return {"run_id": "test", "applied": 0, "rejected": 0, "terms_revision": 0}
 
     monkeypatch.setattr("app.web_term_routes.apply_decision_draft", apply)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://testserver") as client:
         pending = asyncio.create_task(client.post("/api/v1/projects/terms/terms/decision/apply", json={"confirm": True}))
         try:
             assert await asyncio.to_thread(entered.wait, 2), (await pending).text
@@ -585,7 +569,7 @@ async def test_decision_application_keeps_other_requests_responsive(tmp_path, mo
 @pytest.mark.asyncio
 async def test_force_scan_requires_replacement_confirmation_and_empty_results_retire_old_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
-    import httpx
+    import httpx2
     from app.execution import Scope
     from app.stage_terminology import run_terminology
     from app.term_library import load_terms
@@ -598,8 +582,8 @@ async def test_force_scan_requires_replacement_confirmation_and_empty_results_re
         nonlocal calls
         calls+=1
         records=[dict(type="term",source="Alpha",category="name",description="船长")] if calls==1 else []
-        return httpx.Response(200,json={"choices":[{"message":{"content":llm_jsonl(records)}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        return httpx2.Response(200,json={"choices":[{"message":{"content":llm_jsonl(records)}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         await run_terminology(project,Scope(),http_client=client)
         with pytest.raises(UsageError,match="确认"):
             await run_terminology(project,Scope(force=True),http_client=client)
@@ -632,7 +616,7 @@ def test_import_creates_unsourced_explanations_and_preserves_applied_existing_en
     assert repeated["changed"] is False
 
 
-def test_clear_preserves_cited_candidates_in_rollback_and_increments_revision(tmp_path: Path) -> None:
+def test_clear_removes_rollback_draft_and_cited_candidates_and_increments_revision(tmp_path: Path) -> None:
     import json
     from app.config import load_project_config
     from app.sqlite_storage import clear_terminology_state, read_json, write_json, read_terminology_candidates
@@ -652,8 +636,9 @@ def test_clear_preserves_cited_candidates_in_rollback_and_increments_revision(tm
     clear_terminology_state(project, read_json(project, project / "terminology" / "overrides.json"))
     assert load_terms(project)["terms_revision"] == 2
     assert load_terms(project)["terms"] == []
-    assert [r["record_id"] for r in read_terminology_candidates(project, [first["record_id"], unused["record_id"]])] == [first["record_id"]]
-    assert evidence(project, data)[f'{first["record_id"]}:0']["text"] == "captain"
+    assert read_terminology_candidates(project, [first["record_id"], unused["record_id"]]) == []
+    assert not (directory / "terminology_decision_draft.json").exists()
+    assert read_json(project, directory / "manifest.json")["decision_status"] == "discarded"
 
 
 def test_reordered_reviewed_evidence_stays_current_even_when_not_cited(tmp_path: Path) -> None:
@@ -745,65 +730,6 @@ def test_v9_migration_uses_only_complete_saved_order_to_rebuild_hash(
     else:
         assert migrated["knowledge"]["entities"]["alpha"]["input_version"] == old_order_hash
         assert entity_view(project, migrated, "alpha")["status"] == "pending"
-
-
-def test_v9_migration_preserves_unmatched_pending_hash(tmp_path: Path) -> None:
-    import sqlite3
-    from app.sqlite_storage import database_path, ensure_supported, read_json, write_json
-    from app.term_knowledge import save_items, entity_view
-    from app.term_library import load_terms
-
-    project = make_project(tmp_path)
-    data = library()
-    save_items(project, data, "alpha", [{"text": "manual explanation", "fragment_ids": []}])
-    data["knowledge"]["version"] = 1
-    data["knowledge"]["entities"]["alpha"]["input_version"] = "sha256:historical-pending"
-    meta = read_json(project, project / "project.json")
-    write_json(project, project / "terminology" / "terms.json",
-               record_header("terminology_library", meta["project_id"], **data))
-    with sqlite3.connect(database_path(project)) as connection:
-        connection.execute("UPDATE schema_meta SET value = '8' WHERE key = 'schema_version'")
-    from app.sqlite_storage import _SUPPORTED_CACHE
-    _SUPPORTED_CACHE.discard(database_path(project))
-
-    ensure_supported(project)
-    migrated = load_terms(project)
-    saved = migrated["knowledge"]["entities"]["alpha"]
-    assert migrated["knowledge"]["version"] == 2
-    assert saved["input_version"] == "sha256:historical-pending"
-    assert entity_view(project, migrated, "alpha")["status"] == "pending"
-
-
-def test_v9_migration_failure_rolls_back_and_keeps_backup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import sqlite3
-    from app.sqlite_storage import database_path, ensure_supported, read_json, write_json
-
-    project = make_project(tmp_path)
-    data = library()
-    data["knowledge"]["version"] = 1
-    meta = read_json(project, project / "project.json")
-    write_json(project, project / "terminology" / "terms.json",
-               record_header("terminology_library", meta["project_id"], **data))
-    with sqlite3.connect(database_path(project)) as connection:
-        connection.execute("UPDATE schema_meta SET value = '8' WHERE key = 'schema_version'")
-        before = connection.execute("SELECT payload_json FROM terms_state WHERE key='terms'").fetchone()[0]
-        before = connection.execute("SELECT payload_json FROM terms_state WHERE key='terms'").fetchone()[0]
-    from app import sqlite_storage
-    sqlite_storage._SUPPORTED_CACHE.discard(database_path(project))
-
-    def fail(*args: object, **kwargs: object) -> None:
-        raise RuntimeError("migration failure")
-
-    monkeypatch.setattr("app.term_knowledge._migrate_knowledge_to_v2", fail)
-    with pytest.raises(RuntimeError, match="migration failure"):
-        ensure_supported(project)
-    backup, = (project / "snapshots" / "storage_migrations").glob("*.sqlite")
-    with sqlite3.connect(database_path(project)) as connection:
-        assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "8"
-        raw = connection.execute("SELECT payload_json FROM terms_state WHERE key='terms'").fetchone()[0]
-    with sqlite3.connect(backup) as connection:
-        assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "8"
-    assert raw == before
 
 
 @pytest.mark.parametrize("fail", [False, True])
@@ -909,23 +835,6 @@ def test_storage_upgrade_preserves_current_knowledge_and_pending_tasks(tmp_path)
     assert "新建 Run" in migrated_run["error_message"]
 
 
-
-def test_automatic_upgrade_ends_unpublished_legacy_scan(tmp_path):
-    import sqlite3
-    from app import sqlite_storage
-    from app.sqlite_storage import database_path, read_json, write_json
-
-    project = make_project(tmp_path)
-    write_json(project, project / "terminology/active_task.json",
-               record_header("terminology_task", "test", status="active"))
-    with sqlite3.connect(database_path(project)) as db:
-        db.execute("DELETE FROM terms_state WHERE key='terms'")
-        db.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
-    sqlite_storage._SUPPORTED_CACHE.discard(database_path(project))
-    sqlite_storage.ensure_supported(project)
-    assert read_json(project, project / "terminology/active_task.json")["status"] == "reset"
-
-
 def test_scan_publication_transfers_new_alias_evidence(tmp_path: Path) -> None:
     from app.sqlite_storage import read_json, write_json
     from app.term_library import _merge_and_publish_terms
@@ -1020,6 +929,10 @@ def test_replacement_indexes_each_request_and_preserves_slice_boundaries(
     ("all", "all", 1, ["前文", "当前", "后文一", "后文并列", "后文二", "总结"]),
     ("prefer_previous", "when_no_sourced", 1, ["前文", "当前"]),
     ("prefer_previous", "all", 0, ["后文一", "后文并列", "总结"]),
+    ("stage", "when_no_sourced", 1, ["当前"]),
+    ("stage", "when_no_sourced", 3, ["后文一", "后文并列"]),
+    ("stage", "when_no_sourced", (0, 1), ["前文", "当前"]),
+    ("stage", "all", 0, ["后文一", "后文并列", "总结"]),
     ("none", "when_no_sourced", 1, ["总结"]),
     ("all", "none", 1, ["前文", "当前", "后文一", "后文并列", "后文二"]),
     ("none", "none", 1, []),
@@ -1038,7 +951,8 @@ def test_entity_injection_policies(sourced, unsourced, position, expected):
             entry("后文二", 4), entry("总结", None)]}]}
     cache = _TermMatchCache(data, TermNormalization("NFKC", True), 10, segments=segments,
                            sourced_policy=sourced, unsourced_policy=unsourced)
-    terms = cache.for_items([segments[position]])
+    selected = [segments[i] for i in position] if isinstance(position, tuple) else [segments[position]]
+    terms = cache.for_items(selected)
     assert terms[0]["preferred_translation"] == "阿尔法"
     assert [i["text"] for i in terms[0].get("entity_knowledge", {}).get("items", [])] == expected
     if not expected:

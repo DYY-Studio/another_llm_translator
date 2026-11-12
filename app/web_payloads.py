@@ -75,6 +75,7 @@ class TaskStartPayload(_WebPayload):
     confirm_knowledge_replacement: StrictBool = False
     exclude_punctuation_only: StrictBool = True
     screening_enabled: StrictBool = False
+    repetition_final_review: StrictBool = False
     replace_draft: StrictBool = False
     acknowledge_manual_review: StrictBool = False
     include_summaries: StrictBool = False
@@ -83,6 +84,8 @@ class TaskStartPayload(_WebPayload):
     reuse_mixed_fingerprints: StrictBool = False
     final_review: StrictBool = False
     knowledge_only: StrictBool = False
+    all_terms: StrictBool = False
+    review_draft_run_id: StrictStr | None = None
     run_action: str | None = None
     stages: list[StrictStr] = Field(default_factory=list)
     run_actions: dict[StrictStr, StrictStr] = Field(default_factory=dict)

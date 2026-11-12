@@ -53,6 +53,7 @@
 .term-row-category { flex: 0 1 auto; max-width: 48%; overflow: hidden; padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-soft); text-overflow: ellipsis; white-space: nowrap; }
 .term-row-category.conflict { border-color: var(--warning-border); background: var(--warning-bg); color: var(--warning-text); }
 .term-row em { color: var(--muted); font-size: 12px; font-style: normal; white-space: nowrap; }
+.term-state-stack { display: flex; flex-direction: column; gap: 4px; min-height: 22px; }
 .term-state { width: 9px; height: 9px; border: 1.5px solid var(--success); border-radius: 50%; background: var(--success); }
 .term-state.conflict { border-color: var(--status-warning); background: var(--status-warning); }
 .term-state.disabled { border-color: var(--status-idle); background: transparent; }

@@ -6,7 +6,6 @@ import json
 import os
 import secrets
 import shutil
-import sqlite3
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -46,13 +45,12 @@ from .project import (
     update_file_run_options,
 )
 from .sqlite_storage import (
-    SCHEMA_VERSION,
     compact_project_database,
     database_path,
     ensure_supported,
     read_adapter_state,
     read_json,
-    _take_migration_backup_notice,
+    read_project_meta_read_only,
 )
 from .user_config import user_root
 from .web_store import WebStore
@@ -232,32 +230,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
 
 
     def read_project_metadata_read_only(root: Path) -> dict[str, Any]:
-        database = database_path(root).resolve()
-        project_json = root / "project.json"
-        connection: sqlite3.Connection | None = None
-        metadata: dict[str, Any] | None = None
-        try:
-            connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
-            rows = connection.execute(
-                "SELECT key, value_json FROM project_meta"
-            ).fetchall()
-            metadata = {str(key): json.loads(value_json) for key, value_json in rows}
-        except sqlite3.OperationalError as exc:
-            if "no such table: project_meta" not in str(exc) or not project_json.is_file():
-                raise UsageError(f"无法读取项目元数据：{root}: {exc}") from exc
-            try:
-                value = json.loads(project_json.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as read_exc:
-                raise UsageError(f"无法读取项目元数据：{project_json}: {read_exc}") from read_exc
-            if isinstance(value, dict):
-                metadata = value
-        except (sqlite3.Error, json.JSONDecodeError) as exc:
-            raise UsageError(f"无法读取项目元数据：{root}: {exc}") from exc
-        finally:
-            if connection is not None:
-                connection.close()
-        if metadata is None:
-            raise UsageError(f"项目元数据不是对象：{root}")
+        metadata = read_project_meta_read_only(root)
         required = ("project_id", "name", "file_count", "segment_count")
         if any(key not in metadata for key in required):
             raise UsageError(f"项目元数据不完整：{root}")
@@ -271,48 +244,7 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             for language in PROMPT_LANGUAGES
             for stage in PROMPT_RESOURCE_STAGES
         )
-        database = database_path(root).resolve()
-        if not database.is_file():
-            raise UsageError(f"项目缺少 project.sqlite：{root}")
-        connection: sqlite3.Connection | None = None
-        schema_version: int | None = None
-        try:
-            connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
-            table = connection.execute(
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type = 'table' AND name = 'schema_meta'"
-            ).fetchone()
-            if table is not None:
-                row = connection.execute(
-                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-                ).fetchone()
-                if row is not None:
-                    try:
-                        schema_version = int(row[0])
-                    except (TypeError, ValueError) as exc:
-                        raise UsageError(
-                            "不支持的项目 SQLite schema_version："
-                            f"{row[0]!r}；请重新创建项目"
-                        ) from exc
-        except UsageError:
-            raise
-        except sqlite3.Error as exc:
-            raise UsageError(f"无法读取项目 schema：{database}: {exc}") from exc
-        finally:
-            if connection is not None:
-                connection.close()
-        if schema_version is not None and schema_version not in {
-            3,
-            4,
-            5,
-            6,
-            7,
-            SCHEMA_VERSION,
-        }:
-            raise UsageError(
-                f"不支持的项目 SQLite schema_version：{schema_version}；请重新创建项目"
-            )
-        return prompt_missing or schema_version != SCHEMA_VERSION
+        return prompt_missing
 
 
     def project_path_from_payload(payload: dict[str, Any]) -> Path:
@@ -514,12 +446,6 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
         remember_project(root)
         selector = project_selector(root, metadata)
         external = root.parent != projects_root.resolve()
-        backup = _take_migration_backup_notice(root)
-        if backup is not None:
-            warnings = [
-                *warnings,
-                f"项目 SQLite 已升级至当前版本；升级前备份位于 {backup}",
-            ]
         return {
             "selector": selector,
             "name": metadata["name"],
@@ -564,13 +490,24 @@ def register_project_routes(*, app: FastAPI, projects_root: Path, app_root: Path
             raise UsageError("Segment 窗口参数无效")
         root = project(name)
         try:
-            return await asyncio.to_thread(lambda: WebStore(root).overview(
+            result = await asyncio.to_thread(lambda: WebStore(root).overview(
                 offset=offset,
                 limit=limit,
                 stage=params.get("stage", "translation"),
             ))
         except ValueError as exc:
             raise UsageError(str(exc)) from exc
+        active_agent = app.state.tasks.active_agent_task(root)
+        if active_agent is not None:
+            sc = result.get("stage_completion")
+            stage_name = str(active_agent.get("stage", ""))
+            if isinstance(sc, dict) and isinstance(sc.get(stage_name), dict):
+                sc[stage_name] = {
+                    **sc[stage_name],
+                    "checked_out": active_agent.get("checked_out_segments", 0),
+                    "active_run_id": active_agent.get("run_id"),
+                }
+        return result
 
     @app.post("/api/v1/projects/{name}/storage/compact")
     def compact_project_route(name: str) -> dict[str, int]:

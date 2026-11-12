@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decisionAliasChanges, decisionProposalChanges, decisionRelationshipRole, decisionRelationshipSummary, filterDecisionProposals, filterManualReviewItems, summarizeDecisionProposals } from "../src/termDecision.ts";
+import { decisionAliasChanges, decisionProposalChanges, decisionRelationshipRole, decisionRelationshipSummary, filterDecisionDraft, filterDecisionProposals, filterManualReviewItems, summarizeDecisionProposals } from "../src/termDecision.ts";
 
 const state = (normalized, translation, disabled = false) => ({
   normalized,
@@ -86,4 +86,15 @@ test("filters and summarizes the persistent manual queue", () => {
   assert.deepEqual(filterManualReviewItems(items, "alice", "open").map((item) => item.normalized), ["alice"]);
   assert.deepEqual(filterManualReviewItems(items, "核心角色候选", "open").map((item) => item.normalized), ["alice"]);
   assert.deepEqual(filterManualReviewItems(items, "", "resolved").map((item) => item.normalized), ["bob"]);
+});
+
+test("draft filtering exposes manual items alongside proposals and by itself", () => {
+  const pending = { normalized: "carol", source: "Carol", reason: "需要核对身份", evidence: { hit_count: 1 } };
+  const draft = { proposals, needs_review: [pending] };
+  const rejected = new Set(["one"]);
+  assert.equal(filterDecisionDraft(draft, "", "", "all", rejected).length, 3);
+  assert.deepEqual(filterDecisionDraft(draft, "身份", "needs_review", "all", rejected), [{ kind: "needs_review", item: pending }]);
+  assert.equal(filterDecisionDraft(draft, "", "needs_review", "rejected", rejected).length, 0);
+  assert.equal(filterDecisionDraft(draft, "", "", "rejected", rejected).length, 1);
+  assert.equal(filterDecisionDraft(draft, "", "relationship", "all", rejected).length, 1);
 });

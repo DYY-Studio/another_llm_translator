@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
   "chardet>=5.2,<6",
   "fastapi>=0.115,<1",
-  "httpx>=0.27,<1",
+  "httpx2>=2,<3",
   "keyring>=25,<26",
   "PyJWT[crypto]>=2.10,<3",
   "psutil>=5.9,<7",
@@ -24,6 +24,7 @@ dependencies = [
 [project.scripts]
 another-llm-translator = "app.main:main"
 another-llm-translator-web = "app.web:main"
+another-llm-translator-mcp = "app.mcp:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "plugins"]

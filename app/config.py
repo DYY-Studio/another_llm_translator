@@ -384,7 +384,7 @@ def validate_config(config: dict[str, Any]) -> None:
             "terminology.alias_primary_collision 必须是 conflict 或 merge"
         )
     for section, key, choices in (
-        ("terminology", "sourced_description_injection", ("none", "prefer_previous", "all")),
+        ("terminology", "sourced_description_injection", ("none", "stage", "prefer_previous", "all")),
         ("terminology", "unsourced_description_injection", ("none", "when_no_sourced", "all")),
         ("terminology_decision", "description_generation", ("sourced", "sourced_and_summary", "summary_only")),
     ):

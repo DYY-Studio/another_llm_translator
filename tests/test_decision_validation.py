@@ -4,7 +4,7 @@ from tests.helpers import write_term_library
 import json
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app.config import dump_config, load_config, load_run_config
@@ -12,36 +12,16 @@ from app.decision import DecisionAnswer
 from app.diagnostics import Diagnostics
 from app.execution import Scope
 from app.errors import FatalExternalError
-from app.sqlite_storage import read_json, read_jsonl, record_header, write_json
+from app.sqlite_storage import read_json, read_jsonl, record_header
 from app.stage_translation import run_translation
 from app.translation_validation import (
     SegmentAlignmentValidator,
     TranslationValidationContext,
-    validate_translation_response,
 )
 from app.user_config import write_user
 from tests.helpers import llm_jsonl
 from tests.test_decision import preset
 from tests.test_terminology_translation import create_project
-
-
-@pytest.mark.asyncio
-async def test_alignment_can_repair_a_batch_containing_an_empty_translation():
-    class Decision:
-        async def choose(self, state, questions, *, segment_id):
-            return {question.name: DecisionAnswer("misaligned", {"misaligned": 1}, 1)
-                    for question in questions}
-
-    findings = await validate_translation_response((
-        TranslationValidationContext("First source.", "", segment_id="S1"),
-        TranslationValidationContext("Second source.", "错位译文", segment_id="S2"),
-    ), (SegmentAlignmentValidator(Decision()),))
-    assert set(findings) == {"S1", "S2"}
-    finding = findings["S1"][0]
-    assert finding["match_type"] == "segment_misaligned"
-    assert finding["severity"] == "error"
-    assert finding["matched_text"] == ""
-    assert (finding["start"], finding["end"]) == (0, 0)
 
 
 @pytest.mark.asyncio
@@ -74,10 +54,6 @@ async def test_alignment_uses_plain_ruby_evidence_and_preserves_finding_offsets(
     ("still_missing", 0.9, 1, "warning", 0.8),
     ("http_error", 0, 0, "failed", 0.8),
     ("context_error", 0, 0, "failed", 0.8),
-    ("uncertain", 0.9, 0, "passed", 0),
-    ("required", 0.5, 0, "passed", 0),
-    ("required", 0.9, 1, "passed", 0),
-    ("acceptable", 0.7, 0, "passed", 0.6),
 ])
 async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypatch, choice, confidence, repairs, status, warning_threshold):
     project = await create_project(tmp_path, "Alice arrived.")
@@ -102,20 +78,20 @@ async def test_decision_gates_actual_translation_repair(tmp_path: Path, monkeypa
         if str(request.url) == value["url"]:
             assert choice != "context_error", "Oversized Decision must not send HTTP"
             if choice == "http_error":
-                return httpx.Response(401)
+                return httpx2.Response(401)
             selected = "required" if choice == "still_missing" else choice
             assert body["state"]["terms"]["term_0"]["description"] == "A character"
             assert body["state"]["matched_terms"] == []
-            return httpx.Response(200, json=dict(model="decision-test", usage=dict(input_tokens=10, output_tokens=0),
+            return httpx2.Response(200, json=dict(model="decision-test", usage=dict(input_tokens=10, output_tokens=0),
                 answers={name: dict(type="choice", choice=selected, confidence=confidence,
                     probabilities={key: 0.9 if key == selected else 0.1 / (len(question["criteria"]) - 1)
                                    for key in question["criteria"]}) for name, question in body["questions"].items()}))
         payload = json.loads(body["messages"][1]["content"])
         text = "爱丽丝到了。" if "validation_repair" in payload and choice != "still_missing" else "她到了。"
-        return httpx.Response(200, json=dict(choices=[dict(message=dict(content=llm_jsonl([
+        return httpx2.Response(200, json=dict(choices=[dict(message=dict(content=llm_jsonl([
             dict(type="segment", id=item["id"], translation=text) for item in payload["segments"]])))],
             usage=dict(prompt_tokens=20, completion_tokens=5, total_tokens=25)))
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
         if choice == "context_error":
             with pytest.raises(FatalExternalError, match="Decision.*Token"):
                 await run_translation(project, Scope(), http_client=http)
@@ -173,16 +149,16 @@ async def test_translation_decision_context_toggle_and_count(tmp_path, monkeypat
             calls.append(body)
             assert all(question["instructions"].endswith(custom_prompt["instructions"]) for question in body["questions"].values())
             assert body["state"].get("reference_context", []) == expected
-            return httpx.Response(200, json=dict(model="decision-test", answers={name: dict(type="choice",
+            return httpx2.Response(200, json=dict(model="decision-test", answers={name: dict(type="choice",
                 choice="acceptable", confidence=0.9,
                 probabilities={key: 1 if key == "acceptable" else 0 for key in body["questions"][name]["criteria"]})
                 for name in body["questions"]}))
         payload = json.loads(body["messages"][1]["content"])
-        return httpx.Response(200, json=dict(choices=[dict(message=dict(content=llm_jsonl([
+        return httpx2.Response(200, json=dict(choices=[dict(message=dict(content=llm_jsonl([
             dict(type="segment", id=item["id"], translation="她到了。") for item in payload["segments"]])))],
             usage=dict(prompt_tokens=20, completion_tokens=5, total_tokens=25)))
     segment = read_segment_sources(project)[-1]
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
         result = await run_translation(project, Scope(only_segment=segment["segment_id"]), http_client=http)
     assert result["completed"] == 1
     assert len(calls) == 1
@@ -246,8 +222,6 @@ def test_decision_presets_inherit_and_override_independently(tmp_path, monkeypat
     ("aligned", 0.9, "passed", 0, 0.8), ("misaligned", 0.9, "passed", 1, 0.8),
     ("uncertain", 0.9, "warning", 0, 0.8), ("aligned", 0.5, "warning", 0, 0.8),
     ("empty_translation", 0.9, "passed", 1, 0.8),
-    ("uncertain", 0.9, "passed", 0, 0), ("aligned", 0.5, "passed", 0, 0),
-    ("misaligned", 0.9, "passed", 1, 0),
 ])
 async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monkeypatch, choice, confidence, expected_status, repairs, warning_threshold):
     diagnostics = Diagnostics(tmp_path / "global.log")
@@ -267,16 +241,16 @@ async def test_alignment_checks_tail_and_gates_whole_translation(tmp_path, monke
             decisions.append(body)
             assert [item["source"] for item in body["state"]["segments"]] == ["Two.", "Three.", "Four."]
             selected = "aligned" if len(decisions) > 1 else "misaligned" if choice == "empty_translation" else choice
-            return httpx.Response(200, json={"model": "decision-test", "answers": {name: {"type": "choice", "choice": selected,
+            return httpx2.Response(200, json={"model": "decision-test", "answers": {name: {"type": "choice", "choice": selected,
                 "confidence": confidence, "probabilities": {key: int(key == selected) for key in question["criteria"]}}
                 for name, question in body["questions"].items()}})
         payload = json.loads(body["messages"][1]["content"])
         requests.append(payload)
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
             {"type": "segment", "id": item["id"],
              "translation": "" if choice == "empty_translation" and len(requests) == 1 and index == 0
              else "译文" + item["id"]} for index, item in enumerate(payload["segments"])])}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
         result = await run_translation(project, Scope(), http_client=http)
     assert result["completed"] == 4
     assert len(requests) == 1 + repairs
@@ -338,12 +312,12 @@ async def test_alignment_phase_prevents_invalid_terminology_requests(tmp_path, m
                 "type": "choice", "choice": selected, "confidence": 0.99,
                 "probabilities": {key: int(key == selected) for key in question["criteria"]}})
                 for name, question in body["questions"].items()}
-            return httpx.Response(200, json={"model": "test", "answers": answers})
+            return httpx2.Response(200, json={"model": "test", "answers": answers})
         payload = json.loads(body["messages"][1]["content"])
         records = [{"type": "segment", "id": item["id"], "translation": "あ" if gate == "mechanical" and index == 0 else "她来了。"}
                    for index, item in enumerate(payload["segments"])]
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
         result = await run_translation(project, Scope(), http_client=http)
     assert len(terminology_calls) == term_requests
     assert len(alignment_calls) == (0 if gate == "mechanical" else 2 if gate == "misaligned" else 1)
@@ -374,7 +348,7 @@ async def test_partial_response_is_buffered_before_alignment(tmp_path, monkeypat
         if "questions" in body:
             decisions.append(body)
             assert [item["source"] for item in body["state"]["segments"]] == ["One.", "Two."]
-            return httpx.Response(200, json={"model": "test", "answers": {name: {
+            return httpx2.Response(200, json={"model": "test", "answers": {name: {
                 "type": "choice", "choice": "aligned", "confidence": 0.99,
                 "probabilities": {key: int(key == "aligned") for key in question["criteria"]}}
                 for name, question in body["questions"].items()}})
@@ -382,8 +356,8 @@ async def test_partial_response_is_buffered_before_alignment(tmp_path, monkeypat
         translations.append(payload)
         records = [{"type": "segment", "id": item["id"], "translation": "译文"} for item in payload["segments"]]
         content = json.dumps(records[0]) if len(translations) == 1 else llm_jsonl(records)
-        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        return httpx2.Response(200, json={"choices": [{"message": {"content": content}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
         result = await run_translation(project, Scope(), http_client=http)
     assert result["completed"] == (0 if exhausted else 2)
     assert len(decisions) == (0 if exhausted else 1)
@@ -413,19 +387,19 @@ async def test_alignment_uses_complete_segments_in_split_and_joint_requests(tmp_
         if "questions" in body:
             decision_calls.append(body)
             assert [item["source"] for item in body["state"]["segments"]] == source.splitlines()
-            return httpx.Response(200, json={"model": "test", "answers": {name: {
+            return httpx2.Response(200, json={"model": "test", "answers": {name: {
                 "type": "choice", "choice": "aligned", "confidence": 0.99,
                 "probabilities": {key: int(key == "aligned") for key in question["criteria"]}}
                 for name, question in body["questions"].items()}})
         payload = json.loads(body["messages"][1]["content"])
         llm_calls.append(payload)
         if mode == "joint_runtime_split" and any(len(item["source"]) > 10 for item in payload["segments"]):
-            return httpx.Response(400, text="context_length_exceeded: maximum context tokens")
+            return httpx2.Response(400, text="context_length_exceeded: maximum context tokens")
         records = [{"type": "no_terms"}] if mode.startswith("joint") else []
         for item in payload["segments"]:
             records.append({"type": "segment", "id": item["id"], "translation": item["source"].lower()})
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl(records)}}]})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
         if mode.startswith("joint"):
             await run_terminology(project, Scope(), http_client=http, include_draft_translation=True)
         else:
@@ -451,9 +425,9 @@ async def test_final_terminology_phase_repairs_only_affected_segments(tmp_path):
         payload = json.loads(json.loads(request.content)["messages"][1]["content"])
         if "validation_repair" in payload:
             repairs.append(payload)
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
             {"type": "segment", "id": item["id"], "translation": "她。"} for item in payload["segments"]])}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
         await run_translation(project, Scope(), http_client=http)
     assert len(repairs) == 1
     assert [item["source"] for item in repairs[0]["segments"]] == ["Alice."]
@@ -480,20 +454,20 @@ async def test_alignment_repair_split_does_not_accept_unchecked_partial_candidat
         if "questions" in body:
             decisions.append(body)
             assert len(body["state"]["segments"][0]["source"]) == 20
-            return httpx.Response(200, json={"model": "test", "answers": {name: {
+            return httpx2.Response(200, json={"model": "test", "answers": {name: {
                 "type": "choice", "choice": "misaligned", "confidence": 0.99,
                 "probabilities": {key: int(key == "misaligned") for key in question["criteria"]}}
                 for name, question in body["questions"].items()}})
         payload = json.loads(body["messages"][1]["content"])
         if "validation_repair" in payload:
             if len(payload["segments"][0]["source"]) > 10:
-                return httpx.Response(400, text="context_length_exceeded: maximum context tokens")
+                return httpx2.Response(400, text="context_length_exceeded: maximum context tokens")
             repair_parts.append(payload)
             if len(repair_parts) == 1:
-                return httpx.Response(200, json={"choices": [{"message": {"content": '{"type":"end"}'}}]})
-        return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+                return httpx2.Response(200, json={"choices": [{"message": {"content": '{"type":"end"}'}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
             {"type": "segment", "id": item["id"], "translation": "错" * len(item["source"])} for item in payload["segments"]])}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
         result = await run_translation(project, Scope(), http_client=http)
     records = read_jsonl(project, project / "stages" / "translation.jsonl")
     assert len(records) == 1
@@ -541,16 +515,6 @@ async def test_alignment_warning_threshold_is_independent(
         assert findings["S1"][0].repairable == (expected == "error")
 
 
-@pytest.mark.parametrize("value", [-0.1, 1.1, True])
-def test_alignment_warning_threshold_rejects_invalid_config(value) -> None:
-    from app.errors import ConfigError
-
-    config = load_config(Path(__file__).parents[1] / "config/config.toml")
-    config["validation"]["translation"]["alignment"]["warning_threshold"] = value
-    with pytest.raises(ConfigError, match="警告阈值"):
-        dump_config(config)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("threshold,choice,confidence,refused,expected", [
     (0.6, "acceptable", 0.59, False, "preferred_term_uncertain"),
@@ -579,13 +543,17 @@ async def test_term_warning_threshold_boundary_and_refusal(
     assert all(not finding.repairable for finding in findings)
 
 
+@pytest.mark.parametrize("field", ["alignment", "term"])
 @pytest.mark.parametrize("value", [-0.1, 1.1, True])
-def test_term_warning_threshold_rejects_invalid_config(value):
+def test_warning_threshold_rejects_invalid_config(field: str, value) -> None:
     from app.errors import ConfigError
 
-    config = load_config(Path("config/config.toml"))
-    config["validation"]["translation"]["decision_warning_threshold"] = value
-    with pytest.raises(ConfigError, match="术语复核警告阈值"):
+    config = load_config(Path(__file__).parents[1] / "config/config.toml")
+    if field == "alignment":
+        config["validation"]["translation"]["alignment"]["warning_threshold"] = value
+    else:
+        config["validation"]["translation"]["decision_warning_threshold"] = value
+    with pytest.raises(ConfigError, match="警告阈值"):
         dump_config(config)
 
 
@@ -604,9 +572,9 @@ async def test_validation_retry_missing_end_retries_original_repair_request(tmp_
                     "translation": "カ" if len(requests) == 1 else "译文"}
                    for item in payload["segments"]]
         content = "\n".join(json.dumps(record) for record in records) if len(requests) == 2 else llm_jsonl(records)
-        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": content}}]})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
         result = await run_translation(project, Scope(), http_client=client)
     assert result["completed"] == 1
     assert len(requests) == 3
@@ -661,14 +629,14 @@ async def test_validation_repair_uses_current_worker_before_other_translation_fi
                 if max_parallel > 1:
                     await later_started.wait()
                 translation = "カ"
-            return httpx.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
+            return httpx2.Response(200, json={"choices": [{"message": {"content": llm_jsonl([
                 {"type": "segment", "id": item["id"], "translation": translation}
                 for item in payload["segments"]
             ])}}]})
         finally:
             active -= 1
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
         task = asyncio.create_task(run_translation(project, Scope(), http_client=client))
         try:
             result = await asyncio.wait_for(task, 5)

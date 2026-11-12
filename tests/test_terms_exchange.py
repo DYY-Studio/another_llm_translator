@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app.errors import UsageError
@@ -241,11 +241,11 @@ async def test_old_candidates_fail_before_publication_or_scan(tmp_path: Path, op
         "terminology_candidates", project_id, active_task_id="OLD", terms=[term("Alpha")],
     ))
 
-    def handler(_request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx2.Request) -> httpx2.Response:
         pytest.fail("旧候选校验必须在模型请求前完成")
 
     os.environ["LLM_API_KEY"] = "test"
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         with pytest.raises(UsageError, match="源文排序.*重新扫描"):
             if operation == "publish":
                 publish_partial_terms(project)
@@ -280,44 +280,40 @@ def test_terms_json_csv_round_trip_and_disabled_export(tmp_path: Path) -> None:
     assert [item["source"] for item in load_terms(restored)["terms"]] == ["Alpha"]
 
 
-def test_import_merge_follows_case_insensitive_setting(tmp_path: Path) -> None:
-    project = make_project(tmp_path)
-    config_path = project / "config.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
+@pytest.mark.parametrize(
+    ("target", "replacement", "sources", "expected"),
+    [
+        (
             "case_insensitive = true",
             "case_insensitive = false",
+            ["Alice", "alice"],
+            ["Alice", "alice"],
         ),
-        encoding="utf-8",
-    )
-    source = tmp_path / "terms.json"
-    write_exchange(source, [term("Alice"), term("alice")])
-    import_terms(project, source, dry_run=False)
-    assert [item["source"] for item in load_terms(project)["terms"]] == [
-        "Alice",
-        "alice",
-    ]
-
-
-def test_import_merge_follows_unicode_normalization_setting(
+        (
+            'unicode_normalization = "NFKC"',
+            'unicode_normalization = ""',
+            ["\uff21\uff22\uff23", "ABC"],
+            ["ABC", "\uff21\uff22\uff23"],
+        ),
+    ],
+)
+def test_import_merge_follows_normalization_settings(
     tmp_path: Path,
+    target: str,
+    replacement: str,
+    sources: list[str],
+    expected: list[str],
 ) -> None:
     project = make_project(tmp_path)
     config_path = project / "config.toml"
     config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            'unicode_normalization = "NFKC"',
-            'unicode_normalization = ""',
-        ),
+        config_path.read_text(encoding="utf-8").replace(target, replacement),
         encoding="utf-8",
     )
     source = tmp_path / "terms.json"
-    write_exchange(source, [term("\uff21\uff22\uff23"), term("ABC")])
+    write_exchange(source, [term(item) for item in sources])
     import_terms(project, source, dry_run=False)
-    assert [item["source"] for item in load_terms(project)["terms"]] == [
-        "ABC",
-        "\uff21\uff22\uff23",
-    ]
+    assert [item["source"] for item in load_terms(project)["terms"]] == expected
 
 
 def test_terms_import_is_atomic_and_noop_does_not_increment_revision(
@@ -476,11 +472,11 @@ async def test_forced_rescan_merges_with_published_library(tmp_path: Path) -> No
     os.environ["LLM_API_KEY"] = "test"
     calls = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         source = "Alpha" if calls == 1 else "Beta"
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "choices": [
@@ -500,8 +496,8 @@ async def test_forced_rescan_merges_with_published_library(tmp_path: Path) -> No
             },
         )
 
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler)
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(handler)
     ) as client:
         await run_terminology(project, Scope(), http_client=client)
         await run_terminology(
@@ -542,32 +538,20 @@ def test_group_alias_matching_is_exact_and_ignores_disabled_members(tmp_path):
     assert not built[0]["conflicts"]["group_claims"]
 
 
-def test_manual_term_edit_and_grouping_reject_overlapping_aliases_atomically(tmp_path):
+def test_manual_term_edit_and_primary_change_reject_overlapping_aliases_atomically(tmp_path):
     from app.web_store import WebStore
     project = make_project(tmp_path)
     source = tmp_path / "explicit.json"
-    source.write_text(json.dumps({"schema_version": 2, "record_type": "terminology_exchange", "terms": [
-        term("Alpha"), {**term("Beta"), "group_primary": "alpha"}]}), encoding="utf-8")
-    import_terms(project, source, dry_run=False)
-    library = load_terms(project)
-    overrides = read_json(project, project / "terminology" / "overrides.json")
-    with pytest.raises(UsageError, match="组.*Alias"):
-        WebStore(project).save_term({**{k:v for k,v in term("Alpha", aliases=["Beta"]).items() if k != "description"}, "old_normalized": "alpha"})
-    assert load_terms(project) == library
-    assert read_json(project, project / "terminology" / "overrides.json") == overrides
-
-
-def test_changing_group_primary_cannot_introduce_alias_overlap(tmp_path):
-    from app.web_store import WebStore
-    project = make_project(tmp_path)
-    source = tmp_path / "groups.json"
     source.write_text(json.dumps({"schema_version": 2, "record_type": "terminology_exchange", "terms": [
         term("Alpha"), {**term("Beta", aliases=["Alpha"]), "group_primary": "alpha"}]}), encoding="utf-8")
     import_terms(project, source, dry_run=False)
     library = load_terms(project)
     overrides = read_json(project, project / "terminology" / "overrides.json")
+    store = WebStore(project)
     with pytest.raises(UsageError, match="组.*Alias"):
-        WebStore(project).set_term_primary({"normalized": "beta", "confirm": True})
+        store.save_term({**{k: v for k, v in term("Alpha", aliases=["Beta"]).items() if k != "description"}, "old_normalized": "alpha"})
+    with pytest.raises(UsageError, match="组.*Alias"):
+        store.set_term_primary({"normalized": "beta", "confirm": True})
     assert load_terms(project) == library
     assert read_json(project, project / "terminology" / "overrides.json") == overrides
 
@@ -601,3 +585,171 @@ def test_automatic_group_alias_removal_survives_later_manual_edits(tmp_path, cre
     assert rows["Beta"]["group_primary"] == "alpha"
     overrides = read_json(project, project / "terminology" / "overrides.json")
     assert next(item for item in overrides["overrides"] if item["normalized"] == "alpha")["aliases"] == []
+
+
+def test_overwrite_import_clears_descriptions_preserves_untouched_group_items_and_skips_invalid_fragments(
+    tmp_path: Path,
+) -> None:
+    from app.project import remove_project_files
+    from app.sqlite_storage import read_segments, write_terminology_publication
+    from app.term_knowledge import evidence, save_items, source_range
+    from app.term_library import _merge_and_publish_terms
+
+    app_root = make_app_root(tmp_path / "b5")
+    f1 = tmp_path / "f1.txt"
+    f2 = tmp_path / "f2.txt"
+    f1.write_text("Alpha and Beta", encoding="utf-8")
+    f2.write_text("Alpha in removed chapter", encoding="utf-8")
+    project, _ = init_project(
+        [str(f1), str(f2)],
+        name="b5-terms",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    segs = read_segments(project)
+    seg1, seg2 = segs[0], segs[1]
+
+    write_json(
+        project,
+        project / "terminology" / "active_task.json",
+        record_header("terminology_task", project_id, active_task_id="TASK-B5", status="active"),
+    )
+    for idx, (seg, rows) in enumerate(
+        [
+            (
+                seg1,
+                [
+                    {**term("Alpha"), "description": "保留说明"},
+                    {**term("Beta"), "description": "旧Beta说明", "group_primary": "alpha"},
+                    {**term("Gamma"), "description": "待清空Gamma说明"},
+                ],
+            ),
+            (seg1, [{**term("Alpha"), "description": "已淘汰历史说明"}]),
+            (seg2, [{**term("Alpha"), "description": "失效片段说明"}]),
+        ]
+    ):
+        append_jsonl(
+            project,
+            project / "terminology" / "candidates.jsonl",
+            record_header(
+                "terminology_candidates",
+                project_id,
+                active_task_id="TASK-B5",
+                source_order={"segment_id": seg["segment_id"], "offset": idx},
+                source_range=source_range([seg], {seg["segment_id"]: seg}, {}),
+                terms=rows,
+            ),
+        )
+    library = _merge_and_publish_terms(
+        project, task_id="TASK-B5", project_id=project_id, published_run_id="RUN-B5"
+    )
+    known = evidence(project, library)
+    keep_fid = next(
+        fid for fid, f in known.items() if f["owner"] == "alpha" and f["text"] == "保留说明"
+    )
+    beta_fid = next(
+        fid for fid, f in known.items() if f["owner"] == "beta" and f["text"] == "旧Beta说明"
+    )
+    # Curate entity items: manual summary + F_KEEP + beta_fid (deliberately dropping "已淘汰历史说明" and "失效片段说明")
+    save_items(
+        project,
+        library,
+        "alpha",
+        [
+            {"text": "人工整合说明", "fragment_ids": []},
+            {"text": "保留说明", "fragment_ids": [keep_fid]},
+            {"text": "旧Beta说明", "fragment_ids": [beta_fid]},
+        ],
+    )
+    overrides_doc = read_json(project, project / "terminology" / "overrides.json")
+    overrides_doc["overrides"] = [
+        {"normalized": "beta", "source": "Beta", "group_primary": "alpha", "disabled": False}
+    ]
+    write_terminology_publication(project, terms=library, overrides=overrides_doc)
+
+    # Remove F0002 so the third Alpha scan fragment becomes valid=False while still state="active"
+    remove_project_files(project, ["F0002"])
+
+    # 1. Partial overwrite of Beta + explicit empty/null description clear on Gamma
+    patch_json = tmp_path / "partial_overwrite.json"
+    patch_json.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "record_type": "terminology_exchange",
+                "terms": [
+                    {
+                        "source": "Beta",
+                        "preferred_translation": "新译Beta",
+                        "category": "名称",
+                        "description": "新Beta说明",
+                    },
+                    {
+                        "source": "Gamma",
+                        "preferred_translation": "译-Gamma",
+                        "category": "名称",
+                        "description": None,
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    import_terms(project, patch_json, dry_run=False, overwrite=True)
+    by_norm = {t["normalized"]: t for t in load_terms(project)["terms"]}
+    assert by_norm["alpha"]["description"] == "人工整合说明；保留说明；新Beta说明"
+    assert by_norm["beta"]["description"] == "人工整合说明；保留说明；新Beta说明"
+    assert by_norm["gamma"]["description"] == ""
+
+    # 2. Omitting "description" key in overwrite=True preserves existing description
+    omit_desc_json = tmp_path / "omit_desc.json"
+    omit_desc_json.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "record_type": "terminology_exchange",
+                "terms": [{"source": "Beta", "preferred_translation": "再译Beta", "category": "名称"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    import_terms(project, omit_desc_json, dry_run=False, overwrite=True)
+    by_norm = {t["normalized"]: t for t in load_terms(project)["terms"]}
+    assert by_norm["beta"]["preferred_translation"] == "再译Beta"
+    assert by_norm["alpha"]["description"] == "人工整合说明；保留说明；新Beta说明"
+
+    # 3. Clearing Beta's description with "" removes only Beta's item while keeping Alpha's curated items
+    clear_beta_json = tmp_path / "clear_beta.json"
+    clear_beta_json.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "record_type": "terminology_exchange",
+                "terms": [
+                    {
+                        "source": "Beta",
+                        "preferred_translation": "再译Beta",
+                        "category": "名称",
+                        "description": "",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    import_terms(project, clear_beta_json, dry_run=False, overwrite=True)
+    by_norm = {t["normalized"]: t for t in load_terms(project)["terms"]}
+    assert by_norm["alpha"]["description"] == "人工整合说明；保留说明"
+
+    # 4. Full export + CSV overwrite=True round-trip does not duplicate shared group description and clears CSV empty cell
+    exported_csv = tmp_path / "roundtrip.csv"
+    export_terms(project, exported_csv, include_disabled=False)
+    import_terms(project, exported_csv, dry_run=False, overwrite=True)
+    by_norm = {t["normalized"]: t for t in load_terms(project)["terms"]}
+    assert by_norm["alpha"]["description"] == "人工整合说明；保留说明"
+    assert by_norm["gamma"]["description"] == ""

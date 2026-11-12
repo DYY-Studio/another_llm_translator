@@ -4,7 +4,9 @@
   .brand { margin-right: 4px; }
   .sidebar { padding-inline: 8px; }
   .nav-item { justify-content: center; padding: 0; }
-  .nav-item span { display: none; }
+  .nav-item .nav-label { display: none; }
+  .nav-icon-wrap { position: relative; }
+  .nav-status-dot { top: -4px; inset-inline-end: -6px; width: 7px; height: 7px; }
   .run-panel { padding-inline: 0; }
   .run-button { padding: 0; }
   .run-button .run-label-full { display: none; }

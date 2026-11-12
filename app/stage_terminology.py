@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 from .config import load_project_config
 from .diagnostics import current_diagnostics
 
@@ -282,7 +282,7 @@ async def run_terminology(
     project: Path,
     scope: Scope,
     *,
-    http_client: httpx.AsyncClient | None = None,
+    http_client: httpx2.AsyncClient | None = None,
     limiter: SlidingWindowLimiter | KeyPool | None = None,
     resume_run_id: str | None = None,
     reuse_mixed_fingerprints: bool = False,
@@ -293,6 +293,8 @@ async def run_terminology(
     include_draft_translation: bool = False,
     on_draft_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    from .term_changes import require_no_decision_draft
+    require_no_decision_draft(project)
     from .term_knowledge import replacement_impacts
     from .sqlite_storage import read_segments
     impacts = (await run_blocking(lambda: replacement_impacts(project, [s for s in read_segments(project) if not s["is_empty"]]))) if scope.force else []
