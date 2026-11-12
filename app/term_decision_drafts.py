@@ -565,6 +565,10 @@ def apply_decision_draft(
     from .term_knowledge import entity_view, save_items, project_descriptions, transfer_alias_evidence, evidence, confirm_keep
     if not draft.get("knowledge_only", False):
         transfer_alias_evidence(term_record, term_normalization(load_project_config(project)))
+    active = {term["normalized"] for term in terms}
+    pending_changes = term_record["knowledge"]["pending_changes"]
+    for key in pending_changes.keys() - active:
+        del pending_changes[key]
     known = evidence(project, term_record)
     for proposal in draft["proposals"]:
         if proposal["proposal_id"] in rejected:

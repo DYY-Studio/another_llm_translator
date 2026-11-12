@@ -257,6 +257,10 @@ def import_terms(
     }
     moved_owners = transfer_alias_evidence(library_record, spec)
     knowledge = library_record["knowledge"]
+    active = {term["normalized"] for term in terms}
+    pending = knowledge["pending_changes"]
+    for key in pending.keys() - active:
+        del pending[key]
     old_entities = deepcopy(knowledge["entities"])
     known = evidence(project, library_record)
     current = {t["normalized"]: t for t in (library or {}).get("terms", [])}

@@ -165,3 +165,67 @@ def test_continuous_decision_includes_confirmed_terms_with_pending_changes(tmp_p
     plan, reason = _decision_plan_or_skip(project, None, final_review=False)
     assert reason is None
     assert {term["normalized"] for term in plan["eligible"]} == {"alice"}
+
+
+def test_import_disabling_term_clears_orphan_pending_changes_and_preserves_alias_transfer(
+    tmp_path: Path,
+) -> None:
+    import json
+    from app.term_exchange import import_terms
+    from app.term_knowledge import save_items
+    from app.web_continuous import _decision_plan_or_skip
+
+    project = create_web_store_project(tmp_path, "Alice Bob Carol")
+    publish(project, "first", "Alice", "爱丽丝")
+    publish(project, "second", "Bob", "鲍勃")
+    library = publish(project, "third", "Carol", "卡萝尔")
+    save_items(project, library, "carol", [])
+    write_json(project, project / "terminology" / "terms.json", library)
+    store = WebStore(project)
+    store.resolve_term_changes(
+        {"normalized": ["carol"], "expected_revision": library["terms_revision"], "confirm": True}
+    )
+    assert set(load_terms(project)["knowledge"]["pending_changes"]) == {"alice", "bob"}
+    assert store.stage_completion()["terminology"]["changes"] == 2
+
+    patch = tmp_path / "disable_and_alias.json"
+    patch.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "record_type": "terminology_exchange",
+                "terms": [
+                    {"source": "Bob", "disabled": True},
+                    {
+                        "source": "Alice Smith",
+                        "preferred_translation": "艾莉丝·史密斯",
+                        "category": "人物",
+                        "aliases": ["Alice"],
+                    },
+                    {"source": "Alice", "disabled": True},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    import_terms(project, patch, dry_run=False)
+    assert set(load_terms(project)["knowledge"]["pending_changes"]) == {"alice smith"}
+    assert store.stage_completion()["terminology"]["changes"] == 1
+
+    disable_alias_owner = tmp_path / "disable_alice_smith.json"
+    disable_alias_owner.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "record_type": "terminology_exchange",
+                "terms": [{"source": "Alice Smith", "disabled": True}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    import_terms(project, disable_alias_owner, dry_run=False)
+    assert load_terms(project)["knowledge"]["pending_changes"] == {}
+    assert store.stage_completion()["terminology"]["changes"] == 0
+    assert _decision_plan_or_skip(project, None, final_review=False) == (None, "no_work")
