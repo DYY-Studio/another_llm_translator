@@ -97,7 +97,9 @@ def _repair_guidance(
 
 
 def _parse_scope(root: Path, payload: dict[str, Any]) -> Scope:
-    raw = payload.get("scope") or {}
+    raw = payload.get("scope")
+    if raw is None:
+        raw = {}
     if not isinstance(raw, dict):
         raise UsageError("scope 必须是对象")
     segment_ids = raw.get("segment_ids")
@@ -174,15 +176,26 @@ def _parse_slice_spec(
         raise UsageError("line_end 必须是非负整数")
     if "@" in run_id:
         run_id, spec = run_id.split("@", 1)
+        if not spec:
+            raise UsageError("part_id 必须是非空字符串")
+        parsed_range = False
         if ":" in spec:
             spec_part, rng = spec.rsplit(":", 1)
             if "-" in rng:
                 s_str, e_str = rng.split("-", 1)
-                if s_str.isdigit() and e_str.isdigit():
+                if (
+                    s_str.isascii()
+                    and s_str.isdigit()
+                    and e_str.isascii()
+                    and e_str.isdigit()
+                ):
+                    if not spec_part:
+                        raise UsageError("part_id 必须是非空字符串")
                     part_spec = spec_part
                     line_start = int(s_str)
                     line_end = int(e_str)
-        if not part_spec:
+                    parsed_range = True
+        if not parsed_range and not part_spec:
             part_spec = spec
     return run_id, part_spec, line_start, line_end
 
@@ -317,6 +330,9 @@ def register_agent_routes(
         allow_warnings = payload.get("allow_warnings", False)
         if not isinstance(allow_warnings, bool):
             raise UsageError("allow_warnings 必须是布尔值")
+        apply_flag = payload.get("apply", False)
+        if not isinstance(apply_flag, bool):
+            raise UsageError("apply 必须是布尔值")
 
         def _execute() -> dict[str, Any]:
             with project_write_lock(root, wait_seconds=15.0):
@@ -439,7 +455,7 @@ def register_agent_routes(
                 )
                 append_jsonl(root, stage_result_path(root, stage), suggestion)
                 applied = None
-                if payload.get("apply") is True:
+                if apply_flag:
                     text = str(suggested_text) if review_status == "suggested" else str(base["text"])
                     applied_stage = f"{stage}_applied"
                     applied = record_header(

@@ -290,6 +290,86 @@ def _page_params(
     return offset, limit
 
 
+def _quote_project(args: dict[str, Any]) -> str:
+    raw = args.get("project")
+    if not isinstance(raw, str) or not raw.strip() or "/" in raw:
+        raise UsageError("project 必须是非空项目名称或 ID")
+    return quote(raw, safe="")
+
+
+def _opt_bool(args: dict[str, Any], key: str, default: bool) -> bool:
+    val = args.get(key)
+    if val is None:
+        return default
+    if not isinstance(val, bool):
+        raise UsageError(f"{key} 必须是布尔值")
+    return val
+
+
+def _opt_str(args: dict[str, Any], key: str, default: str) -> str:
+    val = args.get(key)
+    if val is None:
+        return default
+    if not isinstance(val, str):
+        raise UsageError(f"{key} 必须是字符串")
+    return val
+
+
+def _resolve_run_slice(args: dict[str, Any], body: dict[str, Any]) -> str:
+    raw_run_id = args.get("run_id")
+    if not isinstance(raw_run_id, str) or not raw_run_id:
+        raise UsageError("Run ID 无效")
+    part_spec = args.get("part_id")
+    line_start = args.get("line_start")
+    line_end = args.get("line_end")
+    if part_spec is not None and (not isinstance(part_spec, str) or not part_spec):
+        raise UsageError("part_id 必须是非空字符串")
+    if line_start is not None and (
+        not isinstance(line_start, int) or isinstance(line_start, bool) or line_start < 0
+    ):
+        raise UsageError("line_start 必须是非负整数")
+    if line_end is not None and (
+        not isinstance(line_end, int) or isinstance(line_end, bool) or line_end < 0
+    ):
+        raise UsageError("line_end 必须是非负整数")
+    if "@" in raw_run_id:
+        bare_run_id, spec = raw_run_id.split("@", 1)
+        if not bare_run_id or "/" in bare_run_id:
+            raise UsageError("Run ID 无效")
+        if not spec:
+            raise UsageError("part_id 必须是非空字符串")
+        parsed_range = False
+        if ":" in spec:
+            spec_part, rng = spec.rsplit(":", 1)
+            if "-" in rng:
+                s_str, e_str = rng.split("-", 1)
+                if (
+                    s_str.isascii()
+                    and s_str.isdigit()
+                    and e_str.isascii()
+                    and e_str.isdigit()
+                ):
+                    if not spec_part:
+                        raise UsageError("part_id 必须是非空字符串")
+                    part_spec = spec_part
+                    line_start = int(s_str)
+                    line_end = int(e_str)
+                    parsed_range = True
+        if not parsed_range and not part_spec:
+            part_spec = spec
+    else:
+        bare_run_id = raw_run_id
+        if "/" in bare_run_id:
+            raise UsageError("Run ID 无效")
+    if part_spec is not None:
+        body["part_id"] = part_spec
+    if line_start is not None:
+        body["line_start"] = line_start
+    if line_end is not None:
+        body["line_end"] = line_end
+    return quote(bare_run_id, safe="")
+
+
 MCP_INSTRUCTIONS = (
     "Another LLM Translator (minimal-llm-translator) MCP Server.\n"
     "Call `reference` (e.g. `reference(topic='workflows')`, `'pattern_b'`, `'terminology'`, `'repetition'`, `'config'`) "
@@ -1407,9 +1487,11 @@ class MCPWebBridge:
         return data
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None) -> Any:
+        if arguments is not None and not isinstance(arguments, dict):
+            raise UsageError("arguments 必须是对象")
         args = dict(arguments or {})
         if name == "reference":
-            topic = str(args.get("topic") or "overview").strip()
+            topic = _opt_str(args, "topic", "overview").strip() or "overview"
             key = topic.casefold()
             if key in REFERENCE_TOPICS:
                 return {"topic": key, **REFERENCE_TOPICS[key]}
@@ -1443,6 +1525,8 @@ class MCPWebBridge:
             }
 
         if name == "list_projects":
+            q_str = _opt_str(args, "q", "").strip().casefold()
+            offset, limit = _page_params(args, default_limit=50, max_limit=500)
             projects_data = self._request("GET", "/api/v1/projects")
             active = self._request("GET", "/api/v1/tasks/active")
             tasks = [
@@ -1457,7 +1541,6 @@ class MCPWebBridge:
                 ),
                 reverse=True,
             )
-            q_str = str(args.get("q") or "").strip().casefold()
             if q_str:
                 items = [
                     p
@@ -1468,7 +1551,6 @@ class MCPWebBridge:
                         for k in ("name", "project_id", "selector", "path")
                     )
                 ]
-            offset, limit = _page_params(args, default_limit=50, max_limit=500)
             compact_projects = []
             for p in items[offset : offset + limit]:
                 if not isinstance(p, dict):
@@ -1499,20 +1581,27 @@ class MCPWebBridge:
             }
 
         if name == "create_project":
-            empty = bool(args.get("empty", False))
+            raw_name = args.get("name")
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                raise UsageError("name 必须是非空字符串")
+            empty = _opt_bool(args, "empty", False)
+            parent_dir = _opt_str(args, "parent_dir", "")
+            raw_opts = args.get("adapter_options")
+            if raw_opts is not None and not isinstance(raw_opts, dict):
+                raise UsageError("adapter_options 必须是对象")
             raw_paths = args.get("paths")
             form: dict[str, Any] = {
-                "name": str(args["name"]),
+                "name": raw_name,
                 "empty": "true" if empty else "false",
-                "parent_dir": str(args.get("parent_dir") or ""),
-                "adapter_options": json.dumps(
-                    args.get("adapter_options") or {}, ensure_ascii=False
-                ),
+                "parent_dir": parent_dir,
+                "adapter_options": json.dumps(raw_opts or {}, ensure_ascii=False),
             }
             if raw_paths:
                 server_paths, server_kinds = _resolve_server_inputs(raw_paths)
                 form["server_paths"] = server_paths
                 form["server_input_kinds"] = server_kinds
+            elif raw_paths is not None and not isinstance(raw_paths, list):
+                raise UsageError("paths 必须是非空字符串数组")
             elif not empty:
                 raise UsageError("必须提供 paths 导入文件，或显式设置 empty=True 创建空项目")
             return self._request("POST", "/api/v1/projects", form_data=form)
@@ -1528,20 +1617,23 @@ class MCPWebBridge:
             )
 
         if name == "add_project_files":
-            proj = quote(str(args["project"]), safe="")
+            proj = _quote_project(args)
+            raw_opts = args.get("adapter_options")
+            if raw_opts is not None and not isinstance(raw_opts, dict):
+                raise UsageError("adapter_options 必须是对象")
             server_paths, server_kinds = _resolve_server_inputs(args.get("paths"))
             form = {
                 "server_paths": server_paths,
                 "server_input_kinds": server_kinds,
-                "adapter_options": json.dumps(
-                    args.get("adapter_options") or {}, ensure_ascii=False
-                ),
+                "adapter_options": json.dumps(raw_opts or {}, ensure_ascii=False),
             }
             return self._request("POST", f"/api/v1/projects/{proj}/files", form_data=form)
 
         if name == "manage_project_files":
-            proj = quote(str(args["project"]), safe="")
-            action = str(args["action"])
+            proj = _quote_project(args)
+            action = args.get("action")
+            if not isinstance(action, str) or not action:
+                raise UsageError("action 必须是非空字符串")
             if action == "remove":
                 if args.get("confirm") is not True:
                     raise UsageError("移除项目文件必须显式指定 confirm=True")
@@ -1557,18 +1649,19 @@ class MCPWebBridge:
                     json_body={"file_ids": args.get("file_ids")},
                 )
             file_id = args.get("file_id")
-            if not isinstance(file_id, str) or not file_id:
-                raise UsageError(f"{action} 必须提供 file_id")
+            if not isinstance(file_id, str) or not file_id or "/" in file_id:
+                raise UsageError(f"{action} 必须提供有效 file_id")
             fid = quote(file_id, safe="")
             if action == "replace_preview":
+                raw_opts = args.get("adapter_options")
+                if raw_opts is not None and not isinstance(raw_opts, dict):
+                    raise UsageError("adapter_options 必须是对象")
                 server_paths, server_kinds = _resolve_server_inputs([args.get("path")])
                 if server_kinds[0] != "file":
                     raise UsageError("单文件替换的 path 必须是文件路径")
                 form = {
                     "server_path": server_paths[0],
-                    "adapter_options": json.dumps(
-                        args.get("adapter_options") or {}, ensure_ascii=False
-                    ),
+                    "adapter_options": json.dumps(raw_opts or {}, ensure_ascii=False),
                 }
                 return self._request(
                     "POST",
@@ -1576,8 +1669,8 @@ class MCPWebBridge:
                     form_data=form,
                 )
             preview_id = args.get("preview_id")
-            if not isinstance(preview_id, str) or not preview_id:
-                raise UsageError(f"{action} 必须提供 preview_id")
+            if not isinstance(preview_id, str) or not preview_id or "/" in preview_id:
+                raise UsageError(f"{action} 必须提供有效 preview_id")
             if action == "replace_confirm":
                 if args.get("confirm") is not True:
                     raise UsageError("确认替换文件必须显式指定 confirm=True")
@@ -1595,8 +1688,10 @@ class MCPWebBridge:
             raise UsageError(f"不支持的文件管理动作：{action}")
 
         if name == "configure_project":
-            proj = quote(str(args["project"]), safe="")
-            action = str(args["action"])
+            proj = _quote_project(args)
+            action = args.get("action")
+            if not isinstance(action, str) or not action:
+                raise UsageError("action 必须是非空字符串")
             if action == "get_config":
                 cfg = self._request("GET", f"/api/v1/projects/{proj}/config")
                 presets = self._request("GET", "/api/v1/global/presets")
@@ -1646,8 +1741,8 @@ class MCPWebBridge:
                 return {**latest, **saved}
             if action == "get_file_options":
                 file_id = args.get("file_id")
-                if not isinstance(file_id, str) or not file_id:
-                    raise UsageError("get_file_options 必须提供 file_id")
+                if not isinstance(file_id, str) or not file_id or "/" in file_id:
+                    raise UsageError("get_file_options 必须提供有效 file_id")
                 fid = quote(file_id, safe="")
                 return self._request(
                     "GET", f"/api/v1/projects/{proj}/files/{fid}/run-options"
@@ -1655,8 +1750,8 @@ class MCPWebBridge:
             if action == "update_file_options":
                 file_id = args.get("file_id")
                 options = args.get("options")
-                if not isinstance(file_id, str) or not file_id:
-                    raise UsageError("update_file_options 必须提供 file_id")
+                if not isinstance(file_id, str) or not file_id or "/" in file_id:
+                    raise UsageError("update_file_options 必须提供有效 file_id")
                 if not isinstance(options, dict):
                     raise UsageError("update_file_options 必须提供 options 对象")
                 fid = quote(file_id, safe="")
@@ -1676,8 +1771,8 @@ class MCPWebBridge:
             raise UsageError(f"不支持的项目配置动作：{action}")
 
         if name == "get_project_overview":
-            proj = quote(str(args["project"]), safe="")
-            include_parts = bool(args.get("include_parts", False))
+            proj = _quote_project(args)
+            include_parts = _opt_bool(args, "include_parts", False)
             data = self._request("GET", f"/api/v1/projects/{proj}", params={"limit": 1})
             if isinstance(data, dict):
                 data.pop("segments", None)
@@ -1706,10 +1801,22 @@ class MCPWebBridge:
             return data
 
         if name == "get_task_and_diagnostics":
-            project_name = str(args["project"])
+            _quote_project(args)
+            project_name = args["project"]
             runs_offset, runs_limit = _page_params(
-                args, "runs_offset", "runs_limit", default_limit=5, max_limit=200
+                args, "runs_offset", "runs_limit", default_limit=5, max_limit=100
             )
+            raw_tid = args.get("task_id")
+            if raw_tid is not None and (
+                not isinstance(raw_tid, str) or not raw_tid or "/" in raw_tid
+            ):
+                raise UsageError("task_id 必须是非空字符串")
+            stage_filter = args.get("stage")
+            if stage_filter is not None and (
+                not isinstance(stage_filter, str) or not stage_filter
+            ):
+                raise UsageError("stage 必须是非空字符串")
+            include_events = _opt_bool(args, "include_events", False)
             active = self._request("GET", "/api/v1/tasks/active").get("tasks", [])
             project_tasks = [
                 _compact_task(t)
@@ -1718,8 +1825,8 @@ class MCPWebBridge:
                 and (t.get("project") == project_name or t.get("project_id") == project_name)
             ]
             raw_detail = (
-                self._request("GET", f"/api/v1/tasks/{quote(str(args['task_id']), safe='')}")
-                if args.get("task_id")
+                self._request("GET", f"/api/v1/tasks/{quote(raw_tid, safe='')}")
+                if raw_tid
                 else None
             )
             task_detail = _compact_task(raw_detail) if isinstance(raw_detail, dict) else raw_detail
@@ -1730,7 +1837,7 @@ class MCPWebBridge:
                     "project": project_name,
                     "offset": runs_offset,
                     "limit": runs_limit,
-                    **({"stage": args["stage"]} if args.get("stage") else {}),
+                    **({"stage": stage_filter} if stage_filter else {}),
                 },
             )
             _strip_run_keys = {
@@ -1765,11 +1872,11 @@ class MCPWebBridge:
                 "runs_limit": runs_limit,
                 "recent_runs": recent_runs,
             }
-            if args.get("include_events"):
+            if include_events:
                 diag = self._request(
                     "POST",
                     "/api/v1/diagnostics",
-                    json_body={"project": project_name, "stage": args.get("stage")},
+                    json_body={"project": project_name, "stage": stage_filter},
                 )
                 if isinstance(diag, dict):
                     logs = diag.get("logs")
@@ -1811,15 +1918,15 @@ class MCPWebBridge:
             return result
 
         if name == "query_segments":
-            proj = quote(str(args["project"]), safe="")
-            stage = str(args.get("stage", "translation"))
+            proj = _quote_project(args)
+            stage = _opt_str(args, "stage", "translation")
             offset, limit = _page_params(args, default_limit=50, max_limit=500)
             body = {
                 "stage": stage,
-                "status": args.get("status", ""),
-                "q": args.get("q", ""),
-                "file_id": args.get("file_id", ""),
-                "part_id": args.get("part_id", ""),
+                "status": _opt_str(args, "status", ""),
+                "q": _opt_str(args, "q", ""),
+                "file_id": _opt_str(args, "file_id", ""),
+                "part_id": _opt_str(args, "part_id", ""),
                 "offset": offset,
                 "limit": limit,
             }
@@ -1837,13 +1944,15 @@ class MCPWebBridge:
             return data
 
         if name == "get_segment_context":
-            proj = quote(str(args["project"]), safe="")
+            proj = _quote_project(args)
+            raw_window = args.get("window")
+            window = 5 if raw_window is None else raw_window
             ctx = self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/agent/segments/context",
                 json_body={
-                    "segment_id": args["segment_id"],
-                    "window": int(args.get("window", 5)),
+                    "segment_id": args.get("segment_id"),
+                    "window": window,
                 },
             )
             if isinstance(ctx, dict):
@@ -1877,15 +1986,20 @@ class MCPWebBridge:
             return ctx
 
         if name == "preflight_stage_run":
-            proj = quote(str(args["project"]), safe="")
-            stage = str(args["stage"])
+            proj = _quote_project(args)
+            stage = args.get("stage")
+            if not isinstance(stage, str) or not stage or "/" in stage:
+                raise UsageError("stage 必须是非空字符串")
+            final_review = _opt_bool(args, "final_review", False)
+            knowledge_only = _opt_bool(args, "knowledge_only", False)
+            all_terms = _opt_bool(args, "all_terms", False)
             if stage == "repetition_consistency":
                 return self._request(
                     "GET",
                     f"/api/v1/projects/{proj}/repetition/options",
                     params={
                         "estimate_usage": True,
-                        "final_review": bool(args.get("final_review", False)),
+                        "final_review": final_review,
                     },
                 )
             res = self._request(
@@ -1893,9 +2007,9 @@ class MCPWebBridge:
                 f"/api/v1/projects/{proj}/task-options/{quote(stage, safe='')}",
                 params={
                     "estimate_usage": True,
-                    "final_review": bool(args.get("final_review", False)),
-                    "knowledge_only": bool(args.get("knowledge_only", False)),
-                    "all_terms": bool(args.get("all_terms", False)),
+                    "final_review": final_review,
+                    "knowledge_only": knowledge_only,
+                    "all_terms": all_terms,
                 },
             )
             if isinstance(res, dict) and isinstance(res.get("knowledge_replacement_impacts"), list):
@@ -1918,7 +2032,10 @@ class MCPWebBridge:
             return res
 
         if name == "start_host_stage_run":
-            proj = quote(str(args["project"]), safe="")
+            proj = _quote_project(args)
+            stage = args.get("stage")
+            if not isinstance(stage, str) or not stage:
+                raise UsageError("stage 必须是非空字符串")
             body = {
                 k: v
                 for k, v in args.items()
@@ -1928,12 +2045,15 @@ class MCPWebBridge:
             return _compact_task(res) if isinstance(res, dict) else res
 
         if name == "cancel_stage_run":
-            tid = quote(str(args["task_id"]), safe="")
+            raw_tid = args.get("task_id")
+            if not isinstance(raw_tid, str) or not raw_tid or "/" in raw_tid:
+                raise UsageError("task_id 必须是非空字符串")
+            tid = quote(raw_tid, safe="")
             res = self._request("POST", f"/api/v1/tasks/{tid}/cancel")
             return _compact_task(res) if isinstance(res, dict) else res
 
         if name == "submit_segment_fix":
-            proj = quote(str(args["project"]), safe="")
+            proj = _quote_project(args)
             body = {k: v for k, v in args.items() if k != "project" and v is not None}
             res = self._request(
                 "POST", f"/api/v1/projects/{proj}/agent/segments/fix", json_body=body
@@ -1948,32 +2068,46 @@ class MCPWebBridge:
             return res
 
         if name == "apply_stage_suggestions":
-            proj = quote(str(args["project"]), safe="")
-            scope_arg = args.get("scope") if isinstance(args.get("scope"), dict) else {}
+            proj = _quote_project(args)
+            stage = args.get("stage")
+            if not isinstance(stage, str) or stage not in {"proofreading", "polishing"}:
+                raise UsageError("stage 必须是 proofreading 或 polishing")
+            if args.get("confirm") is not True:
+                raise UsageError("应用阶段建议必须显式指定 confirm=True")
+            raw_scope = args.get("scope")
+            if raw_scope is not None and not isinstance(raw_scope, dict):
+                raise UsageError("scope 必须是对象")
+            scope_arg = raw_scope or {}
             return self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/apply",
                 json_body={
-                    "stage": args["stage"],
-                    "only_file": args.get("only_file") or scope_arg.get("only_file"),
-                    "only_part": args.get("only_part") or scope_arg.get("only_part"),
-                    "only_segment": args.get("only_segment") or scope_arg.get("only_segment"),
-                    "segment_ids": args.get("segment_ids") or scope_arg.get("segment_ids"),
-                    "allow_outdated_base": bool(args.get("allow_outdated_base", False)),
-                    "all": bool(args.get("confirm", False)),
+                    "stage": stage,
+                    **{
+                        k: args[k] if args.get(k) is not None else scope_arg.get(k)
+                        for k in ("only_file", "only_part", "only_segment", "segment_ids")
+                    },
+                    "allow_outdated_base": _opt_bool(args, "allow_outdated_base", False),
+                    "all": True,
                 },
             )
 
         if name == "export_project":
-            proj = quote(str(args["project"]), safe="")
+            proj = _quote_project(args)
+            stage = args.get("stage")
+            if not isinstance(stage, str) or not stage:
+                raise UsageError("stage 必须是非空字符串")
+            fmt = _opt_str(args, "format", "original")
+            bilingual = _opt_bool(args, "bilingual", False)
+            allow_missing = _opt_bool(args, "allow_missing", False)
             data = self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/export",
                 json_body={
-                    "stage": args["stage"],
-                    "format": args.get("format", "original"),
-                    "bilingual": bool(args.get("bilingual", False)),
-                    "allow_missing": bool(args.get("allow_missing", False)),
+                    "stage": stage,
+                    "format": fmt,
+                    "bilingual": bilingual,
+                    "allow_missing": allow_missing,
                     "file_ids": args.get("file_ids"),
                 },
             )
@@ -1989,7 +2123,10 @@ class MCPWebBridge:
             return data
 
         if name == "start_agent_stage_run":
-            proj = quote(str(args["project"]), safe="")
+            proj = _quote_project(args)
+            prompt_lang = args.get("prompt_language")
+            if prompt_lang is not None and not isinstance(prompt_lang, str):
+                raise UsageError("prompt_language 必须是字符串")
             body = {k: v for k, v in args.items() if k != "project" and v is not None}
             res = self._request(
                 "POST", f"/api/v1/projects/{proj}/agent/runs/start", json_body=body
@@ -2028,15 +2165,17 @@ class MCPWebBridge:
             return res
 
         if name == "checkout_stage_batch":
-            proj = quote(str(args["project"]), safe="")
-            rid = quote(str(args["run_id"]), safe="")
+            proj = _quote_project(args)
+            raw_inc = args.get("include_term_descriptions")
+            if raw_inc is not None and not isinstance(raw_inc, bool):
+                raise UsageError("include_term_descriptions 必须是布尔值")
+            raw_max = args.get("max_segments")
+            raw_ctx = args.get("context_before")
             body: dict[str, Any] = {
-                "max_segments": int(args.get("max_segments", 15)),
-                "context_before": int(args.get("context_before", 3)),
+                "max_segments": 15 if raw_max is None else raw_max,
+                "context_before": 3 if raw_ctx is None else raw_ctx,
             }
-            for opt_key in ("part_id", "line_start", "line_end"):
-                if args.get(opt_key) is not None:
-                    body[opt_key] = args[opt_key]
+            rid = _resolve_run_slice(args, body)
             res = self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/agent/runs/{rid}/checkout",
@@ -2044,9 +2183,8 @@ class MCPWebBridge:
             )
             if isinstance(res, dict):
                 res = dict(res)
-                raw_inc = args.get("include_term_descriptions")
                 inc_desc = (
-                    bool(raw_inc)
+                    raw_inc
                     if raw_inc is not None
                     else (res.get("stage") == "translation")
                 )
@@ -2064,15 +2202,12 @@ class MCPWebBridge:
             return res
 
         if name == "submit_stage_batch":
-            proj = quote(str(args["project"]), safe="")
-            rid = quote(str(args["run_id"]), safe="")
+            proj = _quote_project(args)
             body = {
-                "items": args["items"],
-                "allow_warnings": bool(args.get("allow_warnings", False)),
+                "items": args.get("items"),
+                "allow_warnings": _opt_bool(args, "allow_warnings", False),
             }
-            for opt_key in ("part_id", "line_start", "line_end"):
-                if args.get(opt_key) is not None:
-                    body[opt_key] = args[opt_key]
+            rid = _resolve_run_slice(args, body)
             return self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/agent/runs/{rid}/submit",
@@ -2080,21 +2215,26 @@ class MCPWebBridge:
             )
 
         if name == "finish_agent_stage_run":
-            proj = quote(str(args["project"]), safe="")
-            rid = quote(str(args["run_id"]), safe="")
+            proj = _quote_project(args)
+            raw_rid = args.get("run_id")
+            if not isinstance(raw_rid, str) or not raw_rid or "/" in raw_rid:
+                raise UsageError("Run ID 无效")
+            rid = quote(raw_rid, safe="")
+            action = _opt_str(args, "action", "complete")
+            accept_remaining = _opt_bool(args, "accept_remaining", False)
             return self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/agent/runs/{rid}/finish",
                 json_body={
-                    "action": args.get("action", "complete"),
-                    "accept_remaining": bool(args.get("accept_remaining", False)),
+                    "action": action,
+                    "accept_remaining": accept_remaining,
                     "reason": args.get("reason"),
                 },
             )
 
         if name == "get_terminology_overview":
-            proj = quote(str(args["project"]), safe="")
-            flt = args.get("filter", "all")
+            proj = _quote_project(args)
+            flt = _opt_str(args, "filter", "all")
             if flt not in {
                 "all",
                 "conflicts",
@@ -2106,7 +2246,8 @@ class MCPWebBridge:
             }:
                 raise UsageError(f"不支持的术语筛选类型：{flt}")
             offset, limit = _page_params(args, default_limit=50, max_limit=500)
-            q_str = str(args.get("q") or "").strip().casefold()
+            q_str = _opt_str(args, "q", "").strip().casefold()
+            inc_desc = _opt_bool(args, "include_description", False)
             decision = self._request("GET", f"/api/v1/projects/{proj}/terms/decision")
             if flt == "draft":
                 draft = decision.get("draft")
@@ -2216,7 +2357,6 @@ class MCPWebBridge:
                         )
                     )
                 ]
-            inc_desc = bool(args.get("include_description", False))
             compact_terms = [
                 _compact_term_row(
                     t,
@@ -2256,16 +2396,40 @@ class MCPWebBridge:
             }
 
         if name == "inspect_term_entity":
-            proj = quote(str(args["project"]), safe="")
-            if args.get("run_id") and args.get("proposal_id"):
-                rid = quote(str(args["run_id"]), safe="")
-                pid = quote(str(args["proposal_id"]), safe="")
+            proj = _quote_project(args)
+            run_id = args.get("run_id")
+            proposal_id = args.get("proposal_id")
+            if run_id is not None and (
+                not isinstance(run_id, str) or not run_id or "/" in run_id
+            ):
+                raise UsageError("Run ID 无效")
+            if proposal_id is not None and (
+                not isinstance(proposal_id, str) or not proposal_id or "/" in proposal_id
+            ):
+                raise UsageError("提案 ID 无效")
+            if bool(run_id) != bool(proposal_id):
+                raise UsageError("run_id 与 proposal_id 必须同时提供")
+            inc_fragments = _opt_bool(args, "include_fragments", True)
+            inc_hits = _opt_bool(args, "include_hits", True)
+            f_offset, f_limit = _page_params(
+                args,
+                "fragments_offset",
+                "fragments_limit",
+                default_limit=50,
+                max_limit=500,
+            )
+            h_offset, h_limit = _page_params(
+                args, "hits_offset", "hits_limit", default_limit=20, max_limit=200
+            )
+            if run_id and proposal_id:
+                rid = quote(run_id, safe="")
+                pid = quote(proposal_id, safe="")
                 return self._request(
                     "GET",
                     f"/api/v1/projects/{proj}/terms/decision/{rid}/proposals/{pid}",
                 )
             normalized = args.get("normalized")
-            if not normalized:
+            if not isinstance(normalized, str) or not normalized.strip():
                 raise UsageError("必须提供 normalized 或 (run_id + proposal_id)")
             terms_data = self._request("GET", f"/api/v1/projects/{proj}/terms")
             matched_term = next(
@@ -2283,7 +2447,7 @@ class MCPWebBridge:
             resolved_norm = (
                 str(matched_term.get("normalized") or normalized)
                 if isinstance(matched_term, dict)
-                else str(normalized)
+                else normalized
             )
             knowledge = self._request(
                 "GET",
@@ -2294,24 +2458,14 @@ class MCPWebBridge:
                 knowledge.get("fragments"), list
             ):
                 all_frags = knowledge["fragments"]
-                f_offset, f_limit = _page_params(
-                    args,
-                    "fragments_offset",
-                    "fragments_limit",
-                    default_limit=50,
-                    max_limit=500,
-                )
                 knowledge = {
                     **{k: v for k, v in knowledge.items() if k != "fragments"},
                     "total_fragments": len(all_frags),
                 }
-                if args.get("include_fragments", True):
+                if inc_fragments:
                     knowledge["fragments_offset"] = f_offset
                     knowledge["fragments_limit"] = f_limit
                     knowledge["fragments"] = all_frags[f_offset : f_offset + f_limit]
-            h_offset, h_limit = _page_params(
-                args, "hits_offset", "hits_limit", default_limit=20, max_limit=200
-            )
             hits = (
                 self._request(
                     "POST",
@@ -2322,15 +2476,20 @@ class MCPWebBridge:
                         "limit": h_limit,
                     },
                 )
-                if args.get("include_hits", True)
+                if inc_hits
                 else None
             )
             return {"term": matched_term, "knowledge": knowledge, "hits": hits}
 
         if name == "edit_terms":
-            proj = quote(str(args["project"]), safe="")
-            action = str(args["action"])
-            payload = dict(args["payload"])
+            proj = _quote_project(args)
+            action = args.get("action")
+            if not isinstance(action, str) or not action:
+                raise UsageError("action 必须是非空字符串")
+            raw_payload = args.get("payload")
+            if not isinstance(raw_payload, dict):
+                raise UsageError("payload 必须是对象")
+            payload = dict(raw_payload)
             if action == "import_terms" or (
                 action == "save_term" and isinstance(payload.get("terms"), list)
             ):
@@ -2491,7 +2650,7 @@ class MCPWebBridge:
             return res
 
         if name == "submit_term_decision_draft":
-            proj = quote(str(args["project"]), safe="")
+            proj = _quote_project(args)
             result = {}
             if "rejected_proposal_ids" in args and args["rejected_proposal_ids"] is not None:
                 rej = self._request(
@@ -2507,9 +2666,16 @@ class MCPWebBridge:
                         "total_proposals": len(draft_obj.get("proposals", [])),
                     }
                 result["rejections"] = rej
-            if "manual_reviews" in args and args["manual_reviews"]:
+            if args.get("manual_reviews") is not None:
+                mrs = args["manual_reviews"]
+                if (
+                    not isinstance(mrs, list)
+                    or not mrs
+                    or not all(isinstance(entry, dict) for entry in mrs)
+                ):
+                    raise UsageError("manual_reviews 必须是非空对象数组")
                 last_mr = None
-                for entry in args["manual_reviews"]:
+                for entry in mrs:
                     last_mr = self._request(
                         "PUT",
                         f"/api/v1/projects/{proj}/terms/decision/manual-review",
@@ -2517,21 +2683,23 @@ class MCPWebBridge:
                     )
                 result["manual_reviews"] = {
                     **(_manual_review_summary(last_mr) or {}),
-                    "updated_count": len(args["manual_reviews"]),
+                    "updated_count": len(mrs),
                 }
             if not result:
                 raise UsageError("必须提供 rejected_proposal_ids 或 manual_reviews")
             return result
 
         if name == "finalize_term_decision_draft":
-            proj = quote(str(args["project"]), safe="")
-            action = str(args["action"])
-            if action not in {"apply", "discard", "rollback"}:
+            proj = _quote_project(args)
+            action = args.get("action")
+            if not isinstance(action, str) or action not in {"apply", "discard", "rollback"}:
                 raise UsageError(f"不支持的术语决策收尾动作：{action}")
+            if args.get("confirm") is not True:
+                raise UsageError("收尾术语决策草案必须显式指定 confirm=True")
             res = self._request(
                 "POST",
                 f"/api/v1/projects/{proj}/terms/decision/{action}",
-                json_body={"confirm": bool(args.get("confirm", False))},
+                json_body={"confirm": True},
             )
             if isinstance(res, dict) and isinstance(res.get("terms"), dict):
                 terms_summary = res["terms"]
@@ -2543,25 +2711,28 @@ class MCPWebBridge:
             return res
 
         if name == "get_repetition_overview":
-            proj = quote(str(args["project"]), safe="")
+            proj = _quote_project(args)
             offset, limit = _page_params(args, default_limit=50, max_limit=200)
-            flt = args.get("filter", "all")
+            flt = _opt_str(args, "filter", "all")
             if flt not in {"all", "uncertain_only", "over_budget_only"}:
                 raise UsageError(f"不支持的重复组筛选类型：{flt}")
-            exclude_punct = bool(args.get("exclude_punctuation_only", True))
-            include_occurrences = bool(args.get("include_occurrences", False))
-            sort_by = str(args.get("sort_by", "occurrence_count"))
+            exclude_punct = _opt_bool(args, "exclude_punctuation_only", True)
+            include_occurrences = _opt_bool(args, "include_occurrences", False)
+            sort_by = _opt_str(args, "sort_by", "occurrence_count")
             if sort_by not in {"group_index", "occurrence_count"}:
                 raise UsageError("sort_by 必须是 group_index 或 occurrence_count")
-            if args.get("create_draft"):
+            create_draft = _opt_bool(args, "create_draft", False)
+            replace_draft = _opt_bool(args, "replace_draft", False)
+            if create_draft:
                 self._request(
                     "POST",
                     f"/api/v1/projects/{proj}/agent/repetition/scan",
                     json_body={
                         "only_file": args.get("only_file"),
+                        "only_part": args.get("only_part"),
                         "exclude_punctuation_only": exclude_punct,
                         "create_draft": True,
-                        "replace_draft": bool(args.get("replace_draft", False)),
+                        "replace_draft": replace_draft,
                         "include_occurrences": include_occurrences,
                         "sort_by": sort_by,
                         "offset": offset,
@@ -2661,8 +2832,8 @@ class MCPWebBridge:
             result_state: dict[str, Any] = {**state, "draft": draft}
             if (
                 draft is None
-                or args.get("only_part")
-                or (args.get("only_file") and not args.get("create_draft"))
+                or args.get("only_part") is not None
+                or (args.get("only_file") is not None and not create_draft)
             ):
                 result_state["live_scan"] = self._request(
                     "POST",
@@ -2681,7 +2852,7 @@ class MCPWebBridge:
             return result_state
 
         if name == "inspect_repetition_group":
-            proj = quote(str(args["project"]), safe="")
+            proj = _quote_project(args)
             offset, limit = _page_params(args, default_limit=20, max_limit=100)
             raw_window = args.get("window")
             window = 5 if raw_window is None else raw_window
@@ -2708,10 +2879,12 @@ class MCPWebBridge:
             return res
 
         if name == "update_repetition_draft":
-            proj = quote(str(args["project"]), safe="")
-            run_id = str(args["run_id"])
+            proj = _quote_project(args)
+            run_id = args.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                raise UsageError("Run ID 无效")
             result = {}
-            if args.get("group_proposals"):
+            if args.get("group_proposals") is not None:
                 result["proposals"] = self._request(
                     "POST",
                     f"/api/v1/projects/{proj}/agent/repetition/proposals",
@@ -2731,13 +2904,18 @@ class MCPWebBridge:
             return result
 
         if name == "finalize_repetition_draft":
-            proj = quote(str(args["project"]), safe="")
-            action = str(args["action"])
-            if action not in {"apply", "discard", "rollback"}:
+            proj = _quote_project(args)
+            action = args.get("action")
+            if not isinstance(action, str) or action not in {"apply", "discard", "rollback"}:
                 raise UsageError(f"不支持的重复译文草案动作：{action}")
+            run_id = args.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                raise UsageError("Run ID 无效")
+            if args.get("confirm") is not True:
+                raise UsageError("收尾重复译文草案必须显式指定 confirm=True")
             body: dict[str, Any] = {
-                "run_id": args["run_id"],
-                "confirm": bool(args.get("confirm", False)),
+                "run_id": run_id,
+                "confirm": True,
             }
             if action == "apply":
                 choices = args.get("choices")
@@ -2759,7 +2937,8 @@ def handle_jsonrpc_message(
 ) -> dict[str, Any] | None:
     method = message.get("method")
     msg_id = message.get("id")
-    params = message.get("params") or {}
+    raw_params = message.get("params")
+    params = raw_params if isinstance(raw_params, dict) else {}
 
     if method == "notifications/initialized" or msg_id is None:
         return None
@@ -2788,13 +2967,20 @@ def handle_jsonrpc_message(
 
     if method == "tools/call":
         tool_name = params.get("name")
-        arguments = params.get("arguments") or {}
+        raw_arguments = params.get("arguments")
         if not isinstance(tool_name, str) or not tool_name:
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
                 "error": {"code": -32602, "message": "Missing tool name"},
             }
+        if raw_arguments is not None and not isinstance(raw_arguments, dict):
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -32602, "message": "Invalid tool arguments"},
+            }
+        arguments = raw_arguments or {}
         try:
             payload = bridge.call_tool(tool_name, arguments)
             return {

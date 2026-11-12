@@ -8,12 +8,14 @@ import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
+from app.errors import UsageError
 from app.execution import Scope
 from app.mcp import MCPWebBridge, handle_jsonrpc_message
 from app.project import init_project, load_segments
 from app.repetition_consistency import run_repetition
 from app.web import create_app
 from app.web_store import WebStore
+from tests.test_documents import make_epub
 from tests.test_foundation import make_app_root
 from tests.test_repetition_consistency import repetition_project, transport
 
@@ -918,3 +920,214 @@ def test_project_and_file_lifecycle_mcp(tmp_path: Path) -> None:
         {"project": "rep-mcp", "action": "delete_project", "confirm": True},
     )
     assert deleted["deleted"] is True
+
+
+def test_mcp_slice_shorthand_with_slash_part_id(tmp_path: Path) -> None:
+    bridge, _, _ = _make_bridge(tmp_path)
+    epub_path = tmp_path / "book.epub"
+    make_epub(
+        epub_path,
+        xhtmls=(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body><p>A1</p><p>A2</p><p>A3</p></body></html>',
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body><p>B1</p></body></html>',
+        ),
+    )
+    bridge.call_tool(
+        "create_project",
+        {"name": "epub-slice", "paths": [str(epub_path)]},
+    )
+    started = bridge.call_tool(
+        "start_agent_stage_run",
+        {"project": "epub-slice", "stage": "translation"},
+    )
+    run_id = started["run_id"]
+    slice_id = f"{run_id}@OEBPS/text/ch1.xhtml:0-2"
+
+    co = bridge.call_tool(
+        "checkout_stage_batch",
+        {"project": "epub-slice", "run_id": slice_id, "max_segments": 10},
+    )
+    assert co["part_id"] == "OEBPS/text/ch1.xhtml"
+    assert [item["source"] for item in co["batch"]] == ["A1", "A2"]
+    assert co["remaining_pending_count"] == 2
+    assert co["total_remaining_pending_count"] == 4
+
+    sub = bridge.call_tool(
+        "submit_stage_batch",
+        {
+            "project": "epub-slice",
+            "run_id": slice_id,
+            "items": [
+                {"segment_id": co["batch"][0]["segment_id"], "text": "甲一"},
+                {"segment_id": co["batch"][1]["segment_id"], "text": "甲二"},
+            ],
+        },
+    )
+    assert sub["remaining_pending_count"] == 0
+    assert sub["total_remaining_pending_count"] == 2
+
+    # Bare @part_id yields to explicit part_id, while @part_id:start-end overrides
+    co_explicit = bridge.call_tool(
+        "checkout_stage_batch",
+        {
+            "project": "epub-slice",
+            "run_id": f"{run_id}@OEBPS/text/ch2.xhtml",
+            "part_id": "OEBPS/text/ch1.xhtml",
+        },
+    )
+    assert co_explicit["part_id"] == "OEBPS/text/ch1.xhtml"
+    assert [item["source"] for item in co_explicit["batch"]] == ["A3"]
+
+    for bad_run_id in (f"{run_id}@", f"{run_id}@:0-2", "@OEBPS/text/ch1.xhtml:0-2", "bad/run"):
+        with pytest.raises(UsageError):
+            bridge.call_tool(
+                "checkout_stage_batch",
+                {"project": "epub-slice", "run_id": bad_run_id},
+            )
+
+
+def test_mcp_call_tool_null_defaults_type_guards_and_confirm_gates(tmp_path: Path) -> None:
+    bridge, project, _ = _make_bridge(tmp_path, source="アリスは止まった。\nアリスは止まった。\n進んだ。")
+    segs = load_segments(project)
+    first_id = str(segs[0]["segment_id"])
+
+    ctx = bridge.call_tool(
+        "get_segment_context",
+        {"project": "sample", "segment_id": first_id, "window": None},
+    )
+    assert len(ctx["context"]["after"]) == 2
+    with pytest.raises(UsageError, match="window"):
+        bridge.call_tool(
+            "get_segment_context",
+            {"project": "sample", "segment_id": first_id, "window": True},
+        )
+
+    queried = bridge.call_tool(
+        "query_segments",
+        {
+            "project": "sample",
+            "stage": None,
+            "status": None,
+            "q": None,
+            "file_id": None,
+            "part_id": None,
+        },
+    )
+    assert queried["total_segments"] == 3
+
+    inspected = bridge.call_tool(
+        "inspect_term_entity",
+        {
+            "project": "sample",
+            "normalized": "アリス",
+            "include_fragments": None,
+            "include_hits": None,
+        },
+    )
+    assert inspected["hits"] is not None
+    assert "fragments" in inspected["knowledge"]
+
+    term_ov = bridge.call_tool(
+        "get_terminology_overview",
+        {"project": "sample", "filter": None, "q": None, "include_description": None},
+    )
+    assert term_ov["total"] == 1
+    with pytest.raises(UsageError, match="include_description"):
+        bridge.call_tool(
+            "get_terminology_overview",
+            {"project": "sample", "include_description": "false"},
+        )
+
+    run = bridge.call_tool(
+        "start_agent_stage_run",
+        {"project": "sample", "stage": "translation"},
+    )
+    co = bridge.call_tool(
+        "checkout_stage_batch",
+        {
+            "project": "sample",
+            "run_id": run["run_id"],
+            "max_segments": None,
+            "context_before": None,
+        },
+    )
+    assert len(co["batch"]) == 3
+    with pytest.raises(UsageError, match="max_segments"):
+        bridge.call_tool(
+            "checkout_stage_batch",
+            {"project": "sample", "run_id": run["run_id"], "max_segments": True},
+        )
+    bridge.call_tool(
+        "submit_stage_batch",
+        {
+            "project": "sample",
+            "run_id": run["run_id"],
+            "items": [
+                {"segment_id": str(segs[0]["segment_id"]), "text": "爱丽丝停下了！"},
+                {"segment_id": str(segs[1]["segment_id"]), "text": "爱丽丝停下了。"},
+                {"segment_id": str(segs[2]["segment_id"]), "text": "前进了。"},
+            ],
+        },
+    )
+    done = bridge.call_tool(
+        "finish_agent_stage_run",
+        {
+            "project": "sample",
+            "run_id": run["run_id"],
+            "action": None,
+            "accept_remaining": None,
+        },
+    )
+    assert done["status"] == "completed"
+
+    exported = bridge.call_tool(
+        "export_project",
+        {
+            "project": "sample",
+            "stage": "translated",
+            "format": None,
+            "bilingual": None,
+            "allow_missing": None,
+        },
+    )
+    assert exported["format"] == "original"
+
+    rep_default = bridge.call_tool(
+        "get_repetition_overview",
+        {
+            "project": "sample",
+            "filter": None,
+            "exclude_punctuation_only": None,
+            "include_occurrences": None,
+            "sort_by": None,
+        },
+    )
+    assert rep_default["live_scan"]["excluded_punctuation_groups"] == 1
+    assert rep_default["live_scan"]["total_groups"] == 0
+    rep_incl = bridge.call_tool(
+        "get_repetition_overview",
+        {"project": "sample", "exclude_punctuation_only": False},
+    )
+    assert rep_incl["live_scan"]["total_groups"] == 1
+
+    for bad_confirm in ("false", 1, False, None):
+        with pytest.raises(UsageError, match="confirm=True"):
+            bridge.call_tool(
+                "apply_stage_suggestions",
+                {"project": "sample", "stage": "proofreading", "confirm": bad_confirm},
+            )
+        with pytest.raises(UsageError, match="confirm=True"):
+            bridge.call_tool(
+                "finalize_term_decision_draft",
+                {"project": "sample", "action": "discard", "confirm": bad_confirm},
+            )
+        with pytest.raises(UsageError, match="confirm=True"):
+            bridge.call_tool(
+                "finalize_repetition_draft",
+                {
+                    "project": "sample",
+                    "run_id": "RUN-1",
+                    "action": "discard",
+                    "confirm": bad_confirm,
+                },
+            )
