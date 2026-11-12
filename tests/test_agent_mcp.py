@@ -95,6 +95,9 @@ def test_mcp_jsonrpc_protocol_and_explicit_offline_failure() -> None:
     ref_term_tool = offline_bridge.call_tool("reference", {"topic": "edit_terms"})
     assert ref_term_tool["topic"] == "edit_terms"
     assert "edit_terms_actions" in ref_term_tool["guide"]
+    group_ref_payload = ref_term_tool["guide"]["edit_terms_actions"]["group_related"]["payload"]
+    assert isinstance(group_ref_payload["related_normalized"], str)
+    assert isinstance(group_ref_payload["primary_normalized"], str)
 
     call_resp = handle_jsonrpc_message(
         {
@@ -1434,3 +1437,69 @@ def test_mcp_single_save_term_description_clear_and_group_partial_update(
     )
     by_src = {t["source"]: t for t in cleared_root["terms"]}
     assert by_src["アリス"]["description"] == ""
+
+
+def test_mcp_edit_terms_truncation_retains_group_related_and_remove_targets(
+    tmp_path: Path,
+) -> None:
+    bridge, _, _ = _make_bridge(tmp_path)
+    bridge.call_tool(
+        "edit_terms",
+        {
+            "project": "sample",
+            "action": "save_term",
+            "payload": {
+                "terms": [
+                    *[
+                        {
+                            "source": f"term{i:02d}",
+                            "preferred_translation": f"译{i:02d}",
+                            "category": "noun",
+                        }
+                        for i in range(1, 6)
+                    ],
+                    {
+                        "source": "zomega",
+                        "preferred_translation": "欧米伽",
+                        "category": "character",
+                    },
+                    {
+                        "source": "zomega chan",
+                        "preferred_translation": "小欧米伽",
+                        "category": "character",
+                    },
+                ]
+            },
+        },
+    )
+    grouped = bridge.call_tool(
+        "edit_terms",
+        {
+            "project": "sample",
+            "action": "group_related",
+            "payload": {
+                "normalized": "zomega",
+                "related_normalized": "zomega chan",
+                "primary_normalized": "zomega",
+                "confirm": True,
+            },
+        },
+    )
+    assert grouped["terms_truncated"] is True
+    assert grouped["total_terms"] == 8
+    grouped_by_norm = {t["normalized"]: t for t in grouped["terms"]}
+    assert set(grouped_by_norm) == {"zomega", "zomega chan"}
+    assert grouped_by_norm["zomega chan"]["group_primary"] == "zomega"
+
+    removed = bridge.call_tool(
+        "edit_terms",
+        {
+            "project": "sample",
+            "action": "remove_terms",
+            "payload": {"normalized": ["term01", "term05"]},
+        },
+    )
+    assert removed["terms_truncated"] is True
+    assert removed["total_terms"] == 8
+    assert {t["normalized"] for t in removed["terms"]} == {"term01", "term05"}
+    assert all(t["disabled"] is True for t in removed["terms"])

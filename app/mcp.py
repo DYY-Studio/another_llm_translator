@@ -531,7 +531,7 @@ REFERENCE_TOPICS: dict[str, dict[str, Any]] = {
                 "payload": {},
             },
             "update_knowledge": {
-                "description": "Update entity knowledge items (`expected_revision` is optional and auto-filled when omitted).",
+                "description": "Update entity knowledge (`expected_revision` is optional and auto-filled when omitted). Supports `action='save_items'` (`items`), `action='confirm_keep'`, or `action='set_fragment_enabled'` (`fragment_id`, `enabled`).",
                 "payload": {
                     "normalized": "アリス",
                     "action": "save_items",
@@ -549,9 +549,11 @@ REFERENCE_TOPICS: dict[str, dict[str, Any]] = {
                 "payload": {"normalized": "アリ", "confirm": True},
             },
             "group_related": {
+                "description": "Group two related terms under `primary_normalized` (must be one of their current group roots).",
                 "payload": {
                     "normalized": "アリス",
-                    "related_normalized": ["アリ"],
+                    "related_normalized": "アリスちゃん",
+                    "primary_normalized": "アリス",
                     "confirm": True,
                 },
             },
@@ -1216,7 +1218,7 @@ TOOLS: list[dict[str, Any]] = [
             "import_terms ({'terms': [...]} or {'path': '...'}), complete_scan (mark terminology scan completed for full project or scope), "
             "set_primary, leave_group, group_related, convert_to_alias, "
             "update_knowledge ({'normalized': str, 'action'?: 'save_items'|'confirm_keep'|'set_fragment_enabled', "
-            "'items'?: [{'text': str, 'fragment_ids': [str]}], 'expected_revision'?: int}), "
+            "'items'?: [{'text': str, 'fragment_ids': [str]}], 'fragment_id'?: str, 'enabled'?: bool, 'expected_revision'?: int}), "
             "resolve_change, remove_terms, clear_terms, or publish_partial."
         ),
         "inputSchema": {
@@ -1247,11 +1249,11 @@ TOOLS: list[dict[str, Any]] = [
                         "save_term (batch: {'terms': [{'source', 'preferred_translation', 'category', 'description'?, 'aliases'?, 'disabled'?, 'group_primary'?}]} "
                         "or single: {'source', 'preferred_translation', 'category', 'description'?, 'aliases'?, 'old_normalized'?, 'disabled'?}); "
                         "import_terms ({'terms': [...]} or {'path': '/abs/path.json|.csv'}); "
-                        "complete_scan ({} for full project or {'only_file': 'F0001', 'only_part'?: '...'}); "
-                        "update_knowledge ({'normalized': str, 'action'?: 'save_items'|'confirm_keep'|'set_fragment_enabled', 'items'?: [{'text': str, 'fragment_ids': [str]}], 'expected_revision'?: int}); "
+                        "complete_scan ({} for full project or {'only_file'?: 'F0001', 'only_part'?: '...', 'only_segment'?: '...', 'segment_ids'?: [str], 'reset_task'?: bool}); "
+                        "update_knowledge ({'normalized': str, 'action'?: 'save_items'|'confirm_keep'|'set_fragment_enabled', 'items'?: [{'text': str, 'fragment_ids': [str]}], 'fragment_id'?: str, 'enabled'?: bool, 'expected_revision'?: int}); "
                         "remove_terms ({'normalized': [str]}); "
                         "set_primary / leave_group ({'normalized': str, 'confirm': True}); "
-                        "group_related ({'normalized': str, 'related_normalized': [str], 'confirm': True}); "
+                        "group_related ({'normalized': str, 'related_normalized': str, 'primary_normalized': str, 'confirm': True}); "
                         "convert_to_alias ({'normalized': str, 'related_normalized': str, 'confirm': True}); "
                         "resolve_change ({'normalized': [str], 'expected_revision': int, 'confirm': True}); "
                         "clear_terms / publish_partial ({'confirm': True})."
@@ -2666,13 +2668,20 @@ class MCPWebBridge:
                 selected_terms = terms_list
                 truncated = False
                 if len(terms_list) > 5:
-                    target_keys = {
-                        str(v)
-                        for k in ("normalized", "source", "old_normalized", "primary")
-                        if (v := payload.get(k))
-                    }
-                    if isinstance(payload.get("related_normalized"), list):
-                        target_keys.update(str(x) for x in payload["related_normalized"])
+                    target_keys: set[str] = set()
+                    for k in (
+                        "normalized",
+                        "source",
+                        "old_normalized",
+                        "primary",
+                        "primary_normalized",
+                        "related_normalized",
+                    ):
+                        v = payload.get(k)
+                        if isinstance(v, str) and v:
+                            target_keys.add(v)
+                        elif isinstance(v, list):
+                            target_keys.update(str(x) for x in v if x)
                     matched = [
                         t
                         for t in terms_list
