@@ -8,13 +8,16 @@ import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
-from app.errors import UsageError
-from app.execution import Scope
+from app.config import load_project_config
+from app.errors import AppError, UsageError
+from app.execution import Scope, create_run, finalize_run, find_running_runs, unavailable_usage
 from app.mcp import MCPWebBridge, handle_jsonrpc_message
 from app.project import init_project, load_segments
 from app.repetition_consistency import run_repetition
+from app.sqlite_storage import append_jsonl, list_runs, read_json, record_header, write_json
 from app.web import create_app
 from app.web_store import WebStore
+from tests.helpers import scan_source_range
 from tests.test_documents import make_epub
 from tests.test_foundation import make_app_root
 from tests.test_repetition_consistency import repetition_project, transport
@@ -1131,3 +1134,199 @@ def test_mcp_call_tool_null_defaults_type_guards_and_confirm_gates(tmp_path: Pat
                     "confirm": bad_confirm,
                 },
             )
+
+
+def test_replace_final_review_failed_repetition_draft_completes_old_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = repetition_project(tmp_path, monkeypatch)
+    requests: list[dict[str, object]] = []
+    first = transport(uncertain=True, apply_members=["2"], requests=requests)
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        payload = json.loads(body["messages"][-1]["content"])
+        if payload.get("phase") == "final_review":
+            return httpx2.Response(500, json={"error": {"message": "final review boom"}})
+        return first.handle_request(request)
+
+    async def _run_failed_final_review() -> None:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http_client:
+            with pytest.raises(AppError):
+                await run_repetition(
+                    project,
+                    Scope(),
+                    http_client=http_client,
+                    final_review=True,
+                )
+
+    asyncio.run(_run_failed_final_review())
+    running_before = find_running_runs(project, "repetition_consistency")
+    assert len(running_before) == 1
+    old_run_id = str(running_before[0]["run_id"])
+    assert running_before[0]["draft_status"] == "pending"
+    assert "final_review_error" in running_before[0]
+
+    client = TestClient(create_app(projects_root=project.parent))
+    bridge = MCPWebBridge(client=client)
+    replaced = bridge.call_tool(
+        "get_repetition_overview",
+        {"project": "repetition", "create_draft": True, "replace_draft": True},
+    )
+    new_run_id = replaced["draft"]["run_id"]
+    assert new_run_id != old_run_id
+    assert find_running_runs(project, "repetition_consistency") == []
+
+    old_manifest = read_json(project, project / "runs" / old_run_id / "manifest.json")
+    assert old_manifest["status"] == "completed"
+    assert old_manifest["draft_status"] == "replaced"
+    assert old_manifest.get("completed_at")
+    by_id = {
+        str(item["run_id"]): item
+        for item in list_runs(project, stage="repetition_consistency")
+    }
+    assert by_id[old_run_id]["status"] == "completed"
+    assert by_id[old_run_id]["draft_status"] == "replaced"
+
+
+def test_complete_term_scan_enforces_decision_draft_and_unpublished_candidates_gates(
+    tmp_path: Path,
+) -> None:
+    bridge, project, _ = _make_bridge(tmp_path)
+    segs = load_segments(project)
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    cfg = load_project_config(project)
+
+    # 1. Pending terminology decision draft blocks complete_scan
+    dec_run_id, dec_run_dir = create_run(
+        project,
+        config=cfg,
+        stage="terminology_decision",
+        fingerprint="fp-dec",
+        prompt="prompt",
+        selected_count=1,
+        requested_count=1,
+        reused_count=0,
+        details={"decision_status": "pending"},
+    )
+    finalize_run(
+        project,
+        dec_run_dir,
+        status="completed",
+        completed=1,
+        failed=0,
+        usage=unavailable_usage(),
+        usage_invoked=False,
+    )
+    dec_manifest = read_json(project, dec_run_dir / "manifest.json")
+    dec_manifest["decision_status"] = "pending"
+    write_json(project, dec_run_dir / "manifest.json", dec_manifest)
+    (dec_run_dir / "terminology_decision_draft.json").write_text(
+        json.dumps(
+            {
+                "run_id": dec_run_id,
+                "proposals": [],
+                "needs_review": [],
+                "rejected_proposal_ids": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(UsageError, match="待审术语决策草案"):
+        bridge.call_tool(
+            "edit_terms",
+            {"project": "sample", "action": "complete_scan", "payload": {}},
+        )
+    bridge.call_tool(
+        "finalize_term_decision_draft",
+        {"project": "sample", "action": "discard", "confirm": True},
+    )
+
+    # 2. Active terminology scan with unpublished candidates blocks both normal & reset_task complete_scan
+    task_id = "TERM-TASK-HOST000001"
+    write_json(
+        project,
+        project / "terminology" / "active_task.json",
+        record_header(
+            "terminology_task",
+            project_id,
+            record_id=task_id,
+            active_task_id=task_id,
+            status="active",
+            initial_stage_fingerprint="fp-term",
+            terms_revision=1,
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "terminology" / "candidates.jsonl",
+        record_header(
+            "terminology_candidates",
+            project_id,
+            stage="terminology",
+            status="completed",
+            active_task_id=task_id,
+            segment_ids=[str(segs[0]["segment_id"])],
+            source_order={"segment_id": str(segs[0]["segment_id"]), "offset": 0},
+            source_range=scan_source_range(project),
+            terms=[
+                {
+                    "source": "ボブ",
+                    "preferred_translation": "鲍勃",
+                    "category": "character",
+                    "description": "爱丽丝的同伴",
+                    "aliases": [],
+                }
+            ],
+        ),
+    )
+    append_jsonl(
+        project,
+        project / "terminology" / "scans.jsonl",
+        record_header(
+            "terminology_scan",
+            project_id,
+            stage="terminology",
+            segment_id=str(segs[0]["segment_id"]),
+            status="completed",
+            active_task_id=task_id,
+            stage_fingerprint="fp-term",
+        ),
+    )
+
+    for payload in ({}, {"reset_task": True}, {"only_segment": str(segs[1]["segment_id"])}):
+        with pytest.raises(UsageError, match="publish_partial"):
+            bridge.call_tool(
+                "edit_terms",
+                {"project": "sample", "action": "complete_scan", "payload": payload},
+            )
+
+    # 3. After publish_partial, partial and full complete_scan succeed and keep published terms intact
+    bridge.call_tool(
+        "edit_terms",
+        {"project": "sample", "action": "publish_partial", "payload": {"confirm": True}},
+    )
+    partial_res = bridge.call_tool(
+        "edit_terms",
+        {
+            "project": "sample",
+            "action": "complete_scan",
+            "payload": {"only_segment": str(segs[1]["segment_id"])},
+        },
+    )
+    assert partial_res["status"] == "partial_published"
+    assert partial_res["completed_segments"] == 2
+
+    final_res = bridge.call_tool(
+        "edit_terms",
+        {"project": "sample", "action": "complete_scan", "payload": {}},
+    )
+    assert final_res["status"] == "completed"
+    assert final_res["stage_completion"]["unpublished"] == 0
+    term_sources = {
+        t["source"]
+        for t in bridge.call_tool("get_terminology_overview", {"project": "sample"})["terms"]
+    }
+    assert {"アリス", "ボブ"} <= term_sources

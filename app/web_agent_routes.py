@@ -47,6 +47,7 @@ from .sqlite_storage import (
     latest_stage_states,
     query_segment_neighbors,
     read_json,
+    read_jsonl,
     read_repetition_run,
     record_exists,
     record_header,
@@ -70,6 +71,7 @@ from .stage_runtime import (
     document_prompt_requirements,
     prompt_middle_digests,
 )
+from .term_changes import require_no_decision_draft
 from .term_library import load_terms, term_normalization
 from .term_matching import _TermMatchCache
 from .translation_validation import validate_translation_text
@@ -1456,8 +1458,6 @@ def register_agent_routes(
                         raise UsageError(
                             "存在未处理的重复译文草案，请先应用、丢弃或指定 replace_draft=True"
                         )
-                    for running in find_running_runs(root, "repetition_consistency"):
-                        _interrupt_run(root, running, reason="resume_declined")
                     plan = repetition_plan(
                         root,
                         Scope(only_file=only_file),
@@ -1468,6 +1468,10 @@ def register_agent_routes(
                     )
                     if not plan["groups"]:
                         raise UsageError("所选范围内没有重复原文译文差异组")
+                    for running in find_running_runs(root, "repetition_consistency"):
+                        if old is not None and running["run_id"] == old["run_id"]:
+                            continue
+                        _interrupt_run(root, running, reason="resume_declined")
                     run_id, run_dir = create_run(
                         root,
                         config=plan["config"],
@@ -1564,6 +1568,8 @@ def register_agent_routes(
                     manifests = [manifest]
                     if old and old["run_id"] != run_id:
                         old["draft_status"] = "replaced"
+                        if "final_review_error" in old:
+                            old.update(status="completed", completed_at=utc_now())
                         manifests.append(old)
                     warnings = write_repetition_state(
                         root, records=[], manifests=manifests
@@ -1681,9 +1687,15 @@ def register_agent_routes(
         root = project(name)
         if app.state.tasks.is_project_running(root):
             raise UsageError("项目存在运行中的任务，不能标记术语扫描状态")
+        reset_task = payload.get("reset_task", False)
+        if not isinstance(reset_task, bool):
+            raise UsageError("reset_task 必须是布尔值")
+        raw_scope = payload.get("scope")
+        if raw_scope is not None and not isinstance(raw_scope, dict):
+            raise UsageError("scope 必须是对象")
         scope_payload = (
-            payload.get("scope")
-            if isinstance(payload.get("scope"), dict)
+            raw_scope
+            if raw_scope is not None
             else {
                 k: payload[k]
                 for k in ("from_file", "only_file", "only_part", "only_segment", "segment_ids")
@@ -1694,6 +1706,7 @@ def register_agent_routes(
 
         def _mark() -> dict[str, Any]:
             with project_write_lock(root, wait_seconds=15.0):
+                require_no_decision_draft(root)
                 store = WebStore(root)
                 files = load_source_files(root)
                 segments = load_segments(root)
@@ -1705,7 +1718,20 @@ def register_agent_routes(
                     if record_exists(root, active_path)
                     else None
                 )
-                reset_task = payload.get("reset_task") is True
+                if (
+                    active is not None
+                    and active.get("status") == "active"
+                    and active.get("active_task_id")
+                ):
+                    unpublished = read_jsonl(
+                        root,
+                        root / "terminology" / "candidates.jsonl",
+                        task_id=str(active["active_task_id"]),
+                    )
+                    if unpublished:
+                        raise UsageError(
+                            "当前活动术语扫描存在未发布的候选结果，请先执行 publish_partial 发布现有候选后再标记扫描完成"
+                        )
                 if active is None or reset_task or not active.get("active_task_id"):
                     task_id = f"TERM-TASK-{uuid.uuid4().hex[:10].upper()}"
                 else:
@@ -1737,13 +1763,28 @@ def register_agent_routes(
                 all_done = len(done_ids) >= len(all_nonempty)
                 library = load_terms(root, resolve_knowledge=False)
                 revision = int(library["terms_revision"]) if library else 0
+                next_status = (
+                    "completed"
+                    if all_done
+                    else (
+                        "partial_published"
+                        if not reset_task
+                        and active is not None
+                        and active.get("status") == "partial_published"
+                        else "active"
+                    )
+                )
                 active_record = record_header(
                     "terminology_task",
                     store.project_id,
                     record_id=task_id,
                     active_task_id=task_id,
-                    status="completed" if all_done else "active",
-                    initial_stage_fingerprint=(active or {}).get("initial_stage_fingerprint")
+                    status=next_status,
+                    initial_stage_fingerprint=(
+                        None
+                        if reset_task
+                        else (active or {}).get("initial_stage_fingerprint")
+                    )
                     or fingerprint,
                     terms_revision=revision,
                 )
