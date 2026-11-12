@@ -101,6 +101,7 @@ def _exchange_term(
         "description": (
             value["description"].strip() if value.get("description") else ""
         ),
+        "_description_set": "description" in value,
         "aliases": [
             alias.strip()
             for alias in aliases
@@ -248,46 +249,162 @@ def import_terms(
         active_task_id=library.get("active_task_id") if library else None,
         terms=terms, origin="terms_import", knowledge=deepcopy(library["knowledge"]) if library else empty_knowledge(),
     )
-    transfer_alias_evidence(library_record, spec)
-    knowledge = library_record["knowledge"]
-    known = evidence(project, library_record)
-    no_source = {(f["owner"], f["text"]) for f in known.values() if f["state"] == "active" and f["source_range"] is None}
-    current = {t["normalized"]:t for t in (library or {}).get("terms", [])}
-    overwritten_descriptions: dict[str, str] = {}
-    for item in imported:
-        owner = normalize_term(item["source"], spec)
-        text = item["description"]
-        if text and not item["disabled"]:
-            if (owner, text) not in no_source and text != current.get(owner, {}).get("description"):
-                add_unsourced(knowledge, owner, text, "import")
-                no_source.add((owner, text))
-            if overwrite:
-                overwritten_descriptions[owner] = text
     previous_entities = entity_members(library) if library else {}
+    old_root_of = {
+        member: old_root
+        for old_root, old_members in previous_entities.items()
+        for member in old_members
+    }
+    moved_owners = transfer_alias_evidence(library_record, spec)
+    knowledge = library_record["knowledge"]
+    old_entities = deepcopy(knowledge["entities"])
     known = evidence(project, library_record)
+    current = {t["normalized"]: t for t in (library or {}).get("terms", [])}
+    overwritten_descriptions: dict[str, list[str]] = {}
+    if overwrite:
+        for item in imported:
+            if item["disabled"] or not item["_description_set"]:
+                continue
+            owner = normalize_term(item["source"], spec)
+            texts = overwritten_descriptions.setdefault(owner, [])
+            text = item["description"]
+            if text and text not in texts:
+                texts.append(text)
+        for owner, texts in overwritten_descriptions.items():
+            keep_texts = set(texts)
+            for key, frag in list(known.items()):
+                if (
+                    frag["owner"] == owner
+                    and frag["state"] == "active"
+                    and frag["source_range"] is None
+                    and frag["text"] not in keep_texts
+                ):
+                    knowledge["fragments"][key]["state"] = "disabled"
+                    frag["state"] = "disabled"
+            for text in texts:
+                has_valid_match = any(
+                    frag["owner"] == owner
+                    and frag["state"] == "active"
+                    and frag["valid"]
+                    and frag["text"] == text
+                    for frag in known.values()
+                )
+                if not has_valid_match:
+                    key = add_unsourced(knowledge, owner, text, "import")
+                    known[key] = {
+                        **knowledge["fragments"][key],
+                        "id": key,
+                        "source_range": None,
+                        "valid": True,
+                        "_positions": {},
+                    }
+    else:
+        no_source = {
+            (f["owner"], f["text"])
+            for f in known.values()
+            if f["state"] == "active" and f["source_range"] is None
+        }
+        for item in imported:
+            owner = normalize_term(item["source"], spec)
+            text = item["description"]
+            if text and not item["disabled"]:
+                if (owner, text) not in no_source and text != current.get(
+                    owner, {}
+                ).get("description"):
+                    key = add_unsourced(knowledge, owner, text, "import")
+                    no_source.add((owner, text))
+                    known[key] = {
+                        **knowledge["fragments"][key],
+                        "id": key,
+                        "source_range": None,
+                        "valid": True,
+                        "_positions": {},
+                    }
     for root, members in entity_members(library_record).items():
-        has_overwritten = any(m in overwritten_descriptions for m in members)
-        if has_overwritten:
-            items_to_save: list[dict[str, Any]] = []
+        overwritten_members = {m for m in members if m in overwritten_descriptions}
+        if overwritten_members:
+            raw_items: list[dict[str, Any]] = []
+            untouched_members = [m for m in members if m not in overwritten_members]
+            if untouched_members:
+                by_old_root: dict[str | None, list[str]] = {}
+                for m in untouched_members:
+                    old_r = old_root_of.get(m)
+                    old_r = (
+                        moved_owners.get(old_r, old_r)
+                        if old_r is not None
+                        else None
+                    )
+                    by_old_root.setdefault(old_r, []).append(m)
+                for old_r, group_ums in by_old_root.items():
+                    old_saved = old_entities.get(old_r) if old_r is not None else None
+                    um_set = set(group_ums)
+                    if old_saved is not None:
+                        for item in old_saved.get("items", []):
+                            raw_fids = item.get("fragment_ids", [])
+                            if not raw_fids:
+                                if old_r in um_set and str(item.get("text", "")).strip():
+                                    raw_items.append(
+                                        {
+                                            "text": str(item["text"]).strip(),
+                                            "fragment_ids": [],
+                                        }
+                                    )
+                            else:
+                                valid_fids = [
+                                    fid
+                                    for fid in raw_fids
+                                    if fid in known
+                                    and known[fid]["owner"] in um_set
+                                    and known[fid]["state"] == "active"
+                                    and known[fid]["valid"]
+                                ]
+                                if valid_fids and str(item.get("text", "")).strip():
+                                    raw_items.append(
+                                        {
+                                            "text": str(item["text"]).strip(),
+                                            "fragment_ids": valid_fids,
+                                        }
+                                    )
+                    else:
+                        for key, f in known.items():
+                            if (
+                                f["owner"] in um_set
+                                and f["state"] == "active"
+                                and f["valid"]
+                                and str(f.get("text", "")).strip()
+                            ):
+                                raw_items.append(
+                                    {
+                                        "text": str(f["text"]).strip(),
+                                        "fragment_ids": [key],
+                                    }
+                                )
             for m in members:
-                if m in overwritten_descriptions:
-                    target_text = overwritten_descriptions[m]
+                if m not in overwritten_descriptions:
+                    continue
+                for target_text in overwritten_descriptions[m]:
                     fids = [
                         key
                         for key, f in known.items()
                         if f["owner"] == m
                         and f["state"] == "active"
+                        and f["valid"]
                         and f["text"] == target_text
                     ]
-                    items_to_save.append(
-                        {"text": target_text, "fragment_ids": fids}
-                    )
+                    raw_items.append({"text": target_text, "fragment_ids": fids})
+            items_to_save: list[dict[str, Any]] = []
+            by_text: dict[str, dict[str, Any]] = {}
+            for item in raw_items:
+                txt = item["text"]
+                if txt in by_text:
+                    existing_fids = by_text[txt]["fragment_ids"]
+                    for fid in item["fragment_ids"]:
+                        if fid not in existing_fids:
+                            existing_fids.append(fid)
                 else:
-                    for key, f in known.items():
-                        if f["owner"] == m and f["state"] == "active":
-                            items_to_save.append(
-                                {"text": f["text"], "fragment_ids": [key]}
-                            )
+                    entry = {"text": txt, "fragment_ids": list(item["fragment_ids"])}
+                    by_text[txt] = entry
+                    items_to_save.append(entry)
             save_items(
                 project,
                 library_record,
@@ -295,15 +412,18 @@ def import_terms(
                 items_to_save,
                 all_evidence=known,
             )
-        elif root not in previous_entities:
+        elif root not in previous_entities and root not in old_entities:
             save_items(
                 project,
                 library_record,
                 root,
                 [
-                    {"text": f["text"], "fragment_ids": [key]}
+                    {"text": str(f["text"]).strip(), "fragment_ids": [key]}
                     for key, f in known.items()
-                    if f["owner"] in members and f["state"] == "active"
+                    if f["owner"] in members
+                    and f["state"] == "active"
+                    and f["valid"]
+                    and str(f.get("text", "")).strip()
                 ],
                 all_evidence=known,
             )

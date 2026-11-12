@@ -585,3 +585,171 @@ def test_automatic_group_alias_removal_survives_later_manual_edits(tmp_path, cre
     assert rows["Beta"]["group_primary"] == "alpha"
     overrides = read_json(project, project / "terminology" / "overrides.json")
     assert next(item for item in overrides["overrides"] if item["normalized"] == "alpha")["aliases"] == []
+
+
+def test_overwrite_import_clears_descriptions_preserves_untouched_group_items_and_skips_invalid_fragments(
+    tmp_path: Path,
+) -> None:
+    from app.project import remove_project_files
+    from app.sqlite_storage import read_segments, write_terminology_publication
+    from app.term_knowledge import evidence, save_items, source_range
+    from app.term_library import _merge_and_publish_terms
+
+    app_root = make_app_root(tmp_path / "b5")
+    f1 = tmp_path / "f1.txt"
+    f2 = tmp_path / "f2.txt"
+    f1.write_text("Alpha and Beta", encoding="utf-8")
+    f2.write_text("Alpha in removed chapter", encoding="utf-8")
+    project, _ = init_project(
+        [str(f1), str(f2)],
+        name="b5-terms",
+        app_root=app_root,
+        projects_root=tmp_path / "projects",
+    )
+    assert project is not None
+    project_id = str(read_json(project, project / "project.json")["project_id"])
+    segs = read_segments(project)
+    seg1, seg2 = segs[0], segs[1]
+
+    write_json(
+        project,
+        project / "terminology" / "active_task.json",
+        record_header("terminology_task", project_id, active_task_id="TASK-B5", status="active"),
+    )
+    for idx, (seg, rows) in enumerate(
+        [
+            (
+                seg1,
+                [
+                    {**term("Alpha"), "description": "保留说明"},
+                    {**term("Beta"), "description": "旧Beta说明", "group_primary": "alpha"},
+                    {**term("Gamma"), "description": "待清空Gamma说明"},
+                ],
+            ),
+            (seg1, [{**term("Alpha"), "description": "已淘汰历史说明"}]),
+            (seg2, [{**term("Alpha"), "description": "失效片段说明"}]),
+        ]
+    ):
+        append_jsonl(
+            project,
+            project / "terminology" / "candidates.jsonl",
+            record_header(
+                "terminology_candidates",
+                project_id,
+                active_task_id="TASK-B5",
+                source_order={"segment_id": seg["segment_id"], "offset": idx},
+                source_range=source_range([seg], {seg["segment_id"]: seg}, {}),
+                terms=rows,
+            ),
+        )
+    library = _merge_and_publish_terms(
+        project, task_id="TASK-B5", project_id=project_id, published_run_id="RUN-B5"
+    )
+    known = evidence(project, library)
+    keep_fid = next(
+        fid for fid, f in known.items() if f["owner"] == "alpha" and f["text"] == "保留说明"
+    )
+    beta_fid = next(
+        fid for fid, f in known.items() if f["owner"] == "beta" and f["text"] == "旧Beta说明"
+    )
+    # Curate entity items: manual summary + F_KEEP + beta_fid (deliberately dropping "已淘汰历史说明" and "失效片段说明")
+    save_items(
+        project,
+        library,
+        "alpha",
+        [
+            {"text": "人工整合说明", "fragment_ids": []},
+            {"text": "保留说明", "fragment_ids": [keep_fid]},
+            {"text": "旧Beta说明", "fragment_ids": [beta_fid]},
+        ],
+    )
+    overrides_doc = read_json(project, project / "terminology" / "overrides.json")
+    overrides_doc["overrides"] = [
+        {"normalized": "beta", "source": "Beta", "group_primary": "alpha", "disabled": False}
+    ]
+    write_terminology_publication(project, terms=library, overrides=overrides_doc)
+
+    # Remove F0002 so the third Alpha scan fragment becomes valid=False while still state="active"
+    remove_project_files(project, ["F0002"])
+
+    # 1. Partial overwrite of Beta + explicit empty/null description clear on Gamma
+    patch_json = tmp_path / "partial_overwrite.json"
+    patch_json.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "record_type": "terminology_exchange",
+                "terms": [
+                    {
+                        "source": "Beta",
+                        "preferred_translation": "新译Beta",
+                        "category": "名称",
+                        "description": "新Beta说明",
+                    },
+                    {
+                        "source": "Gamma",
+                        "preferred_translation": "译-Gamma",
+                        "category": "名称",
+                        "description": None,
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    import_terms(project, patch_json, dry_run=False, overwrite=True)
+    by_norm = {t["normalized"]: t for t in load_terms(project)["terms"]}
+    assert by_norm["alpha"]["description"] == "人工整合说明；保留说明；新Beta说明"
+    assert by_norm["beta"]["description"] == "人工整合说明；保留说明；新Beta说明"
+    assert by_norm["gamma"]["description"] == ""
+
+    # 2. Omitting "description" key in overwrite=True preserves existing description
+    omit_desc_json = tmp_path / "omit_desc.json"
+    omit_desc_json.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "record_type": "terminology_exchange",
+                "terms": [{"source": "Beta", "preferred_translation": "再译Beta", "category": "名称"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    import_terms(project, omit_desc_json, dry_run=False, overwrite=True)
+    by_norm = {t["normalized"]: t for t in load_terms(project)["terms"]}
+    assert by_norm["beta"]["preferred_translation"] == "再译Beta"
+    assert by_norm["alpha"]["description"] == "人工整合说明；保留说明；新Beta说明"
+
+    # 3. Clearing Beta's description with "" removes only Beta's item while keeping Alpha's curated items
+    clear_beta_json = tmp_path / "clear_beta.json"
+    clear_beta_json.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "record_type": "terminology_exchange",
+                "terms": [
+                    {
+                        "source": "Beta",
+                        "preferred_translation": "再译Beta",
+                        "category": "名称",
+                        "description": "",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    import_terms(project, clear_beta_json, dry_run=False, overwrite=True)
+    by_norm = {t["normalized"]: t for t in load_terms(project)["terms"]}
+    assert by_norm["alpha"]["description"] == "人工整合说明；保留说明"
+
+    # 4. Full export + CSV overwrite=True round-trip does not duplicate shared group description and clears CSV empty cell
+    exported_csv = tmp_path / "roundtrip.csv"
+    export_terms(project, exported_csv, include_disabled=False)
+    import_terms(project, exported_csv, dry_run=False, overwrite=True)
+    by_norm = {t["normalized"]: t for t in load_terms(project)["terms"]}
+    assert by_norm["alpha"]["description"] == "人工整合说明；保留说明"
+    assert by_norm["gamma"]["description"] == ""

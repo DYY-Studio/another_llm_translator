@@ -1330,3 +1330,107 @@ def test_complete_term_scan_enforces_decision_draft_and_unpublished_candidates_g
         for t in bridge.call_tool("get_terminology_overview", {"project": "sample"})["terms"]
     }
     assert {"アリス", "ボブ"} <= term_sources
+
+
+def test_mcp_single_save_term_description_clear_and_group_partial_update(
+    tmp_path: Path,
+) -> None:
+    bridge, _, _ = _make_bridge(tmp_path)
+    bridge.call_tool(
+        "edit_terms",
+        {
+            "project": "sample",
+            "action": "save_term",
+            "payload": {
+                "source": "アリス",
+                "preferred_translation": "爱丽丝",
+                "category": "character",
+                "description": "主角设定",
+            },
+        },
+    )
+    bridge.call_tool(
+        "edit_terms",
+        {
+            "project": "sample",
+            "action": "save_term",
+            "payload": {
+                "source": "アリスちゃん",
+                "preferred_translation": "小爱丽丝",
+                "category": "character",
+                "description": "旧昵称",
+            },
+        },
+    )
+    bridge.call_tool(
+        "edit_terms",
+        {
+            "project": "sample",
+            "action": "group_related",
+            "payload": {
+                "normalized": "アリス",
+                "related_normalized": "アリスちゃん",
+                "primary_normalized": "アリス",
+                "confirm": True,
+            },
+        },
+    )
+    # Restore clean curated primary description before testing single-term partial updates
+    bridge.call_tool(
+        "edit_terms",
+        {
+            "project": "sample",
+            "action": "update_knowledge",
+            "payload": {
+                "normalized": "アリス",
+                "items": [{"text": "主角设定", "fragment_ids": []}],
+            },
+        },
+    )
+    updated_sub = bridge.call_tool(
+        "edit_terms",
+        {
+            "project": "sample",
+            "action": "save_term",
+            "payload": {
+                "source": "アリスちゃん",
+                "preferred_translation": "小爱丽丝",
+                "category": "character",
+                "description": "亲昵称呼",
+            },
+        },
+    )
+    by_src = {t["source"]: t for t in updated_sub["terms"]}
+    assert by_src["アリスちゃん"]["description"] == "主角设定；亲昵称呼"
+
+    cleared_sub = bridge.call_tool(
+        "edit_terms",
+        {
+            "project": "sample",
+            "action": "save_term",
+            "payload": {
+                "source": "アリスちゃん",
+                "preferred_translation": "小爱丽丝",
+                "category": "character",
+                "description": "",
+            },
+        },
+    )
+    by_src = {t["source"]: t for t in cleared_sub["terms"]}
+    assert by_src["アリスちゃん"]["description"] == "主角设定"
+
+    cleared_root = bridge.call_tool(
+        "edit_terms",
+        {
+            "project": "sample",
+            "action": "save_term",
+            "payload": {
+                "source": "アリス",
+                "preferred_translation": "爱丽丝",
+                "category": "character",
+                "description": "",
+            },
+        },
+    )
+    by_src = {t["source"]: t for t in cleared_root["terms"]}
+    assert by_src["アリス"]["description"] == ""

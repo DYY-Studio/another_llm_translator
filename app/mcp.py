@@ -2559,7 +2559,10 @@ class MCPWebBridge:
             method, path = routes[action]
             if action == "save_term":
                 save_body = dict(payload)
+                has_desc = "description" in save_body
                 desc_text = save_body.pop("description", None)
+                if has_desc and desc_text is not None and not isinstance(desc_text, str):
+                    raise UsageError("description 必须是字符串或 null")
                 try:
                     res = self._request(method, path, json_body=save_body)
                 except UsageError as exc:
@@ -2581,34 +2584,81 @@ class MCPWebBridge:
                         )
                     else:
                         raise
-                if isinstance(desc_text, str) and desc_text.strip():
+                if has_desc and not save_body.get("disabled"):
                     raw_src = str(save_body.get("source") or "").strip()
                     saved_terms = (
                         res.get("terms", []) if isinstance(res, dict) else []
                     )
-                    target_norm = next(
+                    saved_term = next(
                         (
-                            str(t["normalized"])
+                            t
                             for t in saved_terms
                             if isinstance(t, dict)
                             and (
                                 t.get("source") == raw_src
                                 or t.get("normalized") == raw_src
                             )
-                            and t.get("normalized")
                         ),
-                        raw_src,
+                        None,
                     )
-                    res = self._request(
-                        "PUT",
-                        f"/api/v1/projects/{proj}/terms/knowledge",
-                        json_body={
-                            "normalized": target_norm,
-                            "items": [
-                                {"text": desc_text.strip(), "fragment_ids": []}
-                            ],
+                    raw_conflicts = (
+                        saved_term.get("conflicts")
+                        if saved_term and isinstance(saved_term.get("conflicts"), dict)
+                        else {}
+                    )
+                    single_doc = {
+                        "schema_version": 2,
+                        "record_type": "terminology_exchange",
+                        "terms": [
+                            {
+                                "source": (
+                                    str(saved_term["source"])
+                                    if saved_term and saved_term.get("source")
+                                    else raw_src
+                                ),
+                                "preferred_translation": (
+                                    saved_term.get("preferred_translation")
+                                    if saved_term
+                                    else save_body.get("preferred_translation")
+                                ),
+                                "category": (
+                                    saved_term.get("category")
+                                    if saved_term
+                                    else save_body.get("category")
+                                ),
+                                "description": (desc_text or "").strip(),
+                                "aliases": list(
+                                    (
+                                        saved_term.get("aliases")
+                                        if saved_term
+                                        else save_body.get("aliases")
+                                    )
+                                    or []
+                                ),
+                                "disabled": False,
+                                "conflicts": {
+                                    "categories": list(
+                                        raw_conflicts.get("categories", [])
+                                    ),
+                                    "preferred_translations": list(
+                                        raw_conflicts.get("preferred_translations", [])
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                    raw_bytes = json.dumps(single_doc, ensure_ascii=False).encode(
+                        "utf-8"
+                    )
+                    self._request(
+                        "POST",
+                        f"/api/v1/projects/{proj}/terms/import",
+                        params={"overwrite": "true"},
+                        files={
+                            "file": ("terms.json", raw_bytes, "application/json")
                         },
                     )
+                    res = self._request("GET", f"/api/v1/projects/{proj}/terms")
             else:
                 res = self._request(method, path, json_body=payload)
             if isinstance(res, dict) and isinstance(res.get("terms"), list):
